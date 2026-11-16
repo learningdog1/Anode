@@ -1,0 +1,26 @@
+# Android / Gradle / Kotlin build artifacts
+/.gradle/
+/.kotlin/
+/build/
+**/build/
+/captures/
+/.externalNativeBuild/
+/.cxx/
+
+# Local environment configuration (contains local SDK path)
+/local.properties
+
+# IDE files
+/.idea/
+*.iml
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Keystores, signing secrets, and environment variables
+*.jks
+*.keystore
+*.p12
+key.properties
+.env
+.env.*

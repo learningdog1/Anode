@@ -1,0 +1,94 @@
+package com.nodeseek.app
+
+import android.app.Activity
+import android.app.Application
+import android.os.Build
+import android.os.Bundle
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.disk.directory
+import coil3.gif.AnimatedImageDecoder
+import coil3.gif.GifDecoder
+import coil3.memory.MemoryCache
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.crossfade
+import coil3.svg.SvgDecoder
+import com.nodeseek.app.di.DefaultAppContainer
+
+class NodePulseApp : Application(), SingletonImageLoader.Factory {
+
+    lateinit var container: DefaultAppContainer
+        private set
+
+    private var startedActivityCount: Int = 0
+    private var isActivityChangingConfigurations: Boolean = false
+
+    override fun onCreate() {
+        super.onCreate()
+        container = DefaultAppContainer(this)
+        container.notificationDispatcher.ensureChannels()
+        registerActivityLifecycleCallbacks(
+            object : ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+
+                override fun onActivityStarted(activity: Activity) {
+                    val transitioningFromConfigChange = isActivityChangingConfigurations
+                    isActivityChangingConfigurations = false
+                    startedActivityCount += 1
+                    if (startedActivityCount > 0 && !transitioningFromConfigChange) {
+                        container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
+                    }
+                }
+
+                override fun onActivityResumed(activity: Activity) = Unit
+
+                override fun onActivityPaused(activity: Activity) = Unit
+
+                override fun onActivityStopped(activity: Activity) {
+                    isActivityChangingConfigurations = activity.isChangingConfigurations
+                    startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+                    if (startedActivityCount == 0 && !isActivityChangingConfigurations) {
+                        container.radarMonitorController.onForegroundChanged(false)
+                    }
+                }
+
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+
+                override fun onActivityDestroyed(activity: Activity) = Unit
+            },
+        )
+        container.radarMonitorController.start()
+    }
+
+    override fun newImageLoader(context: PlatformContext): ImageLoader {
+        return ImageLoader.Builder(context)
+            .components {
+                add(
+                    OkHttpNetworkFetcherFactory(
+                        callFactory = { container.coilOkHttpClient },
+                    ),
+                )
+                add(SvgDecoder.Factory())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    add(AnimatedImageDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
+            }
+            .memoryCache {
+                MemoryCache.Builder()
+                    .maxSizePercent(context, 0.25)
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(150L * 1024L * 1024L)
+                    .build()
+            }
+            .crossfade(120)
+            .build()
+    }
+}

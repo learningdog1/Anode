@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 108 108" fill="none">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="4" y="4" width="100" height="100" rx="24" ry="24"/>
+    </clipPath>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0C1224"/>
+      <stop offset="0.55" stop-color="#15224A"/>
+      <stop offset="1" stop-color="#1F3470"/>
+    </linearGradient>
+    <radialGradient id="glowGrad" cx="54" cy="46" r="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D74FF" stop-opacity="0.28"/>
+      <stop offset="0.52" stop-color="#4FD8CE" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#15224A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rightPillarGrad" x1="54" y1="32" x2="73" y2="73" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9BB2FF"/>
+      <stop offset="1" stop-color="#5878F5"/>
+    </linearGradient>
+    <linearGradient id="crossbarGrad" x1="47" y1="61.5" x2="61" y2="61.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3FE8DC"/>
+      <stop offset="1" stop-color="#6BA2FF"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#squircle)">
+    <rect x="4" y="4" width="100" height="100" fill="url(#bgGrad)"/>
+    <rect x="4" y="4" width="100" height="100" fill="url(#glowGrad)"/>
+    <rect x="4.75" y="4.75" width="98.5" height="98.5" rx="23.25" ry="23.25" stroke="#9BB2FF" stroke-opacity="0.22" stroke-width="1.5"/>
+    <path d="M54 32 L73 73" stroke="url(#rightPillarGrad)" stroke-width="8.6" stroke-linecap="round"/>
+    <path d="M35 73 L54 32" stroke="#FFFFFF" stroke-width="8.6" stroke-linecap="round"/>
+    <path d="M50.3 61.5 L57.7 61.5" stroke="url(#crossbarGrad)" stroke-width="6.0" stroke-linecap="round"/>
+  </g>
+</svg>
