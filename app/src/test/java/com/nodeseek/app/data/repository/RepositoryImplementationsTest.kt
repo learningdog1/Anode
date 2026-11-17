@@ -438,9 +438,11 @@ class RepositoryImplementationsTest {
     }
 
     @Test
-    fun `default AppSettings enables Material You dynamic color and checkIn invalidates across Beijing midnight`() = runTest {
-        assertTrue(AppSettings().useDynamicColor)
-        assertTrue(settingsRepository.settings.value.useDynamicColor)
+    fun `default AppSettings uses palette defaults with 90 percent font scale and checkIn invalidates across Beijing midnight`() = runTest {
+        assertFalse(AppSettings().useDynamicColor)
+        assertFalse(settingsRepository.settings.value.useDynamicColor)
+        assertEquals(0.90f, AppSettings().fontScale, 0.0001f)
+        assertEquals(0.90f, settingsRepository.settings.value.fontScale, 0.0001f)
 
         val signedInConfigB64 = encodeConfig(
             """

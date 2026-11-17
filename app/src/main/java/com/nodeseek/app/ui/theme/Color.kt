@@ -8,89 +8,89 @@ import androidx.compose.ui.graphics.Color
 import kotlin.math.roundToInt
 
 /**
- * NodePulse ("Editorial Paper & Obsidian Telemetry") Color Tokens.
+ * NodePulse ("Cool Mist Light & Slate Steel Dark") Color Tokens.
  *
- * Core Material 3 Expressive color palette:
- * - Warm Editorial Paper Light (#FAF7F2 parchment, #FFFFFF crisp sheet, #3655D6 Electric Cobalt)
- * - Deep Obsidian AMOLED Dark (#07080C / #000000 Pitch, #151821 slate container, #8DA2FF Periwinkle)
- * - Electric Cobalt, Cyan Pulse & Drumstick Gold brand accents across Light, Dark & Pure Pitch modes.
+ * Core Material 3 color palette:
+ * - Cool Mist Ice-Blue Light (#F7FAFF canvas, #FFFFFF crisp sheet, #2D637E Steel Teal-Blue)
+ * - Slate Steel Dark (#101417 / #000000 Pitch, #1C2024 slate container, #9ACAEC Sky Blue)
+ * - Harmonized accents, semantic heat & Drumstick Gold tokens across Light, Dark & Pure Pitch modes.
  */
 
-// ── Warm Editorial Paper (Light) ──────────────────────────────────────────────
-val PaperPrimary = Color(0xFF3655D6)
+// ── Cool Mist Ice-Blue (Light) ────────────────────────────────────────────────
+val PaperPrimary = Color(0xFF2D637E)
 val PaperOnPrimary = Color(0xFFFFFFFF)
-val PaperPrimaryContainer = Color(0xFFDDE3FF)
-val PaperOnPrimaryContainer = Color(0xFF0B1D6E)
-val PaperInversePrimary = Color(0xFF8DA2FF)
+val PaperPrimaryContainer = Color(0xFFCDE7FB)
+val PaperOnPrimaryContainer = Color(0xFF001E2E)
+val PaperInversePrimary = Color(0xFF9ACAEC)
 
-val PaperSecondary = Color(0xFF0B7A75)
+val PaperSecondary = Color(0xFF4E616D)
 val PaperOnSecondary = Color(0xFFFFFFFF)
-val PaperSecondaryContainer = Color(0xFFCCF3EE)
-val PaperOnSecondaryContainer = Color(0xFF00201E)
+val PaperSecondaryContainer = Color(0xFFD1E5F3)
+val PaperOnSecondaryContainer = Color(0xFF0A1E28)
 
-val PaperTertiary = Color(0xFFC86D00)
+val PaperTertiary = Color(0xFF605A7D)
 val PaperOnTertiary = Color(0xFFFFFFFF)
-val PaperTertiaryContainer = Color(0xFFFFDFB8)
-val PaperOnTertiaryContainer = Color(0xFF3E1E00)
+val PaperTertiaryContainer = Color(0xFFE6DEFF)
+val PaperOnTertiaryContainer = Color(0xFF1C1736)
 
-val PaperBackground = Color(0xFFFAF7F2)
-val PaperOnBackground = Color(0xFF1B1B1F)
-val PaperSurface = Color(0xFFFAF7F2)
-val PaperOnSurface = Color(0xFF1B1B1F)
-val PaperSurfaceVariant = Color(0xFFEBE5DA)
-val PaperOnSurfaceVariant = Color(0xFF5A5863)
+val PaperBackground = Color(0xFFF7FAFF)
+val PaperOnBackground = Color(0xFF171C1F)
+val PaperSurface = Color(0xFFF7FAFF)
+val PaperOnSurface = Color(0xFF171C1F)
+val PaperSurfaceVariant = Color(0xFFDCE3EA)
+val PaperOnSurfaceVariant = Color(0xFF40484D)
 
 val PaperSurfaceContainerLowest = Color(0xFFFFFFFF)
-val PaperSurfaceContainerLow = Color(0xFFF5F1EA)
-val PaperSurfaceContainer = Color(0xFFEFEAE1)
-val PaperSurfaceContainerHigh = Color(0xFFE8E2D7)
-val PaperSurfaceContainerHighest = Color(0xFFDFD8CB)
+val PaperSurfaceContainerLow = Color(0xFFF1F4F9)
+val PaperSurfaceContainer = Color(0xFFEBEEF3)
+val PaperSurfaceContainerHigh = Color(0xFFE5E8EE)
+val PaperSurfaceContainerHighest = Color(0xFFDFE3E8)
 
-val PaperOutline = Color(0xFF84818C)
-val PaperOutlineVariant = Color(0xFFDBD5C9)
-val PaperInverseSurface = Color(0xFF2F3036)
-val PaperInverseOnSurface = Color(0xFFF2EFF7)
+val PaperOutline = Color(0xFF70787E)
+val PaperOutlineVariant = Color(0xFFC0C7CD)
+val PaperInverseSurface = Color(0xFF2C3135)
+val PaperInverseOnSurface = Color(0xFFEEF1F6)
 
 val PaperError = Color(0xFFBA1A1A)
 val PaperOnError = Color(0xFFFFFFFF)
 val PaperErrorContainer = Color(0xFFFFDAD6)
 val PaperOnErrorContainer = Color(0xFF410002)
 
-// ── Deep Obsidian Telemetry (Dark / AMOLED) ───────────────────────────────────
-val ObsidianPrimary = Color(0xFF8DA2FF)
-val ObsidianOnPrimary = Color(0xFF071E72)
-val ObsidianPrimaryContainer = Color(0xFF213C9E)
-val ObsidianOnPrimaryContainer = Color(0xFFDDE3FF)
-val ObsidianInversePrimary = Color(0xFF3655D6)
+// ── Slate Steel Telemetry (Dark / AMOLED) ─────────────────────────────────────
+val ObsidianPrimary = Color(0xFF9ACAEC)
+val ObsidianOnPrimary = Color(0xFF00344B)
+val ObsidianPrimaryContainer = Color(0xFF114B66)
+val ObsidianOnPrimaryContainer = Color(0xFFCDE7FB)
+val ObsidianInversePrimary = Color(0xFF2D637E)
 
-val ObsidianSecondary = Color(0xFF4FD8CE)
-val ObsidianOnSecondary = Color(0xFF003734)
-val ObsidianSecondaryContainer = Color(0xFF00504C)
-val ObsidianOnSecondaryContainer = Color(0xFF92F4EC)
+val ObsidianSecondary = Color(0xFFB5C9D7)
+val ObsidianOnSecondary = Color(0xFF20333E)
+val ObsidianSecondaryContainer = Color(0xFF364955)
+val ObsidianOnSecondaryContainer = Color(0xFFD1E5F3)
 
-val ObsidianTertiary = Color(0xFFFFB951)
-val ObsidianOnTertiary = Color(0xFF452B00)
-val ObsidianTertiaryContainer = Color(0xFF633F00)
-val ObsidianOnTertiaryContainer = Color(0xFFFFDDB3)
+val ObsidianTertiary = Color(0xFFCAC1E9)
+val ObsidianOnTertiary = Color(0xFF322C4C)
+val ObsidianTertiaryContainer = Color(0xFF494264)
+val ObsidianOnTertiaryContainer = Color(0xFFE6DEFF)
 
-val ObsidianBackground = Color(0xFF07080C)
+val ObsidianBackground = Color(0xFF101417)
 val PurePitchBlack = Color(0xFF000000)
-val ObsidianOnBackground = Color(0xFFEAE8EF)
-val ObsidianSurface = Color(0xFF07080C)
-val ObsidianOnSurface = Color(0xFFEAE8EF)
-val ObsidianSurfaceVariant = Color(0xFF222634)
-val ObsidianOnSurfaceVariant = Color(0xFF9C9AA6)
+val ObsidianOnBackground = Color(0xFFDFE3E7)
+val ObsidianSurface = Color(0xFF101417)
+val ObsidianOnSurface = Color(0xFFDFE3E7)
+val ObsidianSurfaceVariant = Color(0xFF40484D)
+val ObsidianOnSurfaceVariant = Color(0xFFC0C7CD)
 
-val ObsidianSurfaceContainerLowest = Color(0xFF040507)
-val ObsidianSurfaceContainerLow = Color(0xFF0F1117)
-val ObsidianSurfaceContainer = Color(0xFF151821)
-val ObsidianSurfaceContainerHigh = Color(0xFF1D212D)
-val ObsidianSurfaceContainerHighest = Color(0xFF262B3A)
+val ObsidianSurfaceContainerLowest = Color(0xFF0B0F12)
+val ObsidianSurfaceContainerLow = Color(0xFF181C1F)
+val ObsidianSurfaceContainer = Color(0xFF1C2024)
+val ObsidianSurfaceContainerHigh = Color(0xFF262A2E)
+val ObsidianSurfaceContainerHighest = Color(0xFF313539)
 
-val ObsidianOutline = Color(0xFF656470)
-val ObsidianOutlineVariant = Color(0xFF262A38)
-val ObsidianInverseSurface = Color(0xFFEAE8EF)
-val ObsidianInverseOnSurface = Color(0xFF1B1B1F)
+val ObsidianOutline = Color(0xFF8A9297)
+val ObsidianOutlineVariant = Color(0xFF40484D)
+val ObsidianInverseSurface = Color(0xFFDFE3E7)
+val ObsidianInverseOnSurface = Color(0xFF2C3135)
 
 val ObsidianError = Color(0xFFFFB4AB)
 val ObsidianOnError = Color(0xFF690005)
@@ -127,8 +127,8 @@ val PaperLightColorScheme: ColorScheme = lightColorScheme(
     outline = PaperOutline,
     outlineVariant = PaperOutlineVariant,
     scrim = Color(0xFF000000),
-    surfaceBright = PaperSurfaceContainerLowest,
-    surfaceDim = Color(0xFFE5DFD3),
+    surfaceBright = PaperSurface,
+    surfaceDim = Color(0xFFD7DADF),
     surfaceContainerLowest = PaperSurfaceContainerLowest,
     surfaceContainerLow = PaperSurfaceContainerLow,
     surfaceContainer = PaperSurfaceContainer,
@@ -166,7 +166,7 @@ val ObsidianDarkColorScheme: ColorScheme = darkColorScheme(
     outline = ObsidianOutline,
     outlineVariant = ObsidianOutlineVariant,
     scrim = Color(0xFF000000),
-    surfaceBright = Color(0xFF2B3040),
+    surfaceBright = Color(0xFF363A3E),
     surfaceDim = ObsidianBackground,
     surfaceContainerLowest = ObsidianSurfaceContainerLowest,
     surfaceContainerLow = ObsidianSurfaceContainerLow,
@@ -180,10 +180,10 @@ fun ColorScheme.withPurePitchAmoled(): ColorScheme = copy(
     surface = PurePitchBlack,
     surfaceDim = PurePitchBlack,
     surfaceContainerLowest = PurePitchBlack,
-    surfaceContainerLow = Color(0xFF0A0C10),
-    surfaceContainer = Color(0xFF10131A),
-    surfaceContainerHigh = Color(0xFF181C26),
-    surfaceContainerHighest = Color(0xFF212634),
+    surfaceContainerLow = Color(0xFF0A0D10),
+    surfaceContainer = Color(0xFF111518),
+    surfaceContainerHigh = Color(0xFF191D21),
+    surfaceContainerHighest = Color(0xFF23272B),
 )
 
 /**
@@ -235,7 +235,7 @@ data class NodePulseExtendedColors(
 
 val LightExtendedColors = NodePulseExtendedColors(
     cardSurface = PaperSurfaceContainerLowest,
-    cardBorder = PaperOutlineVariant.copy(alpha = 0.62f),
+    cardBorder = PaperOutlineVariant.copy(alpha = 0.68f),
     drumstickGoldStart = Color(0xFFF59E0B),
     drumstickGoldEnd = Color(0xFFD97706),
     drumstickContainer = Color(0xFFFFF4DC),
@@ -254,19 +254,19 @@ val LightExtendedColors = NodePulseExtendedColors(
     cardSurfaceElevated = Color(0xFFFFFFFF),
     cardHighlightRim = Color.White.copy(alpha = 0.92f),
     glassSurface = PaperBackground.copy(alpha = 0.88f),
-    glassBorder = PaperOutlineVariant.copy(alpha = 0.70f),
+    glassBorder = PaperOutlineVariant.copy(alpha = 0.72f),
     brandGradientStart = PaperPrimary,
-    brandGradientEnd = Color(0xFF0E8F89),
-    heroTintStart = PaperPrimary.copy(alpha = 0.085f),
+    brandGradientEnd = blendColor(PaperPrimary, PaperSecondary, 0.45f),
+    heroTintStart = PaperPrimary.copy(alpha = 0.09f),
     heroTintEnd = PaperSecondary.copy(alpha = 0.055f),
-    shimmerBase = Color(0xFFEAE3D5),
-    shimmerHighlight = Color(0xFFFCF9F3),
-    softShadowColor = Color(0x181B2559),
+    shimmerBase = PaperSurfaceContainerHigh,
+    shimmerHighlight = PaperSurfaceContainerLowest,
+    softShadowColor = PaperPrimary.copy(alpha = 0.08f),
 )
 
 val DarkExtendedColors = NodePulseExtendedColors(
     cardSurface = ObsidianSurfaceContainer,
-    cardBorder = Color(0xFF2A3044),
+    cardBorder = ObsidianOutlineVariant.copy(alpha = 0.78f),
     drumstickGoldStart = Color(0xFFFCD34D),
     drumstickGoldEnd = Color(0xFFF59E0B),
     drumstickContainer = Color(0xFF2B200E),
@@ -284,14 +284,14 @@ val DarkExtendedColors = NodePulseExtendedColors(
     readTitleAlpha = 0.66f,
     cardSurfaceElevated = ObsidianSurfaceContainerHigh,
     cardHighlightRim = Color.White.copy(alpha = 0.09f),
-    glassSurface = Color(0xFF0D1017).copy(alpha = 0.86f),
-    glassBorder = Color.White.copy(alpha = 0.11f),
+    glassSurface = ObsidianBackground.copy(alpha = 0.86f),
+    glassBorder = ObsidianOutlineVariant.copy(alpha = 0.62f),
     brandGradientStart = ObsidianPrimary,
-    brandGradientEnd = ObsidianSecondary,
-    heroTintStart = ObsidianPrimary.copy(alpha = 0.15f),
+    brandGradientEnd = blendColor(ObsidianPrimary, ObsidianSecondary, 0.45f),
+    heroTintStart = ObsidianPrimary.copy(alpha = 0.16f),
     heroTintEnd = ObsidianSecondary.copy(alpha = 0.08f),
-    shimmerBase = Color(0xFF1A1E2B),
-    shimmerHighlight = Color(0xFF2B3246),
+    shimmerBase = ObsidianSurfaceContainer,
+    shimmerHighlight = ObsidianSurfaceContainerHighest,
     softShadowColor = Color(0x66000000),
 )
 

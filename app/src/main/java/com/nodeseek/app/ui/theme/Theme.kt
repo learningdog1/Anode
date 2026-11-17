@@ -30,8 +30,8 @@ enum class PulseThemeMode {
 }
 
 val LocalNodePulseExtendedColors = staticCompositionLocalOf { LightExtendedColors }
-val LocalNodePulseExtraTypography = staticCompositionLocalOf { buildNodePulseExtraTypography(1.0f) }
-val LocalFontScale = staticCompositionLocalOf { 1.0f }
+val LocalNodePulseExtraTypography = staticCompositionLocalOf { buildNodePulseExtraTypography(0.90f) }
+val LocalFontScale = staticCompositionLocalOf { 0.90f }
 val LocalNodePulseDarkTheme = staticCompositionLocalOf { false }
 val LocalNodePulseDynamicColor = staticCompositionLocalOf { false }
 
@@ -91,8 +91,8 @@ object NodePulseThemeTokens {
 fun NodePulseTheme(
     themeMode: PulseThemeMode = PulseThemeMode.SYSTEM,
     purePitchAmoled: Boolean = false,
-    dynamicColor: Boolean = true,
-    fontScale: Float = 1.0f,
+    dynamicColor: Boolean = false,
+    fontScale: Float = 0.90f,
     content: @Composable () -> Unit,
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -135,13 +135,13 @@ fun NodePulseTheme(
             if (purePitchAmoled) {
                 DarkExtendedColors.copy(
                     cardSurface = ColorSchemePitchCard,
-                    cardSurfaceElevated = Color(0xFF131722),
-                    cardBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.72f) else Color(0xFF232839),
+                    cardSurfaceElevated = Color(0xFF14181C),
+                    cardBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.72f) else Color(0xFF272D32),
                     cardHighlightRim = Color.White.copy(alpha = 0.08f),
-                    glassSurface = Color(0xFF07090E).copy(alpha = 0.90f),
-                    glassBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.68f) else Color(0xFF262B3D),
-                    shimmerBase = Color(0xFF11141E),
-                    shimmerHighlight = Color(0xFF1E2436),
+                    glassSurface = Color(0xFF070A0D).copy(alpha = 0.90f),
+                    glassBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.68f) else Color(0xFF272D32),
+                    shimmerBase = Color(0xFF111518),
+                    shimmerHighlight = Color(0xFF1F2429),
                 )
             } else if (dynamicSupported) {
                 DarkExtendedColors.copy(
@@ -216,7 +216,7 @@ fun NodePulseTheme(
     }
 }
 
-private val ColorSchemePitchCard = Color(0xFF0B0E14)
+private val ColorSchemePitchCard = Color(0xFF0C1013)
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this

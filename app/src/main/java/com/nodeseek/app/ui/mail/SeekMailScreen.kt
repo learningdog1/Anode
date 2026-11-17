@@ -80,7 +80,6 @@ import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
@@ -149,6 +148,7 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailbox
 import com.nodeseek.app.ui.components.CompactCountBadge
+import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
@@ -181,6 +181,7 @@ import kotlin.math.abs
 private val FULL_TIMESTAMP_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US)
 
+@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SeekMailScreen(
@@ -214,6 +215,11 @@ fun SeekMailScreen(
 
     var pendingExportTarget by remember { mutableStateOf<PendingExportTarget?>(null) }
     var pendingExternalUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
+    val openApiKeyDialog: () -> Unit = {
+        viewModel.clearApiKeyError()
+        showApiKeyDialog = true
+    }
 
     val createDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*"),
@@ -294,7 +300,7 @@ fun SeekMailScreen(
                     onToggleSearch = viewModel::toggleSearchBar,
                     onOpenContacts = viewModel::openContactsSheet,
                     onOpenCreateMailbox = viewModel::openCreateMailboxSheet,
-                    onOpenSettings = onOpenSettings,
+                    onManageApiKey = openApiKeyDialog,
                     showBackButton = showBackButton,
                 )
             },
@@ -310,7 +316,6 @@ fun SeekMailScreen(
                         errorMessage = uiState.apiKeyErrorMessage,
                         onClearError = viewModel::clearApiKeyError,
                         onVerifyAndSave = viewModel::verifyAndSaveApiKey,
-                        onOpenSettings = onOpenSettings,
                         bottomContentPadding = bottomContentPadding,
                         modifier = Modifier
                             .fillMaxSize()
@@ -381,7 +386,7 @@ fun SeekMailScreen(
                         onLoadMore = viewModel::loadMoreMails,
                         onClearFilters = viewModel::clearAllFilters,
                         onOpenCreateMailbox = viewModel::openCreateMailboxSheet,
-                        onOpenSettings = onOpenSettings,
+                        onManageApiKey = openApiKeyDialog,
                         onOpenMail = viewModel::openMail,
                         onCopyCode = { code ->
                             copyWithFeedback("验证码", code, "已复制验证码：$code")
@@ -478,6 +483,26 @@ fun SeekMailScreen(
         )
     }
 
+    if (showApiKeyDialog && uiState.hasConfiguredKey) {
+        SeekMailApiKeyDialog(
+            maskedKeyHint = uiState.apiKeyMaskedHint,
+            isVerifying = uiState.isVerifyingApiKey,
+            errorMessage = uiState.apiKeyErrorMessage,
+            onClearError = viewModel::clearApiKeyError,
+            onVerifyAndSave = viewModel::verifyAndSaveApiKey,
+            onDisconnect = {
+                showApiKeyDialog = false
+                viewModel.disconnectApiKey()
+            },
+            onDismiss = {
+                if (!uiState.isVerifyingApiKey) {
+                    viewModel.clearApiKeyError()
+                    showApiKeyDialog = false
+                }
+            },
+        )
+    }
+
     pendingExternalUrl?.let { targetUrl ->
         PulseConfirmDialog(
             onDismissRequest = { pendingExternalUrl = null },
@@ -544,7 +569,7 @@ private fun SeekMailTopBar(
     onToggleSearch: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenCreateMailbox: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onManageApiKey: () -> Unit,
     showBackButton: Boolean = true,
 ) {
     val activeMailboxAddress = uiState.selectedMailbox?.address
@@ -655,13 +680,12 @@ private fun SeekMailTopBar(
                 containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f),
                 borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.26f),
             )
+            MailTopCircleButton(
+                icon = Icons.Rounded.Key,
+                contentDescription = "管理 Seek 邮箱 API Key",
+                onClick = onManageApiKey,
+            )
         }
-
-        MailTopCircleButton(
-            icon = Icons.Rounded.Settings,
-            contentDescription = "打开设置",
-            onClick = onOpenSettings,
-        )
     }
 }
 
@@ -719,11 +743,11 @@ private fun SeekMailOnboardingView(
     errorMessage: String?,
     onClearError: () -> Unit,
     onVerifyAndSave: (String) -> Unit,
-    onOpenSettings: () -> Unit,
     bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     var draftKey by rememberSaveable { mutableStateOf("") }
     var showKey by rememberSaveable { mutableStateOf(false) }
 
@@ -891,49 +915,233 @@ private fun SeekMailOnboardingView(
                 }
             }
 
-            Row(
+            Button(
+                onClick = { onVerifyAndSave(draftKey) },
+                enabled = !isVerifying && draftKey.isNotBlank(),
+                shape = CircleShape,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedButton(
-                    onClick = onOpenSettings,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = null,
+                if (isVerifying) {
+                    CircularProgressIndicator(
                         modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("正在验证密钥…")
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("设置中心")
+                    Text("验证并连接", fontWeight = FontWeight.Bold)
                 }
+            }
 
-                Button(
-                    onClick = { onVerifyAndSave(draftKey) },
-                    enabled = !isVerifying && draftKey.isNotBlank(),
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1.7f),
-                ) {
-                    if (isVerifying) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("正在验证密钥…")
-                    } else {
-                        Icon(
-                            imageVector = Icons.Rounded.CheckCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(17.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("验证并连接", fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .clickable(role = Role.Button) {
+                        runCatching {
+                            uriHandler.openUri("https://seek.li/manage/developer/docs")
+                        }
                     }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = "获取或管理 Seek 邮箱 API Key（seek.li）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeekMailApiKeyDialog(
+    maskedKeyHint: String,
+    isVerifying: Boolean,
+    errorMessage: String?,
+    onClearError: () -> Unit,
+    onVerifyAndSave: (String) -> Unit,
+    onDisconnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    var draftKey by rememberSaveable { mutableStateOf("") }
+    var showKey by rememberSaveable { mutableStateOf(false) }
+    var submittedReplacement by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isVerifying, errorMessage) {
+        if (submittedReplacement && !isVerifying) {
+            if (errorMessage == null) {
+                submittedReplacement = false
+                onDismiss()
+            } else {
+                submittedReplacement = false
+            }
+        }
+    }
+
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        icon = Icons.Rounded.Key,
+        title = "管理 Seek 邮箱密钥",
+        message = "当前已连接：$maskedKeyHint",
+        buttons = {
+            TextButton(
+                onClick = onDisconnect,
+                enabled = !isVerifying,
+            ) {
+                Text(
+                    text = "断开密钥",
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isVerifying,
+            ) {
+                Text("取消")
+            }
+            Button(
+                onClick = {
+                    submittedReplacement = true
+                    onVerifyAndSave(draftKey)
+                },
+                enabled = !isVerifying && draftKey.isNotBlank(),
+                shape = CircleShape,
+            ) {
+                if (isVerifying) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("验证中")
+                } else {
+                    Text("更换并验证", fontWeight = FontWeight.SemiBold)
                 }
+            }
+        },
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+                value = draftKey,
+                onValueChange = {
+                    draftKey = it
+                    onClearError()
+                },
+                label = { Text("输入新的 API Key") },
+                placeholder = { Text("粘贴 sk_live_... 密钥") },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                visualTransformation = if (showKey) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = {
+                                val pasted = readClipboardText(context)
+                                if (!pasted.isNullOrBlank()) {
+                                    draftKey = pasted.trim()
+                                    onClearError()
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
+                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
+                        }
+                        IconButton(onClick = { showKey = !showKey }) {
+                            Icon(
+                                imageVector = if (showKey) {
+                                    Icons.Rounded.VisibilityOff
+                                } else {
+                                    Icons.Rounded.Visibility
+                                },
+                                contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                            )
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            if (!errorMessage.isNullOrBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.78f))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ErrorOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .clickable(role = Role.Button) {
+                        runCatching {
+                            uriHandler.openUri("https://seek.li/manage/developer/docs")
+                        }
+                    }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = "Seek 邮箱开发者文档与密钥管理",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }
@@ -1453,7 +1661,7 @@ private fun SeekMailListPane(
     onLoadMore: () -> Unit,
     onClearFilters: () -> Unit,
     onOpenCreateMailbox: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onManageApiKey: () -> Unit,
     onOpenMail: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
     bottomContentPadding: Dp = 0.dp,
@@ -1518,9 +1726,9 @@ private fun SeekMailListPane(
                     icon = if (isUnauthorized) Icons.Rounded.Key else Icons.Rounded.ErrorOutline,
                     title = if (isUnauthorized) "API Key 无效或已失效" else "加载邮件失败",
                     subtitle = uiState.mailsErrorMessage,
-                    actionLabel = if (isUnauthorized) "前往设置更换 Key" else "重新加载",
-                    actionIcon = if (isUnauthorized) Icons.Rounded.Settings else Icons.Rounded.Refresh,
-                    onAction = if (isUnauthorized) onOpenSettings else onRetry,
+                    actionLabel = if (isUnauthorized) "更换 API Key" else "重新加载",
+                    actionIcon = if (isUnauthorized) Icons.Rounded.Key else Icons.Rounded.Refresh,
+                    onAction = if (isUnauthorized) onManageApiKey else onRetry,
                     secondaryActionLabel = if (isUnauthorized) "重新加载" else null,
                     onSecondaryAction = if (isUnauthorized) onRetry else null,
                     modifier = Modifier
@@ -1600,10 +1808,10 @@ private fun SeekMailListPane(
                                 )
                                 if (isUnauthorized) {
                                     TextButton(
-                                        onClick = onOpenSettings,
+                                        onClick = onManageApiKey,
                                         contentPadding = PaddingValues(horizontal = 8.dp),
                                     ) {
-                                        Text("设置")
+                                        Text("更换 Key")
                                     }
                                 }
                                 TextButton(

@@ -202,8 +202,8 @@ class SettingsRepositoryImpl(
         return AppSettings(
             themeMode = mode,
             purePitchAmoled = this[Keys.PURE_PITCH_AMOLED] ?: false,
-            useDynamicColor = this[Keys.USE_DYNAMIC_COLOR] ?: true,
-            fontScale = (this[Keys.FONT_SCALE] ?: 1.0f).coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
+            useDynamicColor = this[Keys.USE_DYNAMIC_COLOR] ?: false,
+            fontScale = (this[Keys.FONT_SCALE] ?: AppSettings.DEFAULT_FONT_SCALE).coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
             preferRandomCheckIn = this[Keys.PREFER_RANDOM_CHECK_IN] ?: false,
             pinnedCategorySlugs = decodePinnedSlugs(this[Keys.PINNED_CATEGORY_SLUGS]),
             includeBlockedTopics = this[Keys.INCLUDE_BLOCKED_TOPICS] ?: false,

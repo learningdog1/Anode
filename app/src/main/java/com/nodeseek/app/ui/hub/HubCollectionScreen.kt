@@ -13,22 +13,19 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Bookmark
-import androidx.compose.material.icons.rounded.BookmarkRemove
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.OfflinePin
-import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,10 +48,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -64,20 +57,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.LocalAppContainer
-import com.nodeseek.app.domain.model.ReadHistoryEntry
-import com.nodeseek.app.ui.components.CategoryMicroTag
-import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTopicCard
+import com.nodeseek.app.ui.components.PulseTopicCardModel
 import com.nodeseek.app.ui.components.formatCompactCount
-import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
-import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
-import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import java.time.Instant
@@ -91,6 +79,8 @@ fun HubCollectionScreen(
     onBack: () -> Unit,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     modifier: Modifier = Modifier,
+    onOpenAuthorProfile: ((uid: Long, usernameHint: String) -> Unit)? = null,
+    onOpenCategory: ((slug: String) -> Unit)? = null,
     previewUiState: PulseHubUiState? = null,
     viewModel: PulseHubViewModel = viewModel(
         factory = PulseHubViewModel.factory(LocalAppContainer.current),
@@ -99,6 +89,9 @@ fun HubCollectionScreen(
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
+    val bookmarkedIds = remember(uiState.bookmarks) {
+        uiState.bookmarks.map { it.topicId }.toSet()
+    }
     var showClearHistoryConfirm by rememberSaveable { mutableStateOf(false) }
     var appliedInitialTab by rememberSaveable { mutableStateOf<Int?>(null) }
 
@@ -183,12 +176,9 @@ fun HubCollectionScreen(
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
                     top = 12.dp,
                     bottom = 28.dp,
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item(key = "collections_tabs") {
                     HubCollectionsTabHeader(
@@ -196,18 +186,22 @@ fun HubCollectionScreen(
                         bookmarkCount = uiState.bookmarks.size,
                         historyCount = uiState.readHistory.size,
                         onSelectTab = viewModel::selectCollectionTab,
+                        modifier = Modifier.padding(horizontal = 14.dp),
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 when (uiState.selectedTab) {
                     HubCollectionTab.BOOKMARKS -> {
                         if (uiState.bookmarks.isEmpty() && !uiState.isLoadingServerBookmarks) {
                             item(key = "bookmarks_empty") {
-                                HubEmptyPlaceholderCard(
-                                    icon = Icons.Rounded.Bookmark,
-                                    title = "暂无收藏主题",
-                                    subtitle = "浏览帖子时点按右上角书签即可加入收藏；本地将自动保存离线快照以便无网翻阅。",
-                                )
+                                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                                    HubEmptyPlaceholderCard(
+                                        icon = Icons.Rounded.Bookmark,
+                                        title = "暂无收藏主题",
+                                        subtitle = "浏览帖子时点按右上角书签即可加入收藏；本地将自动保存离线快照以便无网翻阅。",
+                                    )
+                                }
                             }
                         } else if (uiState.bookmarks.isEmpty() && uiState.isLoadingServerBookmarks) {
                             item(key = "bookmarks_loading") {
@@ -224,23 +218,56 @@ fun HubCollectionScreen(
                                 }
                             }
                         } else {
-                            itemsIndexed(
+                            items(
                                 items = uiState.bookmarks,
-                                key = { _, item -> "bm_${item.topicId}" },
-                            ) { index, item ->
-                                PulseStaggeredEntrance(
-                                    index = index,
-                                    enabled = index < 8,
-                                ) {
-                                    HubBookmarkCard(
-                                        item = item,
-                                        onClick = {
-                                            val floor = item.summary.lastReadFloor ?: 0
-                                            onOpenTopic(item.topicId, floor, item.summary.title)
-                                        },
-                                        onUnbookmark = { viewModel.removeBookmark(item.topicId) },
-                                    )
+                                key = { item -> "bm_${item.topicId}" },
+                            ) { item ->
+                                val summary = item.summary
+                                val resolvedIso = remember(summary.lastActivityIso, item.savedAtEpochMillis) {
+                                    summary.lastActivityIso.ifBlank {
+                                        item.savedAtEpochMillis?.let { Instant.ofEpochMilli(it).toString() }.orEmpty()
+                                    }
                                 }
+                                val cardModel = PulseTopicCardModel(
+                                    id = summary.id,
+                                    title = summary.title,
+                                    categorySlug = summary.categorySlug,
+                                    categoryName = summary.categoryName,
+                                    authorId = summary.authorId,
+                                    authorName = summary.authorName,
+                                    authorAvatarUrl = summary.authorAvatarUrl,
+                                    authorLevel = summary.authorLevel,
+                                    viewCount = summary.viewCount,
+                                    replyCount = summary.replyCount,
+                                    lastActivityIso = resolvedIso,
+                                    isPinned = summary.isPinned,
+                                    requiredViewLevel = summary.requiredViewLevel,
+                                    isRead = false,
+                                    lastReadFloor = summary.lastReadFloor,
+                                    isBookmarked = true,
+                                    isHot = summary.isHot,
+                                )
+                                PulseTopicCard(
+                                    topic = cardModel,
+                                    showCategoryTag = true,
+                                    onClick = {
+                                        val floor = summary.lastReadFloor ?: 0
+                                        onOpenTopic(item.topicId, floor, summary.title)
+                                    },
+                                    onBookmarkToggle = { viewModel.removeBookmark(item.topicId) },
+                                    onAuthorClick = if (onOpenAuthorProfile != null) {
+                                        { authorUid ->
+                                            onOpenAuthorProfile(authorUid, summary.authorName)
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onCategoryClick = if (onOpenCategory != null && summary.categorySlug.isNotBlank()) {
+                                        { slug -> onOpenCategory(slug) }
+                                    } else {
+                                        null
+                                    },
+                                )
                             }
 
                             if (uiState.hasMoreServerBookmarks || uiState.isLoadingServerBookmarks) {
@@ -248,7 +275,7 @@ fun HubCollectionScreen(
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         if (uiState.isLoadingServerBookmarks) {
@@ -273,32 +300,63 @@ fun HubCollectionScreen(
                     HubCollectionTab.HISTORY -> {
                         if (uiState.readHistory.isEmpty()) {
                             item(key = "history_empty") {
-                                HubEmptyPlaceholderCard(
-                                    icon = Icons.Rounded.History,
-                                    title = "暂无浏览记录",
-                                    subtitle = "您阅读过的主题与上次停留楼层会保存在设备本地，点击即可一键续读。",
-                                )
-                            }
-                        } else {
-                            itemsIndexed(
-                                items = uiState.readHistory,
-                                key = { _, entry -> "hist_${entry.topicId}" },
-                            ) { index, entry ->
-                                PulseStaggeredEntrance(
-                                    index = index,
-                                    enabled = index < 8,
-                                ) {
-                                    HubReadHistoryCard(
-                                        entry = entry,
-                                        onClick = {
-                                            onOpenTopic(
-                                                entry.topicId,
-                                                entry.lastReadFloor,
-                                                entry.title,
-                                            )
-                                        },
+                                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                                    HubEmptyPlaceholderCard(
+                                        icon = Icons.Rounded.History,
+                                        title = "暂无浏览记录",
+                                        subtitle = "您阅读过的主题与上次停留楼层会保存在设备本地，点击即可一键续读。",
                                     )
                                 }
+                            }
+                        } else {
+                            items(
+                                items = uiState.readHistory,
+                                key = { entry -> "hist_${entry.topicId}" },
+                            ) { entry ->
+                                val visitedIso = remember(entry.visitedAtEpochMillis) {
+                                    Instant.ofEpochMilli(entry.visitedAtEpochMillis).toString()
+                                }
+                                val resumeLabel = if (entry.lastReadFloor > 0) {
+                                    "续读 #${entry.lastReadFloor} 楼"
+                                } else {
+                                    "重新打开"
+                                }
+                                val cardModel = PulseTopicCardModel(
+                                    id = entry.topicId,
+                                    title = entry.title,
+                                    categorySlug = entry.categorySlug,
+                                    categoryName = entry.categoryName,
+                                    authorName = entry.authorName,
+                                    authorAvatarUrl = entry.authorAvatarUrl,
+                                    lastActivityIso = visitedIso,
+                                    isRead = false,
+                                    lastReadFloor = entry.lastReadFloor.takeIf { it > 0 },
+                                    isBookmarked = entry.topicId in bookmarkedIds,
+                                )
+                                PulseTopicCard(
+                                    topic = cardModel,
+                                    showCategoryTag = true,
+                                    showEngagementMetrics = false,
+                                    resumeBadgeTextOverride = resumeLabel,
+                                    onClick = {
+                                        onOpenTopic(
+                                            entry.topicId,
+                                            entry.lastReadFloor,
+                                            entry.title,
+                                        )
+                                    },
+                                    onBookmarkToggle = { viewModel.toggleHistoryBookmark(entry) },
+                                    onAuthorClick = if (onOpenAuthorProfile != null && entry.authorName.isNotBlank()) {
+                                        { _ -> onOpenAuthorProfile(0L, entry.authorName) }
+                                    } else {
+                                        null
+                                    },
+                                    onCategoryClick = if (onOpenCategory != null && entry.categorySlug.isNotBlank()) {
+                                        { slug -> onOpenCategory(slug) }
+                                    } else {
+                                        null
+                                    },
+                                )
                             }
                         }
                     }
@@ -423,270 +481,5 @@ private fun CollectionSegmentPill(
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
-    }
-}
-
-@Composable
-private fun HubBookmarkCard(
-    item: HubBookmarkDisplayItem,
-    onClick: () -> Unit,
-    onUnbookmark: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val topic = item.summary
-    val categorySpec = NodePulseThemeTokens.categorySpec(topic.categorySlug)
-    val spineColor = categorySpec.spineColor
-    val isDark = NodePulseThemeTokens.isDark
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                accentColor = spineColor,
-            )
-            .pulseBouncyClickable(
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .drawWithContent {
-                drawContent()
-                val barW = 3.dp.toPx()
-                val vPad = 14.dp.toPx()
-                if (size.height > vPad * 2f) {
-                    val r = 2.dp.toPx()
-                    drawRoundRect(
-                        color = spineColor,
-                        topLeft = Offset(0f, vPad),
-                        size = Size(barW, size.height - vPad * 2f),
-                        cornerRadius = CornerRadius(r, r),
-                    )
-                }
-            }
-            .padding(horizontal = 15.dp, vertical = 13.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank()) {
-                CategoryMicroTag(
-                    slug = topic.categorySlug,
-                    labelOverride = topic.categoryName,
-                )
-            }
-
-            if (item.hasOfflineSnapshot) {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.secondaryContainer)
-                        .border(
-                            width = 0.8.dp,
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = if (isDark) 0.35f else 0.22f),
-                            shape = CircleShape,
-                        )
-                        .padding(horizontal = 7.dp, vertical = 2.5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.OfflinePin,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.size(12.dp),
-                    )
-                    Text(
-                        text = "已离线缓存",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            IconButton(
-                onClick = onUnbookmark,
-                modifier = Modifier.size(32.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.BookmarkRemove,
-                    contentDescription = "取消收藏",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-
-        Text(
-            text = topic.title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    text = topic.authorName.ifBlank { "NodeSeek 成员" },
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (topic.replyCount > 0) {
-                    Text(
-                        text = "· ${formatCompactCount(topic.replyCount)} 回复",
-                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-            }
-            val savedIso = item.savedAtEpochMillis?.let { Instant.ofEpochMilli(it).toString() }
-                ?: topic.lastActivityIso
-            if (savedIso.isNotBlank()) {
-                Text(
-                    text = formatRelativeTimeChinese(savedIso),
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun HubReadHistoryCard(
-    entry: ReadHistoryEntry,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val visitedIso = remember(entry.visitedAtEpochMillis) {
-        Instant.ofEpochMilli(entry.visitedAtEpochMillis).toString()
-    }
-    val categorySpec = NodePulseThemeTokens.categorySpec(entry.categorySlug)
-    val isDark = NodePulseThemeTokens.isDark
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                accentColor = if (entry.categorySlug.isNotBlank()) categorySpec.spineColor else null,
-            )
-            .pulseBouncyClickable(
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .padding(horizontal = 15.dp, vertical = 13.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            PulseAvatar(
-                avatarUrl = entry.authorAvatarUrl,
-                username = entry.authorName,
-                size = 26.dp,
-            )
-            Text(
-                text = entry.authorName.ifBlank { "匿名用户" },
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            if (entry.categorySlug.isNotBlank() || entry.categoryName.isNotBlank()) {
-                CategoryMicroTag(
-                    slug = entry.categorySlug,
-                    labelOverride = entry.categoryName,
-                )
-            }
-        }
-
-        Text(
-            text = entry.title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Schedule,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                    modifier = Modifier.size(13.dp),
-                )
-                Text(
-                    text = "浏览于 ${formatRelativeTimeChinese(visitedIso)}",
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            val floorLabel = if (entry.lastReadFloor > 0) {
-                "续读 #${entry.lastReadFloor} 楼"
-            } else {
-                "重新打开"
-            }
-            Row(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer)
-                    .border(
-                        width = 0.8.dp,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.35f else 0.20f),
-                        shape = CircleShape,
-                    )
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = floorLabel,
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(12.dp),
-                )
-            }
-        }
     }
 }

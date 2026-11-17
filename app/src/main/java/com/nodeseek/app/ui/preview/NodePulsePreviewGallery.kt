@@ -103,26 +103,26 @@ Geekbench 6 : ${'\u001B'}[1;32m2,418 Single-Core${'\u001B'}[0m | ${'\u001B'}[1;3
 // ── 1. Editorial Topic Cards Showcase (Light, Obsidian Dark & Pure Pitch AMOLED) ──────────
 
 @Preview(
-    name = "1A · Topic Cards — Warm Editorial Paper Light",
+    name = "1A · Topic Cards — Cool Mist Light",
     showBackground = true,
     widthDp = 412,
 )
 @Composable
 fun NodePulseTopicCardsLightPreview() {
     NodePulseTheme(themeMode = PulseThemeMode.PAPER_LIGHT) {
-        TopicCardsPreviewContent(subtitle = "Warm Editorial Paper · #FAF7F2")
+        TopicCardsPreviewContent(subtitle = "Cool Mist Light · #F7FAFF")
     }
 }
 
 @Preview(
-    name = "1B · Topic Cards — Deep Obsidian Dark",
+    name = "1B · Topic Cards — Slate Steel Dark",
     showBackground = true,
     widthDp = 412,
 )
 @Composable
 fun NodePulseTopicCardsDarkPreview() {
     NodePulseTheme(themeMode = PulseThemeMode.OBSIDIAN_DARK, purePitchAmoled = false) {
-        TopicCardsPreviewContent(subtitle = "Deep Obsidian Telemetry · #07080C")
+        TopicCardsPreviewContent(subtitle = "Slate Steel Dark · #101417")
     }
 }
 

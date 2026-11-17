@@ -13,8 +13,8 @@ enum class ThemeMode {
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val purePitchAmoled: Boolean = false,
-    val useDynamicColor: Boolean = true,
-    val fontScale: Float = 1.0f,
+    val useDynamicColor: Boolean = false,
+    val fontScale: Float = DEFAULT_FONT_SCALE,
     val preferRandomCheckIn: Boolean = false,
     val pinnedCategorySlugs: Set<String> = DEFAULT_PINNED_CATEGORY_SLUGS,
     val includeBlockedTopics: Boolean = false,
@@ -26,6 +26,8 @@ data class AppSettings(
     val ignoredUpdateTag: String = "",
 ) {
     companion object {
+        const val DEFAULT_FONT_SCALE: Float = 0.90f
+
         val DEFAULT_PINNED_CATEGORY_SLUGS: Set<String> = linkedSetOf(
             "daily",
             "tech",

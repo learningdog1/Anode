@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -86,6 +87,9 @@ fun PulseTopicCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     showCategoryTag: Boolean = true,
+    showEngagementMetrics: Boolean = true,
+    resumeBadgeTextOverride: String? = null,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 3.5.dp),
     onBookmarkToggle: (() -> Unit)? = null,
     onAuthorClick: ((Long) -> Unit)? = null,
     onCategoryClick: ((String) -> Unit)? = null,
@@ -94,7 +98,6 @@ fun PulseTopicCard(
     val isDark = NodePulseThemeTokens.isDark
     val extraType = NodePulseThemeTokens.extraTypography
     val fontScale = NodePulseThemeTokens.fontScale
-    val categorySpec = NodePulseThemeTokens.categorySpec(topic.categorySlug)
     val haptics = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
     val cardShape = RoundedCornerShape(14.dp)
@@ -111,12 +114,13 @@ fun PulseTopicCard(
     )
     val hasCategoryTag = showCategoryTag &&
         (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank())
-    val hasReadFloor = (topic.lastReadFloor ?: 0) > 0
+    val resumeBadgeText = resumeBadgeTextOverride?.takeIf { it.isNotBlank() }
+        ?: topic.lastReadFloor?.takeIf { it > 0 }?.let { "读至 #$it 楼" }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 3.5.dp),
+            .padding(contentPadding),
     ) {
         Column(
             modifier = Modifier
@@ -250,7 +254,7 @@ fun PulseTopicCard(
 
             Spacer(modifier = Modifier.height(7.dp))
 
-            // ── Row 3: Telemetry Footer + Floor Resume + Bottom-Right Plain Category Tag ──
+            // ── Row 3: Telemetry Footer + Floor Resume + Plain Category Tag ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
@@ -261,37 +265,47 @@ fun PulseTopicCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    HeatCommentPill(
-                        replyCount = topic.replyCount,
-                        viewCount = topic.viewCount,
-                        isHotOverride = topic.isHot,
-                        compact = true,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-
-                    if (topic.viewCount > 0) {
-                        Row(
+                    if (showEngagementMetrics) {
+                        HeatCommentPill(
+                            replyCount = topic.replyCount,
+                            viewCount = topic.viewCount,
+                            isHotOverride = topic.isHot,
+                            compact = true,
                             modifier = Modifier.align(Alignment.CenterVertically),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Visibility,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                                modifier = Modifier.size(13.dp),
-                            )
-                            Text(
-                                text = formatCompactCount(topic.viewCount),
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = (11.5f * fontScale).sp,
-                                    fontWeight = FontWeight.Medium,
-                                ).withTabularNumbers(),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        )
+
+                        if (topic.viewCount > 0) {
+                            Row(
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Visibility,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = formatCompactCount(topic.viewCount),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = (11.5f * fontScale).sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ).withTabularNumbers(),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
+                    } else if (hasCategoryTag) {
+                        PulseCardCategoryTag(
+                            categorySlug = topic.categorySlug,
+                            categoryName = topic.categoryName,
+                            isRead = topic.isRead,
+                            onCategoryClick = onCategoryClick,
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        )
                     }
 
                     if (topic.isPinned) {
@@ -330,12 +344,13 @@ fun PulseTopicCard(
                     }
                 }
 
-                if (hasReadFloor || hasCategoryTag) {
+                val showRightCategoryTag = showEngagementMetrics && hasCategoryTag
+                if (resumeBadgeText != null || showRightCategoryTag) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (hasReadFloor) {
+                        if (resumeBadgeText != null) {
                             val resumeShape = RoundedCornerShape(6.dp)
                             Row(
                                 modifier = Modifier
@@ -355,7 +370,7 @@ fun PulseTopicCard(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = "读至 #${topic.lastReadFloor} 楼",
+                                    text = resumeBadgeText,
                                     style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary,
@@ -365,54 +380,13 @@ fun PulseTopicCard(
                             }
                         }
 
-                        if (hasCategoryTag) {
-                            val categoryLabel = topic.categoryName.ifBlank { categorySpec.defaultTitle }
-                            val categoryShape = RoundedCornerShape(4.dp)
-                            Row(
-                                modifier = Modifier
-                                    .clip(categoryShape)
-                                    .then(
-                                        if (onCategoryClick != null) {
-                                            Modifier.clickable(
-                                                role = Role.Button,
-                                                onClickLabel = "筛选$categoryLabel",
-                                                onClick = { onCategoryClick(topic.categorySlug) },
-                                            )
-                                        } else {
-                                            Modifier
-                                        },
-                                    )
-                                    .padding(horizontal = 2.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(5.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            categorySpec.spineColor.copy(
-                                                alpha = if (topic.isRead) 0.55f else 0.88f,
-                                            ),
-                                        ),
-                                )
-                                Text(
-                                    text = categoryLabel,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = (11.5f * fontScale).sp,
-                                        fontWeight = FontWeight.Medium,
-                                        letterSpacing = 0.1.sp,
-                                    ),
-                                    color = blendColor(
-                                        source = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        target = categorySpec.contentColor,
-                                        fraction = if (topic.isRead) 0.25f else 0.55f,
-                                    ),
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
+                        if (showRightCategoryTag) {
+                            PulseCardCategoryTag(
+                                categorySlug = topic.categorySlug,
+                                categoryName = topic.categoryName,
+                                isRead = topic.isRead,
+                                onCategoryClick = onCategoryClick,
+                            )
                         }
                     }
                 }
@@ -421,18 +395,81 @@ fun PulseTopicCard(
     }
 }
 
+@Composable
+private fun PulseCardCategoryTag(
+    categorySlug: String,
+    categoryName: String,
+    isRead: Boolean,
+    onCategoryClick: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val fontScale = NodePulseThemeTokens.fontScale
+    val categorySpec = NodePulseThemeTokens.categorySpec(categorySlug)
+    val categoryLabel = categoryName.ifBlank { categorySpec.defaultTitle }
+    val categoryShape = RoundedCornerShape(4.dp)
+
+    Row(
+        modifier = modifier
+            .clip(categoryShape)
+            .then(
+                if (onCategoryClick != null && categorySlug.isNotBlank()) {
+                    Modifier.clickable(
+                        role = Role.Button,
+                        onClickLabel = "筛选$categoryLabel",
+                        onClick = { onCategoryClick(categorySlug) },
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .padding(horizontal = 2.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .clip(CircleShape)
+                .background(
+                    categorySpec.spineColor.copy(
+                        alpha = if (isRead) 0.55f else 0.88f,
+                    ),
+                ),
+        )
+        Text(
+            text = categoryLabel,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = (11.5f * fontScale).sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 0.1.sp,
+            ),
+            color = blendColor(
+                source = MaterialTheme.colorScheme.onSurfaceVariant,
+                target = categorySpec.contentColor,
+                fraction = if (isRead) 0.25f else 0.55f,
+            ),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 /**
  * Diagonal shimmer skeleton placeholder matching compact outlined `PulseTopicCard` geometry.
  */
 @Composable
-fun PulseTopicCardSkeleton(modifier: Modifier = Modifier) {
+fun PulseTopicCardSkeleton(
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 3.5.dp),
+) {
     val ext = NodePulseThemeTokens.extendedColors
     val cardShape = RoundedCornerShape(14.dp)
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 3.5.dp),
+            .padding(contentPadding),
     ) {
         Column(
             modifier = Modifier

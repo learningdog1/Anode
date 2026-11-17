@@ -45,7 +45,6 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Group
-import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.PersonAdd
@@ -105,11 +104,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.network.NodeSeekUrlNormalizer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.FloorAuthor
-import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.model.UserProfile
 import com.nodeseek.app.domain.model.UserReplyExcerpt
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
-import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.FloorNumberPill
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
@@ -118,6 +115,9 @@ import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTopicCard
+import com.nodeseek.app.ui.components.PulseTopicCardModel
+import com.nodeseek.app.ui.components.PulseTopicCardSkeleton
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
@@ -289,101 +289,115 @@ fun UserProfileScreen(
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
                     top = 12.dp,
                     bottom = 36.dp,
                 ),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 if (profile != null) {
                     item(key = "profile_hero") {
-                        PulseStaggeredEntrance(index = 0) {
-                            UserProfileHeroBento(
-                                profile = profile,
-                                isOwnProfile = uiState.isOwnProfile,
-                                isSignedIn = uiState.isSignedIn,
-                                isUpdatingRelation = uiState.isUpdatingRelation,
-                                onEditProfile = viewModel::openEditProfileDialog,
-                                onToggleFollow = viewModel::toggleFollow,
-                                onSendMessage = if (onOpenDirectMessage != null) {
-                                    { onOpenDirectMessage(profile.uid, profile.username) }
-                                } else {
-                                    null
-                                },
-                                onOpenFollowing = {
-                                    if (uiState.isOwnProfile) viewModel.showOwnConnections(following = true)
-                                },
-                                onOpenFollowers = {
-                                    if (uiState.isOwnProfile) viewModel.showOwnConnections(following = false)
-                                },
-                                onMentionClick = handleMarkdownMentionClick,
-                                onUrlClick = handleMarkdownUrlClick,
-                            )
-                        }
-                    }
-
-                    if (!profile.readmeMarkdown.isNullOrBlank() || !profile.signatureMarkdown.isNullOrBlank()) {
-                        item(key = "profile_markdown_card") {
-                            PulseStaggeredEntrance(index = 1) {
-                                UserMarkdownBioCard(
-                                    readmeMarkdown = profile.readmeMarkdown,
-                                    signatureMarkdown = profile.signatureMarkdown,
+                        Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                            PulseStaggeredEntrance(index = 0) {
+                                UserProfileHeroBento(
+                                    profile = profile,
+                                    isOwnProfile = uiState.isOwnProfile,
+                                    isSignedIn = uiState.isSignedIn,
+                                    isUpdatingRelation = uiState.isUpdatingRelation,
+                                    onEditProfile = viewModel::openEditProfileDialog,
+                                    onToggleFollow = viewModel::toggleFollow,
+                                    onSendMessage = if (onOpenDirectMessage != null) {
+                                        { onOpenDirectMessage(profile.uid, profile.username) }
+                                    } else {
+                                        null
+                                    },
+                                    onOpenFollowing = {
+                                        if (uiState.isOwnProfile) viewModel.showOwnConnections(following = true)
+                                    },
+                                    onOpenFollowers = {
+                                        if (uiState.isOwnProfile) viewModel.showOwnConnections(following = false)
+                                    },
                                     onMentionClick = handleMarkdownMentionClick,
                                     onUrlClick = handleMarkdownUrlClick,
                                 )
                             }
                         }
+                        Spacer(modifier = Modifier.height(14.dp))
+                    }
+
+                    if (!profile.readmeMarkdown.isNullOrBlank() || !profile.signatureMarkdown.isNullOrBlank()) {
+                        item(key = "profile_markdown_card") {
+                            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                                PulseStaggeredEntrance(index = 1) {
+                                    UserMarkdownBioCard(
+                                        readmeMarkdown = profile.readmeMarkdown,
+                                        signatureMarkdown = profile.signatureMarkdown,
+                                        onMentionClick = handleMarkdownMentionClick,
+                                        onUrlClick = handleMarkdownUrlClick,
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(14.dp))
+                        }
                     }
                 } else if (uiState.isRefreshing) {
                     item(key = "profile_skeleton") {
-                        UserProfileHeroSkeleton()
+                        Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                            UserProfileHeroSkeleton()
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
                 } else if (!uiState.isRefreshing && uiState.errorMessage != null) {
                     item(key = "profile_error") {
-                        UserProfileLoadErrorCard(
-                            message = uiState.errorMessage ?: "请稍后下拉刷新重试。",
-                            isChallengeError = uiState.isChallengeError,
-                            onRetry = viewModel::refresh,
-                            onVerifySecurity = if (onRequestWebViewAuth != null) {
-                                {
-                                    onRequestWebViewAuth(
-                                        "${NodeSeekUrlNormalizer.ORIGIN}/space/$uid",
-                                        false,
-                                    )
-                                }
-                            } else {
-                                null
-                            },
-                        )
+                        Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                            UserProfileLoadErrorCard(
+                                message = uiState.errorMessage ?: "请稍后下拉刷新重试。",
+                                isChallengeError = uiState.isChallengeError,
+                                onRetry = viewModel::refresh,
+                                onVerifySecurity = if (onRequestWebViewAuth != null) {
+                                    {
+                                        onRequestWebViewAuth(
+                                            "${NodeSeekUrlNormalizer.ORIGIN}/space/$uid",
+                                            false,
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
                 }
 
                 // ── Activity Tabs (发布的主题 | 参与的回复) ──
                 item(key = "profile_activity_tabs") {
-                    PulseStaggeredEntrance(index = 2) {
-                        ProfileActivityTabs(
-                            selectedTab = uiState.selectedTab,
-                            topicCount = profile?.topicCount ?: uiState.topics.size,
-                            replyCount = profile?.replyCount ?: uiState.replies.size,
-                            onSelectTab = viewModel::selectTab,
-                        )
+                    Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        PulseStaggeredEntrance(index = 2) {
+                            ProfileActivityTabs(
+                                selectedTab = uiState.selectedTab,
+                                topicCount = profile?.topicCount ?: uiState.topics.size,
+                                replyCount = profile?.replyCount ?: uiState.replies.size,
+                                onSelectTab = viewModel::selectTab,
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 when (uiState.selectedTab) {
                     ProfileActivityTab.TOPICS -> {
                         if (uiState.topics.isEmpty() && !uiState.isRefreshing) {
                             item(key = "topics_empty") {
-                                HubEmptyPlaceholderCard(
-                                    icon = Icons.Rounded.Forum,
-                                    title = "暂无发布的主题",
-                                    subtitle = "该成员尚未发布公开讨论主题。",
-                                )
+                                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                    HubEmptyPlaceholderCard(
+                                        icon = Icons.Rounded.Forum,
+                                        title = "暂无发布的主题",
+                                        subtitle = "该成员尚未发布公开讨论主题。",
+                                    )
+                                }
                             }
                         } else if (uiState.topics.isEmpty() && uiState.isRefreshing) {
-                            item(key = "topics_skeleton") {
-                                ProfileActivityListSkeleton()
+                            items(count = 4, key = { "topics_skel_$it" }) {
+                                PulseTopicCardSkeleton()
                             }
                         } else {
                             val fallbackAuthorName = profile?.username?.takeIf { it.isNotBlank() }
@@ -395,13 +409,41 @@ fun UserProfileScreen(
                                 items = uiState.topics,
                                 key = { "u_topic_${it.id}" },
                             ) { summary ->
-                                UserPublishedTopicCard(
-                                    summary = summary,
-                                    fallbackAuthorName = fallbackAuthorName,
-                                    fallbackAvatarUrl = fallbackAvatarUrl,
-                                    fallbackLevel = profile?.level,
-                                    onClick = { onOpenTopic(summary.id, 0, summary.title) },
-                                    onCategoryClick = onOpenCategory,
+                                val cardModel = PulseTopicCardModel(
+                                    id = summary.id,
+                                    title = summary.title,
+                                    categorySlug = summary.categorySlug,
+                                    categoryName = summary.categoryName,
+                                    authorId = summary.authorId ?: uid,
+                                    authorName = summary.authorName.ifBlank { fallbackAuthorName },
+                                    authorAvatarUrl = summary.authorAvatarUrl.ifBlank { fallbackAvatarUrl },
+                                    authorLevel = summary.authorLevel ?: profile?.level,
+                                    viewCount = summary.viewCount,
+                                    replyCount = summary.replyCount,
+                                    lastActivityIso = summary.lastActivityIso,
+                                    isPinned = summary.isPinned,
+                                    requiredViewLevel = summary.requiredViewLevel,
+                                    isRead = summary.isRead,
+                                    lastReadFloor = summary.lastReadFloor,
+                                    isBookmarked = summary.isBookmarked,
+                                    isHot = summary.isHot,
+                                )
+                                PulseTopicCard(
+                                    topic = cardModel,
+                                    showCategoryTag = true,
+                                    onClick = {
+                                        onOpenTopic(
+                                            summary.id,
+                                            summary.lastReadFloor ?: 0,
+                                            summary.title,
+                                        )
+                                    },
+                                    onBookmarkToggle = { viewModel.toggleBookmark(summary) },
+                                    onCategoryClick = if (onOpenCategory != null && summary.categorySlug.isNotBlank()) {
+                                        { slug -> onOpenCategory(slug) }
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
 
@@ -419,15 +461,19 @@ fun UserProfileScreen(
                     ProfileActivityTab.REPLIES -> {
                         if (uiState.replies.isEmpty() && !uiState.isRefreshing) {
                             item(key = "replies_empty") {
-                                HubEmptyPlaceholderCard(
-                                    icon = Icons.Rounded.ChatBubbleOutline,
-                                    title = "暂无参与的回复",
-                                    subtitle = "该成员近期的公开回帖记录将展示在此处。",
-                                )
+                                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                    HubEmptyPlaceholderCard(
+                                        icon = Icons.Rounded.ChatBubbleOutline,
+                                        title = "暂无参与的回复",
+                                        subtitle = "该成员近期的公开回帖记录将展示在此处。",
+                                    )
+                                }
                             }
                         } else if (uiState.replies.isEmpty() && uiState.isRefreshing) {
                             item(key = "replies_skeleton") {
-                                ProfileActivityListSkeleton()
+                                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                    ProfileActivityListSkeleton()
+                                }
                             }
                         } else {
                             items(
@@ -1346,16 +1392,21 @@ private fun UserReplyExcerptCard(
     excerpt: UserReplyExcerpt,
     onClick: () -> Unit,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     val accentBarColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
     val interactionSource = remember { MutableInteractionSource() }
+    val cardShape = RoundedCornerShape(14.dp)
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulsePressScale(interactionSource)
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                elevation = PulseElevation.Card,
+            .padding(horizontal = 14.dp, vertical = 3.5.dp)
+            .pulsePressScale(interactionSource = interactionSource, pressedScale = 0.985f)
+            .clip(cardShape)
+            .border(
+                width = 0.85.dp,
+                color = ext.cardBorder,
+                shape = cardShape,
             )
             .clickable(
                 interactionSource = interactionSource,
@@ -1363,8 +1414,8 @@ private fun UserReplyExcerptCard(
                 role = Role.Button,
                 onClick = onClick,
             )
-            .padding(15.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp),
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1828,197 +1879,6 @@ private fun UserProfileLoadErrorCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("重新加载", fontWeight = FontWeight.SemiBold)
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun UserPublishedTopicCard(
-    summary: TopicSummary,
-    fallbackAuthorName: String,
-    fallbackAvatarUrl: String,
-    fallbackLevel: Int?,
-    onClick: () -> Unit,
-    onCategoryClick: ((String) -> Unit)? = null,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val extraType = NodePulseThemeTokens.extraTypography
-    val categorySpec = NodePulseThemeTokens.categorySpec(summary.categorySlug)
-    val spineBrush = remember(categorySpec.spineColor, categorySpec.gradientEndColor) {
-        Brush.verticalGradient(listOf(categorySpec.spineColor, categorySpec.gradientEndColor))
-    }
-    val interactionSource = remember { MutableInteractionSource() }
-    val resolvedName = summary.authorName.ifBlank { fallbackAuthorName }
-    val resolvedAvatar = summary.authorAvatarUrl.ifBlank { fallbackAvatarUrl }
-    val resolvedLevel = summary.authorLevel ?: fallbackLevel
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .pulsePressScale(interactionSource = interactionSource, pressedScale = 0.985f)
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                containerColor = ext.cardSurface,
-                elevation = PulseElevation.Card,
-                accentColor = categorySpec.spineColor,
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = LocalIndication.current,
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .drawWithContent {
-                drawContent()
-                val barW = 3.2.dp.toPx()
-                val vPad = 14.dp.toPx()
-                if (size.height > vPad * 2f) {
-                    val r = 2.dp.toPx()
-                    drawRoundRect(
-                        brush = spineBrush,
-                        topLeft = Offset(0f, vPad),
-                        size = Size(barW, size.height - vPad * 2f),
-                        cornerRadius = CornerRadius(r, r),
-                    )
-                }
-            }
-            .padding(start = 16.dp, end = 15.dp, top = 13.dp, bottom = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            PulseAvatar(
-                avatarUrl = resolvedAvatar,
-                username = resolvedName,
-                size = 30.dp,
-                rankLevel = resolvedLevel,
-                ringWidth = 1.5.dp,
-            )
-
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    text = resolvedName,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (resolvedLevel != null) {
-                    RankMicroBadge(level = resolvedLevel)
-                }
-                if (summary.lastActivityIso.isNotBlank()) {
-                    Text(
-                        text = "·",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    )
-                    RelativeTimeText(isoTimestamp = summary.lastActivityIso)
-                }
-            }
-
-            if (summary.categorySlug.isNotBlank() || summary.categoryName.isNotBlank()) {
-                CategoryMicroTag(
-                    slug = summary.categorySlug,
-                    labelOverride = summary.categoryName,
-                    compact = true,
-                    onClick = if (onCategoryClick != null && summary.categorySlug.isNotBlank()) {
-                        { onCategoryClick(summary.categorySlug) }
-                    } else {
-                        null
-                    },
-                )
-            }
-        }
-
-        Text(
-            text = summary.title,
-            style = extraType.titleMediumUnread,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                val requiredLevel = summary.requiredViewLevel
-                if (requiredLevel != null && requiredLevel > 0) {
-                    PulseAccentPill(
-                        text = if (requiredLevel >= 255) "仅自己可见" else "Lv.$requiredLevel 可见",
-                        icon = Icons.Rounded.Lock,
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f),
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-                if (summary.replyCount > 0) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ChatBubbleOutline,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(13.dp),
-                        )
-                        Text(
-                            text = summary.replyCount.toString(),
-                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                if (summary.viewCount > 0) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Visibility,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(13.dp),
-                        )
-                        Text(
-                            text = summary.viewCount.toString(),
-                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(
-                    text = "查看主题",
-                    style = extraType.microLabel,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(14.dp),
-                )
             }
         }
     }

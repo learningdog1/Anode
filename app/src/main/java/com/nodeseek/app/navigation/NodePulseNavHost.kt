@@ -833,6 +833,8 @@ fun NodePulseNavHost(
                     initialTab = route.initialTab,
                     onBack = safePopBackStack,
                     onOpenTopic = openTopic,
+                    onOpenAuthorProfile = navigateToUser,
+                    onOpenCategory = selectBoardAndOpenExplore,
                 )
             }
 

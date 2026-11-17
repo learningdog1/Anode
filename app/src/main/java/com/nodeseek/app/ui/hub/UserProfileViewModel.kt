@@ -93,12 +93,15 @@ class UserProfileViewModel(
     val uiState: StateFlow<UserProfileUiState> = combine(
         container.sessionRepository.sessionState,
         internalState,
-    ) { session, state ->
+        container.bookmarkAndHistoryRepository.observeBookmarkedIds(),
+        container.bookmarkAndHistoryRepository.observeReadHistory(),
+    ) { session, state, bookmarkedIds, readHistory ->
         val resolvedName = state.profile?.username?.takeIf { it.isNotBlank() }
             ?: initialUsernameHint
         val resolvedAvatar = state.profile?.avatarUrl?.takeIf { it.isNotBlank() }
             ?: if (uid > 0L) "${NodeSeekUrlNormalizer.ORIGIN}/avatar/$uid.png" else ""
         val resolvedLevel = state.profile?.level
+        val historyById = readHistory.associateBy { it.topicId }
 
         UserProfileUiState(
             uid = uid,
@@ -108,10 +111,15 @@ class UserProfileViewModel(
             profile = state.profile,
             selectedTab = state.selectedTab,
             topics = state.topics.map { topic ->
+                val historyEntry = historyById[topic.id]
                 topic.enrichForMember(
                     fallbackName = resolvedName,
                     fallbackAvatarUrl = resolvedAvatar,
                     fallbackLevel = resolvedLevel,
+                ).copy(
+                    isBookmarked = topic.id in bookmarkedIds,
+                    isRead = topic.isRead || historyEntry != null,
+                    lastReadFloor = historyEntry?.lastReadFloor?.takeIf { it > 0 } ?: topic.lastReadFloor,
                 )
             },
             topicsPage = state.topicsPage,
@@ -157,6 +165,32 @@ class UserProfileViewModel(
 
     fun selectTab(tab: ProfileActivityTab) {
         internalState.update { it.copy(selectedTab = tab) }
+    }
+
+    fun toggleBookmark(topic: TopicSummary) {
+        viewModelScope.launch {
+            val targetBookmarked = !topic.isBookmarked
+            val isSignedIn = container.sessionRepository.sessionState.value != null
+            if (targetBookmarked) {
+                container.bookmarkAndHistoryRepository.saveOfflineBookmark(
+                    summary = topic.copy(isBookmarked = true),
+                    detailSnapshot = null,
+                    syncedWithServer = false,
+                )
+            } else {
+                container.bookmarkAndHistoryRepository.removeLocalBookmark(topic.id)
+            }
+            if (isSignedIn) {
+                container.bookmarkAndHistoryRepository.setTopicBookmarked(
+                    topicId = topic.id,
+                    bookmarked = targetBookmarked,
+                ).onFailure { err ->
+                    _events.trySend(err.message ?: "云端收藏同步未完成，已保存在本机")
+                }
+            } else {
+                _events.trySend(if (targetBookmarked) "已加入我的收藏" else "已移除收藏")
+            }
+        }
     }
 
     fun refresh() {

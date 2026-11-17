@@ -18,6 +18,7 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -136,7 +137,7 @@ data class SeekMailUiState(
     val allowRemoteImages: Boolean = false,
     val exportingKey: String? = null,
     val rateLimit: SeekMailRateLimit? = null,
-    val fontScale: Float = 1.0f,
+    val fontScale: Float = AppSettings.DEFAULT_FONT_SCALE,
     val purePitchAmoled: Boolean = false,
 ) {
     val selectedMailbox: SeekMailbox?
@@ -445,6 +446,15 @@ class SeekMailViewModel(
 
     fun clearApiKeyError() {
         _internalState.update { it.copy(apiKeyErrorMessage = null) }
+    }
+
+    fun disconnectApiKey() {
+        if (_internalState.value.isVerifyingApiKey) return
+        viewModelScope.launch {
+            settingsRepository.setSeekMailApiKey("")
+            seekMailRepository.clearCache()
+            _snackbarChannel.trySend("已断开 Seek 邮箱密钥")
+        }
     }
 
     private fun loadWorkspace(

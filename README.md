@@ -4,10 +4,10 @@
 
 # Anode
 
-**Editorial Paper & Obsidian Telemetry**  
+**Cool Mist Light & Slate Steel Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v1.2.0-3655D6?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.0.0-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.10-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202025.02.00-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,31 +26,31 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v1.2.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v1.2.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v2.0.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.0.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v1.2.0`（`versionCode = 4`） |
+| **当前版本** | `v2.0.0`（`versionCode = 5`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 底部主栏直达隔离式 Seek 邮箱 (`seek.li`) · 个人中心与一行签到/分组入口 · 收藏与足迹离线快照 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 底部主栏直达隔离式 Seek 邮箱 (`seek.li`) 与页内密钥管理 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
 ## 🎨 三态视觉主题同屏对比 · Themes & Design Philosophy
 
-**Anode** 将日间技术杂志的舒朗纸感与夜间机房遥测面板的锐利对比融于同一套 **Material 3 Expressive** 自适应色彩引擎：
+**Anode** 将日间技术杂志的舒朗通透感与夜间机房遥测面板的锐利对比融于同一套 **Material 3 Expressive** 自适应色彩引擎：
 
-- **暖感纸张日间 (`Paper Light`)**：米白纸张画布（`#FAF7F2`）搭配通透线框卡片（`0.85.dp` 建筑级描边 `#DBD5C9`），消除长文阅读眩光。
-- **深邃黑曜夜间 (`Obsidian Dark`)**：深空曜石底色（`#07080C`）与暗色线框信息流卡片，配合 **Electric Cobalt (`#8DA2FF`)** 与 **Telemetry Teal (`#4FD8CE`)** 高对比点缀。
-- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#10131A`），专为 OLED 屏幕优化夜间阅读对比度。
-- **Material You 壁纸动态取色与语义调和**：默认开启（支持在设置中一键切换）Android 12+ Material You 动态取色，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
+- **清雾冰蓝浅色 (`Cool Mist Light`)**：清透冰蓝雾白画布（`#F7FAFF`）搭配纯白底板（`#FFFFFF`）、细密边框（`#C0C7CD`）与沉稳青钢蓝主色（`#2D637E` / 容器 `#CDE7FB`），清爽护眼、层次分明。
+- **深岩钢蓝深色 (`Slate Steel Dark`)**：低辉度岩灰暗色画布（`#101417`）与板岩容器（`#1C2024`），配合澄澈天青蓝（`#9ACAEC` / 容器 `#114B66`）高对比点缀。
+- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#14181B`），专为 OLED 屏幕优化夜间阅读对比度。
+- **Material You 壁纸动态取色与默认 `90%` 紧凑排版**：默认关闭动态取色以呈现标志性的清雾浅色 / 深岩深色主题（支持在设置中一键开启 Android 12+ Material You 壁纸动态取色）；全局默认字号与排版缩放调优为 **`90%`**（支持 `85%–130%` 自由调节）。开启壁纸动态取色时，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
 
 <div align="center">
 <table>
   <tr>
-    <th width="33%">☀️ 暖感纸张日间 · Paper Light</th>
-    <th width="33%">🌙 深邃黑曜夜间 · Obsidian Dark</th>
+    <th width="33%">☀️ 清雾浅色 · Cool Mist Light</th>
+    <th width="33%">🌙 深岩深色 · Slate Steel Dark</th>
     <th width="33%">🖤 纯黑省电 · Pure Pitch AMOLED</th>
   </tr>
   <tr>
@@ -107,7 +107,7 @@
 </div>
 
 - **全站统一搜索 (`SearchRoute`)**：点击首页右上角搜索图标直达独立全站搜索页，支持按 `找帖子`（含分类/排序筛选与分页加载）与 `找用户`（`@username`）检索，自动持久化最近搜索标签，并在底部提供 **1 键 Google `site:www.nodeseek.com` 站外搜索** 卡片。
-- **离线收藏与阅读足迹 (`HubCollectionScreen`)**：从“我的”页面直达独立的「收藏与足迹」二级页，集中管理云端与 Room 本地离线快照收藏（支持无网离线阅读与取消收藏）及自动记录上次停留楼层的浏览历史（支持一键续读与清空记录）。
+- **离线收藏与阅读足迹 (`HubCollectionScreen`)**：从“我的”页面直达独立的「收藏与足迹」二级页，与首页统一采用 `PulseTopicCard` 通透线框帖子卡片设计；集中管理云端与 Room 本地离线快照收藏（支持无网离线阅读与一键取消收藏），并在浏览历史中完整保留版块分类标签与 `读至 #N 楼` 续读标签，支持一键续读、收藏与清空记录。
 
 ---
 
@@ -202,7 +202,7 @@
 
 - **3 分栏收件箱 (`InboxScreen`)**：集成 `回复我`、`@我`、`私信` 三个实时分栏，支持一键全部已读、精准跳转原帖对应楼层，并内置通往 `脉搏雷达` 与 `Seek 邮箱` 的状态快链。
 - **站内私信对话 (`DirectMessageScreen`)**：支持 Markdown 渲染、系统通知识别、自动保存私信草稿与前台静默轮询刷新。
-- **用户空间 (`UserProfileScreen`)**：展示会员等级徽章、鸡腿/星尘数据、个人签名与 Markdown README，支持关注/取关、发私信、加入/移出屏蔽名单，查看 TA 发布的主题与历史回复；浏览本人空间时可直接编辑个人资料。
+- **用户空间 (`UserProfileScreen`)**：展示会员等级徽章、鸡腿/星尘数据、个人签名与 Markdown README，支持关注/取关、发私信、加入/移出屏蔽名单，查看 TA 发布的主题（同步统一为首页同款 `PulseTopicCard` 通透线框帖子卡片形式）与历史回复；浏览本人空间时可直接编辑个人资料。
 
 ---
 
@@ -243,7 +243,7 @@
 </table>
 </div>
 
-- **底部主栏直达 & 会话隔离 OpenAPI 客户端 (`SeekMailApiClient`)**：Seek 邮箱现已升级为底部导航栏中间主标签（`首页` / `邮箱` / `我的`），点按即刻进入收件箱（打开邮件详情时自动收起底栏以获得全屏阅读体验）；网络层基于 `https://seek.li/openapi/v1` 构建，强制启用 `CookieJar.NO_COOKIES`、禁用跨站重定向、严格校验请求 Origin，与 NodeSeek 主站会话彻底隔离——即使不登录社区也能独立使用邮箱。
+- **底部主栏直达、页内密钥闭环与会话隔离 (`SeekMailApiClient`)**：Seek 邮箱作为底部导航栏中间主标签（`首页` / `邮箱` / `我的`），点按即刻进入收件箱（打开邮件详情时自动收起底栏以获得全屏阅读体验）；顶栏内置独立的 API Key 密钥管理弹窗（支持连通性验证、保存与断开密钥），闭环管理无需跳转设置。网络层基于 `https://seek.li/openapi/v1` 构建，强制启用 `CookieJar.NO_COOKIES`、禁用跨站重定向、严格校验请求 Origin，与 NodeSeek 主站会话彻底隔离——即使不登录社区也能独立使用邮箱。
 - **多邮箱与别名管理**：支持全部收件箱与各独立别名（如 `@seek.li` / `@nodeseek.org`）切换、一键复制地址、检查可用性并创建新别名、标签过滤、关键字搜索与联系人目录。
 - **智能验证码提取 (`VerificationCodeExtractor`)**：自动识别中英文验证码邮件并在列表与详情页高亮显示验证码徽章，一键复制即可填入登录验证。
 - **零追踪隐私阅读器 (`SeekMailWebView`)**：经 `Jsoup` 白名单消毒的邮件渲染器，严格禁用 JavaScript、文件访问与第三方 Cookie，默认拦截远程追踪图片（支持按封手动放行），自动适配 `Paper Light` / `Obsidian Dark` / `Pure Pitch AMOLED` 与字体缩放，支持切换 `HTML 视图` / `纯文本` / `原始源码 (.eml)`，并提供 `SPF · DKIM · DMARC` 验证遥测与附件 SAF 导出下载。
@@ -255,7 +255,7 @@
 <div align="center">
 <table>
   <tr>
-    <th width="50%">⚙️ 主题、字体缩放、图床与密钥管理</th>
+    <th width="50%">⚙️ 分组卡片式设置中心</th>
     <th width="50%">🎨 设计系统组件与遥测图鉴</th>
   </tr>
   <tr>
@@ -265,7 +265,7 @@
 </table>
 </div>
 
-- **设置中心 (`SettingsScreen`)**：支持可视化切换 `跟随系统 / 暖感纸张 / 深邃黑曜`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、`85%–130%` 全局正文实时缩放、`保底 +5 / 手气随机` 签到偏好、NodeImage 与 Seek Mail API Key 连通性测试、屏蔽用户列表管理、图片/阅读历史缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与在线升级。
+- **设置中心 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置、屏蔽用户管理、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与在线升级（剔除与邮箱页重复的 Seek Mail 配置项）。
 
 ---
 
@@ -310,14 +310,14 @@ app/src/main/java/com/nodeseek/app/
 │   ├── update/                      # Cookie 隔离 GitHubReleaseClient、APK 安装器与更新调度实现
 │   └── valuation/                   # Frankfurter 汇率仓库（含 24h 本地缓存与手动校准）
 └── ui/
-    ├── theme/                       # Paper/Obsidian/Pitch 色板、15 版块规范、Lv.0–6 等级光环与动效
+    ├── theme/                       # 清雾浅色/深岩深色/Pitch 色板、15 版块规范、Lv.0–6 等级光环与默认 90% 排版缩放
     ├── components/                  # PulseTopicCard、FloatingPillDock、MarkdownRenderer、ANSI/贴纸支持
     ├── explore/                     # 脉冲首页流 Screen & ViewModel
     ├── boards/                      # 独立全站统一搜索与版块过滤 Screen & ViewModel
     ├── topic/                       # 杂志级帖子阅读器、楼层滑块与快捷回复工作台
     ├── composer/                    # Markdown 发帖/改帖编辑器与 NodeImage 上传
-    ├── hub/                         # 个人中心（一行签到/设置式分组）、收藏与足迹、签到榜、收件箱、私信、用户空间与设置
-    ├── mail/                        # SeekMailScreen、SeekMailViewModel 与隔离式 SeekMailWebView
+    ├── hub/                         # 个人中心（一行签到/设置式分组）、收藏与足迹、签到榜、收件箱、私信、用户空间与分组设置页
+    ├── mail/                        # SeekMailScreen（含页内 API Key 弹窗）、SeekMailViewModel 与隔离式 SeekMailWebView
     ├── radar/                       # PulseRadarScreen & ViewModel（规则管理、提醒流与追更追踪）
     ├── update/                      # AppUpdateDialog（更新提醒弹窗、日志渲染与下载安装进度）
     ├── valuation/                   # VpsValuationBottomSheet（实时遥测、汇率同步与 Markdown 导出）
@@ -358,8 +358,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v1.2.0-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v1.2.0-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.0.0-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v2.0.0-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 

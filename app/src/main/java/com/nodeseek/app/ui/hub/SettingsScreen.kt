@@ -2,9 +2,15 @@
 
 package com.nodeseek.app.ui.hub
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,10 +19,11 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +32,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,45 +40,33 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.BrightnessAuto
-import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.CleaningServices
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.NewReleases
-import androidx.compose.material.icons.rounded.NotificationsActive
-import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Radar
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.RssFeed
+import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Science
-import androidx.compose.material.icons.rounded.Security
-import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -79,7 +75,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -87,8 +82,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -131,6 +125,7 @@ import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.update.AppUpdateState
 import com.nodeseek.app.domain.update.UpdateCheckResult
 import com.nodeseek.app.domain.update.UpdateDownloadPhase
+import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -138,6 +133,7 @@ import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.RankMicroBadge
+import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.ObsidianBackground
 import com.nodeseek.app.ui.theme.ObsidianOutlineVariant
@@ -151,14 +147,10 @@ import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseElevation
-import com.nodeseek.app.ui.theme.PulseGradientDivider
-import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
 import com.nodeseek.app.ui.theme.PurePitchBlack
-import com.nodeseek.app.ui.theme.blendColor
+import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
-import com.nodeseek.app.ui.theme.pulseGlassSurface
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import com.nodeseek.app.ui.update.formatUpdateByteSize
@@ -172,12 +164,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
-
-data class SeekMailTestResult(
-    val isSuccess: Boolean,
-    val message: String,
-)
 
 data class SettingsUiState(
     val settings: AppSettings = AppSettings(),
@@ -186,9 +174,6 @@ data class SettingsUiState(
     val isLoadingBlockedUsers: Boolean = false,
     val showBlockedUsersDialog: Boolean = false,
     val isSigningOut: Boolean = false,
-    val isTestingSeekMail: Boolean = false,
-    val isSavingSeekMail: Boolean = false,
-    val seekMailTestResult: SeekMailTestResult? = null,
 )
 
 class SettingsViewModel(
@@ -200,9 +185,6 @@ class SettingsViewModel(
         val isLoadingBlockedUsers: Boolean = false,
         val showBlockedUsersDialog: Boolean = false,
         val isSigningOut: Boolean = false,
-        val isTestingSeekMail: Boolean = false,
-        val isSavingSeekMail: Boolean = false,
-        val seekMailTestResult: SeekMailTestResult? = null,
     )
 
     private val transient = MutableStateFlow(TransientState())
@@ -222,9 +204,6 @@ class SettingsViewModel(
             isLoadingBlockedUsers = local.isLoadingBlockedUsers,
             showBlockedUsersDialog = local.showBlockedUsersDialog,
             isSigningOut = local.isSigningOut,
-            isTestingSeekMail = local.isTestingSeekMail,
-            isSavingSeekMail = local.isSavingSeekMail,
-            seekMailTestResult = local.seekMailTestResult,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -287,81 +266,6 @@ class SettingsViewModel(
         viewModelScope.launch {
             container.settingsRepository.setNodeImageApiKey(apiKey)
             _events.trySend(if (apiKey.isBlank()) "已清除 NodeImage API Key" else "已保存 NodeImage API Key")
-        }
-    }
-
-    fun clearSeekMailTestResult() {
-        if (transient.value.seekMailTestResult != null) {
-            transient.update { it.copy(seekMailTestResult = null) }
-        }
-    }
-
-    fun testSeekMailConnection(candidateKey: String) {
-        val trimmed = candidateKey.trim()
-        if (trimmed.isEmpty()) {
-            val msg = "请先输入 Seek 邮箱 API Key（sk_live_...）"
-            transient.update {
-                it.copy(seekMailTestResult = SeekMailTestResult(isSuccess = false, message = msg))
-            }
-            _events.trySend(msg)
-            return
-        }
-        if (transient.value.isTestingSeekMail || transient.value.isSavingSeekMail) return
-        viewModelScope.launch {
-            transient.update { it.copy(isTestingSeekMail = true, seekMailTestResult = null) }
-            container.seekMailRepository.verifyApiKey(trimmed)
-                .onSuccess { status ->
-                    val mailboxCount = status.mailboxes.size
-                    val unreadLabel = if (status.hasMoreUnread) {
-                        "${status.unreadSampleCount}+"
-                    } else {
-                        "${status.unreadSampleCount}"
-                    }
-                    val msg = "连接成功 · 已加载 $mailboxCount 个邮箱（未读 $unreadLabel 封）"
-                    transient.update {
-                        it.copy(
-                            isTestingSeekMail = false,
-                            seekMailTestResult = SeekMailTestResult(isSuccess = true, message = msg),
-                        )
-                    }
-                    _events.trySend(msg)
-                }
-                .onFailure { error ->
-                    val msg = error.message?.takeIf { it.isNotBlank() } ?: "连接测试失败，请检查 API Key 与网络"
-                    transient.update {
-                        it.copy(
-                            isTestingSeekMail = false,
-                            seekMailTestResult = SeekMailTestResult(isSuccess = false, message = msg),
-                        )
-                    }
-                    _events.trySend(msg)
-                }
-        }
-    }
-
-    fun saveSeekMailApiKey(apiKey: String) {
-        val trimmed = apiKey.trim()
-        if (transient.value.isSavingSeekMail || transient.value.isTestingSeekMail) return
-        viewModelScope.launch {
-            transient.update { it.copy(isSavingSeekMail = true) }
-            try {
-                container.settingsRepository.setSeekMailApiKey(trimmed)
-                if (trimmed.isEmpty()) {
-                    container.seekMailRepository.clearCache()
-                    transient.update {
-                        it.copy(
-                            isSavingSeekMail = false,
-                            seekMailTestResult = null,
-                        )
-                    }
-                    _events.trySend("已清除 Seek 邮箱 API Key")
-                } else {
-                    transient.update { it.copy(isSavingSeekMail = false) }
-                    _events.trySend("已保存 Seek 邮箱 API Key")
-                }
-            } finally {
-                transient.update { it.copy(isSavingSeekMail = false) }
-            }
         }
     }
 
@@ -469,6 +373,7 @@ class SettingsViewModel(
     }
 }
 
+@Suppress("UNUSED_PARAMETER")
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
@@ -503,14 +408,8 @@ fun SettingsScreen(
     val uriHandler = LocalUriHandler.current
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var apiKeyDraft by rememberSaveable(settings.nodeImageApiKey) {
-        mutableStateOf(settings.nodeImageApiKey)
-    }
-    var showApiKey by rememberSaveable { mutableStateOf(false) }
-    var seekMailApiKeyDraft by rememberSaveable(settings.seekMailApiKey) {
-        mutableStateOf(settings.seekMailApiKey)
-    }
-    var showSeekMailApiKey by rememberSaveable { mutableStateOf(false) }
+    var showNodeImageKeyDialog by rememberSaveable { mutableStateOf(false) }
+    var showClearHistoryConfirm by rememberSaveable { mutableStateOf(false) }
     var showSignOutConfirm by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(viewModel) {
@@ -526,63 +425,7 @@ fun SettingsScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                modifier = Modifier.pulseGlassSurface(
-                    showTopBorder = false,
-                    showBottomBorder = true,
-                    tonalAccent = MaterialTheme.colorScheme.primary,
-                ),
-                title = {
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        Text(
-                            text = "设置",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = "外观 · 排版 · 社区与本地存储",
-                            style = extraType.microLabel,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = "返回",
-                        )
-                    }
-                },
-                actions = {
-                    val activeModeLabel = when (settings.themeMode) {
-                        ThemeMode.SYSTEM -> "系统"
-                        ThemeMode.PAPER_LIGHT -> "Paper"
-                        ThemeMode.OBSIDIAN_DARK -> if (settings.purePitchAmoled) "AMOLED" else "Obsidian"
-                    }
-                    PulseAccentPill(
-                        text = activeModeLabel,
-                        icon = when (settings.themeMode) {
-                            ThemeMode.SYSTEM -> Icons.Rounded.BrightnessAuto
-                            ThemeMode.PAPER_LIGHT -> Icons.Rounded.LightMode
-                            ThemeMode.OBSIDIAN_DARK -> Icons.Rounded.DarkMode
-                        },
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                            alpha = if (isDark) 0.72f else 0.85f,
-                        ),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(end = 12.dp),
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent,
-                ),
-            )
-        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = {
             PulseSnackbarHost(
                 hostState = snackbarHostState,
@@ -590,876 +433,431 @@ fun SettingsScreen(
             )
         },
     ) { innerPadding ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 12.dp,
-                bottom = 36.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // ── 1. Appearance & Theme Bento Card ──
-            item(key = "settings_appearance") {
-                PulseStaggeredEntrance(index = 0) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.Palette,
-                        title = "外观与主题",
-                        subtitle = "浅色、深色模式与动态配色",
-                        accentColor = MaterialTheme.colorScheme.primary,
+            // Subtle atmospheric top halo matching "我的" (PulseHubScreen)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                ext.heroTintStart.copy(alpha = if (isDark) 0.22f else 0.14f),
+                                ext.heroTintEnd.copy(alpha = if (isDark) 0.08f else 0.05f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    ),
+            )
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = 36.dp,
+                ),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                // ── Clean Minimalist Top Header ──
+                item(key = "settings_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(top = 8.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier.size(40.dp),
                         ) {
-                            VisualThemeOptionCard(
-                                selected = settings.themeMode == ThemeMode.SYSTEM,
-                                label = "跟随系统",
-                                previewMode = ThemeMode.SYSTEM,
-                                isAmoledPreview = settings.purePitchAmoled,
-                                onClick = { viewModel.setThemeMode(ThemeMode.SYSTEM) },
-                                modifier = Modifier.weight(1f),
-                            )
-                            VisualThemeOptionCard(
-                                selected = settings.themeMode == ThemeMode.PAPER_LIGHT,
-                                label = "浅色模式",
-                                previewMode = ThemeMode.PAPER_LIGHT,
-                                isAmoledPreview = false,
-                                onClick = { viewModel.setThemeMode(ThemeMode.PAPER_LIGHT) },
-                                modifier = Modifier.weight(1f),
-                            )
-                            VisualThemeOptionCard(
-                                selected = settings.themeMode == ThemeMode.OBSIDIAN_DARK,
-                                label = "深色模式",
-                                previewMode = ThemeMode.OBSIDIAN_DARK,
-                                isAmoledPreview = settings.purePitchAmoled,
-                                onClick = { viewModel.setThemeMode(ThemeMode.OBSIDIAN_DARK) },
-                                modifier = Modifier.weight(1f),
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "返回",
+                                tint = MaterialTheme.colorScheme.onBackground,
                             )
                         }
-
-                        PulseGradientDivider()
-
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.DarkMode,
-                            accentColor = MaterialTheme.colorScheme.primary,
-                            title = "纯黑背景 (AMOLED)",
-                            subtitle = "夜间模式下使用纯黑背景以降低 OLED 屏幕功耗",
-                            checked = settings.purePitchAmoled,
-                            onCheckedChange = viewModel::setPurePitchAmoled,
+                        Text(
+                            text = "设置",
+                            style = extraType.heroHeadline,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
                         )
-
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            SettingsToggleRow(
-                                icon = Icons.Rounded.AutoAwesome,
-                                accentColor = MaterialTheme.colorScheme.secondary,
-                                title = "Material You 壁纸动态取色",
-                                subtitle = "根据系统壁纸派生色彩，并与 15 个版块色板进行 12% 语义调和",
-                                checked = settings.useDynamicColor,
-                                onCheckedChange = viewModel::setUseDynamicColor,
-                            )
-                        }
                     }
                 }
-            }
 
-            // ── 2. Typography & Font Scale Card ──
-            item(key = "settings_typography") {
-                val pct = (settings.fontScale * 100f).roundToInt()
-                PulseStaggeredEntrance(index = 1) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.FormatSize,
-                        title = "阅读字号与排版",
-                        subtitle = "当前正文字号缩放：$pct%",
-                        accentColor = MaterialTheme.colorScheme.secondary,
-                        headerTrailing = {
-                            PulseAccentPill(
-                                text = "$pct%",
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            )
-                        },
-                    ) {
-                        Slider(
-                            value = settings.fontScale,
-                            onValueChange = viewModel::setFontScale,
-                            valueRange = 0.85f..1.30f,
-                            steps = 8,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            listOf(
-                                0.85f to "85%",
-                                1.00f to "100%",
-                                1.15f to "115%",
-                                1.30f to "130%",
-                            ).forEach { (scale, label) ->
-                                val isPresetActive = kotlin.math.abs(settings.fontScale - scale) < 0.03f
-                                val chipBg by animateColorAsState(
-                                    targetValue = if (isPresetActive) {
-                                        MaterialTheme.colorScheme.secondaryContainer
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceContainerLow
-                                    },
-                                    label = "fontPresetBg",
-                                )
-                                val chipBorder by animateColorAsState(
-                                    targetValue = if (isPresetActive) {
-                                        MaterialTheme.colorScheme.secondary
-                                    } else {
-                                        ext.cardBorder
-                                    },
-                                    label = "fontPresetBorder",
-                                )
-                                val presetInteraction = remember { MutableInteractionSource() }
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .pulsePressScale(presetInteraction)
-                                        .clip(CircleShape)
-                                        .background(chipBg)
-                                        .border(
-                                            width = if (isPresetActive) 1.2.dp else 0.8.dp,
-                                            color = chipBorder,
-                                            shape = CircleShape,
-                                        )
-                                        .clickable(
-                                            interactionSource = presetInteraction,
-                                            indication = LocalIndication.current,
-                                            role = Role.Button,
-                                            onClick = { viewModel.setFontScale(scale) },
-                                        )
-                                        .padding(vertical = 7.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                                        fontWeight = if (isPresetActive) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isPresetActive) {
-                                            MaterialTheme.colorScheme.onSecondaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                        maxLines = 1,
-                                    )
-                                }
-                            }
-                        }
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pulseCard(
-                                    shape = RoundedCornerShape(14.dp),
-                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                    elevation = PulseElevation.None,
-                                    accentColor = MaterialTheme.colorScheme.secondary,
-                                )
-                                .padding(13.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(
-                                    text = "排版预览",
-                                    style = extraType.microLabel,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                )
-                                Text(
-                                    text = "${(16f * settings.fontScale).roundToInt()}sp",
-                                    style = extraType.microLabel,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            Text(
-                                text = "DMIT LAX Pro 晚高峰三网 CN2 GIA 回程延迟稳定在 138ms，零丢包。",
-                                style = MaterialTheme.typography.bodyLarge.copy(
-                                    fontSize = (16f * settings.fontScale).sp,
-                                    lineHeight = (26.5f * settings.fontScale).sp,
-                                ),
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                    }
-                }
-            }
-
-            // ── 3. Community, Check-In & RSS Fallback Card ──
-            item(key = "settings_community") {
-                PulseStaggeredEntrance(index = 2) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.RssFeed,
-                        title = "浏览与签到设置",
-                        subtitle = "管理签到奖励模式、访客 RSS 降级与内容过滤",
-                        accentColor = ext.drumstickGoldEnd,
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                text = "默认签到策略",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Text(
-                                text = "在「我的」个人中心点击「立即签到」时使用，并与签到卡片模式保持同步",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Max),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            val preferRandom = settings.preferRandomCheckIn
-                            CheckInPreferenceCard(
-                                selected = !preferRandom,
-                                icon = Icons.Rounded.Shield,
-                                title = "固定 +5 鸡腿",
-                                subtitle = "每日稳健固定收益",
-                                accentColor = ext.onDrumstickContainer,
-                                selectedContainer = ext.drumstickContainer,
-                                onClick = { viewModel.setPreferRandomCheckIn(false) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                            )
-                            CheckInPreferenceCard(
-                                selected = preferRandom,
-                                icon = Icons.Rounded.Casino,
-                                title = "🎲 试试手气",
-                                subtitle = "随机鸡腿波动奖励",
-                                accentColor = ext.stardustAccent,
-                                selectedContainer = ext.stardustContainer,
-                                onClick = { viewModel.setPreferRandomCheckIn(true) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
-                            )
-                        }
-
-                        PulseGradientDivider()
-
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.VisibilityOff,
-                            accentColor = MaterialTheme.colorScheme.tertiary,
-                            title = "显示已屏蔽成员的帖子与楼层",
-                            subtitle = "关闭时将在信息流与主题详情页自动折叠屏蔽用户内容",
-                            checked = settings.includeBlockedTopics,
-                            onCheckedChange = viewModel::setIncludeBlockedTopics,
-                        )
-
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.Bolt,
-                            accentColor = MaterialTheme.colorScheme.secondary,
-                            title = "未登录时优先启用 RSS 极速访客流",
-                            subtitle = "通过 rss.nodeseek.com 零验证快速拉取公开版块最新主题",
-                            checked = settings.preferRssFallback,
-                            onCheckedChange = viewModel::setPreferRssFallback,
-                        )
-
-                        if (uiState.session != null) {
-                            val blocklistInteraction = remember { MutableInteractionSource() }
+                // ── Group 1: 外观与显示 ──
+                item(key = "settings_appearance") {
+                    PulseStaggeredEntrance(index = 0) {
+                        SettingsGroupedSection(title = "外观与显示") {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .pulsePressScale(blocklistInteraction)
-                                    .pulseCard(
-                                        shape = RoundedCornerShape(14.dp),
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                        elevation = PulseElevation.None,
-                                    )
-                                    .clickable(
-                                        interactionSource = blocklistInteraction,
-                                        indication = LocalIndication.current,
-                                        role = Role.Button,
-                                        onClick = viewModel::openBlockedUsersManager,
-                                    )
-                                    .padding(horizontal = 12.dp, vertical = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                                    .padding(horizontal = 14.dp, vertical = 14.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(PulseArchitecturalShapes.SmallChip)
-                                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f)),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Block,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                }
-                                Text(
-                                    text = "管理屏蔽用户名单",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
+                                VisualThemeOptionCard(
+                                    selected = settings.themeMode == ThemeMode.SYSTEM,
+                                    label = "跟随系统",
+                                    previewMode = ThemeMode.SYSTEM,
+                                    isAmoledPreview = settings.purePitchAmoled,
+                                    onClick = { viewModel.setThemeMode(ThemeMode.SYSTEM) },
                                     modifier = Modifier.weight(1f),
                                 )
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
+                                VisualThemeOptionCard(
+                                    selected = settings.themeMode == ThemeMode.PAPER_LIGHT,
+                                    label = "浅色模式",
+                                    previewMode = ThemeMode.PAPER_LIGHT,
+                                    isAmoledPreview = false,
+                                    onClick = { viewModel.setThemeMode(ThemeMode.PAPER_LIGHT) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                                VisualThemeOptionCard(
+                                    selected = settings.themeMode == ThemeMode.OBSIDIAN_DARK,
+                                    label = "深色模式",
+                                    previewMode = ThemeMode.OBSIDIAN_DARK,
+                                    isAmoledPreview = settings.purePitchAmoled,
+                                    onClick = { viewModel.setThemeMode(ThemeMode.OBSIDIAN_DARK) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
+                            SettingsGroupDivider()
+
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.DarkMode,
+                                title = "纯黑背景 (AMOLED)",
+                                subtitle = "深色模式下启用纯黑背景以降低 OLED 屏幕功耗",
+                                checked = settings.purePitchAmoled,
+                                onCheckedChange = viewModel::setPurePitchAmoled,
+                            )
+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                SettingsGroupDivider()
+                                SettingsSwitchRow(
+                                    icon = Icons.Rounded.AutoAwesome,
+                                    title = "壁纸动态取色",
+                                    subtitle = "跟随系统壁纸生成 Material You 配色方案",
+                                    checked = settings.useDynamicColor,
+                                    onCheckedChange = viewModel::setUseDynamicColor,
                                 )
                             }
                         }
                     }
                 }
-            }
 
-            // ── 3.5 Pulse Radar Polling & Notification Card ──
-            item(key = "settings_radar_notifications") {
-                PulseStaggeredEntrance(index = 3) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.NotificationsActive,
-                        title = "提醒轮询与手机通知",
-                        subtitle = "控制本地关键词监测、追踪回复频率及私信通知行为",
-                        accentColor = MaterialTheme.colorScheme.primary,
-                        headerTrailing = {
-                            PulseAccentPill(
-                                text = if (radarPollingSettings.isEnabled) "运行中" else "已关闭",
-                                containerColor = if (radarPollingSettings.isEnabled) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                },
-                                contentColor = if (radarPollingSettings.isEnabled) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        },
-                    ) {
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.Radar,
-                            accentColor = MaterialTheme.colorScheme.primary,
-                            title = "启用提醒轮询与脉搏雷达",
-                            subtitle = "在前台与后台期间定时检查新帖命中与追踪楼层回复",
-                            checked = radarPollingSettings.isEnabled,
-                            onCheckedChange = { enabled ->
-                                settingsScope.launch {
-                                    appContainer.radarRepository.updatePollingSettings {
-                                        it.copy(isEnabled = enabled)
-                                    }
-                                }
-                            },
-                        )
-
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.Mail,
-                            accentColor = MaterialTheme.colorScheme.tertiary,
-                            title = "私信、回复与 @提及 系统推送",
-                            subtitle = "轮询到新的未读站内互动或私信时发送原生手机通知",
-                            checked = radarPollingSettings.inboxPushEnabled,
-                            onCheckedChange = { enabled ->
-                                settingsScope.launch {
-                                    appContainer.radarRepository.updatePollingSettings {
-                                        it.copy(inboxPushEnabled = enabled)
-                                    }
-                                }
-                            },
-                        )
-
-                        PulseGradientDivider()
-
-                        SettingsIntervalPresetRow(
-                            title = "前台检查间隔",
-                            optionsMinutes = listOf(1, 2, 5, 10),
-                            selectedMinutes = radarPollingSettings.foregroundIntervalMinutes,
-                            enabled = radarPollingSettings.isEnabled,
-                            onSelect = { minutes ->
-                                settingsScope.launch {
-                                    appContainer.radarRepository.updatePollingSettings {
-                                        it.copy(foregroundIntervalMinutes = minutes)
-                                    }
-                                }
-                            },
-                        )
-
-                        SettingsIntervalPresetRow(
-                            title = "后台检查间隔",
-                            optionsMinutes = listOf(3, 5, 10, 15),
-                            selectedMinutes = radarPollingSettings.backgroundIntervalMinutes,
-                            enabled = radarPollingSettings.isEnabled,
-                            onSelect = { minutes ->
-                                settingsScope.launch {
-                                    appContainer.radarRepository.updatePollingSettings {
-                                        it.copy(backgroundIntervalMinutes = minutes)
-                                    }
-                                }
-                            },
-                        )
-
-                        Text(
-                            text = "说明：定时检查仅在客户端前台运行或退至手机后台期间工作，完全退出应用后自动停止；手机「勿扰模式」与「电池优化/后台省电策略」会影响通知到达及时性。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                        )
-
-                        val radarEntryInteraction = remember { MutableInteractionSource() }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pulsePressScale(radarEntryInteraction)
-                                .pulseCard(
-                                    shape = RoundedCornerShape(14.dp),
-                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                    elevation = PulseElevation.None,
-                                    accentColor = if (radarUnreadCount > 0) MaterialTheme.colorScheme.primary else null,
-                                )
-                                .clickable(
-                                    interactionSource = radarEntryInteraction,
-                                    indication = LocalIndication.current,
-                                    role = Role.Button,
-                                    onClick = { onOpenRadar(0) },
-                                )
-                                .padding(horizontal = 12.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Box(
+                // ── Group 2: 字号与排版 ──
+                item(key = "settings_typography") {
+                    val pct = (settings.fontScale * 100f).roundToInt()
+                    PulseStaggeredEntrance(index = 1) {
+                        SettingsGroupedSection(title = "字号与排版") {
+                            Column(
                                 modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(PulseArchitecturalShapes.SmallChip)
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
-                                contentAlignment = Alignment.Center,
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Radar,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                            Text(
-                                text = "打开脉搏雷达与本地提醒中心",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (radarUnreadCount > 0) {
-                                PulseAccentPill(
-                                    text = "$radarUnreadCount 未读",
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                )
-                            }
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
-                    }
-                }
-            }
-
-            // ── 4. NodeImage Image Host API Key Card ──
-            item(key = "settings_nodeimage") {
-                val hasKey = settings.nodeImageApiKey.isNotBlank()
-                PulseStaggeredEntrance(index = 3) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.Image,
-                        title = "NodeImage 官方图床配置",
-                        subtitle = "配置 api.nodeimage.com 的 X-API-Key 以在编辑器一键上传配图",
-                        accentColor = MaterialTheme.colorScheme.secondary,
-                        headerTrailing = {
-                            PulseAccentPill(
-                                text = if (hasKey) "已配置" else "未配置",
-                                containerColor = if (hasKey) {
-                                    MaterialTheme.colorScheme.secondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                },
-                                contentColor = if (hasKey) {
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        },
-                    ) {
-                        OutlinedTextField(
-                            value = apiKeyDraft,
-                            onValueChange = { apiKeyDraft = it },
-                            label = { Text("NodeImage X-API-Key") },
-                            placeholder = { Text("粘贴您的图床 API Key…") },
-                            shape = RoundedCornerShape(14.dp),
-                            singleLine = true,
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Key,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            },
-                            visualTransformation = if (showApiKey) {
-                                VisualTransformation.None
-                            } else {
-                                PasswordVisualTransformation()
-                            },
-                            trailingIcon = {
-                                IconButton(onClick = { showApiKey = !showApiKey }) {
-                                    Icon(
-                                        imageVector = if (showApiKey) {
-                                            Icons.Rounded.VisibilityOff
-                                        } else {
-                                            Icons.Rounded.Visibility
-                                        },
-                                        contentDescription = if (showApiKey) "隐藏密钥" else "显示密钥",
-                                    )
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            val saveInteraction = remember { MutableInteractionSource() }
-                            FilledTonalButton(
-                                onClick = { viewModel.saveNodeImageApiKey(apiKeyDraft) },
-                                interactionSource = saveInteraction,
-                                shape = CircleShape,
-                                modifier = Modifier.pulsePressScale(saveInteraction),
-                            ) {
-                                Text(
-                                    text = "保存 API Key",
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ── 4.5. Seek Mail (seek.li) OpenAPI Key & Entry Card ──
-            item(key = "settings_seekmail") {
-                val hasSeekMailKey = settings.seekMailApiKey.isNotBlank()
-                PulseStaggeredEntrance(index = 4) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.AlternateEmail,
-                        title = "Seek 邮箱配置",
-                        subtitle = "配置 seek.li OpenAPI Key，支持收件阅读、验证码提取与别名管理",
-                        accentColor = MaterialTheme.colorScheme.secondary,
-                        headerTrailing = {
-                            PulseAccentPill(
-                                text = if (hasSeekMailKey) "已配置" else "未配置",
-                                containerColor = if (hasSeekMailKey) {
-                                    MaterialTheme.colorScheme.secondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                },
-                                contentColor = if (hasSeekMailKey) {
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        },
-                    ) {
-                        OutlinedTextField(
-                            value = seekMailApiKeyDraft,
-                            onValueChange = {
-                                seekMailApiKeyDraft = it
-                                viewModel.clearSeekMailTestResult()
-                            },
-                            label = { Text("Seek 邮箱 API Key") },
-                            placeholder = { Text("粘贴您的 sk_live_... API Key…") },
-                            shape = RoundedCornerShape(14.dp),
-                            singleLine = true,
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Key,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            },
-                            visualTransformation = if (showSeekMailApiKey) {
-                                VisualTransformation.None
-                            } else {
-                                PasswordVisualTransformation()
-                            },
-                            trailingIcon = {
-                                IconButton(onClick = { showSeekMailApiKey = !showSeekMailApiKey }) {
-                                    Icon(
-                                        imageVector = if (showSeekMailApiKey) {
-                                            Icons.Rounded.VisibilityOff
-                                        } else {
-                                            Icons.Rounded.Visibility
-                                        },
-                                        contentDescription = if (showSeekMailApiKey) "隐藏密钥" else "显示密钥",
-                                    )
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-
-                        AnimatedVisibility(visible = uiState.seekMailTestResult != null) {
-                            uiState.seekMailTestResult?.let { testResult ->
-                                val bannerContainer = if (testResult.isSuccess) {
-                                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = if (isDark) 0.55f else 0.72f)
-                                } else {
-                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = if (isDark) 0.55f else 0.75f)
-                                }
-                                val bannerContent = if (testResult.isSuccess) {
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onErrorContainer
-                                }
                                 Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    SettingsRowIconBadge(icon = Icons.Rounded.FormatSize)
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                                    ) {
+                                        Text(
+                                            text = "正文字号与排版缩放",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                        Text(
+                                            text = "全局调整信息流与帖子正文的文字比例",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    PulseAccentPill(
+                                        text = "$pct%",
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    )
+                                }
+
+                                Slider(
+                                    value = settings.fontScale,
+                                    onValueChange = viewModel::setFontScale,
+                                    valueRange = 0.85f..1.30f,
+                                    steps = 8,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    listOf(
+                                        0.85f to "85%",
+                                        0.90f to "90%",
+                                        1.00f to "100%",
+                                        1.15f to "115%",
+                                    ).forEach { (scale, label) ->
+                                        val isPresetActive = abs(settings.fontScale - scale) < 0.02f
+                                        val chipBg by animateColorAsState(
+                                            targetValue = if (isPresetActive) {
+                                                MaterialTheme.colorScheme.primaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.surfaceContainerLow
+                                            },
+                                            label = "fontPresetBg",
+                                        )
+                                        val chipBorder by animateColorAsState(
+                                            targetValue = if (isPresetActive) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                ext.cardBorder
+                                            },
+                                            label = "fontPresetBorder",
+                                        )
+                                        val presetInteraction = remember { MutableInteractionSource() }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .pulsePressScale(presetInteraction)
+                                                .clip(CircleShape)
+                                                .background(chipBg)
+                                                .border(
+                                                    width = if (isPresetActive) 1.1.dp else 0.8.dp,
+                                                    color = chipBorder,
+                                                    shape = CircleShape,
+                                                )
+                                                .clickable(
+                                                    interactionSource = presetInteraction,
+                                                    indication = LocalIndication.current,
+                                                    role = Role.Button,
+                                                    onClick = { viewModel.setFontScale(scale) },
+                                                )
+                                                .padding(vertical = 7.dp),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                text = label,
+                                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                                fontWeight = if (isPresetActive) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isPresetActive) {
+                                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                },
+                                                maxLines = 1,
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(bannerContainer)
-                                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                        .border(
+                                            width = 0.75.dp,
+                                            color = ext.cardBorder,
+                                            shape = RoundedCornerShape(12.dp),
+                                        )
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = if (testResult.isSuccess) {
-                                            Icons.Rounded.CheckCircle
-                                        } else {
-                                            Icons.Rounded.ErrorOutline
-                                        },
-                                        contentDescription = null,
-                                        tint = bannerContent,
-                                        modifier = Modifier.size(16.dp),
-                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Text(
+                                            text = "排版预览",
+                                            style = extraType.microLabel,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            text = "${(16f * settings.fontScale).roundToInt()}sp",
+                                            style = extraType.microLabel,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                     Text(
-                                        text = testResult.message,
-                                        style = MaterialTheme.typography.bodySmall.withTabularNumbers(),
-                                        color = bannerContent,
-                                        modifier = Modifier.weight(1f),
+                                        text = "DMIT LAX Pro 晚高峰三网 CN2 GIA 回程延迟稳定在 138ms，零丢包。",
+                                        style = MaterialTheme.typography.bodyLarge.copy(
+                                            fontSize = (16f * settings.fontScale).sp,
+                                            lineHeight = (25f * settings.fontScale).sp,
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurface,
                                     )
                                 }
                             }
                         }
+                    }
+                }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            val testInteraction = remember { MutableInteractionSource() }
-                            OutlinedButton(
-                                onClick = { viewModel.testSeekMailConnection(seekMailApiKeyDraft) },
-                                enabled = !uiState.isTestingSeekMail && !uiState.isSavingSeekMail,
-                                interactionSource = testInteraction,
-                                shape = CircleShape,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .pulsePressScale(testInteraction),
-                            ) {
-                                if (uiState.isTestingSeekMail) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(15.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Bolt,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                }
-                                Text(
-                                    text = "测试连接",
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                )
-                            }
+                // ── Group 3: 社区与浏览 ──
+                item(key = "settings_community") {
+                    PulseStaggeredEntrance(index = 2) {
+                        SettingsGroupedSection(title = "社区与浏览") {
+                            SettingsCheckInStrategyRow(
+                                preferRandom = settings.preferRandomCheckIn,
+                                onSelect = viewModel::setPreferRandomCheckIn,
+                            )
 
-                            val saveSeekMailInteraction = remember { MutableInteractionSource() }
-                            FilledTonalButton(
-                                onClick = {
-                                    val trimmed = seekMailApiKeyDraft.trim()
-                                    seekMailApiKeyDraft = trimmed
-                                    viewModel.saveSeekMailApiKey(trimmed)
-                                },
-                                enabled = !uiState.isSavingSeekMail && !uiState.isTestingSeekMail,
-                                interactionSource = saveSeekMailInteraction,
-                                shape = CircleShape,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .pulsePressScale(saveSeekMailInteraction),
-                            ) {
-                                Text(
-                                    text = "保存 API Key",
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    softWrap = false,
+                            SettingsGroupDivider()
+
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.Bolt,
+                                title = "未登录优先启用 RSS 访客流",
+                                subtitle = "通过 rss.nodeseek.com 零验证快速拉取公开版块主题",
+                                checked = settings.preferRssFallback,
+                                onCheckedChange = viewModel::setPreferRssFallback,
+                            )
+
+                            SettingsGroupDivider()
+
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.VisibilityOff,
+                                title = "显示已屏蔽成员内容",
+                                subtitle = "关闭时将在信息流与主题详情页自动折叠屏蔽用户楼层",
+                                checked = settings.includeBlockedTopics,
+                                onCheckedChange = viewModel::setIncludeBlockedTopics,
+                            )
+
+                            if (uiState.session != null) {
+                                SettingsGroupDivider()
+                                SettingsNavRow(
+                                    icon = Icons.Rounded.Block,
+                                    title = "屏蔽用户名单",
+                                    subtitle = "管理已屏蔽的社区成员",
+                                    onClick = viewModel::openBlockedUsersManager,
                                 )
                             }
                         }
+                    }
+                }
 
-                        val docsInteraction = remember { MutableInteractionSource() }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pulsePressScale(docsInteraction)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                                .clickable(
-                                    interactionSource = docsInteraction,
-                                    indication = LocalIndication.current,
-                                    role = Role.Button,
-                                    onClick = {
-                                        runCatching {
-                                            uriHandler.openUri("https://seek.li/manage/developer/docs")
-                                        }.onFailure {
-                                            settingsScope.launch {
-                                                snackbarHostState.showSnackbar("无法打开浏览器，请访问 https://seek.li/manage/developer/docs")
-                                            }
+                // ── Group 4: 通知与提醒 ──
+                item(key = "settings_radar_notifications") {
+                    PulseStaggeredEntrance(index = 3) {
+                        SettingsGroupedSection(title = "通知与提醒") {
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.Radar,
+                                title = "启用脉搏雷达监测",
+                                subtitle = "定时检查关键词新帖命中与追踪楼层回复",
+                                checked = radarPollingSettings.isEnabled,
+                                onCheckedChange = { enabled ->
+                                    settingsScope.launch {
+                                        appContainer.radarRepository.updatePollingSettings {
+                                            it.copy(isEnabled = enabled)
                                         }
-                                    },
-                                )
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(16.dp),
+                                    }
+                                },
                             )
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(1.dp),
-                            ) {
-                                Text(
-                                    text = "Seek 邮箱开发者文档与密钥管理",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    text = "https://seek.li/manage/developer/docs",
-                                    style = extraType.microLabel,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
 
-                        val seekMailEntryInteraction = remember { MutableInteractionSource() }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pulsePressScale(seekMailEntryInteraction)
-                                .pulseCard(
-                                    shape = RoundedCornerShape(14.dp),
-                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                    elevation = PulseElevation.None,
-                                    accentColor = if (hasSeekMailKey) MaterialTheme.colorScheme.secondary else null,
-                                )
-                                .clickable(
-                                    interactionSource = seekMailEntryInteraction,
-                                    indication = LocalIndication.current,
-                                    role = Role.Button,
-                                    onClick = onOpenSeekMail,
-                                )
-                                .padding(horizontal = 12.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(PulseArchitecturalShapes.SmallChip)
-                                    .background(MaterialTheme.colorScheme.secondaryContainer),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Mail,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                            Text(
-                                text = "打开 Seek 邮箱",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.weight(1f),
+                            SettingsGroupDivider()
+
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.Mail,
+                                title = "私信与互动系统推送",
+                                subtitle = "收到新的未读回复、@提及或私信时发送原生通知",
+                                checked = radarPollingSettings.inboxPushEnabled,
+                                onCheckedChange = { enabled ->
+                                    settingsScope.launch {
+                                        appContainer.radarRepository.updatePollingSettings {
+                                            it.copy(inboxPushEnabled = enabled)
+                                        }
+                                    }
+                                },
                             )
-                            if (hasSeekMailKey) {
-                                PulseAccentPill(
-                                    text = "已连接",
-                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                )
+
+                            AnimatedVisibility(
+                                visible = radarPollingSettings.isEnabled,
+                                enter = expandVertically() + fadeIn(),
+                                exit = shrinkVertically() + fadeOut(),
+                            ) {
+                                Column {
+                                    SettingsGroupDivider()
+
+                                    SettingsIntervalPresetRow(
+                                        title = "前台检查间隔",
+                                        optionsMinutes = listOf(1, 2, 5, 10),
+                                        selectedMinutes = radarPollingSettings.foregroundIntervalMinutes,
+                                        enabled = radarPollingSettings.isEnabled,
+                                        onSelect = { minutes ->
+                                            settingsScope.launch {
+                                                appContainer.radarRepository.updatePollingSettings {
+                                                    it.copy(foregroundIntervalMinutes = minutes)
+                                                }
+                                            }
+                                        },
+                                    )
+
+                                    SettingsGroupDivider()
+
+                                    SettingsIntervalPresetRow(
+                                        title = "后台检查间隔",
+                                        optionsMinutes = listOf(3, 5, 10, 15),
+                                        selectedMinutes = radarPollingSettings.backgroundIntervalMinutes,
+                                        enabled = radarPollingSettings.isEnabled,
+                                        onSelect = { minutes ->
+                                            settingsScope.launch {
+                                                appContainer.radarRepository.updatePollingSettings {
+                                                    it.copy(backgroundIntervalMinutes = minutes)
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
                             }
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
+
+                            SettingsGroupDivider()
+
+                            SettingsNavRow(
+                                icon = Icons.Rounded.Radar,
+                                title = "脉搏雷达规则与提醒中心",
+                                badgeCount = radarUnreadCount,
+                                onClick = { onOpenRadar(0) },
                             )
                         }
                     }
                 }
-            }
 
-            // ── 5. Cache & Account Session Card ──
-            item(key = "settings_storage_account") {
-                PulseStaggeredEntrance(index = 5) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.CleaningServices,
-                        title = "本地存储与会话安全",
-                        subtitle = "管理图片缓存、浏览记录与当前登录会话",
-                        accentColor = MaterialTheme.colorScheme.primary,
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Max),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            StorageActionTile(
+                // ── Group 5: 服务与存储 ──
+                item(key = "settings_storage") {
+                    val hasNodeImageKey = settings.nodeImageApiKey.isNotBlank()
+                    PulseStaggeredEntrance(index = 4) {
+                        SettingsGroupedSection(title = "服务与存储") {
+                            SettingsNavRow(
                                 icon = Icons.Rounded.Image,
+                                title = "NodeImage 官方图床",
+                                subtitle = "配置 api.nodeimage.com 的上传密钥",
+                                trailingText = if (hasNodeImageKey) "已配置" else "未配置",
+                                trailingTextColor = if (hasNodeImageKey) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                onClick = { showNodeImageKeyDialog = true },
+                            )
+
+                            SettingsGroupDivider()
+
+                            SettingsNavRow(
+                                icon = Icons.Rounded.DeleteSweep,
                                 title = "清理图片缓存",
-                                subtitle = "内存与磁盘缓存",
-                                accentColor = MaterialTheme.colorScheme.primary,
+                                trailingText = "内存与磁盘",
                                 onClick = {
                                     kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                                         runCatching {
@@ -1470,271 +868,33 @@ fun SettingsScreen(
                                     }
                                     viewModel.notifyImageCacheCleared()
                                 },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
                             )
 
-                            StorageActionTile(
+                            SettingsGroupDivider()
+
+                            SettingsNavRow(
                                 icon = Icons.Rounded.History,
                                 title = "清空浏览记录",
-                                subtitle = "本地阅读历史",
-                                accentColor = MaterialTheme.colorScheme.secondary,
-                                onClick = viewModel::clearReadHistory,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight(),
+                                trailingText = "本地足迹",
+                                onClick = { showClearHistoryConfirm = true },
                             )
-                        }
-
-                        val session = uiState.session
-                        if (session != null) {
-                            val rankSpec = NodePulseThemeTokens.rankSpec(session.level)
-                            val accountCardInteraction = remember { MutableInteractionSource() }
-                            PulseGradientDivider()
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .then(
-                                        if (onOpenUserProfile != null) {
-                                            Modifier.pulsePressScale(accountCardInteraction)
-                                        } else {
-                                            Modifier
-                                        },
-                                    )
-                                    .pulseHeroCard(
-                                        accentColor = rankSpec.glowColor,
-                                        shape = PulseArchitecturalShapes.EditorialCard,
-                                        elevation = PulseElevation.Subtle,
-                                    )
-                                    .then(
-                                        if (onOpenUserProfile != null) {
-                                            Modifier.clickable(
-                                                interactionSource = accountCardInteraction,
-                                                indication = LocalIndication.current,
-                                                role = Role.Button,
-                                                onClick = {
-                                                    onOpenUserProfile(session.uid, session.username)
-                                                },
-                                            )
-                                        } else {
-                                            Modifier
-                                        },
-                                    )
-                                    .padding(horizontal = 12.dp, vertical = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                PulseAvatar(
-                                    avatarUrl = session.avatarUrl,
-                                    username = session.username,
-                                    size = 42.dp,
-                                    rankLevel = session.level,
-                                    ringWidth = 2.dp,
-                                )
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    ) {
-                                        Text(
-                                            text = "当前登录：${session.username}",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f, fill = false),
-                                        )
-                                        RankMicroBadge(level = session.level)
-                                    }
-                                    Text(
-                                        text = "UID #${session.uid} · 退出将同步清理本地会话 Cookie",
-                                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                if (onOpenUserProfile != null) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                }
-                            }
-
-                            val signOutInteraction = remember { MutableInteractionSource() }
-                            Button(
-                                onClick = { showSignOutConfirm = true },
-                                enabled = !uiState.isSigningOut,
-                                interactionSource = signOutInteraction,
-                                shape = CircleShape,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(46.dp)
-                                    .pulsePressScale(signOutInteraction),
-                            ) {
-                                if (uiState.isSigningOut) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Rounded.Logout,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                }
-                                Text(
-                                    text = "退出当前账号",
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
                         }
                     }
                 }
-            }
 
-            // ── 6. App Version & GitHub Release Update Card ──
-            item(key = "settings_app_update") {
-                val latestRelease = updateState.latestRelease
-                val downloadPhase = updateState.downloadPhase
-                val githubReleasesUrl = "https://github.com/${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO}/releases"
-                val statusPillText = when (downloadPhase) {
-                    is UpdateDownloadPhase.Downloading -> {
-                        val pct = downloadPhase.progressFraction?.let { (it * 100f).roundToInt().coerceIn(0, 100) }
-                        if (pct != null) "下载中 $pct%" else "下载中"
-                    }
-                    is UpdateDownloadPhase.ReadyToInstall -> {
-                        if (downloadPhase.requiresInstallPermission) "待授权安装" else "待安装"
-                    }
-                    else -> {
-                        if (updateState.hasUpdate && latestRelease != null) {
-                            "新版本 ${latestRelease.tagName}"
-                        } else {
-                            "v${updateState.currentVersionName}"
-                        }
-                    }
-                }
-                val hasHighlightedStatus = updateState.hasUpdate ||
-                    downloadPhase is UpdateDownloadPhase.Downloading ||
-                    downloadPhase is UpdateDownloadPhase.ReadyToInstall
+                // ── Group 6: 关于与更新 ──
+                item(key = "settings_app_update") {
+                    val latestRelease = updateState.latestRelease
+                    val downloadPhase = updateState.downloadPhase
+                    val githubReleasesUrl = "https://github.com/${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO}/releases"
 
-                PulseStaggeredEntrance(index = 6) {
-                    SettingsBentoSection(
-                        icon = Icons.Rounded.SystemUpdate,
-                        title = "应用版本与更新",
-                        subtitle = "通过 GitHub Releases 检查并应用内升级客户端",
-                        accentColor = if (hasHighlightedStatus) ext.drumstickGoldEnd else MaterialTheme.colorScheme.secondary,
-                        headerTrailing = {
-                            PulseAccentPill(
-                                text = statusPillText,
-                                containerColor = if (hasHighlightedStatus) {
-                                    ext.drumstickContainer
-                                } else {
-                                    MaterialTheme.colorScheme.secondaryContainer
-                                },
-                                contentColor = if (hasHighlightedStatus) {
-                                    ext.onDrumstickContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                },
-                            )
-                        },
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pulseCard(
-                                    shape = RoundedCornerShape(15.dp),
-                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                    elevation = PulseElevation.None,
-                                    accentColor = if (updateState.hasUpdate) ext.drumstickGoldEnd else null,
-                                )
-                                .padding(13.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    Text(
-                                        text = "Anode v${updateState.currentVersionName}",
-                                        style = MaterialTheme.typography.titleSmall.withTabularNumbers(),
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    val checkSummary = when {
-                                        updateState.isChecking -> "正在从 GitHub Releases 获取最新版本…"
-                                        updateState.hasUpdate && latestRelease != null ->
-                                            "发现新版本 ${latestRelease.tagName}" + (
-                                                latestRelease.apkAsset?.sizeBytes
-                                                    ?.takeIf { it > 0L }
-                                                    ?.let { " · ${formatUpdateByteSize(it)}" }
-                                                    .orEmpty()
-                                                )
-                                        !updateState.checkError.isNullOrBlank() -> updateState.checkError!!
-                                        updateState.lastCheckedAtMillis > 0L -> "当前已是最新发布版本"
-                                        else -> "Build ${updateState.currentVersionCode} · 更新源 GitHub Releases"
-                                    }
-                                    Text(
-                                        text = checkSummary,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = if (!updateState.checkError.isNullOrBlank() && !updateState.hasUpdate) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                    )
-                                }
-                            }
-
-                            if (downloadPhase is UpdateDownloadPhase.Downloading) {
-                                val fraction = downloadPhase.progressFraction
-                                if (fraction != null) {
-                                    LinearProgressIndicator(
-                                        progress = { fraction },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(5.dp)
-                                            .clip(CircleShape),
-                                    )
-                                } else {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(5.dp)
-                                            .clip(CircleShape),
-                                    )
-                                }
-                            }
-
-                            if (updateState.hasUpdate && latestRelease != null) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    FilledTonalButton(
-                                        onClick = {
+                    PulseStaggeredEntrance(index = 5) {
+                        SettingsGroupedSection(title = "关于与更新") {
+                            SettingsUpdateRow(
+                                updateState = updateState,
+                                onActionClick = {
+                                    when {
+                                        updateState.hasUpdate && latestRelease != null -> {
                                             when (downloadPhase) {
                                                 is UpdateDownloadPhase.ReadyToInstall -> {
                                                     if (downloadPhase.requiresInstallPermission) {
@@ -1749,95 +909,38 @@ fun SettingsScreen(
                                                 }
                                                 else -> appContainer.appUpdateManager.openUpdateDialog()
                                             }
-                                        },
-                                        shape = CircleShape,
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Icon(
-                                            imageVector = when (downloadPhase) {
-                                                is UpdateDownloadPhase.ReadyToInstall ->
-                                                    if (downloadPhase.requiresInstallPermission) {
-                                                        Icons.Rounded.Security
-                                                    } else {
-                                                        Icons.Rounded.InstallMobile
-                                                    }
-                                                is UpdateDownloadPhase.Downloading -> Icons.Rounded.Download
-                                                else -> Icons.Rounded.NewReleases
-                                            },
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = when (downloadPhase) {
-                                                is UpdateDownloadPhase.Downloading -> "查看下载进度"
-                                                is UpdateDownloadPhase.ReadyToInstall ->
-                                                    if (downloadPhase.requiresInstallPermission) "去开启安装权限" else "立即安装"
-                                                is UpdateDownloadPhase.Failed -> "查看更新与重试"
-                                                UpdateDownloadPhase.Idle -> "立即更新 / 查看日志"
-                                            },
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                        }
+                                        else -> viewModel.checkForUpdates()
                                     }
-                                }
-                            }
-                        }
+                                },
+                            )
 
-                        PulseGradientDivider()
+                            SettingsGroupDivider()
 
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.NewReleases,
-                            accentColor = MaterialTheme.colorScheme.primary,
-                            title = "启动时自动检查更新",
-                            subtitle = "每次冷启动后在后台静默检查 GitHub Releases 新版本",
-                            checked = settings.autoCheckUpdates,
-                            onCheckedChange = viewModel::setAutoCheckUpdates,
-                        )
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.NewReleases,
+                                title = "启动时自动检查更新",
+                                subtitle = "冷启动后静默检查 GitHub Releases 新版本",
+                                checked = settings.autoCheckUpdates,
+                                onCheckedChange = viewModel::setAutoCheckUpdates,
+                            )
 
-                        SettingsToggleRow(
-                            icon = Icons.Rounded.Science,
-                            accentColor = ext.stardustAccent,
-                            title = "接收预发布版本 (Pre-release)",
-                            subtitle = "开启后将同时检查 beta / rc 等预览测试版本",
-                            checked = settings.includePrereleaseUpdates,
-                            onCheckedChange = viewModel::setIncludePrereleaseUpdates,
-                        )
+                            SettingsGroupDivider()
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            FilledTonalButton(
-                                onClick = viewModel::checkForUpdates,
-                                enabled = !updateState.isChecking,
-                                shape = CircleShape,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp),
-                            ) {
-                                if (updateState.isChecking) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(17.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                }
-                                Text(
-                                    text = if (updateState.isChecking) "检查中…" else "检查更新",
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
+                            SettingsSwitchRow(
+                                icon = Icons.Rounded.Science,
+                                title = "接收预发布版本 (Pre-release)",
+                                subtitle = "开启后同时检查 beta / rc 等预览测试版本",
+                                checked = settings.includePrereleaseUpdates,
+                                onCheckedChange = viewModel::setIncludePrereleaseUpdates,
+                            )
 
-                            OutlinedButton(
+                            SettingsGroupDivider()
+
+                            SettingsNavRow(
+                                icon = Icons.AutoMirrored.Rounded.OpenInNew,
+                                title = "GitHub Releases",
+                                trailingText = "查看发行版",
                                 onClick = {
                                     runCatching {
                                         uriHandler.openUri(githubReleasesUrl)
@@ -1847,25 +950,93 @@ fun SettingsScreen(
                                         }
                                     }
                                 },
-                                shape = CircleShape,
-                                modifier = Modifier.height(44.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
+
+                // ── Group 7: 账号 ──
+                val session = uiState.session
+                if (session != null) {
+                    item(key = "settings_account") {
+                        PulseStaggeredEntrance(index = 6) {
+                            SettingsGroupedSection(title = "账号") {
+                                SettingsAccountProfileRow(
+                                    session = session,
+                                    onClick = if (onOpenUserProfile != null) {
+                                        { onOpenUserProfile(session.uid, session.username) }
+                                    } else {
+                                        null
+                                    },
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Releases",
-                                    fontWeight = FontWeight.Medium,
-                                )
+
+                                SettingsGroupDivider()
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(
+                                            enabled = !uiState.isSigningOut,
+                                            role = Role.Button,
+                                            onClick = { showSignOutConfirm = true },
+                                        )
+                                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    SettingsRowIconBadge(
+                                        icon = Icons.AutoMirrored.Rounded.Logout,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f),
+                                    )
+                                    Text(
+                                        text = if (uiState.isSigningOut) "正在退出账号…" else "退出当前账号",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (uiState.isSigningOut) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showNodeImageKeyDialog) {
+        NodeImageApiKeyDialog(
+            initialApiKey = settings.nodeImageApiKey,
+            onSave = { newKey ->
+                showNodeImageKeyDialog = false
+                viewModel.saveNodeImageApiKey(newKey)
+            },
+            onDismiss = { showNodeImageKeyDialog = false },
+        )
+    }
+
+    if (showClearHistoryConfirm) {
+        PulseConfirmDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            icon = Icons.Rounded.History,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            title = "清空浏览记录",
+            message = "确定要清空保存在本机的全部浏览历史与续读进度吗？此操作无法撤销。",
+            confirmText = "确认清空",
+            dismissText = "取消",
+            onConfirm = {
+                showClearHistoryConfirm = false
+                viewModel.clearReadHistory()
+            },
+        )
     }
 
     if (uiState.showBlockedUsersDialog) {
@@ -1929,38 +1100,492 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsBentoSection(
-    icon: ImageVector,
+private fun SettingsGroupedSection(
     title: String,
-    subtitle: String,
-    accentColor: Color = MaterialTheme.colorScheme.primary,
-    headerTrailing: (@Composable () -> Unit)? = null,
-    content: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pulseCard(
+                    shape = PulseArchitecturalShapes.ElevatedTile,
+                    elevation = PulseElevation.Card,
+                ),
+            content = content,
+        )
+    }
+}
+
+@Composable
+private fun SettingsGroupDivider() {
+    val ext = NodePulseThemeTokens.extendedColors
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.HeroBento,
-                elevation = PulseElevation.Card,
-                accentColor = accentColor,
-            )
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 16.dp)
+            .height(0.6.dp)
+            .background(ext.cardBorder.copy(alpha = 0.65f)),
+    )
+}
+
+@Composable
+private fun SettingsRowIconBadge(
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.primary,
+    containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.48f),
+) {
+    Box(
+        modifier = modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(containerColor),
+        contentAlignment = Alignment.Center,
     ) {
-        PulseSectionHeader(
-            title = title,
-            subtitle = subtitle,
-            icon = icon,
-            accentColor = accentColor,
-            trailing = if (headerTrailing != null) {
-                { headerTrailing() }
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    icon: ImageVector? = null,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (icon != null) {
+            SettingsRowIconBadge(
+                icon = icon,
+                tint = if (checked) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                containerColor = if (checked) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                },
+            )
+        }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            thumbContent = if (checked) {
+                {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(SwitchDefaults.IconSize),
+                    )
+                }
             } else {
                 null
             },
         )
+    }
+}
 
-        content()
+@Composable
+private fun SettingsNavRow(
+    title: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    icon: ImageVector? = null,
+    trailingText: String? = null,
+    trailingTextColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    badgeCount: Int = 0,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (icon != null) {
+            SettingsRowIconBadge(icon = icon)
+        }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        if (badgeCount > 0) {
+            CompactCountBadge(
+                count = badgeCount,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                minHeight = 20.dp,
+            )
+        } else if (!trailingText.isNullOrBlank()) {
+            Text(
+                text = trailingText,
+                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                color = trailingTextColor,
+                maxLines = 1,
+            )
+        }
+
+        Icon(
+            imageVector = Icons.Rounded.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+@Composable
+private fun SettingsCheckInStrategyRow(
+    preferRandom: Boolean,
+    onSelect: (Boolean) -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SettingsRowIconBadge(icon = Icons.Rounded.Restaurant)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = "默认签到策略",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "与「我的」签到卡片模式同步",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .border(0.8.dp, ext.cardBorder, CircleShape)
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(
+                false to "固定 +5",
+                true to "试试手气",
+            ).forEach { (isRandomOption, label) ->
+                val active = preferRandom == isRandomOption
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(
+                            if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                        )
+                        .pulseBouncyClickable(
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.RadioButton,
+                            onClick = { onSelect(isRandomOption) },
+                        )
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                        color = if (active) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsUpdateRow(
+    updateState: AppUpdateState,
+    onActionClick: () -> Unit,
+) {
+    val latestRelease = updateState.latestRelease
+    val downloadPhase = updateState.downloadPhase
+    val ext = NodePulseThemeTokens.extendedColors
+
+    val checkSummary = when {
+        updateState.isChecking -> "正在从 GitHub Releases 获取最新版本…"
+        updateState.hasUpdate && latestRelease != null ->
+            "发现新版本 ${latestRelease.tagName}" + (
+                latestRelease.apkAsset?.sizeBytes
+                    ?.takeIf { it > 0L }
+                    ?.let { " · ${formatUpdateByteSize(it)}" }
+                    .orEmpty()
+                )
+        !updateState.checkError.isNullOrBlank() -> updateState.checkError!!
+        updateState.lastCheckedAtMillis > 0L -> "当前已是最新发布版本"
+        else -> "Build ${updateState.currentVersionCode} · GitHub Releases"
+    }
+
+    val actionLabel = when {
+        updateState.isChecking -> "检查中"
+        downloadPhase is UpdateDownloadPhase.Downloading -> {
+            val pct = downloadPhase.progressFraction?.let { (it * 100f).roundToInt().coerceIn(0, 100) }
+            if (pct != null) "下载 $pct%" else "下载中"
+        }
+        downloadPhase is UpdateDownloadPhase.ReadyToInstall ->
+            if (downloadPhase.requiresInstallPermission) "授权安装" else "立即安装"
+        updateState.hasUpdate && latestRelease != null -> "立即更新"
+        else -> "检查更新"
+    }
+
+    val isHighlighted = updateState.hasUpdate ||
+        downloadPhase is UpdateDownloadPhase.Downloading ||
+        downloadPhase is UpdateDownloadPhase.ReadyToInstall
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !updateState.isChecking, role = Role.Button, onClick = onActionClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            SettingsRowIconBadge(
+                icon = Icons.Rounded.SystemUpdate,
+                tint = if (isHighlighted) ext.onDrumstickContainer else MaterialTheme.colorScheme.primary,
+                containerColor = if (isHighlighted) {
+                    ext.drumstickContainer
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.48f)
+                },
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "Anode v${updateState.currentVersionName}",
+                    style = MaterialTheme.typography.titleSmall.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = checkSummary,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Normal,
+                    color = if (!updateState.checkError.isNullOrBlank() && !updateState.hasUpdate) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(
+                        if (isHighlighted) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                    )
+                    .padding(horizontal = 11.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (updateState.isChecking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.8.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Text(
+                    text = actionLabel,
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isHighlighted) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
+
+        if (downloadPhase is UpdateDownloadPhase.Downloading) {
+            val fraction = downloadPhase.progressFraction
+            if (fraction != null) {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(CircleShape),
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(CircleShape),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsAccountProfileRow(
+    session: AccountSession,
+    onClick: (() -> Unit)?,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick != null) {
+                    Modifier.clickable(role = Role.Button, onClick = onClick)
+                } else {
+                    Modifier
+                },
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        PulseAvatar(
+            avatarUrl = session.avatarUrl,
+            username = session.username,
+            size = 40.dp,
+            rankLevel = session.level,
+            ringWidth = 1.8.dp,
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = session.username,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                RankMicroBadge(level = session.level, compact = true)
+            }
+            Text(
+                text = "UID #${session.uid} · 点击查看个人主页",
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (onClick != null) {
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
 
@@ -1993,12 +1618,12 @@ private fun VisualThemeOptionCard(
     Column(
         modifier = modifier
             .pulsePressScale(interactionSource)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(containerBg)
             .border(
-                width = if (selected) 1.75.dp else 0.9.dp,
+                width = if (selected) 1.5.dp else 0.85.dp,
                 brush = borderBrush,
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(14.dp),
             )
             .clickable(
                 interactionSource = interactionSource,
@@ -2006,15 +1631,15 @@ private fun VisualThemeOptionCard(
                 role = Role.RadioButton,
                 onClick = onClick,
             )
-            .padding(9.dp),
+            .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .height(50.dp)
+                .clip(RoundedCornerShape(9.dp))
                 .border(
                     width = 0.75.dp,
                     color = if (selected) {
@@ -2022,7 +1647,7 @@ private fun VisualThemeOptionCard(
                     } else {
                         ext.cardBorder
                     },
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(9.dp),
                 ),
         ) {
             when (previewMode) {
@@ -2050,7 +1675,7 @@ private fun VisualThemeOptionCard(
                     Box(
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .size(22.dp)
+                            .size(20.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f))
                             .border(0.6.dp, ext.cardBorder, CircleShape),
@@ -2060,7 +1685,7 @@ private fun VisualThemeOptionCard(
                             imageVector = Icons.Rounded.BrightnessAuto,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(13.dp),
+                            modifier = Modifier.size(12.dp),
                         )
                     }
                 }
@@ -2091,7 +1716,7 @@ private fun VisualThemeOptionCard(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(4.dp)
-                        .size(16.dp)
+                        .size(15.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary)
                         .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape),
@@ -2101,7 +1726,7 @@ private fun VisualThemeOptionCard(
                         imageVector = Icons.Rounded.Check,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(10.dp),
+                        modifier = Modifier.size(9.dp),
                     )
                 }
             }
@@ -2235,245 +1860,92 @@ private fun ThemeWireframeCanvas(
 }
 
 @Composable
-private fun CheckInPreferenceCard(
-    selected: Boolean,
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    accentColor: Color,
-    selectedContainer: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
+private fun NodeImageApiKeyDialog(
+    initialApiKey: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val ext = NodePulseThemeTokens.extendedColors
-    val shape = RoundedCornerShape(15.dp)
-    val bgBrush = if (selected) {
-        Brush.linearGradient(
-            colors = listOf(
-                selectedContainer,
-                blendColor(selectedContainer, MaterialTheme.colorScheme.surface, 0.25f),
-            ),
-        )
-    } else {
-        SolidColor(MaterialTheme.colorScheme.surfaceContainerLow)
-    }
-    val borderColor by animateColorAsState(
-        targetValue = if (selected) accentColor else ext.cardBorder,
-        label = "checkInPrefBorder",
-    )
-    val interactionSource = remember { MutableInteractionSource() }
+    val context = LocalContext.current
+    var apiKeyDraft by rememberSaveable(initialApiKey) { mutableStateOf(initialApiKey) }
+    var showApiKey by rememberSaveable { mutableStateOf(false) }
 
-    Column(
-        modifier = modifier
-            .pulsePressScale(interactionSource)
-            .clip(shape)
-            .background(bgBrush)
-            .border(
-                width = if (selected) 1.5.dp else 0.9.dp,
-                color = borderColor,
-                shape = shape,
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = LocalIndication.current,
-                role = Role.RadioButton,
-                onClick = onClick,
-            )
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(26.dp)
-                    .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(
-                        if (selected) {
-                            accentColor.copy(alpha = if (isDark) 0.22f else 0.14f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceContainerHigh
-                        },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(15.dp),
-                )
-            }
-
-            if (selected) {
-                Icon(
-                    imageVector = Icons.Rounded.CheckCircle,
-                    contentDescription = null,
-                    tint = accentColor,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Text(
-            text = subtitle,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun SettingsToggleRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    icon: ImageVector? = null,
-    accentColor: Color = MaterialTheme.colorScheme.primary,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    val rowBg by animateColorAsState(
-        targetValue = if (checked) {
-            accentColor.copy(alpha = if (isDark) 0.09f else 0.055f)
-        } else {
-            Color.Transparent
-        },
-        label = "toggleRowBg",
-    )
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(13.dp))
-            .background(rowBg)
-            .clickable { onCheckedChange(!checked) }
-            .padding(horizontal = 8.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        if (icon != null) {
-            Box(
-                modifier = Modifier
-                    .size(30.dp)
-                    .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(
-                        if (checked) {
-                            accentColor.copy(alpha = if (isDark) 0.20f else 0.14f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceContainerHigh
-                        },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (checked) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            thumbContent = if (checked) {
-                {
-                    Icon(
-                        imageVector = Icons.Rounded.Check,
-                        contentDescription = null,
-                        modifier = Modifier.size(SwitchDefaults.IconSize),
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        icon = Icons.Rounded.Image,
+        title = "NodeImage 官方图床",
+        message = "配置 api.nodeimage.com 的 X-API-Key，可在发帖与回复编辑器中一键上传配图。",
+        buttons = {
+            if (initialApiKey.isNotBlank()) {
+                TextButton(onClick = { onSave("") }) {
+                    Text(
+                        text = "清除密钥",
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
-            } else {
-                null
-            },
-        )
-    }
-}
-
-@Composable
-private fun StorageActionTile(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    accentColor: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    val interactionSource = remember { MutableInteractionSource() }
-    Column(
-        modifier = modifier
-            .pulsePressScale(interactionSource)
-            .pulseCard(
-                shape = RoundedCornerShape(15.dp),
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                elevation = PulseElevation.None,
-                accentColor = accentColor,
-            )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = LocalIndication.current,
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .padding(horizontal = 12.dp, vertical = 11.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+            Button(
+                onClick = { onSave(apiKeyDraft.trim()) },
+                shape = CircleShape,
+            ) {
+                Text("保存", fontWeight = FontWeight.SemiBold)
+            }
+        },
     ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(PulseArchitecturalShapes.SmallChip)
-                .background(accentColor.copy(alpha = if (isDark) 0.18f else 0.12f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = accentColor,
-                modifier = Modifier.size(15.dp),
-            )
-        }
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = subtitle,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        OutlinedTextField(
+            value = apiKeyDraft,
+            onValueChange = { apiKeyDraft = it },
+            label = { Text("NodeImage X-API-Key") },
+            placeholder = { Text("粘贴您的图床 API Key…") },
+            shape = RoundedCornerShape(14.dp),
+            singleLine = true,
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Rounded.Key,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+            visualTransformation = if (showApiKey) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            val clip = clipboard?.primaryClip
+                            val pasted = if (clip != null && clip.itemCount > 0) {
+                                clip.getItemAt(0)?.coerceToText(context)?.toString()
+                            } else {
+                                null
+                            }
+                            if (!pasted.isNullOrBlank()) {
+                                apiKeyDraft = pasted.trim()
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text("粘贴", style = MaterialTheme.typography.labelMedium)
+                    }
+                    IconButton(onClick = { showApiKey = !showApiKey }) {
+                        Icon(
+                            imageVector = if (showApiKey) {
+                                Icons.Rounded.VisibilityOff
+                            } else {
+                                Icons.Rounded.Visibility
+                            },
+                            contentDescription = if (showApiKey) "隐藏密钥" else "显示密钥",
+                        )
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }
@@ -2629,21 +2101,21 @@ private fun SettingsIntervalPresetRow(
     onSelect: (Int) -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(
-                imageVector = Icons.Rounded.Schedule,
-                contentDescription = null,
-                tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                modifier = Modifier.size(15.dp),
-            )
+            SettingsRowIconBadge(icon = Icons.Rounded.Schedule)
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Medium,
                 color = if (enabled) {
                     MaterialTheme.colorScheme.onSurface
                 } else {
@@ -2669,13 +2141,13 @@ private fun SettingsIntervalPresetRow(
                             } else if (isSelected) {
                                 MaterialTheme.colorScheme.primaryContainer
                             } else {
-                                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f)
+                                MaterialTheme.colorScheme.surfaceContainerLow
                             },
                         )
                         .border(
                             width = 0.8.dp,
                             color = if (enabled && isSelected) {
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                             } else {
                                 ext.cardBorder
                             },
@@ -2688,12 +2160,12 @@ private fun SettingsIntervalPresetRow(
                             role = Role.RadioButton,
                             onClick = { onSelect(minutes) },
                         )
-                        .padding(vertical = 7.dp),
+                        .padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = "${minutes} 分钟",
-                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                         color = if (!enabled) {
                             MaterialTheme.colorScheme.outline

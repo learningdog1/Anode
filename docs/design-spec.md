@@ -3,25 +3,25 @@
 - **Product Name**: **Anode**
 - **Application ID**: `com.nodeseek.app`
 - **Target Platform**: Android 8.0+ (`minSdk = 26`, `targetSdk = 35`), Jetpack Compose + Material 3 (`1.3+`), Edge-to-Edge
-- **Design Language**: **Material 3 Expressive — "Editorial Paper & Obsidian Telemetry"**
+- **Design Language**: **Material 3 Expressive — "Cool Mist Light & Slate Steel Telemetry"**
 
 ---
 
 ## 1. Executive Design Vision & Spatial Principles
 
-### 1.1 Aesthetic North Star: "Editorial Paper & Obsidian Telemetry"
+### 1.1 Aesthetic North Star: "Cool Mist Light & Slate Steel Telemetry"
 NodeSeek is home to infrastructure builders, VPS benchmarkers, network engineers, and self-hosters. **Anode** treats technical forum reading like a **boutique hardware & network journal** tailored for Android edge-to-edge ergonomics:
 
-1. **Warm Editorial Paper (Daylight)**: Unbleached warm parchment surfaces (`#FAF7F2` / `#EFEAE1`) paired with crisp ink (`#1B1B1F`) and **Electric Editorial Cobalt (`#3655D6`)** accents—eliminating harsh clinical white glare during long technical threads.
-2. **Deep Obsidian Telemetry (Night / AMOLED)**: True low-luminance obsidian (`#07080C`, with an optional `#000000` Pure Pitch toggle) layered with cool slate-obsidian containers (`#151821` / `#1D212D`), luminous **Periwinkle Cobalt (`#8DA2FF`)**, **Neon Telemetry Cyan (`#4FD8CE`)**, and **Glowing Drumstick Gold (`#FFB951`)**.
+1. **Cool Mist Ice-Blue (Daylight)**: Clean cool-mist daylight surfaces (`#F7FAFF` / `#EBEEF3` with crisp `#FFFFFF` sheets) paired with high-contrast slate ink (`#171C1F`) and **Steel Teal-Blue (`#2D637E`)** accents—eliminating harsh glare during long technical threads.
+2. **Slate Steel Telemetry (Night / AMOLED)**: Low-luminance slate obsidian (`#101417`, with an optional `#000000` Pure Pitch toggle) layered with cool slate containers (`#1C2024` / `#262A2E`), luminous **Sky Blue (`#9ACAEC`)**, **Slate Cyan-Secondary (`#B5C9D7`)**, and **Glowing Drumstick Gold (`#FFB951`)**.
 3. **Architectural Precision**: 1dp crisp hairlines (`outlineVariant`), tabular numerals (`tnum`) across every metric, semantic category color spines, conic metallic rank rings (`Lv0`–`Lv6`), and bouncy Material 3 Expressive spring transitions.
 
 ### 1.2 Core Spatial & Component Principles
 
 | Dimension | Design Principle & Compose Implementation |
 | :--- | :--- |
-| **Brand & App Icon** | **Anode**: Concentric radar pulse arcs and Anode architectural pillars in Electric Cobalt (`#3655D6` → `#06B6D4`) with a glowing Cyan/Gold signal core on an adaptive squircle. |
-| **Color Philosophy** | **Warm Editorial Paper (`#FAF7F2`)** + **Deep Obsidian AMOLED (`#07080C`)**; **Electric Cobalt (`#3655D6` / `#8DA2FF`)** primary, **Telemetry Teal (`#0B7A75`)** secondary, **Drumstick Gold (`#C86D00` / `#FFB951`)** reward tertiary, plus optional **Material You** wallpaper harmonization. |
+| **Brand & App Icon** | **Anode**: Concentric radar pulse arcs and Anode architectural pillars in Steel Blue (`#2D637E` → `#06B6D4`) with a glowing Cyan/Gold signal core on an adaptive squircle. |
+| **Color Philosophy** | **Cool Mist Light (`#F7FAFF`)** + **Slate Steel Dark (`#101417`)** (`#000000` Pitch option); **Steel Teal-Blue (`#2D637E` / `#9ACAEC`)** primary, **Muted Steel (`#4E616D` / `#B5C9D7`)** secondary, **Drumstick Gold (`#C86D00` / `#FFB951`)** reward accent, plus optional **Material You** wallpaper harmonization (`useDynamicColor = false` by default). |
 | **Navigation Shell** | Edge-to-edge viewport with a **Floating Tonal Pill Dock** (`Explore / 首页`, `Seek Mail / 邮箱`, `Pulse Hub / 我的`) + **Contextual Collapsing Squircle FAB** (`发帖` on Explore). |
 | **Feed Top Bar & Sort** | **Minimalist Glass Top Bar** with left `Anode` emblem + right compact **Search Icon** (`SearchRoute`) + borderless **Sort Selector** (`新评论 ▾` / `新帖子` / `热门` / `推荐阅读`), paired with a full-board **Text Category Strip** synchronized 1:1 with `HorizontalPager`. |
 | **Pinned Topics** | Compact, transparent **Collapsible Pinned Ticker Strip** (`📌 置顶`) that expands inline on tap—preserving vertical viewport space. |
@@ -29,7 +29,7 @@ NodeSeek is home to infrastructure builders, VPS benchmarkers, network engineers
 | **Unified Search** | Dedicated **Search Screen (`SearchRoute`)** supporting topic/user scope switching, board & sort filters, recent search chips, and 1-tap Google `site:www.nodeseek.com` fallback. |
 | **Topic Reader & Comments** | **Magazine-Grade Article Surface** + clean **Threaded Stream** separated by architectural hairlines: `楼主` (**OP**) solid Cobalt highlight chip on OP floors, compact tabular `#12` floor pill inside header, syntax-tinted code blocks with 1-tap copy, zoomable Coil image cards, and inline tonal reaction chips (`👍` `🍗` `👎` `💬`). |
 | **Reader Bottom Controls & Floor Jump** | **Single Anchored Tonal Quick-Reply Bar** (inline quick-reply pill + bookmark + floor counter `12/148` + expand icon) + **Full Markdown Reply Bottom Sheet**, paired with a draggable right-edge **Floor Jump Scrubber & Sheet** (`只看楼主`, slider, page jump). |
-| **Profile Hub & Check-in** | **Personal Hub (`我的`)**: Preserved ambient-glow Hero Rank & `Lv` Coin Progress Card with 4-column stats (`鸡腿 / 星尘 / 主题 / 评论`), **1-Line Compact Check-in Card**, settings-style grouped lists (`消息`: 通知/私信/关键词提醒; `内容`: 我的收藏/浏览记录/我的帖子) linking to **`HubCollectionScreen`**, Settings, and a **Clean WebView Session Login Bottom Sheet**. |
+| **Profile Hub & Check-in** | **Personal Hub (`我的`)**: Preserved ambient-glow Hero Rank & `Lv` Coin Progress Card with 4-column stats (`鸡腿 / 星尘 / 主题 / 评论`), **1-Line Compact Check-in Card**, settings-style grouped lists (`消息`: 通知/私信/关键词提醒; `内容`: 我的收藏/浏览记录/我的帖子) linking to **`HubCollectionScreen`** (which unifies Bookmarks, History with category/resume badges, and User Profile topics onto `PulseTopicCard`), grouped-card **`SettingsScreen`**, in-place **`SeekMailApiKeyDialog`**, and a **Clean WebView Session Login Bottom Sheet**. |
 
 ---
 
@@ -37,40 +37,40 @@ NodeSeek is home to infrastructure builders, VPS benchmarkers, network engineers
 
 ### 2.1 Core Material 3 Color Schemes (`Color.kt`)
 
-Anode ships with two bespoke default palettes (**Warm Editorial Paper Light** and **Deep Obsidian AMOLED Dark**), plus an optional **Pure Pitch (`#000000`)** AMOLED sub-toggle and **Material You Dynamic Color** (Android 12+).
+Anode ships with two bespoke default palettes (**Cool Mist Ice-Blue Light** and **Slate Steel Dark**), plus an optional **Pure Pitch (`#000000`)** AMOLED sub-toggle and **Material You Dynamic Color** (Android 12+, `useDynamicColor = false` by default).
 
-| M3 Color Role | Warm Editorial Paper (Light) | Deep Obsidian AMOLED (Dark) | Usage in Anode |
+| M3 Color Role | Cool Mist Light | Slate Steel Dark | Usage in Anode |
 | :--- | :--- | :--- | :--- |
-| `primary` | `#3655D6` (Electric Cobalt) | `#8DA2FF` (Luminous Periwinkle) | Active nav indicator, OP chip, links, primary CTAs, unread dot |
-| `onPrimary` | `#FFFFFF` | `#071E72` | Text/icons on solid `primary` fills |
-| `primaryContainer` | `#DDE3FF` | `#213C9E` | Selected filter pills, active sort segment, FAB container |
-| `onPrimaryContainer` | `#0B1D6E` | `#DDE3FF` | Text/icons inside `primaryContainer` |
-| `secondary` | `#0B7A75` (Telemetry Teal) | `#4FD8CE` (Signal Cyan) | RSS live badge, verified/pinned tags, benchmark highlights |
-| `onSecondary` | `#FFFFFF` | `#003734` | Text/icons on `secondary` |
-| `secondaryContainer` | `#CCF3EE` | `#00504C` | RSS mode pill, secondary Bento accents |
-| `onSecondaryContainer` | `#00201E` | `#92F4EC` | Text/icons inside `secondaryContainer` |
-| `tertiary` | `#C86D00` (Drumstick Amber) | `#FFB951` (Glowing Gold) | `鸡腿` check-in CTA, drumstick rewards, hot thread accents |
-| `onTertiary` | `#FFFFFF` | `#452B00` | Text/icons on `tertiary` |
-| `tertiaryContainer` | `#FFDFB8` | `#633F00` | `鸡腿` check-in chip/card background, reward toast |
-| `onTertiaryContainer` | `#3E1E00` | `#FFDDB3` | Text/icons inside `tertiaryContainer` |
-| `background` | `#FAF7F2` (Warm Paper) | `#07080C` (`#000000` Pitch mode) | Root edge-to-edge screen background |
-| `onBackground` | `#1B1B1F` (Deep Warm Ink) | `#EAE8EF` (Soft Alabaster) | Primary reading body & unread headline text |
-| `surface` | `#FAF7F2` | `#07080C` (`#000000` Pitch mode) | Collapsible top bar resting background, reader canvas |
-| `onSurface` | `#1B1B1F` | `#EAE8EF` | Primary text, unread feed titles (`100%` alpha) |
-| `onSurfaceVariant` | `#5A5863` | `#9C9AA6` | Metadata, timestamps, read feed titles (`68%–85%` alpha) |
-| `surfaceContainerLowest` | `#FFFFFF` (Crisp Sheet) | `#040507` | Elevated feed cards in Light mode for subtle paper-on-parchment lift |
-| `surfaceContainerLow` | `#F5F1EA` | `#0F1117` | Grouped reader blockquotes, table alternating rows |
-| `surfaceContainer` | `#EFEAE1` | `#151821` | Default Bento cards, dark-mode feed cards, reply bar base |
-| `surfaceContainerHigh` | `#E8E2D7` | `#1D212D` | Floating bottom navigation pill, search pill, modal sheets |
-| `surfaceContainerHighest`| `#DFD8CB` | `#262B3A` | Pressed states, code block headers, segmented track |
-| `outline` | `#84818C` | `#656470` | Input borders, focused outlines |
-| `outlineVariant` | `#DBD5C9` | `#262A38` | `1.dp` card borders, floor dividers, table gridlines |
+| `primary` | `#2D637E` (Steel Teal-Blue) | `#9ACAEC` (Sky Blue) | Active nav indicator, OP chip, links, primary CTAs, unread dot |
+| `onPrimary` | `#FFFFFF` | `#00344B` | Text/icons on solid `primary` fills |
+| `primaryContainer` | `#CDE7FB` | `#114B66` | Selected filter pills, active sort segment, FAB container |
+| `onPrimaryContainer` | `#001E2E` | `#CDE7FB` | Text/icons inside `primaryContainer` |
+| `secondary` | `#4E616D` | `#B5C9D7` | RSS live badge, verified/pinned tags, benchmark highlights |
+| `onSecondary` | `#FFFFFF` | `#20333E` | Text/icons on `secondary` |
+| `secondaryContainer` | `#D1E5F3` | `#364955` | RSS mode pill, secondary accents |
+| `onSecondaryContainer` | `#0A1E28` | `#D1E5F3` | Text/icons inside `secondaryContainer` |
+| `tertiary` | `#605A7D` | `#CAC1E9` | Tertiary tonal badges & composer accents |
+| `onTertiary` | `#FFFFFF` | `#322C4C` | Text/icons on `tertiary` |
+| `tertiaryContainer` | `#E6DEFF` | `#494264` | Tertiary tonal containers |
+| `onTertiaryContainer` | `#1C1736` | `#E6DEFF` | Text/icons inside `tertiaryContainer` |
+| `background` | `#F7FAFF` (Cool Mist) | `#101417` (`#000000` Pitch mode) | Root edge-to-edge screen background |
+| `onBackground` | `#171C1F` | `#DFE3E7` | Primary reading body & unread headline text |
+| `surface` | `#F7FAFF` | `#101417` (`#000000` Pitch mode) | Collapsible top bar resting background, reader canvas |
+| `onSurface` | `#171C1F` | `#DFE3E7` | Primary text, unread feed titles (`100%` alpha) |
+| `onSurfaceVariant` | `#40484D` | `#C0C7CD` | Metadata, timestamps, read feed titles (`68%–85%` alpha) |
+| `surfaceContainerLowest` | `#FFFFFF` (Crisp Sheet) | `#0B0F12` | Outlined card lifts & modal highlights |
+| `surfaceContainerLow` | `#F1F4F9` | `#181C1F` (`#0B0D10` Pitch) | Grouped reader blockquotes, settings group containers, alternating rows |
+| `surfaceContainer` | `#EBEEF3` | `#1C2024` (`#14181B` Pitch) | Default cards, reply bar base |
+| `surfaceContainerHigh` | `#E5E8EE` | `#262A2E` (`#1C2024` Pitch) | Floating bottom navigation pill, search pill, modal sheets |
+| `surfaceContainerHighest`| `#DFE3E8` | `#313539` (`#24282C` Pitch) | Pressed states, code block headers, segmented track |
+| `outline` | `#70787E` | `#8A9297` | Input borders, focused outlines |
+| `outlineVariant` | `#C0C7CD` | `#40484D` | `0.85.dp–1.dp` card borders, floor dividers, table gridlines |
 | `error` / `onError` | `#BA1A1A` / `#FFFFFF` | `#FFB4AB` / `#690005` | Expose warnings, auth/network errors, downvote confirmation |
 | `errorContainer` | `#FFDAD6` | `#93000A` | Error banners & destructive action chips |
 | `scrim` | `#000000` (`52%` alpha) | `#000000` (`68%` alpha) | Modal bottom sheet & image lightbox backdrop |
 
 ### 2.2 Optional Material You Dynamic Color & Semantic Harmonization
-- **Default Behavior**: `useDynamicColor = false` by default so Anode's signature Warm Paper & Obsidian Cobalt aesthetic is unmistakable on first launch.
+- **Default Behavior**: `useDynamicColor = false` by default so Anode's Cool Mist Light & Slate Steel Dark aesthetic is unmistakable on first launch.
 - **User Opt-In (`Build.VERSION.SDK_INT >= 31`)**: Toggling *"Material You 壁纸动态取色"* in Pulse Hub Settings switches `MaterialTheme.colorScheme` to `dynamicLightColorScheme(context)` / `dynamicDarkColorScheme(context)` (with `background` & `surface` overridden to `#000000` if *Pure Pitch AMOLED* is also enabled).
 - **Semantic Harmonization**: When Dynamic Color is active, blend `12%` of `colorScheme.primary` into all 11 Category Badge tokens and Drumstick Gold via `ColorUtils.blendARGB(semanticArgb, primaryArgb, 0.12f)` so semantic colors feel native to the user's wallpaper without losing categorical meaning.
 
@@ -129,7 +129,7 @@ Anode pairs clean CJK editorial legibility (`Noto Sans CJK SC` / Android system 
 | `titleMedium` | `16.5.sp` / `23.sp`| **SemiBold (`W600`)** | `0.sp` | **UNREAD Feed Card Title** (`onSurface` `100%` alpha) |
 | `titleMediumRead`| `16.5.sp` / `23.sp`| **Normal (`W400`)** | `0.sp` | **READ Feed Card Title** (`onSurfaceVariant` `68%` alpha) |
 | `titleSmall` | `14.5.sp` / `20.sp`| SemiBold (`W600`)| `0.1.sp` | Bento board title, author username in Reader & Hub |
-| `bodyLarge` | `16.sp` / `26.5.sp`| Normal (`W400`) | `0.2.sp` | **Topic Reader Markdown/HTML Body** (`1.65x` line-height; scalable `85%–130%`) |
+| `bodyLarge` | `16.sp` / `26.5.sp`| Normal (`W400`) | `0.2.sp` | **Topic Reader Markdown/HTML Body** (`1.65x` line-height; default `90%` / `0.90f`, scalable `85%–130%`) |
 | `bodyMedium` | `14.sp` / `21.sp` | Normal (`W400`) | `0.15.sp` | Floor comment body (`15.sp` option), Bento board descriptions, notifications |
 | `labelLarge` | `13.5.sp` / `18.sp`| SemiBold (`W600`)| `0.1.sp` | Sort switcher labels, CTA buttons, Quick-Reply bar prompt |
 | `labelMedium` | `12.sp` / `16.sp` | Medium (`W500`) | `0.2.sp` | Category micro-tags, Heat/Comment pills, relative time (`tnum`) |
@@ -144,7 +144,7 @@ Anode pairs clean CJK editorial legibility (`Noto Sans CJK SC` / Android system 
   - `large = 22.dp` (Hero `2x1` Bento cards, Pinned ticker card, Modal dialogs)
   - `extraLarge = 28.dp` (Modal Bottom Sheets top corners)
   - `full = CircleShape` (**Floating Navigation Pill Dock**, Search Pill, Sort Switcher capsule, `鸡腿` status chip)
-- **Zero-Muddy-Shadow Rule**: Cards use `0.dp` shadow elevation in scroll lists; depth is expressed via **tonal surface contrast** (`surfaceContainerLowest` `#FFFFFF` over `#FAF7F2` in Light; `surfaceContainer` `#151821` over `#07080C` in Dark) framed by a **`1.dp` `outlineVariant` border** (`45%` alpha Light, `65%` alpha Dark). Only the Floating Navigation Dock and FAB carry subtle `4.dp–6.dp` shadow elevation.
+- **Zero-Muddy-Shadow Rule**: Cards use `0.dp` shadow elevation in scroll lists; depth is expressed via **tonal surface contrast** (`surfaceContainerLowest` `#FFFFFF` over `#F7FAFF` in Light; `surfaceContainer` `#1C2024` over `#101417` in Dark) framed by a **`0.85.dp–1.dp` `outlineVariant` border** (`45%` alpha Light, `65%` alpha Dark). Only the Floating Navigation Dock and FAB carry subtle `4.dp–6.dp` shadow elevation.
 - **Material 3 Expressive Springs**:
   - Spatial / Layout Morph (`navPillIndicator`, `sortSegmentSlide`, `fabExpand`): `spring(dampingRatio = 0.72f, stiffness = 380f)`
   - Micro-Interaction Pop (`bookmarkToggle`, `drumstickBurst`, `upvoteBounce`): `spring(dampingRatio = 0.55f, stiffness = 520f)`
@@ -470,17 +470,14 @@ Presents a vibrant **Material 3 Bento-Grid Dashboard** + **Embedded Offline Book
    - Header with `Icons.Rounded.Notifications` + live unread count pill (`primary` Cobalt fill).
    - Displays a 2-line preview of the most recent unread `@提及`, `帖子回复`, or `私信 (DM)` (or *"暂无未读动态，一切静好"* when caught up).
    - Tapping opens `InboxBottomSheet` / `InboxScreen` with 3 filter pills (`回复我的`, `@提到我`, `站内私信`) and a 1-tap `全部已读` action button.
-4. **Offline Bookmarks & Read History Tabs (`HubCollectionsSection`)**:
-   - `PrimaryTabRow` directly below the Bento grid:
-     - **Tab 1 — `🔖 离线收藏 (Offline Bookmarks)`**:
-       - Stores full parsed `TopicDetail` + first-page comments in local **Room** database on bookmark so users can read saved VPS tutorials and benchmarks completely **offline** (`⚡ 已离线缓存` green/teal micro-pill), while syncing bookmark IDs with their NodeSeek web account when signed in.
-       - Includes instant local filter chip & swipe-to-remove with `Snackbar` undo.
-     - **Tab 2 — `🕓 阅读历史 (Read History)`**:
-       - Automatically records viewed topics in Room with timestamp and **last visible floor index**, displaying an actionable **`上次读至 #24 楼 →`** Cobalt chip that jumps straight back to `#24` on tap!
-5. **Theme, Typography & Cache Settings (`SettingsBottomSheet` / `SettingsScreen`, opened via `[⚙ 设置]`)**:
-   - **Appearance Visual Picker**: 3 illustrated preview cards (`暖纸日光 Paper Light`, `曜石深邃 Obsidian Dark`, `跟随系统 Auto`) + **`纯黑 AMOLED 省电模式 (#000000)`** toggle + **`Material You 动态取色 (Android 12+)`** toggle.
-   - **Reader Comfort**: Font size slider (`85%` · `100%` · `115%` · `130%` with live paragraph preview) + Default Data Source preference (`自动智能切换` / `优先 RSS 极速` / `始终 Web 会话`).
-   - **Storage & Privacy**: Live cache meter (`图片缓存 42.6 MB · 离线帖子 3.1 MB`) + 1-tap `清理图片缓存` + `清空阅读历史` + `退出当前账号` (clears WebView cookies & OkHttp `CookieJar` atomically).
+4. **Unified Collections, History & Profile Topic Stream (`HubCollectionScreen` & `UserProfileScreen`)**:
+   - **Tab 1 — `🔖 离线收藏 (Offline Bookmarks)`** & **Tab 2 — `🕓 阅读历史 (Read History)`** & **User Profile `发布的主题`** all reuse the exact same outlined **`PulseTopicCard`** design as Home Explore for visual consistency across the entire app:
+     - **Offline Bookmarks**: Stores full parsed `TopicDetail` + first-page comments in local **Room** database on bookmark so users can read saved threads offline while keeping the Home-style outlined card layout and 1-tap bookmark toggle.
+     - **Read History**: Records viewed topics in Room with timestamp and last visible floor index, retaining the card's bottom-right **category indicator** and **`读至 #N 楼`** resume badge while supporting 1-tap bookmarking from history.
+5. **Grouped-Card Settings & In-Place Seek Mail Key Management (`SettingsScreen` & `SeekMailScreen`)**:
+   - **Grouped List Architecture (`SettingsScreen`)**: Styled identically to `PulseHubScreen` (`我的`) using rounded grouped cards (`surfaceContainerLow`), subtle dividers, and `30.dp` aligned rounded icon badges across 7 coherent sections (外观主题 / 字体与排版 / 社区与签到 / 脉搏雷达 / 数据与隐私 / 图床与进阶 / 关于与更新).
+   - **Theme & Typography Presets**: Switch between `跟随系统 / 清雾浅色 / 深岩深色`, **Pure Pitch AMOLED (`#000000`)**, **Material You Dynamic Color** (`false` by default), and global `fontScale` (`90%` default with `85% / 90% / 100% / 115%` preset pills and continuous `85%–130%` slider + live preview).
+   - **Integrations & Maintenance**: NodeImage API Key management via clean `NodeImageApiKeyDialog` (Seek Mail API Key configuration is consolidated directly inside `SeekMailScreen`'s top bar via `SeekMailApiKeyDialog`), image/history cache clearing, blocked-users management, and GitHub Releases update controls.
 6. **Clean In-App WebView Session Login Bottom Sheet (`SessionLoginSheet`)**:
    - `ModalBottomSheet` (`92%` screen height, `28.dp` top corners, `dragHandle` disabled over WebView scroll area to prevent accidental swipe-dismiss during verification):
      - **Header Bar**: Close `[✕]` button + **`🔒 https://www.nodeseek.com/signIn.html`** verified SSL domain pill + Reload `[↻]` button.
@@ -512,7 +509,7 @@ UI engineers should structure `com.nodeseek.app.ui.theme` into four clean, decou
 
 ## 5. Accessibility, Contrast & Quality Checklist
 
-- **Contrast Compliance**: Every text/surface pair in both Paper Light (`#1B1B1F` on `#FAF7F2` = `15.8:1`) and Obsidian Dark (`#EAE8EF` on `#07080C` = `16.4:1`), as well as all 11 semantic Category Badges (`>= 5.2:1`), meets or exceeds **WCAG 2.1 AA** (and AAA for body text).
+- **Contrast Compliance**: Every text/surface pair in both Cool Mist Light (`#171C1F` on `#F7FAFF`) and Slate Steel Dark (`#DFE3E7` on `#101417`), as well as all semantic Category Badges (`>= 5.2:1`), meets or exceeds **WCAG 2.1 AA** (and AAA for body text).
 - **Touch Targets**: All interactive chips, bookmark toggles, floor pills, and reaction buttons enforce `minimumInteractiveComponentSize()` (`48.dp × 48.dp` hit bounds even when visual pill height is `28.dp–34.dp`).
 - **TalkBack & Semantics**: `PulseTopicCard` merges header/title/telemetry via `Modifier.semantics(mergeDescendants = true)` with explicit `stateDescription = "未读"` / `"已读"`, while keeping the Bookmark quick-toggle as an independent accessible action.
 - **Reduced Motion**: Respect system animator duration scale; spring bounces gracefully degrade to instant crossfades when animations are disabled.

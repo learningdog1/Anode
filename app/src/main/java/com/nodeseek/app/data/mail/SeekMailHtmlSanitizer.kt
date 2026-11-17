@@ -215,7 +215,7 @@ object SeekMailHtmlSanitizer {
 
         val safeBackground = sanitizeHexColor(
             candidate = if (isDark && purePitchAmoled) "#000000" else backgroundHex,
-            fallback = if (isDark) "#07080C" else "#FAF7F2",
+            fallback = if (isDark) "#101417" else "#F7FAFF",
         )
         val safeOnSurface = sanitizeHexColor(
             candidate = onSurfaceHex,

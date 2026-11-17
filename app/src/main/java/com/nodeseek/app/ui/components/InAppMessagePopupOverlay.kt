@@ -795,7 +795,7 @@ private fun InAppMessagePopupCard(
                             )
                             .border(
                                 width = 1.5.dp,
-                                color = if (isDark) Color(0xFF10131C) else Color(0xFFFAF7F2),
+                                color = MaterialTheme.colorScheme.background,
                                 shape = CircleShape,
                             ),
                         contentAlignment = Alignment.Center,

@@ -142,6 +142,7 @@ class PulseHubViewModel(
         val mergedBookmarks = mergeBookmarks(
             local = base.localBookmarks,
             server = transient.serverBookmarks,
+            history = base.history,
         )
         val seekMailConfigured = base.settings.seekMailApiKey.isNotBlank()
         val effectiveSeekMailUnreadCount = if (seekMailConfigured) {
@@ -411,6 +412,40 @@ class PulseHubViewModel(
         }
     }
 
+    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
+        val currentlyBookmarked = uiState.value.bookmarks.any { it.topicId == entry.topicId }
+        if (currentlyBookmarked) {
+            removeBookmark(entry.topicId)
+            return
+        }
+        viewModelScope.launch {
+            val summary = TopicSummary(
+                id = entry.topicId,
+                title = entry.title,
+                categorySlug = entry.categorySlug,
+                categoryName = entry.categoryName,
+                authorName = entry.authorName,
+                authorAvatarUrl = entry.authorAvatarUrl,
+                lastActivityIso = Instant.ofEpochMilli(entry.visitedAtEpochMillis).toString(),
+                lastReadFloor = entry.lastReadFloor.takeIf { it > 0 },
+                isBookmarked = true,
+            )
+            container.bookmarkAndHistoryRepository.saveOfflineBookmark(
+                summary = summary,
+                detailSnapshot = null,
+                syncedWithServer = false,
+            )
+            if (container.sessionRepository.sessionState.value != null) {
+                container.bookmarkAndHistoryRepository.setTopicBookmarked(entry.topicId, bookmarked = true)
+                    .onFailure { err ->
+                        _events.trySend(err.message ?: "云端收藏同步未完成，已保存在本机")
+                    }
+            } else {
+                _events.trySend("已加入我的收藏")
+            }
+        }
+    }
+
     fun clearReadHistory() {
         viewModelScope.launch {
             container.bookmarkAndHistoryRepository.clearReadHistory()
@@ -578,31 +613,61 @@ class PulseHubViewModel(
     private fun mergeBookmarks(
         local: List<BookmarkedTopic>,
         server: List<TopicSummary>,
+        history: List<ReadHistoryEntry>,
     ): List<HubBookmarkDisplayItem> {
+        val historyById = history.associateBy { it.topicId }
         val byId = LinkedHashMap<Long, HubBookmarkDisplayItem>()
         for (item in local) {
+            val hist = historyById[item.topicId]
+            val mergedSummary = item.summary.copy(
+                isBookmarked = true,
+                categorySlug = item.summary.categorySlug.ifBlank { hist?.categorySlug.orEmpty() },
+                categoryName = item.summary.categoryName.ifBlank { hist?.categoryName.orEmpty() },
+                authorName = item.summary.authorName.ifBlank { hist?.authorName.orEmpty() },
+                authorAvatarUrl = item.summary.authorAvatarUrl.ifBlank { hist?.authorAvatarUrl.orEmpty() },
+                lastReadFloor = item.summary.lastReadFloor ?: hist?.lastReadFloor?.takeIf { it > 0 },
+            )
             byId[item.topicId] = HubBookmarkDisplayItem(
                 topicId = item.topicId,
-                summary = item.summary.copy(isBookmarked = true),
+                summary = mergedSummary,
                 hasOfflineSnapshot = item.hasOfflineSnapshot,
                 savedAtEpochMillis = item.savedAtEpochMillis,
             )
         }
         for (summary in server) {
             val existing = byId[summary.id]
+            val hist = historyById[summary.id]
             if (existing == null) {
                 byId[summary.id] = HubBookmarkDisplayItem(
                     topicId = summary.id,
-                    summary = summary.copy(isBookmarked = true),
+                    summary = summary.copy(
+                        isBookmarked = true,
+                        categorySlug = summary.categorySlug.ifBlank { hist?.categorySlug.orEmpty() },
+                        categoryName = summary.categoryName.ifBlank { hist?.categoryName.orEmpty() },
+                        authorName = summary.authorName.ifBlank { hist?.authorName.orEmpty() },
+                        authorAvatarUrl = summary.authorAvatarUrl.ifBlank { hist?.authorAvatarUrl.orEmpty() },
+                        lastReadFloor = summary.lastReadFloor ?: hist?.lastReadFloor?.takeIf { it > 0 },
+                    ),
                     hasOfflineSnapshot = false,
                     savedAtEpochMillis = null,
                 )
             } else {
+                val prev = existing.summary
                 byId[summary.id] = existing.copy(
                     summary = summary.copy(
+                        categorySlug = summary.categorySlug.ifBlank { prev.categorySlug },
+                        categoryName = summary.categoryName.ifBlank { prev.categoryName },
+                        authorId = summary.authorId ?: prev.authorId,
+                        authorName = summary.authorName.ifBlank { prev.authorName },
+                        authorAvatarUrl = summary.authorAvatarUrl.ifBlank { prev.authorAvatarUrl },
+                        authorLevel = summary.authorLevel ?: prev.authorLevel,
+                        viewCount = if (summary.viewCount > 0) summary.viewCount else prev.viewCount,
+                        replyCount = if (summary.replyCount > 0) summary.replyCount else prev.replyCount,
+                        lastActivityIso = summary.lastActivityIso.ifBlank { prev.lastActivityIso },
+                        requiredViewLevel = summary.requiredViewLevel ?: prev.requiredViewLevel,
                         isBookmarked = true,
-                        isRead = existing.summary.isRead || summary.isRead,
-                        lastReadFloor = existing.summary.lastReadFloor ?: summary.lastReadFloor,
+                        isRead = prev.isRead || summary.isRead,
+                        lastReadFloor = prev.lastReadFloor ?: summary.lastReadFloor ?: hist?.lastReadFloor?.takeIf { it > 0 },
                     ),
                 )
             }
