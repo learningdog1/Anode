@@ -14,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -60,6 +61,7 @@ import com.nodeseek.app.ui.boards.BoardsScreen
 import com.nodeseek.app.ui.boards.BoardsUiState
 import com.nodeseek.app.ui.boards.SearchScope
 import com.nodeseek.app.ui.components.CategoryMicroTag
+import com.nodeseek.app.ui.components.LocalPreviewAvatarResResolver
 import com.nodeseek.app.ui.components.CollapsingSquircleFab
 import com.nodeseek.app.ui.components.DrumstickCheckInChip
 import com.nodeseek.app.ui.components.FloatingPillDock
@@ -159,7 +161,6 @@ private val SHOWCASE_PINNED_TOPICS = listOf(
         replyCount = 312,
         lastActivityIso = "2026-11-16T01:05:00Z",
         isPinned = true,
-        authorLevel = 6,
     ),
     TopicSummary(
         id = 10002L,
@@ -172,7 +173,6 @@ private val SHOWCASE_PINNED_TOPICS = listOf(
         replyCount = 87,
         lastActivityIso = "2026-11-16T01:12:00Z",
         isPinned = true,
-        authorLevel = 5,
     ),
 )
 
@@ -189,7 +189,6 @@ private val SHOWCASE_TOPICS = listOf(
         lastActivityIso = "2026-11-16T01:36:00Z",
         isRead = false,
         isBookmarked = true,
-        authorLevel = 5,
     ),
     TopicSummary(
         id = 883905L,
@@ -204,7 +203,6 @@ private val SHOWCASE_TOPICS = listOf(
         requiredViewLevel = 1,
         isRead = true,
         lastReadFloor = 18,
-        authorLevel = 3,
     ),
     TopicSummary(
         id = 883712L,
@@ -217,7 +215,6 @@ private val SHOWCASE_TOPICS = listOf(
         replyCount = 79,
         lastActivityIso = "2026-11-16T00:52:00Z",
         isRead = false,
-        authorLevel = 4,
     ),
     TopicSummary(
         id = 883518L,
@@ -230,7 +227,6 @@ private val SHOWCASE_TOPICS = listOf(
         replyCount = 24,
         lastActivityIso = "2026-11-16T00:25:00Z",
         isRead = false,
-        authorLevel = 4,
     ),
     TopicSummary(
         id = 883301L,
@@ -245,7 +241,6 @@ private val SHOWCASE_TOPICS = listOf(
         isRead = true,
         lastReadFloor = 9,
         isBookmarked = true,
-        authorLevel = 6,
     ),
 )
 
@@ -994,7 +989,7 @@ fun Preview14UserProfile() {
                     followerCount = 194,
                     isFollowedByViewer = true,
                 ),
-                topics = SHOWCASE_TOPICS.take(3),
+                topics = SHOWCASE_TOPICS.take(3).map { it.copy(authorId = 1024L, authorName = "latency_hunter") },
                 hasMoreTopics = true,
             ),
         )
@@ -1187,7 +1182,8 @@ fun Preview19Settings() {
 @Preview(widthDp = 412, showBackground = true)
 @Composable
 fun Preview20DesignSystemComponents() {
-    NodePulseTheme(themeMode = PulseThemeMode.PAPER_LIGHT, dynamicColor = false) {
+    CompositionLocalProvider(LocalPreviewAvatarResResolver provides ::resolveShowcaseAvatarRes) {
+        NodePulseTheme(themeMode = PulseThemeMode.PAPER_LIGHT, dynamicColor = false) {
         Surface(color = MaterialTheme.colorScheme.background) {
             Column(
                 modifier = Modifier
@@ -1264,7 +1260,6 @@ fun Preview20DesignSystemComponents() {
                         categoryName = "测评",
                         authorId = 1024L,
                         authorName = "latency_hunter",
-                        authorLevel = 5,
                         viewCount = 6840,
                         replyCount = 142,
                         lastActivityIso = "3m",
@@ -1294,6 +1289,7 @@ fun Preview20DesignSystemComponents() {
                     onUrlClick = {},
                 )
             }
+        }
         }
     }
 }

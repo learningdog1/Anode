@@ -1,5 +1,6 @@
 package com.nodeseek.app.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,6 +31,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -42,6 +45,8 @@ import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.pulsePressScale
 
 private const val NODESEEK_ORIGIN = "https://www.nodeseek.com"
+
+val LocalPreviewAvatarResResolver = staticCompositionLocalOf<((String) -> Int?)?> { null }
 
 private data class MonogramTint(
     val lightStart: Color,
@@ -133,6 +138,7 @@ fun PulseAvatar(
     showOpBadge: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
+    val previewDrawableRes = LocalPreviewAvatarResResolver.current?.invoke(username)
     val resolvedUrl = remember(avatarUrl) { normalizeNodeSeekAssetUrl(avatarUrl) }
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -221,29 +227,44 @@ fun PulseAvatar(
                         Modifier
                     }
                 )
-                .background(fallbackBrush),
+                .background(
+                    if (previewDrawableRes != null) {
+                        SolidColor(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    } else {
+                        fallbackBrush
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
-            if (!imageLoadedSuccessfully) {
-                Text(
-                    text = monogram,
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = (size.value * 0.39f).sp,
-                    ),
-                    color = fallbackTextColor,
-                )
-            }
-
-            if (imageRequest != null) {
-                AsyncImage(
-                    model = imageRequest,
+            if (previewDrawableRes != null) {
+                Image(
+                    painter = painterResource(id = previewDrawableRes),
                     contentDescription = "$username 头像",
                     contentScale = ContentScale.Crop,
-                    onSuccess = { imageLoadedSuccessfully = true },
-                    onError = { imageLoadedSuccessfully = false },
                     modifier = Modifier.fillMaxSize(),
                 )
+            } else {
+                if (!imageLoadedSuccessfully) {
+                    Text(
+                        text = monogram,
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = (size.value * 0.39f).sp,
+                        ),
+                        color = fallbackTextColor,
+                    )
+                }
+
+                if (imageRequest != null) {
+                    AsyncImage(
+                        model = imageRequest,
+                        contentDescription = "$username 头像",
+                        contentScale = ContentScale.Crop,
+                        onSuccess = { imageLoadedSuccessfully = true },
+                        onError = { imageLoadedSuccessfully = false },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
 

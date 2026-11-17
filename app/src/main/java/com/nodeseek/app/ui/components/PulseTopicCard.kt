@@ -138,7 +138,7 @@ fun PulseTopicCard(
                 )
                 .padding(horizontal = 13.dp, vertical = 10.dp),
         ) {
-            // ── Row 1: Compact Author + Lv Badge + Time + Borderless 1-Tap Bookmark ──
+            // ── Row 1: Compact Author + Time + Borderless 1-Tap Bookmark ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -151,8 +151,8 @@ fun PulseTopicCard(
                     avatarUrl = topic.authorAvatarUrl,
                     username = topic.authorName,
                     size = 24.dp,
-                    rankLevel = topic.authorLevel,
-                    ringWidth = 1.3.dp,
+                    rankLevel = null,
+                    ringWidth = 0.85.dp,
                     onClick = if (canClickAuthor) {
                         { onAuthorClick?.invoke(resolvedAuthorId) }
                     } else {
@@ -193,9 +193,6 @@ fun PulseTopicCard(
                                 },
                             ),
                     )
-                    if (topic.authorLevel != null) {
-                        RankMicroBadge(level = topic.authorLevel, compact = true)
-                    }
                     if (topic.lastActivityIso.isNotBlank()) {
                         Text(
                             text = "·",

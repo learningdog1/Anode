@@ -45,6 +45,7 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.nodeseek.app.BuildConfig
+import com.nodeseek.app.R
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.mail.SeekMailAttachment
@@ -102,6 +103,7 @@ import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.domain.update.AppUpdateState
 import com.nodeseek.app.domain.update.UpdateCheckResult
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import com.nodeseek.app.ui.components.LocalPreviewAvatarResResolver
 import com.nodeseek.app.ui.components.PulseBottomDockOverlay
 import com.nodeseek.app.ui.components.PulseNavTab
 import com.nodeseek.app.ui.theme.NodePulseTheme
@@ -442,6 +444,35 @@ internal class PreviewAppContainer(
     }
 }
 
+private val SHOWCASE_AVATAR_POOL = intArrayOf(
+    R.drawable.showcase_avatar_01,
+    R.drawable.showcase_avatar_02,
+    R.drawable.showcase_avatar_03,
+    R.drawable.showcase_avatar_04,
+    R.drawable.showcase_avatar_05,
+    R.drawable.showcase_avatar_06,
+    R.drawable.showcase_avatar_07,
+    R.drawable.showcase_avatar_08,
+    R.drawable.showcase_avatar_09,
+)
+
+internal fun resolveShowcaseAvatarRes(username: String): Int {
+    return when (username.trim()) {
+        "latency_hunter" -> R.drawable.showcase_avatar_01
+        "bgp_artisan" -> R.drawable.showcase_avatar_02
+        "bgp_watcher" -> R.drawable.showcase_avatar_03
+        "cloud_nomad" -> R.drawable.showcase_avatar_04
+        "compose_craft" -> R.drawable.showcase_avatar_05
+        "tokyo_core" -> R.drawable.showcase_avatar_06
+        "ipv6_pilot" -> R.drawable.showcase_avatar_07
+        "mtr_scanner" -> R.drawable.showcase_avatar_08
+        else -> {
+            val hash = username.trim().hashCode() and 0x7FFFFFFF
+            SHOWCASE_AVATAR_POOL[hash % SHOWCASE_AVATAR_POOL.size]
+        }
+    }
+}
+
 @Composable
 internal fun PreviewPhoneFrame(
     themeMode: PulseThemeMode,
@@ -485,6 +516,7 @@ internal fun PreviewPhoneFrame(
         LocalViewModelStoreOwner provides vmStoreOwner,
         LocalOnBackPressedDispatcherOwner provides backDispatcherOwner,
         LocalActivityResultRegistryOwner provides activityResultRegistryOwner,
+        LocalPreviewAvatarResResolver provides ::resolveShowcaseAvatarRes,
     ) {
         NodePulseTheme(
             themeMode = themeMode,
