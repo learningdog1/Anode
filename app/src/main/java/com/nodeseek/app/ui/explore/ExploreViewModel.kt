@@ -432,15 +432,46 @@ class ExploreViewModel(
         selectedCategorySlug: String,
     ): List<Category> {
         val bySlug = categories.associateBy { it.slug }
+        val defaultBySlug = Category.DEFAULT_CATEGORIES.associateBy { it.slug }
+        val seen = HashSet<String>()
         return buildList {
-            add(bySlug[""] ?: Category(slug = "", name = "全部"))
-            pinnedCategorySlugs.forEach { slug ->
+            // 1. Always place "" ("全部") first
+            val allTab = bySlug[""] ?: defaultBySlug[""] ?: Category(slug = "", name = "全部")
+            if (seen.add(allTab.slug)) {
+                add(allTab)
+            }
+
+            // 2. Priority board tabs first (matching editorial reference when using default pinned set)
+            val prioritySlugs = if (pinnedCategorySlugs == AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS) {
+                DEFAULT_EXPLORE_CATEGORY_ORDER
+            } else {
+                pinnedCategorySlugs
+            }
+            prioritySlugs.forEach { rawSlug ->
+                val slug = rawSlug.trim()
                 if (slug.isNotBlank()) {
-                    add(bySlug[slug] ?: Category(slug = slug, name = slug))
+                    val candidate = bySlug[slug] ?: defaultBySlug[slug] ?: Category(slug = slug, name = slug)
+                    if (!candidate.isAdminOnly && seen.add(slug)) {
+                        add(candidate)
+                    }
                 }
             }
-            if (selectedCategorySlug.isNotBlank() && none { it.slug == selectedCategorySlug }) {
-                add(bySlug[selectedCategorySlug] ?: Category(slug = selectedCategorySlug, name = selectedCategorySlug))
+
+            // 3. Append all remaining non-admin categories so every board stays reachable via strip & pager
+            categories.forEach { category ->
+                if (!category.isAdminOnly && category.slug.isNotBlank() && seen.add(category.slug)) {
+                    add(category)
+                }
+            }
+
+            // 4. Ensure an externally selected slug is never dropped
+            val normalizedSelected = selectedCategorySlug.trim()
+            if (normalizedSelected.isNotBlank() && seen.add(normalizedSelected)) {
+                add(
+                    bySlug[normalizedSelected]
+                        ?: defaultBySlug[normalizedSelected]
+                        ?: Category(slug = normalizedSelected, name = normalizedSelected),
+                )
             }
         }
     }
@@ -739,6 +770,14 @@ class ExploreViewModel(
         private const val NEIGHBOR_PREFETCH_SETTLE_MS = 450L
         private const val MIN_PREFETCH_GAP_MS = 800L
         private const val MIN_PULL_REFRESH_SETTLE_MS = 120L
+        private val DEFAULT_EXPLORE_CATEGORY_ORDER = listOf(
+            "tech",
+            "review",
+            "info",
+            "trade",
+            "daily",
+            "dev",
+        )
 
         fun factory(
             container: AppContainer,

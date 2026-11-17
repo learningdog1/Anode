@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -138,9 +140,11 @@ fun RankMicroBadge(
     level: Int,
     modifier: Modifier = Modifier,
     showPersona: Boolean = false,
+    compact: Boolean = false,
 ) {
     val spec = NodePulseThemeTokens.rankSpec(level)
-    val shape = RoundedCornerShape(7.dp)
+    val shape = RoundedCornerShape(if (compact) 5.5.dp else 7.dp)
+    val fontScale = NodePulseThemeTokens.fontScale
     val text = if (showPersona) {
         "Lv.${spec.level} · ${spec.personaTitle}"
     } else {
@@ -151,22 +155,36 @@ fun RankMicroBadge(
         modifier = modifier
             .clip(shape)
             .background(spec.softContainerBrush)
-            .border(width = 0.9.dp, brush = spec.ringBrush, shape = shape)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .border(
+                width = if (compact) 0.8.dp else 0.9.dp,
+                brush = spec.ringBrush,
+                shape = shape,
+            )
+            .padding(
+                horizontal = if (compact) 5.dp else 6.dp,
+                vertical = if (compact) 1.dp else 2.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 4.dp),
     ) {
         if (spec.level >= 5) {
             Box(
                 modifier = Modifier
-                    .size(5.dp)
+                    .size(if (compact) 4.dp else 5.dp)
                     .clip(CircleShape)
                     .background(spec.ringBrush),
             )
         }
         Text(
             text = text,
-            style = NodePulseThemeTokens.extraTypography.tabularBadge,
+            style = if (compact) {
+                NodePulseThemeTokens.extraTypography.tabularBadge.copy(
+                    fontSize = (10f * fontScale).sp,
+                    lineHeight = (13f * fontScale).sp,
+                )
+            } else {
+                NodePulseThemeTokens.extraTypography.tabularBadge
+            },
             color = spec.contentColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -315,10 +333,12 @@ fun HeatCommentPill(
     modifier: Modifier = Modifier,
     viewCount: Int = 0,
     isHotOverride: Boolean = false,
+    compact: Boolean = false,
 ) {
     val isHot = isHotOverride || replyCount >= 30 || viewCount >= 1500
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
+    val fontScale = NodePulseThemeTokens.fontScale
 
     val bgBrush = if (isHot) {
         Brush.horizontalGradient(
@@ -339,23 +359,33 @@ fun HeatCommentPill(
 
     Row(
         modifier = modifier
-            .height(22.dp)
+            .heightIn(min = if (compact) 20.dp else 22.dp)
             .clip(CircleShape)
             .background(bgBrush)
             .border(width = 0.75.dp, color = borderColor, shape = CircleShape)
-            .padding(horizontal = 8.dp),
+            .padding(
+                horizontal = if (compact) 7.dp else 8.dp,
+                vertical = if (compact) 2.dp else 3.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.5.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 3.5.dp),
     ) {
         Icon(
             imageVector = if (isHot) Icons.Rounded.LocalFireDepartment else Icons.Rounded.ChatBubbleOutline,
             contentDescription = null,
             tint = fgColor,
-            modifier = Modifier.size(12.dp),
+            modifier = Modifier.size(if (compact) 11.dp else 12.dp),
         )
         Text(
             text = formatCompactCount(replyCount),
-            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+            style = if (compact) {
+                MaterialTheme.typography.labelSmall.copy(
+                    fontSize = (11f * fontScale).sp,
+                    lineHeight = (13.5f * fontScale).sp,
+                ).withTabularNumbers()
+            } else {
+                MaterialTheme.typography.labelMedium.withTabularNumbers()
+            },
             fontWeight = if (isHot) FontWeight.Bold else FontWeight.Medium,
             color = fgColor,
             maxLines = 1,
@@ -402,15 +432,17 @@ fun OpHighlightChip(
 fun AccessLockChip(
     requiredLevel: Int,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     if (requiredLevel <= 0) return
     val isDark = NodePulseThemeTokens.isDark
     val insideSpec = NodePulseThemeTokens.categorySpec("inside")
     val label = if (requiredLevel >= 255) "仅作者可见" else "Lv.$requiredLevel+"
-    val shape = RoundedCornerShape(7.dp)
+    val shape = RoundedCornerShape(if (compact) 6.dp else 7.dp)
 
     Row(
         modifier = modifier
+            .then(if (compact) Modifier.heightIn(min = 20.dp) else Modifier)
             .clip(shape)
             .background(insideSpec.softTonalBrush)
             .border(
@@ -418,7 +450,7 @@ fun AccessLockChip(
                 color = insideSpec.spineColor.copy(alpha = if (isDark) 0.40f else 0.24f),
                 shape = shape,
             )
-            .padding(horizontal = 6.5.dp, vertical = 2.dp),
+            .padding(horizontal = if (compact) 6.dp else 6.5.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
@@ -426,7 +458,7 @@ fun AccessLockChip(
             imageVector = Icons.Rounded.Lock,
             contentDescription = null,
             tint = insideSpec.contentColor,
-            modifier = Modifier.size(11.dp),
+            modifier = Modifier.size(if (compact) 10.5.dp else 11.dp),
         )
         Text(
             text = label,

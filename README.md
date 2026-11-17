@@ -7,7 +7,7 @@
 **Editorial Paper & Obsidian Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v1.1.1-3655D6?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v1.2.0-3655D6?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.10-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202025.02.00-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,14 +26,14 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v1.1.1`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v1.1.1-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v1.2.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v1.2.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v1.1.1`（`versionCode = 3`） |
+| **当前版本** | `v1.2.0`（`versionCode = 4`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 脉冲首页流 · 非对称 Bento 版块与统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 枢机中心与签到榜 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · 隔离式 Seek 邮箱客户端 (`seek.li`) · GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 底部主栏直达隔离式 Seek 邮箱 (`seek.li`) · 个人中心与一行签到/分组入口 · 收藏与足迹离线快照 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · GitHub Releases 应用内更新 |
 
 ---
 
@@ -41,10 +41,10 @@
 
 **Anode** 将日间技术杂志的舒朗纸感与夜间机房遥测面板的锐利对比融于同一套 **Material 3 Expressive** 自适应色彩引擎：
 
-- **暖感纸张日间 (`Paper Light`)**：米白纸张画布（`#FAF7F2`）搭配纯净白卡片（`#FFFFFF`）与 `1.dp` 建筑级描边（`#DBD5C9`），消除长文阅读眩光。
-- **深邃黑曜夜间 (`Obsidian Dark`)**：深空曜石底色（`#07080C`）与碳灰层级卡片（`#151821`），配合 **Electric Cobalt (`#8DA2FF`)** 与 **Telemetry Teal (`#4FD8CE`)** 高对比点缀。
-- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳卡片（`#10131A`），专为 OLED 屏幕优化夜间阅读对比度。
-- **动态取色与语义色板**：可选开启 Android 12+ Material You 动态调和；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
+- **暖感纸张日间 (`Paper Light`)**：米白纸张画布（`#FAF7F2`）搭配通透线框卡片（`0.85.dp` 建筑级描边 `#DBD5C9`），消除长文阅读眩光。
+- **深邃黑曜夜间 (`Obsidian Dark`)**：深空曜石底色（`#07080C`）与暗色线框信息流卡片，配合 **Electric Cobalt (`#8DA2FF`)** 与 **Telemetry Teal (`#4FD8CE`)** 高对比点缀。
+- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#10131A`），专为 OLED 屏幕优化夜间阅读对比度。
+- **Material You 壁纸动态取色与语义调和**：默认开启（支持在设置中一键切换）Android 12+ Material You 动态取色，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
 
 <div align="center">
 <table>
@@ -61,39 +61,53 @@
 </table>
 </div>
 
+<div align="center">
+<table>
+  <tr>
+    <th width="33%">🌿 绿色壁纸 · 动态取色浅色</th>
+    <th width="33%">🌺 红色壁纸 · 动态取色深色</th>
+    <th width="33%">🍀 个人中心 · 动态取色联动</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/21-dynamic-green-explore-light.png" width="250" alt="Material You Dynamic Green Explore Light" /></td>
+    <td align="center"><img src="docs/screenshots/22-dynamic-red-explore-dark.png" width="250" alt="Material You Dynamic Red Explore Dark" /></td>
+    <td align="center"><img src="docs/screenshots/23-dynamic-green-hub-light.png" width="250" alt="Material You Dynamic Green Hub Light" /></td>
+  </tr>
+</table>
+</div>
+
 ---
 
 ## ✨ 核心功能与全页面图鉴 · Feature & Screen Walkthrough
 
 ### 1. 脉冲首页与悬浮药丸导航 (`Explore & Navigation Shell`)
 
-- **毛玻璃顶栏与快速切换**：内置 `Anode` 品牌徽标、全站搜索触发胶囊、4 路信息流排序切换（`新评论` / `新帖子` / `热门` / `推荐阅读`）以及可横向滑动的常驻版块轨道（`全部` + 用户星标版块）。
-- **信息密度与阅读连续性**：
-  - **CollapsiblePinnedTicker**：默认折叠的置顶公告滚动条，一键展开查看全站置顶。
-  - **PulseTopicCard**：未读帖子左侧呈 `3.dp` 版块语义色脊线；已读帖子自动降低对比度并显示 `读至 #N 楼` 续读标签；支持热帖火焰徽章、`Lv.0–Lv.6` 等级头像环与一键收藏。
+- **极简毛玻璃顶栏与全版块轨道**：左上角保留 `Anode` 品牌徽标，右侧收敛为搜索图标按钮与极简排序选择器（`新评论 ▾` / `新帖子` / `热门` / `推荐阅读`）；第二行为无框极简文字频道条（`全部` + `技术 / 测评 / 情报 / 交易 / 日常 / Dev` 及全站所有非管理员版块），与下方 `HorizontalPager` 1:1 丝滑联动。
+- **高密度通透信息流**：
+  - **CollapsiblePinnedTicker**：轻量化透明线框置顶公告条，默认折叠，一键展开查看全站置顶。
+  - **PulseTopicCard**：剔除厚重卡片底色与左侧竖条，采用通透圆角线框卡片并优化垂直排布密度（单屏可完整浏览 5+ 篇主题）；版块标识以无底色语义小圆点 + 文字置于卡片右下角，已读/未读通过字重与墨色清晰区分，并支持 `读至 #N 楼` 续读标签、热帖火焰徽章、`Lv.0–Lv.6` 等级头像环与一键收藏。
   - **RSS 快速降级通道**：未登录或触发临时安全校验时自动切换 RSS 快速预览，保证随时可读。
-- **单手拇指区交互**：悬浮毛玻璃药丸底栏（`首页` / `版块` / `我的`）配以弹性渐隐 Squircle `发帖` FAB。
+- **单手拇指区交互**：悬浮毛玻璃药丸底栏改为 **`首页` / `邮箱` / `我的`**，配以弹性渐隐 Squircle `发帖` FAB。
 
 ---
 
-### 2. 版块矩阵与全站统一搜索 (`Boards Directory & Unified Search`)
+### 2. 全站统一搜索与离线收藏足迹 (`Unified Search & Offline Collections`)
 
 <div align="center">
 <table>
   <tr>
-    <th width="50%">🧩 非对称 2 列 Bento 版块矩阵</th>
     <th width="50%">🔍 帖子 / 成员统一搜索与 Google 兜底</th>
+    <th width="50%">🔖 离线收藏快照与楼层续读足迹</th>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/04-boards-bento.png" width="275" alt="Boards Bento Directory" /></td>
     <td align="center"><img src="docs/screenshots/05-unified-search.png" width="275" alt="Unified Search" /></td>
+    <td align="center"><img src="docs/screenshots/04-collections-history.png" width="275" alt="Collections and Read History" /></td>
   </tr>
 </table>
 </div>
 
-- **非对称 Bento 频道矩阵**：顶部 `2×1` Hero 渐变卡突出 `技术 /tech` 与 `测评 /review`，其余版块以 `1×1` 伴随磁贴整齐排布；清晰标注内版发帖消耗（`5 🍗`）、`RSS·Web` / `Web` 支持状态与频道简介。
-- **一键常驻星标**：点击磁贴右上角星标即可弹性常驻至首页顶部频道栏，支持「全部频道 / 已常驻 ★ / 支持 RSS ⚡」快速筛选，也可在当前页内直接打开任意版块流。
-- **全站统一搜索**：支持按 `找帖子`（含分类/排序筛选与分页加载）与 `找用户`（`@username`）检索，自动持久化最近搜索标签，并在底部提供 **1 键 Google `site:www.nodeseek.com` 站外搜索** 卡片。
+- **全站统一搜索 (`SearchRoute`)**：点击首页右上角搜索图标直达独立全站搜索页，支持按 `找帖子`（含分类/排序筛选与分页加载）与 `找用户`（`@username`）检索，自动持久化最近搜索标签，并在底部提供 **1 键 Google `site:www.nodeseek.com` 站外搜索** 卡片。
+- **离线收藏与阅读足迹 (`HubCollectionScreen`)**：从“我的”页面直达独立的「收藏与足迹」二级页，集中管理云端与 Room 本地离线快照收藏（支持无网离线阅读与取消收藏）及自动记录上次停留楼层的浏览历史（支持一键续读与清空记录）。
 
 ---
 
@@ -146,25 +160,25 @@
 
 ---
 
-### 5. 枢机中心与每日签到手气榜 (`Pulse Hub & Check-In Leaderboard`)
+### 5. 个人中心与每日签到手气榜 (`Personal Hub & Check-In Leaderboard`)
 
 <div align="center">
 <table>
   <tr>
-    <th width="50%">🏛️ 枢机仪表盘 · 等级进度 · 离线收藏</th>
+    <th width="50%">👤 个人中心 · 一行签到 · 设置式分组</th>
     <th width="50%">🏆 每日签到手气榜与领奖台</th>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/10-pulse-hub.png" width="275" alt="Pulse Hub" /></td>
+    <td align="center"><img src="docs/screenshots/10-pulse-hub.png" width="275" alt="Personal Hub" /></td>
     <td align="center"><img src="docs/screenshots/11-checkin-leaderboard.png" width="275" alt="Check-In Leaderboard" /></td>
   </tr>
 </table>
 </div>
 
-- **枢机仪表盘 (`PulseHubScreen`)**：
-  - **`2×1` 等级进度 Hero 卡**：实时展示当前等级 `Lv.0–Lv.6`、距离下一级所需鸡腿进度条、鸡腿/星尘余额与发回帖统计；未登录时支持官方 WebView 安全登录或原生凭据登录。
-  - **交互式签到磁贴**：支持在 `保底 +5` 与 `🎲 手气随机` 间即时切换、查看今日发帖/回帖/免费鸡腿额度条，并直达每日手气榜。
-  - **快捷入口与离线内容库**：聚合实时收件箱未读数、脉搏雷达未读命中、Seek 邮箱未读预览，以及整合 Room 本地完整离线快照的「收藏夹」与记录最后阅读楼层的「阅读足迹」。
+- **个人中心 (`PulseHubScreen`)**：
+  - **个人信息 Hero 卡**：保留主题渐变光效与等级经验进度条，精简展示等级 / UID / TG 绑定状态与底部 4 列数据统计（`鸡腿` / `星尘` / `主题` / `评论`）；未登录时支持官方 WebView 安全登录或原生凭据登录。
+  - **一行紧凑签到条 (`CompactCheckInCard`)**：单行展示今日签到名次、鸡腿收益及发帖/回帖/加腿额度进度，未签到时支持原地切换 `固定 +5` / `试试手气` 并一键签到，已签到直接查看「签到榜」。
+  - **设置式分组列表**：清晰划分为 **「消息」**（`通知` / `私信` / `关键词提醒`，各自独立角标计数）与 **「内容」**（`我的收藏` / `浏览记录` / `我的帖子`），点按即可直达独立二级页面。
 - **签到榜 (`CheckInBoardScreen`)**：可视化前三甲领奖台、全站签到排名与自己的当日名次及手气收益。
 
 ---
@@ -229,7 +243,7 @@
 </table>
 </div>
 
-- **会话完全隔离的 OpenAPI 客户端 (`SeekMailApiClient`)**：基于 `https://seek.li/openapi/v1` 构建，强制启用 `CookieJar.NO_COOKIES`、禁用跨站重定向、严格校验请求 Origin，与 NodeSeek 主站会话彻底隔离——即使不登录社区也能独立使用邮箱。
+- **底部主栏直达 & 会话隔离 OpenAPI 客户端 (`SeekMailApiClient`)**：Seek 邮箱现已升级为底部导航栏中间主标签（`首页` / `邮箱` / `我的`），点按即刻进入收件箱（打开邮件详情时自动收起底栏以获得全屏阅读体验）；网络层基于 `https://seek.li/openapi/v1` 构建，强制启用 `CookieJar.NO_COOKIES`、禁用跨站重定向、严格校验请求 Origin，与 NodeSeek 主站会话彻底隔离——即使不登录社区也能独立使用邮箱。
 - **多邮箱与别名管理**：支持全部收件箱与各独立别名（如 `@seek.li` / `@nodeseek.org`）切换、一键复制地址、检查可用性并创建新别名、标签过滤、关键字搜索与联系人目录。
 - **智能验证码提取 (`VerificationCodeExtractor`)**：自动识别中英文验证码邮件并在列表与详情页高亮显示验证码徽章，一键复制即可填入登录验证。
 - **零追踪隐私阅读器 (`SeekMailWebView`)**：经 `Jsoup` 白名单消毒的邮件渲染器，严格禁用 JavaScript、文件访问与第三方 Cookie，默认拦截远程追踪图片（支持按封手动放行），自动适配 `Paper Light` / `Obsidian Dark` / `Pure Pitch AMOLED` 与字体缩放，支持切换 `HTML 视图` / `纯文本` / `原始源码 (.eml)`，并提供 `SPF · DKIM · DMARC` 验证遥测与附件 SAF 导出下载。
@@ -299,10 +313,10 @@ app/src/main/java/com/nodeseek/app/
     ├── theme/                       # Paper/Obsidian/Pitch 色板、15 版块规范、Lv.0–6 等级光环与动效
     ├── components/                  # PulseTopicCard、FloatingPillDock、MarkdownRenderer、ANSI/贴纸支持
     ├── explore/                     # 脉冲首页流 Screen & ViewModel
-    ├── boards/                      # 非对称 Bento 版块目录与统一搜索 Screen & ViewModel
+    ├── boards/                      # 独立全站统一搜索与版块过滤 Screen & ViewModel
     ├── topic/                       # 杂志级帖子阅读器、楼层滑块与快捷回复工作台
     ├── composer/                    # Markdown 发帖/改帖编辑器与 NodeImage 上传
-    ├── hub/                         # 枢机中心 Bento、签到榜、收件箱、私信、用户空间与设置
+    ├── hub/                         # 个人中心（一行签到/设置式分组）、收藏与足迹、签到榜、收件箱、私信、用户空间与设置
     ├── mail/                        # SeekMailScreen、SeekMailViewModel 与隔离式 SeekMailWebView
     ├── radar/                       # PulseRadarScreen & ViewModel（规则管理、提醒流与追更追踪）
     ├── update/                      # AppUpdateDialog（更新提醒弹窗、日志渲染与下载安装进度）
@@ -344,8 +358,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v1.1.1-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v1.1.1-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v1.2.0-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v1.2.0-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 

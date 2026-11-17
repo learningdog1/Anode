@@ -303,9 +303,9 @@ private fun ShellControlsPreviewContent() {
                 )
             }
 
-            // Floating Pill Dock (99+ Unread) + Compact Badge Scale Check (1 -> 88 -> 99+)
+            // Floating Pill Dock (Seek Mail Selected, 99+ Unread) + Compact Badge Scale Check (1 -> 88 -> 99+)
             FloatingPillDock(
-                selectedTab = PulseNavTab.EXPLORE,
+                selectedTab = PulseNavTab.SEEK_MAIL,
                 onSelectTab = {},
                 unreadNotificationCount = 128,
                 modifier = Modifier.fillMaxWidth(),

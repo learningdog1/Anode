@@ -446,6 +446,7 @@ internal class PreviewAppContainer(
 internal fun PreviewPhoneFrame(
     themeMode: PulseThemeMode,
     purePitchAmoled: Boolean = false,
+    dynamicColor: Boolean = false,
     bottomDockTab: PulseNavTab? = null,
     showFab: Boolean = bottomDockTab == PulseNavTab.EXPLORE,
     unreadCount: Int = 3,
@@ -488,7 +489,7 @@ internal fun PreviewPhoneFrame(
         NodePulseTheme(
             themeMode = themeMode,
             purePitchAmoled = purePitchAmoled,
-            dynamicColor = false,
+            dynamicColor = dynamicColor,
         ) {
             Column(
                 modifier = Modifier

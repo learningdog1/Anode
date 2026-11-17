@@ -123,20 +123,35 @@ fun NodePulseTheme(
         purePitchAmoled,
         dynamicSupported,
         colorScheme.primary,
+        colorScheme.secondary,
+        colorScheme.background,
+        colorScheme.outlineVariant,
+        colorScheme.surfaceContainerLowest,
         colorScheme.surfaceContainer,
         colorScheme.surfaceContainerHigh,
+        colorScheme.surfaceContainerHighest,
     ) {
         val raw = if (useDark) {
             if (purePitchAmoled) {
                 DarkExtendedColors.copy(
                     cardSurface = ColorSchemePitchCard,
                     cardSurfaceElevated = Color(0xFF131722),
-                    cardBorder = Color(0xFF232839),
+                    cardBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.72f) else Color(0xFF232839),
                     cardHighlightRim = Color.White.copy(alpha = 0.08f),
                     glassSurface = Color(0xFF07090E).copy(alpha = 0.90f),
-                    glassBorder = Color(0xFF262B3D),
+                    glassBorder = if (dynamicSupported) colorScheme.outlineVariant.copy(alpha = 0.68f) else Color(0xFF262B3D),
                     shimmerBase = Color(0xFF11141E),
                     shimmerHighlight = Color(0xFF1E2436),
+                )
+            } else if (dynamicSupported) {
+                DarkExtendedColors.copy(
+                    cardSurface = colorScheme.surfaceContainer,
+                    cardSurfaceElevated = colorScheme.surfaceContainerHigh,
+                    cardBorder = colorScheme.outlineVariant.copy(alpha = 0.78f),
+                    glassSurface = colorScheme.background.copy(alpha = 0.86f),
+                    glassBorder = colorScheme.outlineVariant.copy(alpha = 0.62f),
+                    shimmerBase = colorScheme.surfaceContainer,
+                    shimmerHighlight = colorScheme.surfaceContainerHighest,
                 )
             } else {
                 DarkExtendedColors.copy(
@@ -144,10 +159,30 @@ fun NodePulseTheme(
                     cardSurfaceElevated = colorScheme.surfaceContainerHigh,
                 )
             }
+        } else if (dynamicSupported) {
+            LightExtendedColors.copy(
+                cardSurface = colorScheme.surfaceContainerLowest,
+                cardSurfaceElevated = colorScheme.surfaceContainerLowest,
+                cardBorder = colorScheme.outlineVariant.copy(alpha = 0.68f),
+                glassSurface = colorScheme.background.copy(alpha = 0.88f),
+                glassBorder = colorScheme.outlineVariant.copy(alpha = 0.72f),
+                shimmerBase = colorScheme.surfaceContainerHigh,
+                shimmerHighlight = colorScheme.surfaceContainerLowest,
+                softShadowColor = colorScheme.primary.copy(alpha = 0.08f),
+            )
         } else {
             LightExtendedColors
         }
-        if (dynamicSupported) raw.harmonizeWith(colorScheme.primary, fraction = 0.12f) else raw
+        if (dynamicSupported) {
+            raw.harmonizeWith(colorScheme.primary, fraction = 0.14f).copy(
+                brandGradientStart = colorScheme.primary,
+                brandGradientEnd = blendColor(colorScheme.primary, colorScheme.secondary, 0.45f),
+                heroTintStart = colorScheme.primary.copy(alpha = if (useDark) 0.16f else 0.09f),
+                heroTintEnd = colorScheme.secondary.copy(alpha = if (useDark) 0.08f else 0.055f),
+            )
+        } else {
+            raw
+        }
     }
 
     val clampedScale = fontScale.coerceIn(0.85f, 1.35f)

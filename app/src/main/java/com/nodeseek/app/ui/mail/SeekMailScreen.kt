@@ -105,6 +105,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -187,6 +188,10 @@ fun SeekMailScreen(
     onOpenSettings: () -> Unit = {},
     initialMailboxId: Long = 0L,
     initialMailId: Long = 0L,
+    showBackButton: Boolean = true,
+    bottomContentPadding: Dp = 0.dp,
+    reselectTrigger: Int = 0,
+    onMailDetailOpenChanged: ((Boolean) -> Unit)? = null,
     container: AppContainer = LocalAppContainer.current,
     previewUiState: SeekMailUiState? = null,
 ) {
@@ -259,6 +264,16 @@ fun SeekMailScreen(
         }
     }
 
+    LaunchedEffect(uiState.openedMailId != null) {
+        onMailDetailOpenChanged?.invoke(uiState.openedMailId != null)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onMailDetailOpenChanged?.invoke(false) }
+    }
+    LaunchedEffect(reselectTrigger) {
+        if (reselectTrigger > 0) viewModel.refresh()
+    }
+
     BackHandler(enabled = uiState.openedMailId != null) {
         viewModel.closeMailDetail()
     }
@@ -280,6 +295,7 @@ fun SeekMailScreen(
                     onOpenContacts = viewModel::openContactsSheet,
                     onOpenCreateMailbox = viewModel::openCreateMailboxSheet,
                     onOpenSettings = onOpenSettings,
+                    showBackButton = showBackButton,
                 )
             },
         ) { innerPadding ->
@@ -295,9 +311,10 @@ fun SeekMailScreen(
                         onClearError = viewModel::clearApiKeyError,
                         onVerifyAndSave = viewModel::verifyAndSaveApiKey,
                         onOpenSettings = onOpenSettings,
+                        bottomContentPadding = bottomContentPadding,
                         modifier = Modifier
                             .fillMaxSize()
-                            .navigationBarsPadding(),
+                            .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier),
                     )
                 } else {
                     AnimatedVisibility(
@@ -369,6 +386,7 @@ fun SeekMailScreen(
                         onCopyCode = { code ->
                             copyWithFeedback("验证码", code, "已复制验证码：$code")
                         },
+                        bottomContentPadding = bottomContentPadding,
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),
@@ -418,8 +436,18 @@ fun SeekMailScreen(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp),
+                .then(
+                    if (bottomContentPadding == 0.dp || uiState.openedMailId != null) {
+                        Modifier.navigationBarsPadding()
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = if (uiState.openedMailId != null) 0.dp else bottomContentPadding,
+                ),
         )
     }
 
@@ -517,6 +545,7 @@ private fun SeekMailTopBar(
     onOpenContacts: () -> Unit,
     onOpenCreateMailbox: () -> Unit,
     onOpenSettings: () -> Unit,
+    showBackButton: Boolean = true,
 ) {
     val activeMailboxAddress = uiState.selectedMailbox?.address
     val subtitle = when {
@@ -550,16 +579,23 @@ private fun SeekMailTopBar(
                 tonalAccent = MaterialTheme.colorScheme.primary,
             )
             .statusBarsPadding()
-            .padding(start = 6.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+            .padding(
+                start = if (showBackButton) 6.dp else 16.dp,
+                end = 12.dp,
+                top = 10.dp,
+                bottom = 10.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        IconButton(onClick = onBack) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                contentDescription = "返回",
-                modifier = Modifier.size(22.dp),
-            )
+        if (showBackButton) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "返回",
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
 
         Column(
@@ -684,6 +720,7 @@ private fun SeekMailOnboardingView(
     onClearError: () -> Unit,
     onVerifyAndSave: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -694,7 +731,12 @@ private fun SeekMailOnboardingView(
         modifier = modifier
             .verticalScroll(rememberScrollState())
             .imePadding()
-            .padding(horizontal = 16.dp, vertical = 20.dp),
+            .padding(
+                start = 16.dp,
+                end = 16.dp,
+                top = 20.dp,
+                bottom = 20.dp + bottomContentPadding,
+            ),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Column(
@@ -1414,6 +1456,7 @@ private fun SeekMailListPane(
     onOpenSettings: () -> Unit,
     onOpenMail: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
+    bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -1455,7 +1498,12 @@ private fun SeekMailListPane(
             uiState.isLoadingMails && uiState.mails.isEmpty() -> {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp),
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = 8.dp,
+                        bottom = 28.dp + bottomContentPadding,
+                    ),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(5, key = { "mail_skel_$it" }) {
@@ -1475,7 +1523,9 @@ private fun SeekMailListPane(
                     onAction = if (isUnauthorized) onOpenSettings else onRetry,
                     secondaryActionLabel = if (isUnauthorized) "重新加载" else null,
                     onSecondaryAction = if (isUnauthorized) onRetry else null,
-                    modifier = Modifier.navigationBarsPadding(),
+                    modifier = Modifier
+                        .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
+                        .padding(bottom = bottomContentPadding),
                 )
             }
 
@@ -1506,7 +1556,9 @@ private fun SeekMailListPane(
                     actionLabel = if (hasFilters) "查看全部邮件" else "新建邮箱别名",
                     actionIcon = if (hasFilters) Icons.Rounded.Refresh else Icons.Rounded.Add,
                     onAction = if (hasFilters) onClearFilters else onOpenCreateMailbox,
-                    modifier = Modifier.navigationBarsPadding(),
+                    modifier = Modifier
+                        .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
+                        .padding(bottom = bottomContentPadding),
                 )
             }
 
@@ -1518,7 +1570,7 @@ private fun SeekMailListPane(
                         start = 16.dp,
                         end = 16.dp,
                         top = 8.dp,
-                        bottom = 32.dp,
+                        bottom = 32.dp + bottomContentPadding,
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
@@ -1581,7 +1633,7 @@ private fun SeekMailListPane(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .navigationBarsPadding()
+                                .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
                                 .padding(vertical = 12.dp),
                             contentAlignment = Alignment.Center,
                         ) {

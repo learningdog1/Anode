@@ -209,6 +209,8 @@ fun BoardsScreen(
     onOpenUserProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: (() -> Unit)? = null,
     bottomContentPadding: Dp = 98.dp,
+    standaloneSearchMode: Boolean = false,
+    onBack: (() -> Unit)? = null,
     previewUiState: BoardsUiState? = null,
     viewModel: BoardsViewModel = viewModel(
         factory = BoardsViewModel.factory(
@@ -271,10 +273,17 @@ fun BoardsScreen(
         viewModel.consumeSnackbar()
     }
 
-    // Intercept system back when viewing an inline board feed or active search mode
-    BackHandler(enabled = uiState.activeInlineBoardSlug != null || uiState.isSearchModeActive) {
+    // Intercept system back when viewing an inline board feed, active search mode, or standalone search
+    BackHandler(
+        enabled = uiState.activeInlineBoardSlug != null || uiState.isSearchModeActive || standaloneSearchMode,
+    ) {
         when {
             uiState.activeInlineBoardSlug != null -> viewModel.closeInlineBoard()
+            standaloneSearchMode -> {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+                onBack?.invoke()
+            }
             uiState.isSearchModeActive -> {
                 focusManager.clearFocus()
                 viewModel.setSearchModeActive(false)
@@ -284,7 +293,7 @@ fun BoardsScreen(
 
     val displayMode = when {
         uiState.activeInlineBoardSlug != null -> BoardsDisplayMode.INLINE_BOARD
-        uiState.isSearchModeActive -> BoardsDisplayMode.SEARCH
+        standaloneSearchMode || uiState.isSearchModeActive -> BoardsDisplayMode.SEARCH
         else -> BoardsDisplayMode.DIRECTORY
     }
     val visibleBoardCount = remember(uiState.categories) {
@@ -331,7 +340,7 @@ fun BoardsScreen(
                     // so focusRequester stays attached without losing keyboard focus.
                     BoardsDirectorySearchHeader(
                         query = uiState.queryInput,
-                        isSearchActive = uiState.isSearchModeActive,
+                        isSearchActive = standaloneSearchMode || uiState.isSearchModeActive,
                         pinnedCount = pinnedBoardCount,
                         totalBoardCount = visibleBoardCount,
                         focusRequester = focusRequester,
@@ -344,7 +353,11 @@ fun BoardsScreen(
                         onCancelSearch = {
                             focusManager.clearFocus()
                             keyboardController?.hide()
-                            viewModel.setSearchModeActive(false)
+                            if (standaloneSearchMode) {
+                                onBack?.invoke()
+                            } else {
+                                viewModel.setSearchModeActive(false)
+                            }
                         },
                         onClearInput = { viewModel.updateQueryInput("") },
                     )

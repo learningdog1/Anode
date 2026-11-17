@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.Wallpapers
 import androidx.compose.ui.unit.dp
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailAuthTelemetry
@@ -79,6 +80,7 @@ import com.nodeseek.app.ui.hub.CheckInBoardUiState
 import com.nodeseek.app.ui.hub.DirectMessageScreen
 import com.nodeseek.app.ui.hub.DirectMessageUiState
 import com.nodeseek.app.ui.hub.HubBookmarkDisplayItem
+import com.nodeseek.app.ui.hub.HubCollectionScreen
 import com.nodeseek.app.ui.hub.InboxScreen
 import com.nodeseek.app.ui.hub.InboxTab
 import com.nodeseek.app.ui.hub.InboxUiState
@@ -138,9 +140,12 @@ private val SHOWCASE_ORDERED_TABS = listOf(
     Category(slug = "review", name = "测评"),
     Category(slug = "info", name = "情报"),
     Category(slug = "trade", name = "交易"),
-    Category(slug = "dev", name = "Dev"),
     Category(slug = "daily", name = "日常"),
-)
+    Category(slug = "dev", name = "Dev"),
+) + Category.DEFAULT_CATEGORIES.filter {
+    !it.isAdminOnly && it.slug.isNotBlank() &&
+        it.slug !in setOf("tech", "review", "info", "trade", "daily", "dev")
+}
 
 private val SHOWCASE_PINNED_TOPICS = listOf(
     TopicSummary(
@@ -265,6 +270,50 @@ private val SHOWCASE_EXPLORE_STATE = ExploreUiState(
     isInitialLoading = false,
     hasNextPage = true,
     session = SHOWCASE_SESSION,
+)
+
+private val SHOWCASE_PULSE_HUB_STATE = PulseHubUiState(
+    session = SHOWCASE_SESSION,
+    settings = SHOWCASE_SETTINGS,
+    unreadInboxCount = 3,
+    isRefreshing = false,
+    checkInStatus = CheckInStatus(
+        hasCheckedInToday = true,
+        todayGain = 12,
+        todayOrder = 18,
+        totalCheckedInUsers = 4820,
+    ),
+    dailyQuota = DailyQuotaProgress(
+        postBonusEarned = 5,
+        maxPostBonus = 5,
+        replyBonusEarned = 3,
+        maxReplyBonus = 5,
+        freeDrumsticksUsed = 2,
+        maxFreeDrumsticks = 5,
+    ),
+    bookmarks = SHOWCASE_TOPICS.take(3).map { summary ->
+        HubBookmarkDisplayItem(
+            topicId = summary.id,
+            summary = summary,
+            hasOfflineSnapshot = summary.id != 883712L,
+            savedAtEpochMillis = 1794798000000L,
+        )
+    },
+    readHistory = listOf(
+        ReadHistoryEntry(
+            topicId = 883905L,
+            title = SHOWCASE_TOPICS[1].title,
+            categoryName = "技术",
+            authorName = "bgp_artisan",
+            lastReadPage = 2,
+            lastReadFloor = 18,
+            categorySlug = "tech",
+        ),
+    ),
+    seekMailConfigured = true,
+    seekMailboxCount = 2,
+    seekMailPrimaryAddress = "ops@seek.li",
+    seekMailUnreadCount = 2,
 )
 
 private val SHOWCASE_OP_MARKDOWN = """
@@ -589,25 +638,20 @@ fun Preview03ExplorePitchAmoled() {
     }
 }
 
-// ── 04–05. Asymmetric Bento Boards & Unified Search ─────────────────────────────────────
+// ── 04–05. Collections & History and Unified Search ─────────────────────────────────────
 
 @Preview(device = PHONE_DEVICE_SPEC, showBackground = true)
 @Composable
-fun Preview04BoardsBentoDirectory() {
+fun Preview04CollectionsAndHistory() {
     PreviewPhoneFrame(
         themeMode = PulseThemeMode.PAPER_LIGHT,
-        bottomDockTab = PulseNavTab.BOARDS,
-        showFab = false,
-        unreadCount = 3,
+        bottomDockTab = null,
     ) {
-        BoardsScreen(
+        HubCollectionScreen(
+            initialTab = 0,
+            onBack = {},
             onOpenTopic = { _, _, _ -> },
-            previewUiState = BoardsUiState(
-                categories = Category.DEFAULT_CATEGORIES,
-                pinnedCategorySlugs = SHOWCASE_SETTINGS.pinnedCategorySlugs,
-                recentSearchQueries = listOf("东京 IIJ", "DMIT TYO", "YABS"),
-                isSignedIn = true,
-            ),
+            previewUiState = SHOWCASE_PULSE_HUB_STATE,
         )
     }
 }
@@ -621,6 +665,8 @@ fun Preview05UnifiedSearch() {
     ) {
         BoardsScreen(
             onOpenTopic = { _, _, _ -> },
+            standaloneSearchMode = true,
+            onBack = {},
             previewUiState = BoardsUiState(
                 categories = Category.DEFAULT_CATEGORIES,
                 pinnedCategorySlugs = SHOWCASE_SETTINGS.pinnedCategorySlugs,
@@ -751,49 +797,7 @@ fun Preview10PulseHub() {
             onOpenCheckInBoard = {},
             onOpenInbox = {},
             onOpenSettings = {},
-            previewUiState = PulseHubUiState(
-                session = SHOWCASE_SESSION,
-                settings = SHOWCASE_SETTINGS,
-                unreadInboxCount = 3,
-                isRefreshing = false,
-                checkInStatus = CheckInStatus(
-                    hasCheckedInToday = true,
-                    todayGain = 12,
-                    todayOrder = 18,
-                    totalCheckedInUsers = 4820,
-                ),
-                dailyQuota = DailyQuotaProgress(
-                    postBonusEarned = 5,
-                    maxPostBonus = 5,
-                    replyBonusEarned = 3,
-                    maxReplyBonus = 5,
-                    freeDrumsticksUsed = 2,
-                    maxFreeDrumsticks = 5,
-                ),
-                bookmarks = SHOWCASE_TOPICS.take(3).map { summary ->
-                    HubBookmarkDisplayItem(
-                        topicId = summary.id,
-                        summary = summary,
-                        hasOfflineSnapshot = summary.id != 883712L,
-                        savedAtEpochMillis = 1794798000000L,
-                    )
-                },
-                readHistory = listOf(
-                    ReadHistoryEntry(
-                        topicId = 883905L,
-                        title = SHOWCASE_TOPICS[1].title,
-                        categoryName = "技术",
-                        authorName = "bgp_artisan",
-                        lastReadPage = 2,
-                        lastReadFloor = 18,
-                        categorySlug = "tech",
-                    ),
-                ),
-                seekMailConfigured = true,
-                seekMailboxCount = 2,
-                seekMailPrimaryAddress = "ops@seek.li",
-                seekMailUnreadCount = 2,
-            ),
+            previewUiState = SHOWCASE_PULSE_HUB_STATE,
             previewRadarUnreadCount = 2,
             previewRadarRules = SHOWCASE_RADAR_RULES,
             previewRadarTrackedTopics = SHOWCASE_RADAR_TRACKED,
@@ -1077,9 +1081,16 @@ fun Preview16PulseRadarRules() {
 @Preview(device = PHONE_DEVICE_SPEC, showBackground = true)
 @Composable
 fun Preview17SeekMailInbox() {
-    PreviewPhoneFrame(themeMode = PulseThemeMode.PAPER_LIGHT) {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.PAPER_LIGHT,
+        bottomDockTab = PulseNavTab.SEEK_MAIL,
+        showFab = false,
+        unreadCount = 3,
+    ) {
         SeekMailScreen(
             onBack = {},
+            showBackButton = false,
+            bottomContentPadding = 96.dp,
             previewUiState = SeekMailUiState(
                 hasConfiguredKey = true,
                 apiKeyMaskedHint = "sk_mail_••••981c",
@@ -1284,5 +1295,143 @@ fun Preview20DesignSystemComponents() {
                 )
             }
         }
+    }
+}
+
+// ── 21–25. Material You Dynamic Color Wallpaper Showcase ────────────────────────────────
+
+private val SHOWCASE_SEEK_MAIL_INBOX_STATE = SeekMailUiState(
+    hasConfiguredKey = true,
+    apiKeyMaskedHint = "sk_mail_••••981c",
+    mailboxes = SHOWCASE_MAILBOXES,
+    selectedMailboxId = null,
+    filterMode = SeekMailFilterMode.ALL,
+    tags = SHOWCASE_MAIL_TAGS,
+    mails = SHOWCASE_MAIL_ITEMS,
+    totalMailCount = 3,
+    hasMoreMails = false,
+    rateLimit = SeekMailRateLimit(limit = 60, remaining = 56, resetEpochSeconds = 0L),
+)
+
+@Preview(
+    device = PHONE_DEVICE_SPEC,
+    showBackground = true,
+    wallpaper = Wallpapers.GREEN_DOMINATED_EXAMPLE,
+)
+@Composable
+fun Preview21DynamicGreenExploreLight() {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.PAPER_LIGHT,
+        dynamicColor = true,
+        bottomDockTab = PulseNavTab.EXPLORE,
+        unreadCount = 3,
+    ) {
+        ExploreScreen(
+            onOpenTopic = { _, _, _ -> },
+            onOpenSearch = {},
+            onOpenBoardsTab = {},
+            previewUiState = SHOWCASE_EXPLORE_STATE,
+        )
+    }
+}
+
+@Preview(
+    device = PHONE_DEVICE_SPEC,
+    showBackground = true,
+    wallpaper = Wallpapers.RED_DOMINATED_EXAMPLE,
+)
+@Composable
+fun Preview22DynamicRedExploreDark() {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.OBSIDIAN_DARK,
+        dynamicColor = true,
+        bottomDockTab = PulseNavTab.EXPLORE,
+        unreadCount = 3,
+    ) {
+        ExploreScreen(
+            onOpenTopic = { _, _, _ -> },
+            onOpenSearch = {},
+            onOpenBoardsTab = {},
+            previewUiState = SHOWCASE_EXPLORE_STATE,
+        )
+    }
+}
+
+@Preview(
+    device = PHONE_DEVICE_SPEC,
+    showBackground = true,
+    wallpaper = Wallpapers.GREEN_DOMINATED_EXAMPLE,
+)
+@Composable
+fun Preview23DynamicGreenPulseHubLight() {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.PAPER_LIGHT,
+        dynamicColor = true,
+        bottomDockTab = PulseNavTab.PULSE_HUB,
+        showFab = false,
+        unreadCount = 3,
+    ) {
+        PulseHubScreen(
+            onOpenTopic = { _, _, _ -> },
+            onOpenUserProfile = { _, _ -> },
+            onOpenCheckInBoard = {},
+            onOpenInbox = {},
+            onOpenSettings = {},
+            previewUiState = SHOWCASE_PULSE_HUB_STATE,
+            previewRadarUnreadCount = 2,
+            previewRadarRules = SHOWCASE_RADAR_RULES,
+            previewRadarTrackedTopics = SHOWCASE_RADAR_TRACKED,
+        )
+    }
+}
+
+@Preview(
+    device = PHONE_DEVICE_SPEC,
+    showBackground = true,
+    wallpaper = Wallpapers.YELLOW_DOMINATED_EXAMPLE,
+)
+@Composable
+fun Preview24DynamicYellowPulseHubDark() {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.OBSIDIAN_DARK,
+        dynamicColor = true,
+        bottomDockTab = PulseNavTab.PULSE_HUB,
+        showFab = false,
+        unreadCount = 3,
+    ) {
+        PulseHubScreen(
+            onOpenTopic = { _, _, _ -> },
+            onOpenUserProfile = { _, _ -> },
+            onOpenCheckInBoard = {},
+            onOpenInbox = {},
+            onOpenSettings = {},
+            previewUiState = SHOWCASE_PULSE_HUB_STATE,
+            previewRadarUnreadCount = 2,
+            previewRadarRules = SHOWCASE_RADAR_RULES,
+            previewRadarTrackedTopics = SHOWCASE_RADAR_TRACKED,
+        )
+    }
+}
+
+@Preview(
+    device = PHONE_DEVICE_SPEC,
+    showBackground = true,
+    wallpaper = Wallpapers.RED_DOMINATED_EXAMPLE,
+)
+@Composable
+fun Preview25DynamicRedSeekMailLight() {
+    PreviewPhoneFrame(
+        themeMode = PulseThemeMode.PAPER_LIGHT,
+        dynamicColor = true,
+        bottomDockTab = PulseNavTab.SEEK_MAIL,
+        showFab = false,
+        unreadCount = 3,
+    ) {
+        SeekMailScreen(
+            onBack = {},
+            showBackButton = false,
+            bottomContentPadding = 96.dp,
+            previewUiState = SHOWCASE_SEEK_MAIL_INBOX_STATE,
+        )
     }
 }

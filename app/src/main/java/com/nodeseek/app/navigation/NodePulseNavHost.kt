@@ -103,6 +103,7 @@ import com.nodeseek.app.ui.composer.TopicComposerScreen
 import com.nodeseek.app.ui.explore.ExploreScreen
 import com.nodeseek.app.ui.hub.CheckInBoardScreen
 import com.nodeseek.app.ui.hub.DirectMessageScreen
+import com.nodeseek.app.ui.hub.HubCollectionScreen
 import com.nodeseek.app.ui.hub.InboxScreen
 import com.nodeseek.app.ui.hub.PulseHubScreen
 import com.nodeseek.app.ui.hub.SettingsScreen
@@ -194,7 +195,7 @@ fun NodePulseRootShell(
 
 /**
  * End-to-end Compose Navigation host connecting the 3-tab Floating Pill Dock shell
- * (`ExploreScreen`, `BoardsScreen`, `PulseHubScreen`) with all child routes and a
+ * (`ExploreScreen`, `SeekMailScreen`, `PulseHubScreen`) with all child routes and a
  * centralized first-party `WebViewSessionSheet`.
  */
 @Composable
@@ -224,7 +225,8 @@ fun NodePulseNavHost(
     var selectedTab by rememberSaveable { mutableStateOf(PulseNavTab.EXPLORE) }
     var fabExpanded by rememberSaveable { mutableStateOf(true) }
     var exploreScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
-    var boardsFocusSearchTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var mailReselectTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var isSeekMailDetailOpen by rememberSaveable { mutableStateOf(false) }
     var pendingExploreCategorySlug by rememberSaveable { mutableStateOf<String?>(null) }
     var lastSelectedCategorySlug by rememberSaveable { mutableStateOf("") }
 
@@ -376,11 +378,18 @@ fun NodePulseNavHost(
         }
     }
 
-    // Clear one-shot focus-search trigger after BoardsScreen consumes it so visiting Boards later shows Bento grid
-    LaunchedEffect(selectedTab, boardsFocusSearchTrigger) {
-        if (selectedTab == PulseNavTab.BOARDS && boardsFocusSearchTrigger > 0) {
-            delay(250)
-            boardsFocusSearchTrigger = 0
+    // Reset mail detail open flag whenever switching away from Seek Mail tab
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != PulseNavTab.SEEK_MAIL) {
+            isSeekMailDetailOpen = false
+        }
+    }
+
+    // Clear one-shot mail reselect trigger after SeekMailScreen consumes it
+    LaunchedEffect(selectedTab, mailReselectTrigger) {
+        if (selectedTab == PulseNavTab.SEEK_MAIL && mailReselectTrigger > 0) {
+            delay(150)
+            mailReselectTrigger = 0
         }
     }
 
@@ -605,9 +614,9 @@ fun NodePulseNavHost(
                 )
             },
         ) {
-            // Root 3-tab container preserving scroll & ViewModel state across Explore / Boards / Pulse Hub
+            // Root 3-tab container preserving scroll & ViewModel state across Explore / Seek Mail / Pulse Hub
             composable<ExploreRoute> {
-                // Placed before tab content so child BackHandlers (e.g. Boards inline search) run first
+                // Placed before tab content so child BackHandlers (e.g. Seek Mail detail) run first
                 BackHandler(enabled = selectedTab != PulseNavTab.EXPLORE) {
                     selectedTab = PulseNavTab.EXPLORE
                     fabExpanded = true
@@ -642,12 +651,11 @@ fun NodePulseNavHost(
                                     ExploreScreen(
                                         onOpenTopic = openTopic,
                                         onOpenSearch = {
-                                            boardsFocusSearchTrigger += 1
-                                            selectedTab = PulseNavTab.BOARDS
+                                            navController.navigate(SearchRoute) {
+                                                launchSingleTop = true
+                                            }
                                         },
-                                        onOpenBoardsTab = {
-                                            selectedTab = PulseNavTab.BOARDS
-                                        },
+                                        onOpenBoardsTab = {},
                                         onOpenAuthorProfile = navigateToUser,
                                         onRequestWebViewAuth = {
                                             openWebViewAuth(SIGN_IN_URL, session == null)
@@ -661,19 +669,19 @@ fun NodePulseNavHost(
                                     )
                                 }
 
-                                PulseNavTab.BOARDS -> {
-                                    BoardsScreen(
-                                        onOpenTopic = openTopic,
-                                        autoFocusSearch = false,
-                                        focusSearchTrigger = boardsFocusSearchTrigger,
-                                        onSelectBoard = { slug ->
-                                            selectBoardAndOpenExplore(slug)
+                                PulseNavTab.SEEK_MAIL -> {
+                                    SeekMailScreen(
+                                        onBack = { selectedTab = PulseNavTab.EXPLORE },
+                                        onOpenSettings = {
+                                            navController.navigate(SettingsRoute) {
+                                                launchSingleTop = true
+                                            }
                                         },
-                                        onOpenUserProfile = navigateToUser,
-                                        onRequestWebViewAuth = {
-                                            openWebViewAuth(SIGN_IN_URL, session == null)
-                                        },
+                                        showBackButton = false,
                                         bottomContentPadding = dockedBottomPadding,
+                                        reselectTrigger = mailReselectTrigger,
+                                        onMailDetailOpenChanged = { isSeekMailDetailOpen = it },
+                                        container = container,
                                     )
                                 }
 
@@ -693,6 +701,16 @@ fun NodePulseNavHost(
                                         },
                                         onOpenRadar = openRadar,
                                         onOpenSeekMail = { openSeekMail(0L, 0L) },
+                                        onOpenBookmarks = {
+                                            navController.navigate(HubCollectionRoute(initialTab = 0)) {
+                                                launchSingleTop = true
+                                            }
+                                        },
+                                        onOpenReadHistory = {
+                                            navController.navigate(HubCollectionRoute(initialTab = 1)) {
+                                                launchSingleTop = true
+                                            }
+                                        },
                                         onOpenSettings = {
                                             navController.navigate(SettingsRoute) {
                                                 launchSingleTop = true
@@ -708,71 +726,80 @@ fun NodePulseNavHost(
                         }
                     }
 
-                    PulseBottomDockOverlay(
-                        selectedTab = selectedTab,
-                        onSelectTab = { targetTab ->
-                            selectedTab = targetTab
-                            if (targetTab == PulseNavTab.EXPLORE) {
-                                fabExpanded = true
-                            }
-                        },
-                        onReselectTab = { reselectedTab ->
-                            when (reselectedTab) {
-                                PulseNavTab.EXPLORE -> {
-                                    exploreScrollToTopTrigger += 1
+                    AnimatedVisibility(
+                        visible = !(selectedTab == PulseNavTab.SEEK_MAIL && isSeekMailDetailOpen),
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically(),
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    ) {
+                        PulseBottomDockOverlay(
+                            selectedTab = selectedTab,
+                            onSelectTab = { targetTab ->
+                                selectedTab = targetTab
+                                if (targetTab == PulseNavTab.EXPLORE) {
                                     fabExpanded = true
                                 }
-                                PulseNavTab.BOARDS -> {
-                                    boardsFocusSearchTrigger += 1
-                                }
-                                PulseNavTab.PULSE_HUB -> {
-                                    appScope.launch {
-                                        container.sessionRepository.refreshSession()
-                                        if (container.sessionRepository.sessionState.value != null) {
-                                            container.checkInRepository.getCheckInBoard(
-                                                page = 1,
-                                                forceRefresh = true,
-                                            )
+                            },
+                            onReselectTab = { reselectedTab ->
+                                when (reselectedTab) {
+                                    PulseNavTab.EXPLORE -> {
+                                        exploreScrollToTopTrigger += 1
+                                        fabExpanded = true
+                                    }
+                                    PulseNavTab.SEEK_MAIL -> {
+                                        mailReselectTrigger += 1
+                                    }
+                                    PulseNavTab.PULSE_HUB -> {
+                                        appScope.launch {
+                                            container.sessionRepository.refreshSession()
+                                            if (container.sessionRepository.sessionState.value != null) {
+                                                container.checkInRepository.getCheckInBoard(
+                                                    page = 1,
+                                                    forceRefresh = true,
+                                                )
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        },
-                        onFabClick = {
-                            val defaultSlug = lastSelectedCategorySlug
-                                .takeIf { it.isNotBlank() && it != "meaningless" && it != "sandbox" }
-                                ?: "daily"
-                            if (session != null) {
-                                navController.navigate(
-                                    ComposerRoute(
-                                        editTopicId = null,
-                                        initialCategorySlug = defaultSlug,
+                            },
+                            onFabClick = {
+                                val defaultSlug = lastSelectedCategorySlug
+                                    .takeIf { it.isNotBlank() && it != "meaningless" && it != "sandbox" }
+                                    ?: "daily"
+                                if (session != null) {
+                                    navController.navigate(
+                                        ComposerRoute(
+                                            editTopicId = null,
+                                            initialCategorySlug = defaultSlug,
+                                        )
                                     )
-                                )
-                            } else {
-                                pendingComposerSlugAfterAuth = defaultSlug
-                                appScope.launch {
-                                    rootSnackbarHostState.showSnackbar("请先登录 NodeSeek 账号后再发布新帖")
+                                } else {
+                                    pendingComposerSlugAfterAuth = defaultSlug
+                                    appScope.launch {
+                                        rootSnackbarHostState.showSnackbar("请先登录 NodeSeek 账号后再发布新帖")
+                                    }
+                                    openWebViewAuth(SIGN_IN_URL, true)
                                 }
-                                openWebViewAuth(SIGN_IN_URL, true)
-                            }
-                        },
-                        showFab = selectedTab == PulseNavTab.EXPLORE || selectedTab == PulseNavTab.BOARDS,
-                        fabExpanded = fabExpanded,
-                        unreadNotificationCount = (if (session != null) unreadCount else 0) + radarUnreadCount,
-                        hasPendingCheckIn = session != null &&
-                            sharedCheckInStatus != null &&
-                            !sharedCheckInStatus!!.hasCheckedInToday,
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                    )
+                            },
+                            showFab = selectedTab == PulseNavTab.EXPLORE,
+                            fabExpanded = fabExpanded,
+                            unreadNotificationCount = (if (session != null) unreadCount else 0) + radarUnreadCount,
+                            hasPendingCheckIn = session != null &&
+                                sharedCheckInStatus != null &&
+                                !sharedCheckInStatus!!.hasCheckedInToday,
+                        )
+                    }
                 }
             }
 
             // Defensive aliases in case any caller navigates to BoardsRoute / PulseHubRoute directly
             composable<BoardsRoute> {
                 LaunchedEffect(Unit) {
-                    selectedTab = PulseNavTab.BOARDS
+                    selectedTab = PulseNavTab.EXPLORE
                     navController.popBackStack(ExploreRoute, inclusive = false)
+                    navController.navigate(SearchRoute) {
+                        launchSingleTop = true
+                    }
                 }
             }
 
@@ -781,6 +808,32 @@ fun NodePulseNavHost(
                     selectedTab = PulseNavTab.PULSE_HUB
                     navController.popBackStack(ExploreRoute, inclusive = false)
                 }
+            }
+
+            // Standalone Unified Search (posts, users & boards)
+            composable<SearchRoute> {
+                BoardsScreen(
+                    onOpenTopic = openTopic,
+                    autoFocusSearch = true,
+                    standaloneSearchMode = true,
+                    onBack = safePopBackStack,
+                    onSelectBoard = selectBoardAndOpenExplore,
+                    onOpenUserProfile = navigateToUser,
+                    onRequestWebViewAuth = {
+                        openWebViewAuth(SIGN_IN_URL, session == null)
+                    },
+                    bottomContentPadding = 24.dp,
+                )
+            }
+
+            // Bookmarks & Read History Collection
+            composable<HubCollectionRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<HubCollectionRoute>()
+                HubCollectionScreen(
+                    initialTab = route.initialTab,
+                    onBack = safePopBackStack,
+                    onOpenTopic = openTopic,
+                )
             }
 
             // Topic Detail Reader

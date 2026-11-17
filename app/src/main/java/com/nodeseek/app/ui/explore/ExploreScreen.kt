@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -40,12 +39,10 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forum
-import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -74,7 +72,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
@@ -127,16 +124,17 @@ private val EXPLORE_SORT_OPTIONS: List<Pair<FeedSort, String>> = listOf(
 
 /**
  * Native Android Feed Screen (`首页`):
- * - Atmospheric glass header (`Anode` architectural brand lockup + search trigger pill + sort selector)
- * - Tactile semantic category pill strip + aligned boards shortcut synchronized 1:1 with `HorizontalPager`
- * - Per-board cached slices in ViewModel + layered editorial feed cards
+ * - Atmospheric glass header (`Anode` brand lockup + compact search icon + minimal sort selector)
+ * - Clean minimalist category text strip synchronized 1:1 with `HorizontalPager` across all boards
+ * - Per-board cached slices in ViewModel + compact outlined feed cards
  */
+@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExploreScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenSearch: () -> Unit,
-    onOpenBoardsTab: () -> Unit,
+    onOpenBoardsTab: () -> Unit = {},
     modifier: Modifier = Modifier,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: (() -> Unit)? = null,
@@ -232,15 +230,31 @@ fun ExploreScreen(
     }
 
     // Notify ViewModel immediately when horizontal swipe commits to a target board tab
+    val currentSelectedSlug by rememberUpdatedState(uiState.selectedCategorySlug)
     LaunchedEffect(pagerState, boardTabs) {
         snapshotFlow { pagerState.targetPage }
             .distinctUntilChanged()
             .collect { targetPage ->
                 val targetTab = boardTabs.getOrNull(targetPage) ?: return@collect
-                if (targetTab.slug != uiState.selectedCategorySlug) {
+                if (targetTab.slug != currentSelectedSlug) {
                     viewModel.selectCategory(targetTab.slug)
                 }
             }
+    }
+
+    val selectAndScrollToCategory: (String) -> Unit = { slug ->
+        val normalized = slug.trim()
+        viewModel.selectCategory(normalized)
+        val targetIndex = boardTabs.indexOfFirst { it.slug == normalized }
+        if (targetIndex >= 0 && targetIndex != pagerState.currentPage) {
+            coroutineScope.launch {
+                if (abs(targetIndex - pagerState.currentPage) <= 1) {
+                    pagerState.animateScrollToPage(targetIndex)
+                } else {
+                    pagerState.scrollToPage(targetIndex)
+                }
+            }
+        }
     }
 
     LaunchedEffect(uiState.snackbarMessage) {
@@ -290,23 +304,44 @@ fun ExploreScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 7.dp),
+                        .padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     ExploreBrandTitle()
 
-                    ExploreSearchTriggerPill(
-                        onClick = onOpenSearch,
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    Box(
                         modifier = Modifier
-                            .weight(1f)
-                            .widthIn(min = 64.dp),
-                    )
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .pulseBouncyClickable(
+                                pressedScale = NodePulseMotion.chipPressScale,
+                                role = Role.Button,
+                                onClickLabel = "搜索主题与成员",
+                                showRipple = false,
+                                onClick = onOpenSearch,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = "搜索主题",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     Box {
-                        ExploreSortPill(
+                        ExploreSortTrigger(
                             label = currentSortLabel,
-                            accentColor = currentSortAccent,
+                            textColor = if (sortMenuExpanded || uiState.selectedSort != FeedSort.LATEST_REPLY) {
+                                currentSortAccent
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
                             expanded = sortMenuExpanded,
                             onClick = { sortMenuExpanded = true },
                         )
@@ -345,55 +380,35 @@ fun ExploreScreen(
                     }
                 }
 
-                Row(
+                LazyRow(
+                    state = categoryRowState,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 1.dp, bottom = 9.dp),
+                        .padding(top = 1.dp, bottom = 7.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    LazyRow(
-                        state = categoryRowState,
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(start = 14.dp, end = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        itemsIndexed(
-                            items = boardTabs,
-                            key = { _, board -> board.slug.ifBlank { "__all__" } },
-                        ) { index, board ->
-                            val isSelected = index == visualTabIndex
-                            ExploreCategoryPill(
-                                board = board,
-                                selected = isSelected,
-                                onClick = {
-                                    viewModel.selectCategory(board.slug)
-                                    coroutineScope.launch {
-                                        if (abs(index - pagerState.currentPage) <= 1) {
-                                            pagerState.animateScrollToPage(index)
-                                        } else {
-                                            pagerState.scrollToPage(index)
-                                        }
+                    itemsIndexed(
+                        items = boardTabs,
+                        key = { _, board -> board.slug.ifBlank { "__all__" } },
+                    ) { index, board ->
+                        val isSelected = index == visualTabIndex
+                        ExploreCategoryTab(
+                            board = board,
+                            selected = isSelected,
+                            onClick = {
+                                viewModel.selectCategory(board.slug)
+                                coroutineScope.launch {
+                                    if (abs(index - pagerState.currentPage) <= 1) {
+                                        pagerState.animateScrollToPage(index)
+                                    } else {
+                                        pagerState.scrollToPage(index)
                                     }
-                                },
-                            )
-                        }
+                                }
+                            },
+                        )
                     }
-
-                    Box(
-                        modifier = Modifier
-                            .width(1.dp)
-                            .height(16.dp)
-                            .background(ext.cardBorder.copy(alpha = 0.85f)),
-                    )
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    ExploreBoardsButton(
-                        onClick = onOpenBoardsTab,
-                    )
-
-                    Spacer(modifier = Modifier.width(14.dp))
                 }
             }
         },
@@ -421,7 +436,7 @@ fun ExploreScreen(
                 onScrollDirectionChanged = onScrollDirectionChanged,
                 onRefresh = { viewModel.refresh(board.slug) },
                 onLoadNextPage = { viewModel.loadNextPage(board.slug) },
-                onSelectCategory = viewModel::selectCategory,
+                onSelectCategory = selectAndScrollToCategory,
                 onBookmarkToggle = viewModel::toggleBookmark,
                 onOpenTopic = onOpenTopic,
                 onOpenAuthorProfile = onOpenAuthorProfile,
@@ -536,96 +551,26 @@ private fun ExploreAnodeBrandMark(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ExploreSearchTriggerPill(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val containerColor = if (isDark) {
-        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f)
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.048f)
-    }
-
-    Row(
-        modifier = modifier
-            .height(36.dp)
-            .pulseBouncyClickable(
-                pressedScale = NodePulseMotion.chipPressScale,
-                role = Role.Button,
-                onClickLabel = "搜索主题与成员",
-                showRipple = false,
-                onClick = onClick,
-            )
-            .clip(CircleShape)
-            .background(containerColor)
-            .border(
-                width = 0.8.dp,
-                color = ext.cardBorder.copy(alpha = if (isDark) 0.78f else 0.65f),
-                shape = CircleShape,
-            )
-            .padding(horizontal = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Search,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.84f),
-            modifier = Modifier.size(15.dp),
-        )
-        Text(
-            text = "搜索主题",
-            style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.5.sp),
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun ExploreSortPill(
+private fun ExploreSortTrigger(
     label: String,
-    accentColor: Color,
+    textColor: Color,
     expanded: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
     val interactionSource = remember { MutableInteractionSource() }
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
         animationSpec = NodePulseMotion.spatialFloatSpring(),
         label = "sortMenuChevronRotation",
     )
-    val containerColor = when {
-        expanded -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.55f else 0.72f)
-        isDark -> ext.cardSurfaceElevated.copy(alpha = 0.90f)
-        else -> ext.cardSurface.copy(alpha = 0.94f)
-    }
 
     Row(
         modifier = modifier
-            .height(36.dp)
+            .height(32.dp)
             .pulsePressScale(
                 interactionSource = interactionSource,
                 pressedScale = NodePulseMotion.chipPressScale,
-            )
-            .clip(CircleShape)
-            .background(containerColor)
-            .border(
-                width = 0.8.dp,
-                color = if (expanded) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-                } else {
-                    ext.cardBorder.copy(alpha = if (isDark) 0.90f else 0.95f)
-                },
-                shape = CircleShape,
             )
             .clickable(
                 interactionSource = interactionSource,
@@ -634,84 +579,40 @@ private fun ExploreSortPill(
                 onClickLabel = "切换信息流排序",
                 onClick = onClick,
             )
-            .padding(start = 10.dp, end = 7.dp),
+            .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Icon(
-            imageVector = Icons.Rounded.SwapVert,
-            contentDescription = null,
-            tint = accentColor,
-            modifier = Modifier.size(14.dp),
-        )
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.5.sp),
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelLarge.copy(
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+            ),
+            color = textColor,
             maxLines = 1,
             softWrap = false,
         )
         Icon(
             imageVector = Icons.Rounded.ExpandMore,
             contentDescription = "切换排序",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = textColor,
             modifier = Modifier
-                .size(15.dp)
+                .size(16.dp)
                 .graphicsLayer { rotationZ = chevronRotation },
         )
     }
 }
 
 @Composable
-private fun ExploreCategoryPill(
+private fun ExploreCategoryTab(
     board: Category,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val spec = NodePulseThemeTokens.categorySpec(board.slug)
-    val isAllTab = board.slug.isBlank()
-
-    val selectedFillBrush: Brush = if (isAllTab) {
-        Brush.horizontalGradient(
-            colors = listOf(
-                MaterialTheme.colorScheme.primaryContainer,
-                blendColor(
-                    source = MaterialTheme.colorScheme.primaryContainer,
-                    target = MaterialTheme.colorScheme.secondaryContainer,
-                    fraction = 0.35f,
-                ),
-            ),
-        )
-    } else {
-        spec.softTonalBrush
-    }
-    val unselectedFillBrush: Brush = SolidColor(
-        MaterialTheme.colorScheme.onSurface.copy(
-            alpha = if (isDark) 0.06f else 0.045f,
-        ),
-    )
-    val selectedBorderColor = if (isAllTab) {
-        MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.45f else 0.28f)
-    } else {
-        spec.spineColor.copy(alpha = if (isDark) 0.50f else 0.34f)
-    }
-    val selectedContentColor = if (isAllTab) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        spec.contentColor
-    }
-    val dotColor = if (isAllTab) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        spec.spineColor
-    }
-
-    Row(
+    Box(
         modifier = modifier
-            .height(32.dp)
             .semantics { this.selected = selected }
             .pulseBouncyClickable(
                 pressedScale = NodePulseMotion.chipPressScale,
@@ -719,87 +620,22 @@ private fun ExploreCategoryPill(
                 showRipple = false,
                 onClick = onClick,
             )
-            .clip(CircleShape)
-            .background(if (selected) selectedFillBrush else unselectedFillBrush)
-            .then(
-                if (selected) {
-                    Modifier.border(
-                        width = 0.8.dp,
-                        color = selectedBorderColor,
-                        shape = CircleShape,
-                    )
-                } else {
-                    Modifier
-                },
-            )
-            .padding(horizontal = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        if (selected) {
-            Icon(
-                imageVector = spec.icon,
-                contentDescription = null,
-                tint = selectedContentColor,
-                modifier = Modifier.size(13.dp),
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(5.5.dp)
-                    .clip(CircleShape)
-                    .background(dotColor.copy(alpha = 0.80f)),
-            )
-        }
-        Text(
-            text = board.name,
-            style = MaterialTheme.typography.labelLarge.copy(fontSize = 13.sp),
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) selectedContentColor else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            softWrap = false,
-        )
-    }
-}
-
-@Composable
-private fun ExploreBoardsButton(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-
-    Box(
-        modifier = modifier
-            .size(32.dp)
-            .pulseBouncyClickable(
-                pressedScale = NodePulseMotion.chipPressScale,
-                role = Role.Button,
-                onClickLabel = "全部版块",
-                showRipple = false,
-                onClick = onClick,
-            )
-            .clip(CircleShape)
-            .background(
-                if (isDark) {
-                    ext.cardSurfaceElevated.copy(alpha = 0.85f)
-                } else {
-                    ext.cardSurface.copy(alpha = 0.90f)
-                },
-            )
-            .border(
-                width = 0.8.dp,
-                color = ext.cardBorder.copy(alpha = if (isDark) 0.85f else 0.90f),
-                shape = CircleShape,
-            ),
+            .padding(vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = Icons.Rounded.GridView,
-            contentDescription = "全部版块",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(15.dp),
+        Text(
+            text = board.name,
+            style = MaterialTheme.typography.labelLarge.copy(
+                fontSize = if (selected) 14.5.sp else 14.sp,
+                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+            ),
+            color = if (selected) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
@@ -876,8 +712,8 @@ private fun ExploreBoardFeedPage(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
-                top = 6.dp,
-                bottom = bottomContentPadding + 14.dp,
+                top = 4.dp,
+                bottom = bottomContentPadding + 12.dp,
             ),
         ) {
             // Compact Collapsible Pinned Ticker (Page 1)
@@ -893,7 +729,7 @@ private fun ExploreBoardFeedPage(
                             )
                         }
                     }
-                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 3.dp)) {
                         CollapsiblePinnedTicker(
                             pinnedTopics = tickerItems,
                             onTopicClick = { pinnedId ->

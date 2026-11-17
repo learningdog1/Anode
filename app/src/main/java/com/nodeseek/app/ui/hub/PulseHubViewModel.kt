@@ -10,21 +10,17 @@ import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.CheckInStatus
 import com.nodeseek.app.domain.model.DailyQuotaProgress
+import com.nodeseek.app.domain.model.DirectMessageSummary
+import com.nodeseek.app.domain.model.NotificationItem
 import com.nodeseek.app.domain.model.ReadHistoryEntry
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.repository.SignInStepResult
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -94,6 +90,8 @@ data class PulseHubUiState(
     val seekMailHasMoreUnread: Boolean = false,
     val seekMailLoading: Boolean = false,
     val seekMailError: String? = null,
+    val unreadNotificationCount: Int = 0,
+    val unreadDirectMessageCount: Int = 0,
 )
 
 class PulseHubViewModel(
@@ -105,17 +103,31 @@ class PulseHubViewModel(
     private val _events = Channel<String>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private val inboxDataFlow = combine(
+        container.inboxRepository.unreadTotalCount,
+        container.inboxRepository.replyNotifications,
+        container.inboxRepository.mentionNotifications,
+        container.inboxRepository.messageThreads,
+    ) { unreadTotal, replies, mentions, threads ->
+        InboxHubData(
+            unreadTotal = unreadTotal,
+            replies = replies,
+            mentions = mentions,
+            threads = threads,
+        )
+    }
+
     private val baseDataFlow = combine(
         container.sessionRepository.sessionState,
         container.settingsRepository.settings,
-        container.inboxRepository.unreadTotalCount,
+        inboxDataFlow,
         container.bookmarkAndHistoryRepository.observeLocalBookmarks(),
         container.bookmarkAndHistoryRepository.observeReadHistory(),
-    ) { session, settings, unreadCount, localBookmarks, history ->
+    ) { session, settings, inboxData, localBookmarks, history ->
         BaseHubData(
             session = session,
             settings = settings,
-            unreadCount = unreadCount,
+            inboxData = inboxData,
             localBookmarks = localBookmarks,
             history = history,
         )
@@ -137,14 +149,31 @@ class PulseHubViewModel(
         } else {
             0
         }
+        val isSignedIn = base.session != null
+        val unreadTotal = if (isSignedIn) base.inboxData.unreadTotal else 0
+        val dmUnread = if (isSignedIn) {
+            base.inboxData.threads.sumOf { if (it.isRead) 0 else it.unreadCount.coerceAtLeast(1) }
+        } else {
+            0
+        }
+        val loadedNotifUnread = if (isSignedIn) {
+            base.inboxData.replies.count { !it.isRead } + base.inboxData.mentions.count { !it.isRead }
+        } else {
+            0
+        }
+        val notifUnread = if (isSignedIn) {
+            maxOf(loadedNotifUnread, (unreadTotal - dmUnread).coerceAtLeast(0))
+        } else {
+            0
+        }
         PulseHubUiState(
             session = base.session,
             settings = base.settings,
-            unreadInboxCount = if (base.session != null) base.unreadCount else 0,
+            unreadInboxCount = unreadTotal,
             selectedTab = transient.selectedTab,
             isRefreshing = transient.isRefreshing,
             isLoadingCheckInStatus = transient.isLoadingCheckInStatus,
-            checkInStatus = if (base.session != null) sharedCheckInStatus else null,
+            checkInStatus = if (isSignedIn) sharedCheckInStatus else null,
             dailyQuota = transient.dailyQuota,
             isCheckingIn = transient.isCheckingIn,
             bookmarks = mergedBookmarks,
@@ -159,6 +188,8 @@ class PulseHubViewModel(
             seekMailHasMoreUnread = seekMailConfigured && transient.seekMailHasMoreUnread,
             seekMailLoading = seekMailConfigured && transient.seekMailLoading,
             seekMailError = if (seekMailConfigured) transient.seekMailError else null,
+            unreadNotificationCount = notifUnread,
+            unreadDirectMessageCount = dmUnread,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -169,9 +200,6 @@ class PulseHubViewModel(
     private var lastObservedUid: Long? = null
     private var lastTelemetryRefreshedAtMs: Long = 0L
     private var lastTelemetryBeijingDate: LocalDate? = null
-    private var lastObservedSeekMailKey: String = ""
-    private var lastSeekMailRefreshedAtMs: Long = 0L
-    private var seekMailRefreshJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -212,63 +240,10 @@ class PulseHubViewModel(
                 }
             }
         }
-
-        viewModelScope.launch {
-            container.settingsRepository.settings
-                .map { it.seekMailApiKey.trim() }
-                .distinctUntilChanged()
-                .collect { apiKey ->
-                    if (apiKey.isEmpty()) {
-                        seekMailRefreshJob?.cancel()
-                        lastObservedSeekMailKey = ""
-                        lastSeekMailRefreshedAtMs = 0L
-                        transientState.update {
-                            it.copy(
-                                seekMailboxCount = 0,
-                                seekMailPrimaryAddress = "",
-                                seekMailUnreadIds = emptySet(),
-                                seekMailHasMoreUnread = false,
-                                seekMailLoading = false,
-                                seekMailError = null,
-                            )
-                        }
-                    } else {
-                        if (lastObservedSeekMailKey != apiKey) {
-                            seekMailRefreshJob?.cancel()
-                            lastObservedSeekMailKey = apiKey
-                            lastSeekMailRefreshedAtMs = 0L
-                            transientState.update {
-                                it.copy(
-                                    seekMailboxCount = 0,
-                                    seekMailPrimaryAddress = "",
-                                    seekMailUnreadIds = emptySet(),
-                                    seekMailHasMoreUnread = false,
-                                    seekMailError = null,
-                                )
-                            }
-                        }
-                        launchSeekMailRefresh(
-                            expectedKey = apiKey,
-                            forceRefresh = false,
-                        )
-                    }
-                }
-        }
     }
 
     fun onHubVisible() {
         val now = System.currentTimeMillis()
-        val seekMailKey = container.settingsRepository.settings.value.seekMailApiKey.trim()
-        if (seekMailKey.isNotEmpty() &&
-            !transientState.value.seekMailLoading &&
-            (lastSeekMailRefreshedAtMs == 0L || (now - lastSeekMailRefreshedAtMs) >= HUB_VISIBLE_REFRESH_THROTTLE_MS)
-        ) {
-            launchSeekMailRefresh(
-                expectedKey = seekMailKey,
-                forceRefresh = false,
-            )
-        }
-
         val session = container.sessionRepository.sessionState.value ?: return
         if (session.uid <= 0L) return
 
@@ -303,18 +278,6 @@ class PulseHubViewModel(
     fun refreshAll() {
         viewModelScope.launch {
             transientState.update { it.copy(isRefreshing = true) }
-            val seekMailKey = container.settingsRepository.settings.value.seekMailApiKey.trim()
-            val seekMailJob = if (seekMailKey.isNotEmpty()) {
-                seekMailRefreshJob?.cancel()
-                viewModelScope.launch {
-                    loadSeekMailSummary(
-                        expectedKey = seekMailKey,
-                        forceRefresh = true,
-                    )
-                }.also { seekMailRefreshJob = it }
-            } else {
-                null
-            }
             container.sessionRepository.refreshSession()
             if (container.sessionRepository.sessionState.value != null) {
                 loadSignedInTelemetry(
@@ -322,80 +285,7 @@ class PulseHubViewModel(
                     forceCheckInRefresh = true,
                 )
             }
-            seekMailJob?.join()
             transientState.update { it.copy(isRefreshing = false) }
-        }
-    }
-
-    private fun launchSeekMailRefresh(
-        expectedKey: String,
-        forceRefresh: Boolean,
-    ) {
-        if (expectedKey.isEmpty()) return
-        if (!forceRefresh && seekMailRefreshJob?.isActive == true && lastObservedSeekMailKey == expectedKey) {
-            return
-        }
-        seekMailRefreshJob?.cancel()
-        seekMailRefreshJob = viewModelScope.launch {
-            loadSeekMailSummary(
-                expectedKey = expectedKey,
-                forceRefresh = forceRefresh,
-            )
-        }
-    }
-
-    private suspend fun loadSeekMailSummary(
-        expectedKey: String,
-        forceRefresh: Boolean,
-    ) {
-        if (expectedKey.isEmpty()) return
-        lastSeekMailRefreshedAtMs = System.currentTimeMillis()
-        transientState.update { it.copy(seekMailLoading = true) }
-        try {
-            coroutineScope {
-                val mailboxesDeferred = async {
-                    container.seekMailRepository.getMailboxes(forceRefresh = forceRefresh)
-                }
-                val unreadDeferred = async {
-                    container.seekMailRepository.getUnreadMails(limit = 20)
-                }
-                val mailboxesResult = mailboxesDeferred.await()
-                val unreadResult = unreadDeferred.await()
-
-                val activeKey = container.settingsRepository.settings.value.seekMailApiKey.trim()
-                if (activeKey != expectedKey) return@coroutineScope
-
-                val mailboxes = mailboxesResult.getOrNull()
-                val unreadPage = unreadResult.getOrNull()
-                val primaryAddress = mailboxes
-                    ?.let { list -> list.firstOrNull { it.isPinned } ?: list.firstOrNull() }
-                    ?.address
-                    .orEmpty()
-                val firstError = mailboxesResult.exceptionOrNull() ?: unreadResult.exceptionOrNull()
-
-                transientState.update { state ->
-                    state.copy(
-                        seekMailboxCount = mailboxes?.size ?: state.seekMailboxCount,
-                        seekMailPrimaryAddress = if (mailboxes != null) primaryAddress else state.seekMailPrimaryAddress,
-                        seekMailUnreadIds = unreadPage?.items?.filterNot { it.isRead }?.map { it.id }?.toSet()
-                            ?: state.seekMailUnreadIds,
-                        seekMailHasMoreUnread = unreadPage?.hasMore ?: state.seekMailHasMoreUnread,
-                        seekMailLoading = false,
-                        seekMailError = if (mailboxes == null && unreadPage == null) {
-                            firstError?.message?.takeIf { it.isNotBlank() } ?: "Seek 邮箱连接暂不可用"
-                        } else {
-                            null
-                        },
-                    )
-                }
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } finally {
-            val activeKey = container.settingsRepository.settings.value.seekMailApiKey.trim()
-            if (activeKey == expectedKey) {
-                transientState.update { it.copy(seekMailLoading = false) }
-            }
         }
     }
 
@@ -720,10 +610,17 @@ class PulseHubViewModel(
         return byId.values.toList()
     }
 
+    private data class InboxHubData(
+        val unreadTotal: Int,
+        val replies: List<NotificationItem>,
+        val mentions: List<NotificationItem>,
+        val threads: List<DirectMessageSummary>,
+    )
+
     private data class BaseHubData(
         val session: AccountSession?,
         val settings: AppSettings,
-        val unreadCount: Int,
+        val inboxData: InboxHubData,
         val localBookmarks: List<BookmarkedTopic>,
         val history: List<ReadHistoryEntry>,
     )

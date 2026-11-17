@@ -38,13 +38,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Mail
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material3.Icon
@@ -102,10 +102,10 @@ enum class PulseNavTab(
         selectedIcon = Icons.Rounded.Home,
         unselectedIcon = Icons.Outlined.Home,
     ),
-    BOARDS(
-        label = "版块",
-        selectedIcon = Icons.Rounded.GridView,
-        unselectedIcon = Icons.Outlined.GridView,
+    SEEK_MAIL(
+        label = "邮箱",
+        selectedIcon = Icons.Rounded.Mail,
+        unselectedIcon = Icons.Outlined.Mail,
     ),
     PULSE_HUB(
         label = "我的",
@@ -115,7 +115,7 @@ enum class PulseNavTab(
 }
 
 /**
- * Edge-to-edge Floating Glass Pill Dock (`首页` / `版块` / `我的`).
+ * Edge-to-edge Floating Glass Pill Dock (`首页` / `邮箱` / `我的`).
  * Features a translucent beveled glass capsule, spring-driven gradient pill indicator,
  * subtle icon bounce, and crisp unread / check-in telemetry badges.
  */
@@ -662,7 +662,7 @@ fun CollapsiblePinnedTicker(
     )
     val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(13.dp)
 
     val pinBadgeBrush = Brush.horizontalGradient(
         colors = listOf(
@@ -676,9 +676,10 @@ fun CollapsiblePinnedTicker(
             .fillMaxWidth()
             .pulseCard(
                 shape = shape,
-                containerColor = ext.cardSurface,
-                elevation = PulseElevation.Subtle,
-                accentColor = MaterialTheme.colorScheme.primary,
+                containerColor = Color.Transparent,
+                borderColor = ext.cardBorder,
+                elevation = PulseElevation.None,
+                accentColor = null,
             ),
     ) {
         Row(
@@ -694,7 +695,7 @@ fun CollapsiblePinnedTicker(
                         }
                     },
                 )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 11.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {

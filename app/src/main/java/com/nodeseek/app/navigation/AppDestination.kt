@@ -59,3 +59,11 @@ data class SeekMailRoute(
     val initialMailboxId: Long = 0L,
     val initialMailId: Long = 0L,
 ) : AppDestination
+
+@Serializable
+data object SearchRoute : AppDestination
+
+@Serializable
+data class HubCollectionRoute(
+    val initialTab: Int = 0,
+) : AppDestination
