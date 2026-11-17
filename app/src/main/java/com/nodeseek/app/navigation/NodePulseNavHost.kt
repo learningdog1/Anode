@@ -48,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -62,10 +63,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -110,6 +113,7 @@ import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseThemeMode
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.topic.TopicDetailScreen
+import com.nodeseek.app.ui.update.AppUpdateDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -199,6 +203,7 @@ fun NodePulseNavHost(
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val appScope = rememberCoroutineScope()
     val rootSnackbarHostState = remember { SnackbarHostState() }
@@ -209,6 +214,7 @@ fun NodePulseNavHost(
     val unreadCount by container.inboxRepository.unreadTotalCount.collectAsStateWithLifecycle()
     val radarUnreadCount by container.radarRepository.unreadAlertCountFlow.collectAsStateWithLifecycle(initialValue = 0)
     val sharedCheckInStatus by container.checkInRepository.checkInStatus.collectAsStateWithLifecycle()
+    val updateState by container.appUpdateManager.state.collectAsStateWithLifecycle()
 
     // Top-level 3-tab shell state
     var selectedTab by rememberSaveable { mutableStateOf(PulseNavTab.EXPLORE) }
@@ -251,6 +257,25 @@ fun NodePulseNavHost(
             selectedTab != PulseNavTab.EXPLORE
         ) {
             container.sessionRepository.refreshSession()
+        }
+    }
+
+    // Cold-start GitHub Release update check (respects autoCheckUpdates & cooldown)
+    LaunchedEffect(container) {
+        delay(2_000L)
+        container.appUpdateManager.checkForUpdatesOnLaunch()
+    }
+
+    // Resume APK installation automatically once the user grants "Install unknown apps"
+    DisposableEffect(lifecycleOwner, container) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                container.appUpdateManager.onAppResumed()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -1034,6 +1059,45 @@ fun NodePulseNavHost(
                                     )
                                 )
                             }
+                        }
+                    }
+                },
+            )
+        }
+
+        // In-app GitHub Release update prompt dialog
+        if (activeWebViewRequest == null &&
+            updateState.showUpdatePrompt &&
+            updateState.latestRelease != null
+        ) {
+            AppUpdateDialog(
+                state = updateState,
+                onDismiss = container.appUpdateManager::dismissUpdatePrompt,
+                onIgnoreVersion = container.appUpdateManager::ignoreRelease,
+                onStartDownload = container.appUpdateManager::startDownloadAndInstall,
+                onCancelDownload = container.appUpdateManager::cancelDownload,
+                onInstallReadyApk = {
+                    val launched = container.appUpdateManager.installReadyApk()
+                    if (!launched) {
+                        appScope.launch {
+                            rootSnackbarHostState.showSnackbar("请先确认「安装未知应用」权限后重试")
+                        }
+                    }
+                },
+                onOpenUnknownSourcesSettings = {
+                    val opened = container.appUpdateManager.openUnknownSourcesSettings()
+                    if (!opened) {
+                        appScope.launch {
+                            rootSnackbarHostState.showSnackbar("无法打开系统安装权限设置，请在系统设置中手动授权")
+                        }
+                    }
+                },
+                onOpenBrowserUrl = { url ->
+                    runCatching {
+                        uriHandler.openUri(url)
+                    }.onFailure {
+                        appScope.launch {
+                            rootSnackbarHostState.showSnackbar("无法打开浏览器，请访问 $url")
                         }
                     }
                 },

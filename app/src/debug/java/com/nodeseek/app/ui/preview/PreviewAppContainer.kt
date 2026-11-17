@@ -44,6 +44,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.mail.SeekMailAttachment
@@ -97,6 +98,9 @@ import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.SignInStepResult
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.update.AppUpdateManager
+import com.nodeseek.app.domain.update.AppUpdateState
+import com.nodeseek.app.domain.update.UpdateCheckResult
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import com.nodeseek.app.ui.components.PulseBottomDockOverlay
 import com.nodeseek.app.ui.components.PulseNavTab
@@ -293,6 +297,9 @@ internal class PreviewAppContainer(
         override suspend fun setPreferRssFallback(preferRss: Boolean) = Unit
         override suspend fun setNodeImageApiKey(apiKey: String) = Unit
         override suspend fun setSeekMailApiKey(apiKey: String) = Unit
+        override suspend fun setAutoCheckUpdates(enabled: Boolean) = Unit
+        override suspend fun setIncludePrereleaseUpdates(enabled: Boolean) = Unit
+        override suspend fun setIgnoredUpdateTag(tag: String) = Unit
         override suspend fun addRecentSearchQuery(query: String) = Unit
         override suspend fun removeRecentSearchQuery(query: String) = Unit
         override suspend fun clearRecentSearchQueries() = Unit
@@ -413,6 +420,26 @@ internal class PreviewAppContainer(
 
     override val notificationDispatcher: PulseNotificationDispatcher =
         PreviewNotificationDispatcher(context)
+
+    override val appUpdateManager: AppUpdateManager = object : AppUpdateManager {
+        override val state: StateFlow<AppUpdateState> = MutableStateFlow(
+            AppUpdateState(
+                currentVersionName = BuildConfig.VERSION_NAME,
+                currentVersionCode = BuildConfig.VERSION_CODE,
+            ),
+        ).asStateFlow()
+
+        override fun checkForUpdatesOnLaunch() = Unit
+        override suspend fun checkForUpdates(manual: Boolean) = UpdateCheckResult.UpToDate(BuildConfig.VERSION_NAME)
+        override fun openUpdateDialog() = Unit
+        override fun dismissUpdatePrompt() = Unit
+        override fun ignoreRelease(tagName: String) = Unit
+        override fun startDownloadAndInstall() = Unit
+        override fun cancelDownload() = Unit
+        override fun installReadyApk(): Boolean = false
+        override fun openUnknownSourcesSettings(): Boolean = false
+        override fun onAppResumed() = Unit
+    }
 }
 
 @Composable

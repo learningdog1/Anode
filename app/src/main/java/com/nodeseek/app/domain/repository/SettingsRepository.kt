@@ -19,6 +19,9 @@ interface SettingsRepository {
     suspend fun setPreferRssFallback(preferRss: Boolean)
     suspend fun setNodeImageApiKey(apiKey: String)
     suspend fun setSeekMailApiKey(apiKey: String)
+    suspend fun setAutoCheckUpdates(enabled: Boolean)
+    suspend fun setIncludePrereleaseUpdates(enabled: Boolean)
+    suspend fun setIgnoredUpdateTag(tag: String)
 
     suspend fun addRecentSearchQuery(query: String)
     suspend fun removeRecentSearchQuery(query: String)

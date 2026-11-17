@@ -13,6 +13,7 @@ import com.nodeseek.app.domain.repository.InboxRepository
 import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 
 interface AppContainer {
@@ -29,6 +30,7 @@ interface AppContainer {
     val radarRepository: RadarRepository
     val radarMonitorController: RadarMonitorController
     val notificationDispatcher: PulseNotificationDispatcher
+    val appUpdateManager: AppUpdateManager
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

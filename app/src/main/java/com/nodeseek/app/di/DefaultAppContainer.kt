@@ -1,6 +1,8 @@
 package com.nodeseek.app.di
 
 import android.content.Context
+import android.os.Build
+import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.data.local.DraftRepositoryImpl
 import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.local.NodePulseDatabase
@@ -25,6 +27,9 @@ import com.nodeseek.app.data.repository.NodeImageHostRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.UserRepositoryImpl
+import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
+import com.nodeseek.app.data.update.AppUpdateManagerImpl
+import com.nodeseek.app.data.update.GitHubReleaseClient
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
@@ -37,6 +42,7 @@ import com.nodeseek.app.domain.repository.InboxRepository
 import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -254,6 +260,26 @@ class DefaultAppContainer(
             radarRepository = radarRepositoryImpl,
             notificationDispatcher = notificationDispatcher,
             watermarkStore = radarPreferencesStore,
+        )
+    }
+
+    val gitHubReleaseClient: GitHubReleaseClient by lazy {
+        GitHubReleaseClient(
+            baseHttpClient = apiHttpClient,
+            owner = BuildConfig.GITHUB_OWNER,
+            repo = BuildConfig.GITHUB_REPO,
+            supportedAbis = Build.SUPPORTED_ABIS.toList(),
+        )
+    }
+
+    override val appUpdateManager: AppUpdateManager by lazy {
+        AppUpdateManagerImpl(
+            releaseClient = gitHubReleaseClient,
+            settingsRepository = settingsRepository,
+            installer = AndroidApkUpdateInstaller(appContext),
+            cacheFile = File(appContext.filesDir, AppUpdateManagerImpl.CACHE_FILE_NAME),
+            apkDirectory = File(appContext.cacheDir, AppUpdateManagerImpl.APK_CACHE_DIR_NAME),
+            externalScope = applicationScope,
         )
     }
 }

@@ -8,8 +8,11 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val appVersionName = "1.1.0"
+val appVersionCode = 2
+
 base {
-    archivesName.set("Anode-v1.0.0")
+    archivesName.set("Anode-v$appVersionName")
 }
 
 val keystoreProperties = Properties().apply {
@@ -39,8 +42,11 @@ android {
         applicationId = "com.nodeseek.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
+
+        buildConfigField("String", "GITHUB_OWNER", "\"learningdog1\"")
+        buildConfigField("String", "GITHUB_REPO", "\"Anode\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

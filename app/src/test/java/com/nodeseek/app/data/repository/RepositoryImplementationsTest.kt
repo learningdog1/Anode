@@ -703,6 +703,15 @@ internal class FakeSettingsRepository : SettingsRepository {
     override suspend fun setSeekMailApiKey(apiKey: String) {
         _settings.value = _settings.value.copy(seekMailApiKey = apiKey.trim())
     }
+    override suspend fun setAutoCheckUpdates(enabled: Boolean) {
+        _settings.value = _settings.value.copy(autoCheckUpdates = enabled)
+    }
+    override suspend fun setIncludePrereleaseUpdates(enabled: Boolean) {
+        _settings.value = _settings.value.copy(includePrereleaseUpdates = enabled)
+    }
+    override suspend fun setIgnoredUpdateTag(tag: String) {
+        _settings.value = _settings.value.copy(ignoredUpdateTag = tag.trim())
+    }
     override suspend fun addRecentSearchQuery(query: String) = Unit
     override suspend fun removeRecentSearchQuery(query: String) = Unit
     override suspend fun clearRecentSearchQueries() = Unit

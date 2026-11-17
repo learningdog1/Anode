@@ -21,6 +21,9 @@ data class AppSettings(
     val preferRssFallback: Boolean = false,
     val nodeImageApiKey: String = "",
     val seekMailApiKey: String = "",
+    val autoCheckUpdates: Boolean = true,
+    val includePrereleaseUpdates: Boolean = false,
+    val ignoredUpdateTag: String = "",
 ) {
     companion object {
         val DEFAULT_PINNED_CATEGORY_SLUGS: Set<String> = linkedSetOf(

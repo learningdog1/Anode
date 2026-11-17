@@ -47,19 +47,26 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Mail
+import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Radar
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.RssFeed
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Science
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -70,6 +77,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -112,6 +120,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.SingletonImageLoader
+import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.AccountSession
@@ -119,6 +128,9 @@ import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.RadarPollingSettings
+import com.nodeseek.app.domain.update.AppUpdateState
+import com.nodeseek.app.domain.update.UpdateCheckResult
+import com.nodeseek.app.domain.update.UpdateDownloadPhase
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -149,6 +161,7 @@ import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import com.nodeseek.app.ui.update.formatUpdateByteSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -245,6 +258,29 @@ class SettingsViewModel(
 
     fun setPreferRssFallback(preferRss: Boolean) {
         viewModelScope.launch { container.settingsRepository.setPreferRssFallback(preferRss) }
+    }
+
+    fun setAutoCheckUpdates(enabled: Boolean) {
+        viewModelScope.launch { container.settingsRepository.setAutoCheckUpdates(enabled) }
+    }
+
+    fun setIncludePrereleaseUpdates(enabled: Boolean) {
+        viewModelScope.launch { container.settingsRepository.setIncludePrereleaseUpdates(enabled) }
+    }
+
+    fun checkForUpdates() {
+        if (container.appUpdateManager.state.value.isChecking) return
+        viewModelScope.launch {
+            when (val result = container.appUpdateManager.checkForUpdates(manual = true)) {
+                is UpdateCheckResult.UpdateAvailable -> Unit
+                is UpdateCheckResult.UpToDate -> {
+                    _events.trySend("当前已是最新版本 (v${result.currentVersionName})")
+                }
+                is UpdateCheckResult.Error -> {
+                    _events.trySend(result.message)
+                }
+            }
+        }
     }
 
     fun saveNodeImageApiKey(apiKey: String) {
@@ -443,6 +479,7 @@ fun SettingsScreen(
     previewUiState: SettingsUiState? = null,
     previewRadarPollingSettings: RadarPollingSettings? = null,
     previewRadarUnreadCount: Int? = null,
+    previewUpdateState: AppUpdateState? = null,
     viewModel: SettingsViewModel = viewModel(
         factory = SettingsViewModel.factory(LocalAppContainer.current),
     ),
@@ -456,6 +493,8 @@ fun SettingsScreen(
         initialValue = 0,
     )
     val radarUnreadCount = previewRadarUnreadCount ?: observedRadarUnreadCount
+    val observedUpdateState by appContainer.appUpdateManager.state.collectAsStateWithLifecycle()
+    val updateState = previewUpdateState ?: observedUpdateState
     val settingsScope = rememberCoroutineScope()
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
@@ -1563,6 +1602,263 @@ fun SettingsScreen(
                                 Text(
                                     text = "退出当前账号",
                                     fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 6. App Version & GitHub Release Update Card ──
+            item(key = "settings_app_update") {
+                val latestRelease = updateState.latestRelease
+                val downloadPhase = updateState.downloadPhase
+                val githubReleasesUrl = "https://github.com/${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO}/releases"
+                val statusPillText = when (downloadPhase) {
+                    is UpdateDownloadPhase.Downloading -> {
+                        val pct = downloadPhase.progressFraction?.let { (it * 100f).roundToInt().coerceIn(0, 100) }
+                        if (pct != null) "下载中 $pct%" else "下载中"
+                    }
+                    is UpdateDownloadPhase.ReadyToInstall -> {
+                        if (downloadPhase.requiresInstallPermission) "待授权安装" else "待安装"
+                    }
+                    else -> {
+                        if (updateState.hasUpdate && latestRelease != null) {
+                            "新版本 ${latestRelease.tagName}"
+                        } else {
+                            "v${updateState.currentVersionName}"
+                        }
+                    }
+                }
+                val hasHighlightedStatus = updateState.hasUpdate ||
+                    downloadPhase is UpdateDownloadPhase.Downloading ||
+                    downloadPhase is UpdateDownloadPhase.ReadyToInstall
+
+                PulseStaggeredEntrance(index = 6) {
+                    SettingsBentoSection(
+                        icon = Icons.Rounded.SystemUpdate,
+                        title = "应用版本与更新",
+                        subtitle = "通过 GitHub Releases 检查并应用内升级客户端",
+                        accentColor = if (hasHighlightedStatus) ext.drumstickGoldEnd else MaterialTheme.colorScheme.secondary,
+                        headerTrailing = {
+                            PulseAccentPill(
+                                text = statusPillText,
+                                containerColor = if (hasHighlightedStatus) {
+                                    ext.drumstickContainer
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                },
+                                contentColor = if (hasHighlightedStatus) {
+                                    ext.onDrumstickContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                },
+                            )
+                        },
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pulseCard(
+                                    shape = RoundedCornerShape(15.dp),
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                    elevation = PulseElevation.None,
+                                    accentColor = if (updateState.hasUpdate) ext.drumstickGoldEnd else null,
+                                )
+                                .padding(13.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        text = "Anode v${updateState.currentVersionName}",
+                                        style = MaterialTheme.typography.titleSmall.withTabularNumbers(),
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    val checkSummary = when {
+                                        updateState.isChecking -> "正在从 GitHub Releases 获取最新版本…"
+                                        updateState.hasUpdate && latestRelease != null ->
+                                            "发现新版本 ${latestRelease.tagName}" + (
+                                                latestRelease.apkAsset?.sizeBytes
+                                                    ?.takeIf { it > 0L }
+                                                    ?.let { " · ${formatUpdateByteSize(it)}" }
+                                                    .orEmpty()
+                                                )
+                                        !updateState.checkError.isNullOrBlank() -> updateState.checkError!!
+                                        updateState.lastCheckedAtMillis > 0L -> "当前已是最新发布版本"
+                                        else -> "Build ${updateState.currentVersionCode} · 更新源 GitHub Releases"
+                                    }
+                                    Text(
+                                        text = checkSummary,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (!updateState.checkError.isNullOrBlank() && !updateState.hasUpdate) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
+                            }
+
+                            if (downloadPhase is UpdateDownloadPhase.Downloading) {
+                                val fraction = downloadPhase.progressFraction
+                                if (fraction != null) {
+                                    LinearProgressIndicator(
+                                        progress = { fraction },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(5.dp)
+                                            .clip(CircleShape),
+                                    )
+                                } else {
+                                    LinearProgressIndicator(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(5.dp)
+                                            .clip(CircleShape),
+                                    )
+                                }
+                            }
+
+                            if (updateState.hasUpdate && latestRelease != null) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    FilledTonalButton(
+                                        onClick = {
+                                            when (downloadPhase) {
+                                                is UpdateDownloadPhase.ReadyToInstall -> {
+                                                    if (downloadPhase.requiresInstallPermission) {
+                                                        if (!appContainer.appUpdateManager.openUnknownSourcesSettings()) {
+                                                            settingsScope.launch {
+                                                                snackbarHostState.showSnackbar("无法打开系统安装权限设置")
+                                                            }
+                                                        }
+                                                    } else if (!appContainer.appUpdateManager.installReadyApk()) {
+                                                        appContainer.appUpdateManager.openUpdateDialog()
+                                                    }
+                                                }
+                                                else -> appContainer.appUpdateManager.openUpdateDialog()
+                                            }
+                                        },
+                                        shape = CircleShape,
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Icon(
+                                            imageVector = when (downloadPhase) {
+                                                is UpdateDownloadPhase.ReadyToInstall ->
+                                                    if (downloadPhase.requiresInstallPermission) {
+                                                        Icons.Rounded.Security
+                                                    } else {
+                                                        Icons.Rounded.InstallMobile
+                                                    }
+                                                is UpdateDownloadPhase.Downloading -> Icons.Rounded.Download
+                                                else -> Icons.Rounded.NewReleases
+                                            },
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = when (downloadPhase) {
+                                                is UpdateDownloadPhase.Downloading -> "查看下载进度"
+                                                is UpdateDownloadPhase.ReadyToInstall ->
+                                                    if (downloadPhase.requiresInstallPermission) "去开启安装权限" else "立即安装"
+                                                is UpdateDownloadPhase.Failed -> "查看更新与重试"
+                                                UpdateDownloadPhase.Idle -> "立即更新 / 查看日志"
+                                            },
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        PulseGradientDivider()
+
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.NewReleases,
+                            accentColor = MaterialTheme.colorScheme.primary,
+                            title = "启动时自动检查更新",
+                            subtitle = "每次冷启动后在后台静默检查 GitHub Releases 新版本",
+                            checked = settings.autoCheckUpdates,
+                            onCheckedChange = viewModel::setAutoCheckUpdates,
+                        )
+
+                        SettingsToggleRow(
+                            icon = Icons.Rounded.Science,
+                            accentColor = ext.stardustAccent,
+                            title = "接收预发布版本 (Pre-release)",
+                            subtitle = "开启后将同时检查 beta / rc 等预览测试版本",
+                            checked = settings.includePrereleaseUpdates,
+                            onCheckedChange = viewModel::setIncludePrereleaseUpdates,
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            FilledTonalButton(
+                                onClick = viewModel::checkForUpdates,
+                                enabled = !updateState.isChecking,
+                                shape = CircleShape,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                            ) {
+                                if (updateState.isChecking) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(17.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(
+                                    text = if (updateState.isChecking) "检查中…" else "检查更新",
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        uriHandler.openUri(githubReleasesUrl)
+                                    }.onFailure {
+                                        settingsScope.launch {
+                                            snackbarHostState.showSnackbar("无法打开浏览器，请访问 $githubReleasesUrl")
+                                        }
+                                    }
+                                },
+                                shape = CircleShape,
+                                modifier = Modifier.height(44.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Releases",
+                                    fontWeight = FontWeight.Medium,
                                 )
                             }
                         }

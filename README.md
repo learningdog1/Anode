@@ -7,7 +7,7 @@
 **Editorial Paper & Obsidian Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v1.0.0-3655D6?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v1.1.0-3655D6?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.10-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202025.02.00-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,14 +26,14 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v1.0.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v1.0.0-release.apk`），下载后可直接在 Android 设备安装。
+> 前往 [**GitHub Releases (`v1.1.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v1.1.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v1.0.0`（`versionCode = 1`） |
+| **当前版本** | `v1.1.0`（`versionCode = 2`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 脉冲首页流 · 非对称 Bento 版块与统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 枢机中心与签到榜 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · 隔离式 Seek 邮箱客户端 (`seek.li`) |
+| **核心模块一览** | 脉冲首页流 · 非对称 Bento 版块与统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 枢机中心与签到榜 · 聚合收件箱与实时私信 · 本地脉搏雷达监控 · 隔离式 Seek 邮箱客户端 (`seek.li`) · GitHub Releases 应用内更新 |
 
 ---
 
@@ -251,20 +251,20 @@
 </table>
 </div>
 
-- **设置中心 (`SettingsScreen`)**：支持可视化切换 `跟随系统 / 暖感纸张 / 深邃黑曜`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、`85%–130%` 全局正文实时缩放、`保底 +5 / 手气随机` 签到偏好、NodeImage 与 Seek Mail API Key 连通性测试、屏蔽用户列表管理以及图片/阅读历史缓存清理。
+- **设置中心 (`SettingsScreen`)**：支持可视化切换 `跟随系统 / 暖感纸张 / 深邃黑曜`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、`85%–130%` 全局正文实时缩放、`保底 +5 / 手气随机` 签到偏好、NodeImage 与 Seek Mail API Key 连通性测试、屏蔽用户列表管理、图片/阅读历史缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与在线升级。
 
 ---
 
 ## 🏗️ 工程架构 · Architecture
 
-Anode 采用清晰的单向多层架构（`ui` → `domain` ← `data`），通过轻量级构造器依赖注入（`AppContainer` / `DefaultAppContainer`）连接全部 11 个领域仓库与本地控制器：
+Anode 采用清晰的单向多层架构（`ui` → `domain` ← `data`），通过轻量级构造器依赖注入（`AppContainer` / `DefaultAppContainer`）连接全部领域仓库与本地控制器：
 
 ```mermaid
 flowchart TD
-    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · explore · boards · topic · composer · hub · mail · radar · valuation"]
+    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · explore · boards · topic · composer · hub · mail · radar · valuation · update"]
     NAV["Navigation Shell<br/>MainActivity · NavHost · UrlRouter · AppDestination"]
-    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · SeekMail · Radar · Valuation"]
-    DATA["Data Layer<br/>Repositories · NodeSeekApiClient & SeekMailApiClient (OkHttp) · Jsoup/RSS Parsers · Room DB · DataStore · Disk Cache"]
+    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · SeekMail · Radar · Valuation · Update"]
+    DATA["Data Layer<br/>Repositories · NodeSeekApiClient & SeekMailApiClient & GitHubReleaseClient (OkHttp) · Jsoup/RSS Parsers · Room DB · DataStore · Disk Cache"]
 
     NAV --> UI
     UI --> DOMAIN
@@ -284,6 +284,7 @@ app/src/main/java/com/nodeseek/app/
 │   ├── model/                       # 社区帖子、账户、社交与设置不可变模型
 │   ├── radar/                       # Pulse Radar 规则、提醒记录与定位解析器
 │   ├── repository/                  # 纯 Kotlin 领域仓库接口
+│   ├── update/                      # GitHub Releases 更新模型、SemVer 比较器与管理器接口
 │   └── valuation/                   # BigDecimal VPS 剩余价值与过户交易估值引擎
 ├── data/
 │   ├── local/                       # Room 数据库（离线收藏快照、阅读进度、雷达规则、版块）与 DataStore
@@ -292,6 +293,7 @@ app/src/main/java/com/nodeseek/app/
 │   ├── parser/                      # Jsoup window.__config__ 注水解析、RSS XML 与 HTML→Markdown
 │   ├── radar/                       # PulseRadarMonitor 前后台轮询与关键词/正则匹配引擎
 │   ├── repository/                  # 各仓库实现与 DTO 映射层
+│   ├── update/                      # Cookie 隔离 GitHubReleaseClient、APK 安装器与更新调度实现
 │   └── valuation/                   # Frankfurter 汇率仓库（含 24h 本地缓存与手动校准）
 └── ui/
     ├── theme/                       # Paper/Obsidian/Pitch 色板、15 版块规范、Lv.0–6 等级光环与动效
@@ -303,6 +305,7 @@ app/src/main/java/com/nodeseek/app/
     ├── hub/                         # 枢机中心 Bento、签到榜、收件箱、私信、用户空间与设置
     ├── mail/                        # SeekMailScreen、SeekMailViewModel 与隔离式 SeekMailWebView
     ├── radar/                       # PulseRadarScreen & ViewModel（规则管理、提醒流与追更追踪）
+    ├── update/                      # AppUpdateDialog（更新提醒弹窗、日志渲染与下载安装进度）
     ├── valuation/                   # VpsValuationBottomSheet（实时遥测、汇率同步与 Markdown 导出）
     └── preview/                     # Compose @Preview 组件设计图库
 ```
@@ -341,8 +344,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v1.0.0-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v1.0.0-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v1.1.0-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v1.1.0-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 

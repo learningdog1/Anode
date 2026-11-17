@@ -145,6 +145,24 @@ class SettingsRepositoryImpl(
         }
     }
 
+    override suspend fun setAutoCheckUpdates(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[Keys.AUTO_CHECK_UPDATES] = enabled
+        }
+    }
+
+    override suspend fun setIncludePrereleaseUpdates(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[Keys.INCLUDE_PRERELEASE_UPDATES] = enabled
+        }
+    }
+
+    override suspend fun setIgnoredUpdateTag(tag: String) {
+        dataStore.edit { prefs ->
+            prefs[Keys.IGNORED_UPDATE_TAG] = tag.trim()
+        }
+    }
+
     override suspend fun addRecentSearchQuery(query: String) {
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return
@@ -192,6 +210,9 @@ class SettingsRepositoryImpl(
             preferRssFallback = this[Keys.PREFER_RSS_FALLBACK] ?: false,
             nodeImageApiKey = this[Keys.NODE_IMAGE_API_KEY] ?: "",
             seekMailApiKey = this[Keys.SEEK_MAIL_API_KEY] ?: "",
+            autoCheckUpdates = this[Keys.AUTO_CHECK_UPDATES] ?: true,
+            includePrereleaseUpdates = this[Keys.INCLUDE_PRERELEASE_UPDATES] ?: false,
+            ignoredUpdateTag = this[Keys.IGNORED_UPDATE_TAG] ?: "",
         )
     }
 
@@ -213,6 +234,9 @@ class SettingsRepositoryImpl(
         val PREFER_RSS_FALLBACK = booleanPreferencesKey("prefer_rss_fallback")
         val NODE_IMAGE_API_KEY = stringPreferencesKey("node_image_api_key")
         val SEEK_MAIL_API_KEY = stringPreferencesKey("seek_mail_api_key")
+        val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
+        val INCLUDE_PRERELEASE_UPDATES = booleanPreferencesKey("include_prerelease_updates")
+        val IGNORED_UPDATE_TAG = stringPreferencesKey("ignored_update_tag")
         val RECENT_SEARCH_QUERIES = stringPreferencesKey("recent_search_queries")
     }
 

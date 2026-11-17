@@ -181,11 +181,14 @@ fun PulseHubScreen(
     previewRadarUnreadCount: Int? = null,
     previewRadarRules: List<com.nodeseek.app.domain.radar.KeywordWatchRule>? = null,
     previewRadarTrackedTopics: List<com.nodeseek.app.domain.radar.TrackedTopic>? = null,
+    previewHasAppUpdate: Boolean? = null,
     viewModel: PulseHubViewModel = viewModel(
         factory = PulseHubViewModel.factory(LocalAppContainer.current),
     ),
 ) {
     val appContainer = LocalAppContainer.current
+    val observedUpdateState by appContainer.appUpdateManager.state.collectAsStateWithLifecycle()
+    val hasAppUpdate = previewHasAppUpdate ?: observedUpdateState.hasUpdate
     val observedRadarUnreadCount by appContainer.radarRepository.unreadAlertCountFlow.collectAsStateWithLifecycle(
         initialValue = 0,
     )
@@ -294,6 +297,7 @@ fun PulseHubScreen(
                     item(key = "hub_header") {
                         PulseHubHeaderBar(
                             onOpenSettings = onOpenSettings,
+                            hasAppUpdate = hasAppUpdate,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .statusBarsPadding()
@@ -550,6 +554,7 @@ fun PulseHubScreen(
 private fun PulseHubHeaderBar(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    hasAppUpdate: Boolean = false,
 ) {
     val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
@@ -603,40 +608,57 @@ private fun PulseHubHeaderBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        PulseGlassSurface(
-            shape = CircleShape,
-            containerColor = ext.cardSurfaceElevated.copy(alpha = if (isDark) 0.85f else 0.92f),
-            tonalAccent = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .size(42.dp)
-                .then(
-                    if (!isDark) {
-                        Modifier.shadow(
-                            elevation = PulseElevation.Card,
-                            shape = CircleShape,
-                            clip = false,
-                            ambientColor = ext.softShadowColor,
-                            spotColor = ext.softShadowColor,
-                        )
-                    } else {
-                        Modifier
-                    },
-                )
-                .pulseBouncyClickable(
-                    pressedScale = NodePulseMotion.chipPressScale,
-                    role = Role.Button,
-                    onClickLabel = "打开设置",
-                    onClick = onOpenSettings,
-                ),
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Settings,
-                contentDescription = "打开设置",
-                tint = MaterialTheme.colorScheme.onSurface,
+        Box(modifier = Modifier.size(42.dp)) {
+            PulseGlassSurface(
+                shape = CircleShape,
+                containerColor = ext.cardSurfaceElevated.copy(alpha = if (isDark) 0.85f else 0.92f),
+                tonalAccent = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(20.dp),
-            )
+                    .fillMaxSize()
+                    .then(
+                        if (!isDark) {
+                            Modifier.shadow(
+                                elevation = PulseElevation.Card,
+                                shape = CircleShape,
+                                clip = false,
+                                ambientColor = ext.softShadowColor,
+                                spotColor = ext.softShadowColor,
+                            )
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .pulseBouncyClickable(
+                        pressedScale = NodePulseMotion.chipPressScale,
+                        role = Role.Button,
+                        onClickLabel = "打开设置",
+                        onClick = onOpenSettings,
+                    ),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Settings,
+                    contentDescription = "打开设置",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(20.dp),
+                )
+            }
+
+            if (hasAppUpdate) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(11.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error)
+                        .border(
+                            width = 2.dp,
+                            color = MaterialTheme.colorScheme.background,
+                            shape = CircleShape,
+                        ),
+                )
+            }
         }
     }
 }
