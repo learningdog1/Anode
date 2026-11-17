@@ -573,7 +573,7 @@ class PulseHubViewModel(
         if (trimmedToken.isEmpty()) {
             transientState.update {
                 it.copy(
-                    nativeSignIn = it.nativeSignIn.copy(errorMessage = "请先完成下方 Cloudflare 人机验证"),
+                    nativeSignIn = it.nativeSignIn.copy(errorMessage = "正在等待 Cloudflare 安全验证完成，请稍候或点击验证框刷新重试"),
                 )
             }
             return

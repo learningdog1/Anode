@@ -730,6 +730,62 @@ class PulseRadarMonitorTest {
         radarRepository.clearAllAlerts()
         assertTrue(radarRepository.alertRecordsFlow.first().isEmpty())
     }
+
+    @Test
+    fun `inbox polling holds unread DM watermark while POST_NOTIFICATIONS is denied and notifies once granted`() = runTest {
+        var step = 1
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(
+                            buildFeedHtml(
+                                emptyList(),
+                                userJson = """{"member_id":101,"member_name":"Me","coin":100}""",
+                            ),
+                        )
+
+                    path == "/api/notification/message/list" && step == 1 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[]}""")
+
+                    path == "/api/notification/message/list" && step == 2 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":88,"sender_id":999,"sender_name":"Alice","receiver_id":101,"receiver_name":"Me","content":"权限未授予时的私信","is_markdown":0,"created_at":"2026-11-17T01:00:00Z","viewed":0}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        radarRepository.updatePollingSettings {
+            it.copy(keywordAlertsEnabled = false, replyTrackingEnabled = false, inboxPushEnabled = true)
+        }
+        val monitor = createMonitor(this)
+
+        // Step 1: Initialize empty baseline silently.
+        assertTrue(monitor.runPollCycle())
+        assertTrue(preferencesStore.getWatermarks().dmInitialized)
+
+        // Step 2: Permission denied -> DM arrives, monitor must NOT emit or burn watermark #88.
+        dispatcher.notificationPermissionGranted = false
+        step = 2
+        fakeClockMillis += 60_000L
+        assertTrue(monitor.runPollCycle())
+        assertTrue(dispatcher.directMessages.isEmpty())
+        assertEquals(null, preferencesStore.getWatermarks().lastNotifiedDmMap[999L])
+
+        // Step 3: Permission granted -> next poll delivers DM #88 and advances watermark!
+        dispatcher.notificationPermissionGranted = true
+        fakeClockMillis += 60_000L
+        assertTrue(monitor.runPollCycle())
+        assertEquals(1, dispatcher.directMessages.size)
+        assertEquals(88L, dispatcher.directMessages.single().messageId)
+        assertEquals(88L, preferencesStore.getWatermarks().lastNotifiedDmMap[999L])
+    }
 }
 
 internal class RecordingNotificationDispatcher : PulseNotificationDispatcher(ContextWrapper(null)) {
@@ -755,9 +811,11 @@ internal class RecordingNotificationDispatcher : PulseNotificationDispatcher(Con
     val interactions = mutableListOf<InteractionCall>()
     val directMessages = mutableListOf<DirectMessageCall>()
 
+    var notificationPermissionGranted: Boolean = true
+
     override fun ensureChannels() = Unit
 
-    override fun hasPostNotificationsPermission(): Boolean = true
+    override fun hasPostNotificationsPermission(): Boolean = notificationPermissionGranted
 
     override fun postKeywordHitNotification(record: LocalAlertRecord) {
         keywordHits.add(record)

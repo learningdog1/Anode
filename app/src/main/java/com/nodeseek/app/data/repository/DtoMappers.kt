@@ -42,7 +42,7 @@ internal fun ConfigUserDto.toDomainSession(enableCustomedStyle: Boolean?): Accou
         replyCount = nComment,
         bookmarkCount = collectionCount,
         permissionRank = rank,
-        unreadNotificationCount = unViewedCount?.all ?: 0,
+        unreadNotificationCount = unViewedCount?.effectiveAll ?: 0,
         canCustomizeCss = canStyle,
         isTelegramBound = isTelegramBound,
     )

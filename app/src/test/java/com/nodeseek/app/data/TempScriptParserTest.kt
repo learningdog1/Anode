@@ -155,4 +155,28 @@ class TempScriptParserTest {
         assertEquals(6, levelForCoins(3600))
         assertEquals(6, levelForCoins(50000))
     }
+
+    @Test
+    fun `unViewedCount supports plural keys and uses maxOf all vs category sum`() {
+        val raw = """
+            {
+              "user": {
+                "member_id": 101,
+                "member_name": "Tester",
+                "coin": 200,
+                "unViewedCount": {
+                  "all": 1,
+                  "replys": 1,
+                  "atMe": 1,
+                  "messages": 2,
+                  "sys": 1
+                }
+              },
+              "allCategory": []
+            }
+        """.trimIndent()
+        val b64 = Base64.getEncoder().encodeToString(raw.toByteArray(Charsets.UTF_8))
+        val parsed = TempScriptParser.decodeBase64Config(b64)
+        assertEquals(5, parsed.user?.unViewedCount?.effectiveAll)
+    }
 }

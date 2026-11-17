@@ -1,7 +1,11 @@
 package com.nodeseek.app.navigation
 
+import android.Manifest
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
@@ -242,6 +246,10 @@ fun NodePulseNavHost(
     val latestChallengeRequired by rememberUpdatedState(challengeRequired)
     val latestWebViewActive by rememberUpdatedState(activeWebViewRequest != null)
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { }
+
     val synchronizedUserAgent = remember(container, context) {
         (container as? DefaultAppContainer)?.userAgentProvider?.getUserAgent(context)
     }
@@ -286,6 +294,16 @@ fun NodePulseNavHost(
         if (currentSession == null) {
             container.checkInRepository.clearCachedStatus()
         } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                currentSession.uid > 0L &&
+                !container.notificationDispatcher.hasPostNotificationsPermission() &&
+                !container.notificationDispatcher.hasRequestedPostNotificationsOnce()
+            ) {
+                container.notificationDispatcher.markPostNotificationsRequestedOnce()
+                runCatching {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
             delay(600L)
             container.checkInRepository.getCheckInBoard(page = 1, forceRefresh = false)
         }

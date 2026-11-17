@@ -286,9 +286,25 @@ data class ConfigUserDto(
 
 @Serializable
 data class UnreadCountsDto(
+    @JsonNames("total", "count")
     @Serializable(with = FlexibleIntSerializer::class)
     val all: Int = 0,
-)
+    @JsonNames("replys", "replies", "replyCount", "reply_count")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val reply: Int = 0,
+    @JsonNames("atMe", "at_me", "mention", "mentions", "atCount", "at_count")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val at: Int = 0,
+    @JsonNames("messages", "pm", "dm", "messageCount", "message_count", "msg", "msgCount")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val message: Int = 0,
+    @JsonNames("sys", "systemCount", "system_count")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val system: Int = 0,
+) {
+    val effectiveAll: Int
+        get() = maxOf(all, reply + at + message + system).coerceAtLeast(0)
+}
 
 @Serializable
 data class CategoryDto(

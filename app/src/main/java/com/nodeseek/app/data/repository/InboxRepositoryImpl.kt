@@ -1,5 +1,7 @@
 package com.nodeseek.app.data.repository
 
+import com.nodeseek.app.data.local.RadarWatermarkStore
+import com.nodeseek.app.data.local.RadarWatermarks
 import com.nodeseek.app.data.network.ConversationResponseDto
 import com.nodeseek.app.data.network.DirectMessageRowDto
 import com.nodeseek.app.data.network.NodeSeekApiClient
@@ -36,6 +38,7 @@ class InboxRepositoryImpl(
     private val apiClientProvider: () -> NodeSeekApiClient,
     private val sessionRepository: SessionRepositoryImpl,
     private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val watermarkStore: RadarWatermarkStore? = null,
 ) : InboxRepository {
 
     private enum class CountSource {
@@ -123,10 +126,13 @@ class InboxRepositoryImpl(
 
     private var dmPopupBaselineInitialized: Boolean = false
     private val dmPopupWatermarkByPeer = mutableMapOf<Long, Long>()
+    private val dmPopupSignatureByPeer = mutableMapOf<Long, String>()
     private val emittedInteractionFloorKeys = LinkedHashMap<Pair<Long, Int>, Long>()
     private val emittedPopupKeys = LinkedHashSet<String>()
+    private var persistedBaselineCheckedForUid: Long = 0L
     private var lastForegroundCheckMs: Long = 0L
     private var lastFullListSyncMs: Long = 0L
+    private var lastDmListSyncMs: Long = 0L
     private var foregroundRateLimitUntilMs: Long = 0L
     private var foregroundBackoffUntilMs: Long = 0L
 
@@ -223,7 +229,8 @@ class InboxRepositoryImpl(
         foregroundSyncMutex.withLock {
             runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
                 val currentSession = sessionRepository.sessionState.value ?: return@runDomainCatching
-                if (currentSession.uid <= 0L) return@runDomainCatching
+                val viewerUid = currentSession.uid
+                if (viewerUid <= 0L) return@runDomainCatching
 
                 val now = clockMillis()
                 val rateLimited = synchronized(stateLock) {
@@ -231,12 +238,38 @@ class InboxRepositoryImpl(
                 }
                 if (rateLimited) return@runDomainCatching
 
+                ensurePersistedBaselineSeeded(viewerUid)
+
+                var pendingLoadedPopups: List<InAppMessagePopup> = emptyList()
+                var pendingReplyPersist: Long? = null
+                var pendingMentionPersist: Long? = null
+                var pendingDmPersist: Map<Long, Long> = emptyMap()
                 val (initReplies, initMentions, initDm) = synchronized(stateLock) {
                     syncAccountLocked()
+                    val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
+                    if (allowEmit) {
+                        val flushResult = flushPendingPopupsFromLoadedStateLocked(now = now, viewerUid = viewerUid)
+                        pendingLoadedPopups = flushResult.popups
+                        pendingReplyPersist = flushResult.replyWatermark
+                        pendingMentionPersist = flushResult.mentionWatermark
+                        pendingDmPersist = flushResult.dmWatermarks
+                    }
                     Triple(
                         !repliesLedger.popupBaselineInitialized,
                         !mentionsLedger.popupBaselineInitialized,
                         !dmPopupBaselineInitialized,
+                    )
+                }
+                if (pendingLoadedPopups.isNotEmpty()) {
+                    for (popup in pendingLoadedPopups) {
+                        _inAppPopupEvents.tryEmit(popup)
+                    }
+                    persistWatermarksToStore(
+                        viewerUid = viewerUid,
+                        replyWatermark = pendingReplyPersist,
+                        mentionWatermark = pendingMentionPersist,
+                        dmInitialized = pendingDmPersist.isNotEmpty(),
+                        dmWatermarks = pendingDmPersist,
                     )
                 }
                 val needsBaselineInit = initReplies || initMentions || initDm
@@ -249,39 +282,71 @@ class InboxRepositoryImpl(
                 }
 
                 if (needsBaselineInit) {
-                    try {
-                        if (initReplies) getNotifications(NotificationKind.REPLIES).getOrThrow()
-                        if (initMentions) getNotifications(NotificationKind.MENTIONS).getOrThrow()
-                        if (initDm) getMessageThreads().getOrThrow()
-                        if (initReplies && initMentions && initDm) {
-                            try {
-                                refreshUnreadCount()
-                            } catch (c: CancellationException) {
-                                throw c
-                            } catch (_: Throwable) {
-                                // Non-fatal; list floor already populated.
-                            }
-                            synchronized(stateLock) {
-                                val ts = clockMillis()
-                                lastForegroundCheckMs = ts
-                                lastFullListSyncMs = ts
-                                foregroundBackoffUntilMs = 0L
-                            }
-                            return@runDomainCatching
+                    val repliesRes = if (initReplies) getNotifications(NotificationKind.REPLIES) else null
+                    val mentionsRes = if (initMentions) getNotifications(NotificationKind.MENTIONS) else null
+                    val dmRes = if (initDm) getMessageThreads() else null
+
+                    val firstError = repliesRes?.exceptionOrNull()
+                        ?: mentionsRes?.exceptionOrNull()
+                        ?: dmRes?.exceptionOrNull()
+
+                    if (firstError != null) {
+                        recordForegroundSyncFailure(firstError)
+                        throw firstError
+                    }
+
+                    val baselineSnapshot = synchronized(stateLock) {
+                        BaselinePersistSnapshot(
+                            replyWatermark = if (repliesLedger.popupBaselineInitialized) {
+                                repliesLedger.popupWatermarkId
+                            } else {
+                                null
+                            },
+                            mentionWatermark = if (mentionsLedger.popupBaselineInitialized) {
+                                mentionsLedger.popupWatermarkId
+                            } else {
+                                null
+                            },
+                            dmInitialized = dmPopupBaselineInitialized,
+                            dmWatermarks = dmPopupWatermarkByPeer.toMap(),
+                        )
+                    }
+                    persistWatermarksToStore(
+                        viewerUid = viewerUid,
+                        replyWatermark = baselineSnapshot.replyWatermark,
+                        mentionWatermark = baselineSnapshot.mentionWatermark,
+                        dmInitialized = baselineSnapshot.dmInitialized,
+                        dmWatermarks = baselineSnapshot.dmWatermarks,
+                    )
+
+                    if (initReplies && initMentions && initDm) {
+                        try {
+                            refreshUnreadCount()
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (_: Throwable) {
+                            // Non-fatal; list floor already populated.
                         }
-                    } catch (c: CancellationException) {
-                        throw c
-                    } catch (t: Throwable) {
-                        recordForegroundSyncFailure(t)
-                        throw t
+                        synchronized(stateLock) {
+                            val ts = clockMillis()
+                            lastForegroundCheckMs = ts
+                            lastFullListSyncMs = ts
+                            lastDmListSyncMs = ts
+                            foregroundBackoffUntilMs = 0L
+                        }
+                        return@runDomainCatching
                     }
                 }
 
-                val (countBeforeCheck, knownLocalUnread, lastFullSync) = synchronized(stateLock) {
-                    Triple(
-                        _unreadTotalCount.value,
-                        knownListFloorLocked(clockMillis()),
-                        lastFullListSyncMs,
+                val syncState = synchronized(stateLock) {
+                    ForegroundSyncStateSnapshot(
+                        countBeforeCheck = _unreadTotalCount.value,
+                        knownLocalUnread = knownListFloorLocked(clockMillis()),
+                        lastFullSync = lastFullListSyncMs,
+                        lastDmSync = lastDmListSyncMs,
+                        repliesLoaded = repliesLedger.loaded,
+                        mentionsLoaded = mentionsLedger.loaded,
+                        threadsLoaded = threadsLoaded,
                     )
                 }
 
@@ -299,30 +364,51 @@ class InboxRepositoryImpl(
                 }
 
                 val checkTime = clockMillis()
-                val shouldSyncLists = forceListSync ||
-                    effectiveCount > countBeforeCheck ||
-                    effectiveCount > knownLocalUnread ||
-                    (effectiveCount == 0 && knownLocalUnread > 0) ||
-                    (effectiveCount > 0 && (checkTime - lastFullSync) >= PERIODIC_NONZERO_LIST_SYNC_MS)
+                val shouldSyncAllLists = forceListSync ||
+                    !syncState.repliesLoaded ||
+                    !syncState.mentionsLoaded ||
+                    effectiveCount > syncState.countBeforeCheck ||
+                    effectiveCount > syncState.knownLocalUnread ||
+                    (effectiveCount == 0 && syncState.knownLocalUnread > 0) ||
+                    (effectiveCount > 0 && (checkTime - syncState.lastFullSync) >= PERIODIC_NONZERO_LIST_SYNC_MS)
+
+                val shouldSyncDmOnly = !shouldSyncAllLists &&
+                    (!syncState.threadsLoaded || (checkTime - syncState.lastDmSync) >= PERIODIC_NONZERO_LIST_SYNC_MS)
 
                 synchronized(stateLock) {
                     lastForegroundCheckMs = checkTime
                     foregroundBackoffUntilMs = 0L
                 }
 
-                if (shouldSyncLists) {
-                    try {
-                        getNotifications(NotificationKind.REPLIES).getOrThrow()
-                        getNotifications(NotificationKind.MENTIONS).getOrThrow()
-                        getMessageThreads().getOrThrow()
-                        synchronized(stateLock) {
-                            lastFullListSyncMs = clockMillis()
+                if (shouldSyncAllLists) {
+                    val repliesRes = getNotifications(NotificationKind.REPLIES)
+                    val mentionsRes = getNotifications(NotificationKind.MENTIONS)
+                    val dmRes = getMessageThreads()
+                    val finishedAt = clockMillis()
+                    synchronized(stateLock) {
+                        if (dmRes.isSuccess) {
+                            lastDmListSyncMs = finishedAt
                         }
-                    } catch (c: CancellationException) {
-                        throw c
-                    } catch (t: Throwable) {
-                        recordForegroundSyncFailure(t)
-                        throw t
+                        if (repliesRes.isSuccess && mentionsRes.isSuccess && dmRes.isSuccess) {
+                            lastFullListSyncMs = finishedAt
+                        }
+                    }
+                    val firstError = repliesRes.exceptionOrNull()
+                        ?: mentionsRes.exceptionOrNull()
+                        ?: dmRes.exceptionOrNull()
+                    if (firstError != null) {
+                        recordForegroundSyncFailure(firstError)
+                        throw firstError
+                    }
+                } else if (shouldSyncDmOnly) {
+                    val dmRes = getMessageThreads()
+                    dmRes.onSuccess {
+                        synchronized(stateLock) {
+                            lastDmListSyncMs = clockMillis()
+                        }
+                    }.onFailure { err ->
+                        recordForegroundSyncFailure(err)
+                        throw err
                     }
                 }
             }
@@ -330,6 +416,10 @@ class InboxRepositoryImpl(
 
     override suspend fun getNotifications(kind: NotificationKind): Result<List<NotificationItem>> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val currentUid = sessionRepository.sessionState.value?.uid ?: 0L
+            if (currentUid > 0L) {
+                ensurePersistedBaselineSeeded(currentUid)
+            }
             val response = when (kind) {
                 NotificationKind.REPLIES -> apiClientProvider().listReplyNotifications()
                 NotificationKind.MENTIONS -> apiClientProvider().listMentionNotifications()
@@ -349,10 +439,14 @@ class InboxRepositoryImpl(
                 )
             }
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
+            var viewerUidForPersist = 0L
+            var updatedWatermarkForPersist: Long? = null
             val effective = synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
                 val viewerUid = sessionRepository.sessionState.value?.uid ?: 0L
+                viewerUidForPersist = viewerUid
+                val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
                 raw.forEach { item ->
@@ -371,12 +465,22 @@ class InboxRepositoryImpl(
                     effectiveItems = resolvedEffective,
                     viewerUid = viewerUid,
                     now = now,
+                    allowEmit = allowEmit,
                 )
-                lastFullListSyncMs = now
+                if (popupsToEmit.isNotEmpty()) {
+                    updatedWatermarkForPersist = ledger.popupWatermarkId
+                }
                 resolvedEffective
             }
-            for (popup in popupsToEmit) {
-                _inAppPopupEvents.tryEmit(popup)
+            if (popupsToEmit.isNotEmpty()) {
+                for (popup in popupsToEmit) {
+                    _inAppPopupEvents.tryEmit(popup)
+                }
+                persistWatermarksToStore(
+                    viewerUid = viewerUidForPersist,
+                    replyWatermark = if (kind == NotificationKind.REPLIES) updatedWatermarkForPersist else null,
+                    mentionWatermark = if (kind == NotificationKind.MENTIONS) updatedWatermarkForPersist else null,
+                )
             }
             effective
         }
@@ -396,9 +500,12 @@ class InboxRepositoryImpl(
             var previousWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
 
+            var viewerUidForPersist = 0L
+            var markAllWatermarkForPersist: Long? = null
             synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
+                viewerUidForPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
@@ -409,6 +516,10 @@ class InboxRepositoryImpl(
                     previousWatermark = ledger.allReadWatermark
                     val maxKnownId = ledger.rawItems.maxOfOrNull { it.id } ?: 0L
                     ledger.allReadWatermark = maxKnownId to now
+                    if (ledger.popupBaselineInitialized && maxKnownId > ledger.popupWatermarkId) {
+                        ledger.popupWatermarkId = maxKnownId
+                    }
+                    markAllWatermarkForPersist = ledger.popupWatermarkId.takeIf { ledger.popupBaselineInitialized }
                     val newlyAdded = mutableListOf<Long>()
                     ledger.rawItems.forEach { item ->
                         if (!item.isRead && !ledger.locallyReadIds.containsKey(item.id)) {
@@ -483,12 +594,20 @@ class InboxRepositoryImpl(
             synchronized(stateLock) {
                 finishMarkPostLocked(clockMillis())
             }
+            if (markAllWatermarkForPersist != null && viewerUidForPersist > 0L) {
+                persistWatermarksToStore(
+                    viewerUid = viewerUidForPersist,
+                    replyWatermark = if (kind == NotificationKind.REPLIES) markAllWatermarkForPersist else null,
+                    mentionWatermark = if (kind == NotificationKind.MENTIONS) markAllWatermarkForPersist else null,
+                )
+            }
             refreshUnreadAfterMutation(opGeneration)
         }
 
     override suspend fun getMessageThreads(): Result<List<DirectMessageSummary>> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
             val viewerUid = requireViewerUid()
+            ensurePersistedBaselineSeeded(viewerUid)
             val response = apiClientProvider().listDirectMessages()
             val allRows = response.allMessages()
             val mappedThreads = response.groupThreadsForViewer(viewerUid).map { thread ->
@@ -507,6 +626,7 @@ class InboxRepositoryImpl(
             }
 
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
+            var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
             val effective = synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
@@ -537,16 +657,27 @@ class InboxRepositoryImpl(
                 val resolvedEffective = effectiveThreadsLocked(now)
                 _messageThreads.value = resolvedEffective
                 raiseTotalToKnownFloorLocked(now)
+                val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
                 popupsToEmit = detectDmPopupsLocked(
                     effectiveThreads = resolvedEffective,
                     viewerUid = viewerUid,
                     now = now,
+                    allowEmit = allowEmit,
                 )
-                lastFullListSyncMs = now
+                if (popupsToEmit.isNotEmpty()) {
+                    dmWatermarksForPersist = dmPopupWatermarkByPeer.toMap()
+                }
                 resolvedEffective
             }
-            for (popup in popupsToEmit) {
-                _inAppPopupEvents.tryEmit(popup)
+            if (popupsToEmit.isNotEmpty()) {
+                for (popup in popupsToEmit) {
+                    _inAppPopupEvents.tryEmit(popup)
+                }
+                persistWatermarksToStore(
+                    viewerUid = viewerUid,
+                    dmInitialized = true,
+                    dmWatermarks = dmWatermarksForPersist,
+                )
             }
             effective
         }
@@ -617,6 +748,7 @@ class InboxRepositoryImpl(
                     )
                 }
 
+            var dmWatermarkIncreasedForPersist: Long? = null
             synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
@@ -637,10 +769,11 @@ class InboxRepositoryImpl(
                         if (msg.isRead) {
                             locallyReadMessageIds.remove(msg.id)
                             if (dmPopupBaselineInitialized) {
-                                dmPopupWatermarkByPeer[peerUid] = maxOf(
-                                    dmPopupWatermarkByPeer[peerUid] ?: 0L,
-                                    msg.id,
-                                )
+                                val prevWm = dmPopupWatermarkByPeer[peerUid] ?: 0L
+                                if (msg.id > prevWm) {
+                                    dmPopupWatermarkByPeer[peerUid] = msg.id
+                                    dmWatermarkIncreasedForPersist = msg.id
+                                }
                             }
                         } else {
                             serverUnreadIds.add(msg.id)
@@ -656,6 +789,12 @@ class InboxRepositoryImpl(
                                 summary.copy(isRead = true)
                             } else {
                                 summary
+                            }
+                        }
+                        rawThreads.firstOrNull { it.peerUid == peerUid }?.let { summary ->
+                            val sig = buildDmThreadSignature(summary.updatedAtIso, summary.previewText)
+                            if (sig.isNotEmpty()) {
+                                dmPopupSignatureByPeer[peerUid] = sig
                             }
                         }
                         if (hadUnreadBefore) {
@@ -679,6 +818,13 @@ class InboxRepositoryImpl(
                 }
                 emitThreadsLocked(now)
             }
+            if (dmWatermarkIncreasedForPersist != null && viewerUid > 0L) {
+                persistWatermarksToStore(
+                    viewerUid = viewerUid,
+                    dmInitialized = true,
+                    dmWatermarks = mapOf(peerUid to dmWatermarkIncreasedForPersist!!),
+                )
+            }
 
             conversation
         }
@@ -691,10 +837,13 @@ class InboxRepositoryImpl(
             var addedMessageIds: List<Long> = emptyList()
             var previousPeerWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
+            var viewerUidForPersist = 0L
+            var watermarkForPersist: Long? = null
 
             synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
+                viewerUidForPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 pruneMessageReadStateLocked(now)
 
@@ -739,6 +888,13 @@ class InboxRepositoryImpl(
                         dmPopupWatermarkByPeer[peerUid] ?: 0L,
                         watermarkMaxId,
                     )
+                    watermarkForPersist = dmPopupWatermarkByPeer[peerUid]
+                }
+                if (thread != null) {
+                    val sig = buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
+                    if (sig.isNotEmpty()) {
+                        dmPopupSignatureByPeer[peerUid] = sig
+                    }
                 }
 
                 val newlyAdded = mutableListOf<Long>()
@@ -804,6 +960,13 @@ class InboxRepositoryImpl(
             synchronized(stateLock) {
                 finishMarkPostLocked(clockMillis())
             }
+            if (watermarkForPersist != null && viewerUidForPersist > 0L) {
+                persistWatermarksToStore(
+                    viewerUid = viewerUidForPersist,
+                    dmInitialized = true,
+                    dmWatermarks = mapOf(peerUid to watermarkForPersist!!),
+                )
+            }
             if (idsToSend.isNotEmpty()) {
                 refreshUnreadAfterMutation(opGeneration)
             }
@@ -820,10 +983,13 @@ class InboxRepositoryImpl(
             var addedMessageIds: List<Long> = emptyList()
             var previousAllWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
+            var viewerUidForDmPersist = 0L
+            var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
 
             synchronized(stateLock) {
                 syncAccountLocked()
                 val now = clockMillis()
+                viewerUidForDmPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 pruneMessageReadStateLocked(now)
 
@@ -852,7 +1018,12 @@ class InboxRepositoryImpl(
                                     peerMax,
                                 )
                             }
+                            val sig = buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
+                            if (sig.isNotEmpty()) {
+                                dmPopupSignatureByPeer[thread.peerUid] = sig
+                            }
                         }
+                        dmWatermarksForPersist = dmPopupWatermarkByPeer.toMap()
                     }
                     val effectiveThreadsBefore = rawThreads.count { !isThreadReadLocked(it, now) }
                     val newlyAdded = mutableListOf<Long>()
@@ -903,6 +1074,11 @@ class InboxRepositoryImpl(
                         }
                     }
                     addedMessageIds = newlyMarkedIds
+                    if (dmPopupBaselineInitialized && touchedPeers.isNotEmpty()) {
+                        dmWatermarksForPersist = touchedPeers.mapNotNull { peer ->
+                            dmPopupWatermarkByPeer[peer]?.let { peer to it }
+                        }.toMap()
+                    }
                     val completedThreadsCount = touchedPeers.count { peerUid ->
                         val thread = rawThreads.firstOrNull { it.peerUid == peerUid }
                         val serverUnread = serverUnreadMessageIdsByPeer[peerUid].orEmpty()
@@ -959,6 +1135,13 @@ class InboxRepositoryImpl(
 
             synchronized(stateLock) {
                 finishMarkPostLocked(clockMillis())
+            }
+            if (dmWatermarksForPersist.isNotEmpty() && viewerUidForDmPersist > 0L) {
+                persistWatermarksToStore(
+                    viewerUid = viewerUidForDmPersist,
+                    dmInitialized = true,
+                    dmWatermarks = dmWatermarksForPersist,
+                )
             }
             refreshUnreadAfterMutation(opGeneration)
         }
@@ -1064,10 +1247,13 @@ class InboxRepositoryImpl(
         mentionsLedger.popupWatermarkId = 0L
         dmPopupBaselineInitialized = false
         dmPopupWatermarkByPeer.clear()
+        dmPopupSignatureByPeer.clear()
         emittedInteractionFloorKeys.clear()
         emittedPopupKeys.clear()
+        persistedBaselineCheckedForUid = 0L
         lastForegroundCheckMs = 0L
         lastFullListSyncMs = 0L
+        lastDmListSyncMs = 0L
         foregroundRateLimitUntilMs = 0L
         foregroundBackoffUntilMs = 0L
         readMutationGeneration += 1L
@@ -1305,11 +1491,35 @@ class InboxRepositoryImpl(
         effectiveItems: List<NotificationItem>,
         viewerUid: Long,
         now: Long,
+        allowEmit: Boolean,
     ): List<InAppMessagePopup> {
         val maxIdInFeed = effectiveItems.maxOfOrNull { it.id } ?: 0L
         if (!ledger.popupBaselineInitialized) {
             ledger.popupBaselineInitialized = true
             ledger.popupWatermarkId = maxIdInFeed
+            return emptyList()
+        }
+
+        if (!allowEmit) {
+            val minUnreadNewId = effectiveItems
+                .asSequence()
+                .filter { item ->
+                    !item.isRead &&
+                        item.id > ledger.popupWatermarkId &&
+                        (viewerUid <= 0L || item.senderUid != viewerUid)
+                }
+                .minOfOrNull { it.id }
+            val safeMaxReadId = effectiveItems
+                .asSequence()
+                .filter { item ->
+                    item.isRead || (viewerUid > 0L && item.senderUid == viewerUid)
+                }
+                .map { it.id }
+                .filter { id -> minUnreadNewId == null || id < minUnreadNewId }
+                .maxOrNull() ?: 0L
+            if (safeMaxReadId > ledger.popupWatermarkId) {
+                ledger.popupWatermarkId = safeMaxReadId
+            }
             return emptyList()
         }
 
@@ -1385,6 +1595,7 @@ class InboxRepositoryImpl(
         effectiveThreads: List<DirectMessageSummary>,
         viewerUid: Long,
         now: Long,
+        allowEmit: Boolean,
     ): List<InAppMessagePopup> {
         if (!dmPopupBaselineInitialized) {
             dmPopupBaselineInitialized = true
@@ -1404,6 +1615,57 @@ class InboxRepositoryImpl(
                         baselineId,
                     )
                 }
+                val baselineSignature = buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
+                if (baselineSignature.isNotEmpty()) {
+                    dmPopupSignatureByPeer[thread.peerUid] = baselineSignature
+                }
+            }
+            return emptyList()
+        }
+
+        if (!allowEmit) {
+            for (thread in effectiveThreads) {
+                if (thread.isSystem || thread.peerUid <= 0L) continue
+                val peerRows = cachedListMessagesByPeer[thread.peerUid].orEmpty()
+                val prevWatermark = dmPopupWatermarkByPeer[thread.peerUid] ?: 0L
+                val unreadIncomingIds = peerRows
+                    .asSequence()
+                    .filter { row ->
+                        row.senderId != viewerUid &&
+                            !row.viewed &&
+                            !isMessageLocallyReadLocked(thread.peerUid, row.id, now)
+                    }
+                    .map { it.id }
+                    .filter { it > 0L }
+                    .toList()
+                val minUnreadId = unreadIncomingIds.minOrNull()
+                if (thread.isRead && minUnreadId == null) {
+                    val maxPeerMsgId = maxOf(
+                        thread.latestMessageId ?: 0L,
+                        peerRows.maxOfOrNull { it.id } ?: 0L,
+                    )
+                    if (maxPeerMsgId > prevWatermark) {
+                        dmPopupWatermarkByPeer[thread.peerUid] = maxPeerMsgId
+                    }
+                    val sig = buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
+                    if (sig.isNotEmpty()) {
+                        dmPopupSignatureByPeer[thread.peerUid] = sig
+                    }
+                } else {
+                    val safeMaxReadId = peerRows
+                        .asSequence()
+                        .filter { row ->
+                            row.senderId == viewerUid ||
+                                row.viewed ||
+                                isMessageLocallyReadLocked(thread.peerUid, row.id, now)
+                        }
+                        .map { it.id }
+                        .filter { id -> id > 0L && (minUnreadId == null || id < minUnreadId) }
+                        .maxOrNull() ?: 0L
+                    if (safeMaxReadId > prevWatermark && (minUnreadId != null || peerRows.isNotEmpty())) {
+                        dmPopupWatermarkByPeer[thread.peerUid] = safeMaxReadId
+                    }
+                }
             }
             return emptyList()
         }
@@ -1413,6 +1675,7 @@ class InboxRepositoryImpl(
             if (thread.isSystem || thread.peerUid <= 0L) continue
             val peerRows = cachedListMessagesByPeer[thread.peerUid].orEmpty()
             val prevWatermark = dmPopupWatermarkByPeer[thread.peerUid] ?: 0L
+            val prevSignature = dmPopupSignatureByPeer[thread.peerUid]
             val maxPeerMsgId = maxOf(
                 thread.latestMessageId ?: 0L,
                 peerRows.maxOfOrNull { it.id } ?: 0L,
@@ -1430,26 +1693,50 @@ class InboxRepositoryImpl(
             val triggerMsgId: Long
             val rawPreview: String
             val createdAtIso: String
+            val hasTriggerCandidate: Boolean
             if (newestIncomingUnread != null) {
                 triggerMsgId = newestIncomingUnread.id
                 rawPreview = newestIncomingUnread.effectiveContent()
                 createdAtIso = newestIncomingUnread.createdAt.ifBlank { thread.updatedAtIso }
+                hasTriggerCandidate = true
             } else if (!thread.isRead && peerRows.isEmpty()) {
                 triggerMsgId = thread.latestMessageId ?: 0L
                 rawPreview = thread.previewText
                 createdAtIso = thread.updatedAtIso
+                hasTriggerCandidate = true
             } else {
                 triggerMsgId = 0L
                 rawPreview = ""
                 createdAtIso = ""
+                hasTriggerCandidate = false
             }
 
             if (maxPeerMsgId > prevWatermark) {
                 dmPopupWatermarkByPeer[thread.peerUid] = maxPeerMsgId
             }
 
-            if (!thread.isRead && triggerMsgId > prevWatermark) {
-                val dedupKey = "dm:${thread.peerUid}:$triggerMsgId"
+            val currentSignature = if (hasTriggerCandidate) {
+                buildDmThreadSignature(createdAtIso, rawPreview)
+            } else {
+                buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
+            }
+            if (currentSignature.isNotEmpty()) {
+                dmPopupSignatureByPeer[thread.peerUid] = currentSignature
+            }
+
+            val shouldTriggerById = !thread.isRead && triggerMsgId > prevWatermark
+            val shouldTriggerBySignature = !thread.isRead &&
+                hasTriggerCandidate &&
+                triggerMsgId <= 0L &&
+                currentSignature.isNotEmpty() &&
+                currentSignature != prevSignature
+
+            if (shouldTriggerById || shouldTriggerBySignature) {
+                val dedupKey = if (shouldTriggerById) {
+                    "dm:${thread.peerUid}:$triggerMsgId"
+                } else {
+                    "dm:${thread.peerUid}:sig:${currentSignature.hashCode()}"
+                }
                 if (recordEmittedPopupKeyLocked(dedupKey)) {
                     val senderName = thread.peerName.ifBlank {
                         newestIncomingUnread?.senderName?.takeIf { it.isNotBlank() } ?: "用户 #${thread.peerUid}"
@@ -1477,6 +1764,193 @@ class InboxRepositoryImpl(
             .sortedBy { it.itemId }
             .takeLast(MAX_POPUPS_PER_BATCH)
     }
+
+    private fun buildDmThreadSignature(updatedAtIso: String, preview: String): String {
+        val cleanTime = updatedAtIso.trim()
+        val cleanBody = preview.trim()
+        return if (cleanTime.isEmpty() && cleanBody.isEmpty()) "" else "$cleanTime|$cleanBody"
+    }
+
+    private fun flushPendingPopupsFromLoadedStateLocked(
+        now: Long,
+        viewerUid: Long,
+    ): FlushPopupsResult {
+        val collected = ArrayList<InAppMessagePopup>()
+        var replyPersist: Long? = null
+        var mentionPersist: Long? = null
+        var dmPersist: Map<Long, Long> = emptyMap()
+
+        if (repliesLedger.loaded && repliesLedger.popupBaselineInitialized) {
+            val emitted = detectNotificationPopupsLocked(
+                kind = NotificationKind.REPLIES,
+                ledger = repliesLedger,
+                effectiveItems = repliesLedger.effectiveItems(now),
+                viewerUid = viewerUid,
+                now = now,
+                allowEmit = true,
+            )
+            if (emitted.isNotEmpty()) {
+                collected += emitted
+                replyPersist = repliesLedger.popupWatermarkId
+            }
+        }
+        if (mentionsLedger.loaded && mentionsLedger.popupBaselineInitialized) {
+            val emitted = detectNotificationPopupsLocked(
+                kind = NotificationKind.MENTIONS,
+                ledger = mentionsLedger,
+                effectiveItems = mentionsLedger.effectiveItems(now),
+                viewerUid = viewerUid,
+                now = now,
+                allowEmit = true,
+            )
+            if (emitted.isNotEmpty()) {
+                collected += emitted
+                mentionPersist = mentionsLedger.popupWatermarkId
+            }
+        }
+        if (threadsLoaded && dmPopupBaselineInitialized) {
+            val emitted = detectDmPopupsLocked(
+                effectiveThreads = effectiveThreadsLocked(now),
+                viewerUid = viewerUid,
+                now = now,
+                allowEmit = true,
+            )
+            if (emitted.isNotEmpty()) {
+                collected += emitted
+                dmPersist = dmPopupWatermarkByPeer.toMap()
+            }
+        }
+        return FlushPopupsResult(
+            popups = collected,
+            replyWatermark = replyPersist,
+            mentionWatermark = mentionPersist,
+            dmWatermarks = dmPersist,
+        )
+    }
+
+    private suspend fun ensurePersistedBaselineSeeded(viewerUid: Long) {
+        if (viewerUid <= 0L) return
+        val alreadyChecked = synchronized(stateLock) {
+            persistedBaselineCheckedForUid == viewerUid
+        }
+        if (alreadyChecked) return
+        val store = watermarkStore
+        val persisted: RadarWatermarks? = if (store != null) {
+            runCatching { store.getWatermarks() }.getOrNull()
+        } else {
+            null
+        }
+        synchronized(stateLock) {
+            syncAccountLocked()
+            if (persistedBaselineCheckedForUid == viewerUid) return@synchronized
+            persistedBaselineCheckedForUid = viewerUid
+            if (persisted != null && persisted.inboxAccountUid == viewerUid) {
+                if (!repliesLedger.popupBaselineInitialized && persisted.lastNotifiedReplyId >= 0L) {
+                    repliesLedger.popupBaselineInitialized = true
+                    repliesLedger.popupWatermarkId = maxOf(
+                        repliesLedger.popupWatermarkId,
+                        persisted.lastNotifiedReplyId,
+                    )
+                }
+                if (!mentionsLedger.popupBaselineInitialized && persisted.lastNotifiedMentionId >= 0L) {
+                    mentionsLedger.popupBaselineInitialized = true
+                    mentionsLedger.popupWatermarkId = maxOf(
+                        mentionsLedger.popupWatermarkId,
+                        persisted.lastNotifiedMentionId,
+                    )
+                }
+                if (!dmPopupBaselineInitialized && persisted.dmInitialized) {
+                    dmPopupBaselineInitialized = true
+                    for ((peerUid, msgId) in persisted.lastNotifiedDmMap) {
+                        if (peerUid > 0L && msgId > 0L) {
+                            dmPopupWatermarkByPeer[peerUid] = maxOf(
+                                dmPopupWatermarkByPeer[peerUid] ?: 0L,
+                                msgId,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun persistWatermarksToStore(
+        viewerUid: Long,
+        replyWatermark: Long? = null,
+        mentionWatermark: Long? = null,
+        dmInitialized: Boolean = false,
+        dmWatermarks: Map<Long, Long> = emptyMap(),
+    ) {
+        val store = watermarkStore ?: return
+        if (viewerUid <= 0L) return
+        runCatching {
+            store.updateWatermarks { current ->
+                val base = if (current.inboxAccountUid != 0L && current.inboxAccountUid != viewerUid) {
+                    current.copy(
+                        inboxAccountUid = viewerUid,
+                        lastNotifiedReplyId = -1L,
+                        lastNotifiedMentionId = -1L,
+                        dmInitialized = false,
+                        lastNotifiedDmMap = emptyMap(),
+                    )
+                } else {
+                    current.copy(inboxAccountUid = viewerUid)
+                }
+                val nextReply = if (replyWatermark != null) {
+                    maxOf(base.lastNotifiedReplyId, replyWatermark)
+                } else {
+                    base.lastNotifiedReplyId
+                }
+                val nextMention = if (mentionWatermark != null) {
+                    maxOf(base.lastNotifiedMentionId, mentionWatermark)
+                } else {
+                    base.lastNotifiedMentionId
+                }
+                val nextDmInit = base.dmInitialized || dmInitialized
+                val nextDmMap = if (dmWatermarks.isEmpty()) {
+                    base.lastNotifiedDmMap
+                } else {
+                    base.lastNotifiedDmMap.toMutableMap().apply {
+                        for ((peerUid, msgId) in dmWatermarks) {
+                            if (peerUid > 0L && msgId > (this[peerUid] ?: 0L)) {
+                                this[peerUid] = msgId
+                            }
+                        }
+                    }
+                }
+                base.copy(
+                    lastNotifiedReplyId = nextReply,
+                    lastNotifiedMentionId = nextMention,
+                    dmInitialized = nextDmInit,
+                    lastNotifiedDmMap = nextDmMap,
+                )
+            }
+        }
+    }
+
+    private data class BaselinePersistSnapshot(
+        val replyWatermark: Long?,
+        val mentionWatermark: Long?,
+        val dmInitialized: Boolean,
+        val dmWatermarks: Map<Long, Long>,
+    )
+
+    private data class ForegroundSyncStateSnapshot(
+        val countBeforeCheck: Int,
+        val knownLocalUnread: Int,
+        val lastFullSync: Long,
+        val lastDmSync: Long,
+        val repliesLoaded: Boolean,
+        val mentionsLoaded: Boolean,
+        val threadsLoaded: Boolean,
+    )
+
+    private data class FlushPopupsResult(
+        val popups: List<InAppMessagePopup>,
+        val replyWatermark: Long?,
+        val mentionWatermark: Long?,
+        val dmWatermarks: Map<Long, Long>,
+    )
 
     private fun pruneInteractionFloorCacheLocked(now: Long) {
         val iter = emittedInteractionFloorKeys.entries.iterator()

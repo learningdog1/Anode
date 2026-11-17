@@ -797,6 +797,8 @@ class PulseRadarMonitor(
         }
 
         val notifiedTopicFloorPairs = HashSet<Pair<Long, Int>>()
+        val canAdvanceUnreadWatermark =
+            quietHoursActive || notificationDispatcher.hasPostNotificationsPermission()
 
         // 1. Reply notifications
         val repliesResult = inboxRepository.getNotifications(NotificationKind.REPLIES)
@@ -813,29 +815,42 @@ class PulseRadarMonitor(
                 val freshReplies = replyItems
                     .filter { !it.isRead && it.id > watermarks.lastNotifiedReplyId && it.senderUid != viewerUid }
                     .sortedBy { it.id }
-                val nextReplyWatermark = maxOf(watermarks.lastNotifiedReplyId, maxReplyId)
+                val nextReplyWatermark = if (canAdvanceUnreadWatermark) {
+                    maxOf(watermarks.lastNotifiedReplyId, maxReplyId)
+                } else {
+                    val minUnreadId = freshReplies.minOfOrNull { it.id }
+                    val safeMaxReadId = replyItems
+                        .asSequence()
+                        .filter { it.isRead || it.senderUid == viewerUid }
+                        .map { it.id }
+                        .filter { id -> minUnreadId == null || id < minUnreadId }
+                        .maxOrNull() ?: 0L
+                    maxOf(watermarks.lastNotifiedReplyId, safeMaxReadId)
+                }
                 if (nextReplyWatermark > watermarks.lastNotifiedReplyId) {
                     watermarks = watermarkStore.updateWatermarks {
                         it.copy(lastNotifiedReplyId = nextReplyWatermark)
                     }
                 }
-                for (item in freshReplies.take(MAX_NOTIFICATIONS_PER_CYCLE)) {
-                    val resolved = InboxTargetResolver.resolveForNotificationItem(item)
-                    val targetTopicId = resolved?.topicId ?: item.topicId
-                    val targetFloor = resolved?.floor ?: item.floorNumber
-                    if (targetTopicId > 0L && targetFloor > 0) {
-                        notifiedTopicFloorPairs.add(targetTopicId to targetFloor)
-                    }
-                    if (!quietHoursActive) {
-                        notificationDispatcher.postForumInteractionNotification(
-                            itemId = item.id,
-                            isMention = false,
-                            senderName = item.senderName,
-                            topicId = targetTopicId,
-                            topicTitle = item.topicTitle,
-                            floorNumber = targetFloor,
-                            excerpt = item.excerpt.orEmpty(),
-                        )
+                if (canAdvanceUnreadWatermark) {
+                    for (item in freshReplies.take(MAX_NOTIFICATIONS_PER_CYCLE)) {
+                        val resolved = InboxTargetResolver.resolveForNotificationItem(item)
+                        val targetTopicId = resolved?.topicId ?: item.topicId
+                        val targetFloor = resolved?.floor ?: item.floorNumber
+                        if (targetTopicId > 0L && targetFloor > 0) {
+                            notifiedTopicFloorPairs.add(targetTopicId to targetFloor)
+                        }
+                        if (!quietHoursActive) {
+                            notificationDispatcher.postForumInteractionNotification(
+                                itemId = item.id,
+                                isMention = false,
+                                senderName = item.senderName,
+                                topicId = targetTopicId,
+                                topicTitle = item.topicTitle,
+                                floorNumber = targetFloor,
+                                excerpt = item.excerpt.orEmpty(),
+                            )
+                        }
                     }
                 }
             }
@@ -856,32 +871,45 @@ class PulseRadarMonitor(
                 val freshMentions = mentionItems
                     .filter { !it.isRead && it.id > watermarks.lastNotifiedMentionId && it.senderUid != viewerUid }
                     .sortedBy { it.id }
-                val nextMentionWatermark = maxOf(watermarks.lastNotifiedMentionId, maxMentionId)
+                val nextMentionWatermark = if (canAdvanceUnreadWatermark) {
+                    maxOf(watermarks.lastNotifiedMentionId, maxMentionId)
+                } else {
+                    val minUnreadId = freshMentions.minOfOrNull { it.id }
+                    val safeMaxReadId = mentionItems
+                        .asSequence()
+                        .filter { it.isRead || it.senderUid == viewerUid }
+                        .map { it.id }
+                        .filter { id -> minUnreadId == null || id < minUnreadId }
+                        .maxOrNull() ?: 0L
+                    maxOf(watermarks.lastNotifiedMentionId, safeMaxReadId)
+                }
                 if (nextMentionWatermark > watermarks.lastNotifiedMentionId) {
                     watermarks = watermarkStore.updateWatermarks {
                         it.copy(lastNotifiedMentionId = nextMentionWatermark)
                     }
                 }
-                var emitted = 0
-                for (item in freshMentions) {
-                    val resolved = InboxTargetResolver.resolveForNotificationItem(item)
-                    val targetTopicId = resolved?.topicId ?: item.topicId
-                    val targetFloor = resolved?.floor ?: item.floorNumber
-                    val key = targetTopicId to targetFloor
-                    if (targetTopicId > 0L && targetFloor > 0 && !notifiedTopicFloorPairs.add(key)) {
-                        continue
-                    }
-                    if (!quietHoursActive && emitted < MAX_NOTIFICATIONS_PER_CYCLE) {
-                        notificationDispatcher.postForumInteractionNotification(
-                            itemId = item.id,
-                            isMention = true,
-                            senderName = item.senderName,
-                            topicId = targetTopicId,
-                            topicTitle = item.topicTitle,
-                            floorNumber = targetFloor,
-                            excerpt = item.excerpt.orEmpty(),
-                        )
-                        emitted++
+                if (canAdvanceUnreadWatermark) {
+                    var emitted = 0
+                    for (item in freshMentions) {
+                        val resolved = InboxTargetResolver.resolveForNotificationItem(item)
+                        val targetTopicId = resolved?.topicId ?: item.topicId
+                        val targetFloor = resolved?.floor ?: item.floorNumber
+                        val key = targetTopicId to targetFloor
+                        if (targetTopicId > 0L && targetFloor > 0 && !notifiedTopicFloorPairs.add(key)) {
+                            continue
+                        }
+                        if (!quietHoursActive && emitted < MAX_NOTIFICATIONS_PER_CYCLE) {
+                            notificationDispatcher.postForumInteractionNotification(
+                                itemId = item.id,
+                                isMention = true,
+                                senderName = item.senderName,
+                                topicId = targetTopicId,
+                                topicTitle = item.topicTitle,
+                                floorNumber = targetFloor,
+                                excerpt = item.excerpt.orEmpty(),
+                            )
+                            emitted++
+                        }
                     }
                 }
             }
@@ -908,23 +936,29 @@ class PulseRadarMonitor(
                 for (thread in threads) {
                     val latestId = thread.latestMessageId ?: 0L
                     val prevKnownId = updatedMap[thread.peerUid] ?: 0L
-                    if (!thread.isRead && !thread.isSystem && thread.peerUid > 0L && latestId > prevKnownId) {
-                        if (!quietHoursActive && emitted < MAX_NOTIFICATIONS_PER_CYCLE) {
-                            val cleanPreview = if (thread.isMarkdown) {
-                                NodeSeekHtmlParser.stripMarkdownToPlainPreview(thread.previewText)
-                            } else {
-                                thread.previewText.trim()
+                    val isNewUnreadDm = !thread.isRead &&
+                        !thread.isSystem &&
+                        thread.peerUid > 0L &&
+                        latestId > prevKnownId
+                    if (isNewUnreadDm) {
+                        if (canAdvanceUnreadWatermark) {
+                            if (!quietHoursActive && emitted < MAX_NOTIFICATIONS_PER_CYCLE) {
+                                val cleanPreview = if (thread.isMarkdown) {
+                                    NodeSeekHtmlParser.stripMarkdownToPlainPreview(thread.previewText)
+                                } else {
+                                    thread.previewText.trim()
+                                }
+                                notificationDispatcher.postDirectMessageNotification(
+                                    peerUid = thread.peerUid,
+                                    peerName = thread.peerName,
+                                    messageId = latestId,
+                                    previewText = cleanPreview,
+                                )
+                                emitted++
                             }
-                            notificationDispatcher.postDirectMessageNotification(
-                                peerUid = thread.peerUid,
-                                peerName = thread.peerName,
-                                messageId = latestId,
-                                previewText = cleanPreview,
-                            )
-                            emitted++
+                            updatedMap[thread.peerUid] = latestId
                         }
-                    }
-                    if (latestId > prevKnownId) {
+                    } else if (latestId > prevKnownId) {
                         updatedMap[thread.peerUid] = latestId
                     }
                 }

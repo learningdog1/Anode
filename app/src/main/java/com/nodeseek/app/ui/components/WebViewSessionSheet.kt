@@ -61,7 +61,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -75,6 +77,8 @@ import androidx.webkit.WebViewFeature
 import com.nodeseek.app.data.network.NodeSeekUrlNormalizer
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
+import com.nodeseek.app.ui.theme.blendColor
+import java.util.Locale
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.net.URI
@@ -657,12 +661,14 @@ fun TurnstileVerificationWidget(
     val latestOnTokenCleared by rememberUpdatedState(onTokenCleared)
 
     var status by remember { mutableStateOf(TurnstileStatus.LOADING) }
+    var hasVisibleWidget by remember { mutableStateOf(false) }
     var manualReloadCount by remember { mutableIntStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     LaunchedEffect(resetNonce) {
         if (resetNonce > 0) {
             status = TurnstileStatus.LOADING
+            hasVisibleWidget = false
             latestOnTokenCleared()
             val wv = webViewRef
             if (wv != null) {
@@ -696,6 +702,19 @@ fun TurnstileVerificationWidget(
         TurnstileStatus.VERIFIED -> MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
         TurnstileStatus.ERROR, TurnstileStatus.EXPIRED -> MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
         else -> MaterialTheme.colorScheme.outlineVariant
+    }
+    val surfaceLow = MaterialTheme.colorScheme.surfaceContainerLow
+    val webViewBgColor = when (status) {
+        TurnstileStatus.VERIFIED -> blendColor(surfaceLow, MaterialTheme.colorScheme.primaryContainer, 0.45f)
+        TurnstileStatus.ERROR, TurnstileStatus.EXPIRED -> blendColor(surfaceLow, MaterialTheme.colorScheme.errorContainer, 0.45f)
+        else -> surfaceLow
+    }
+    val webViewBgArgb = webViewBgColor.toArgb()
+    val webViewBgHex = remember(webViewBgArgb) {
+        String.format(Locale.US, "#%06X", 0xFFFFFF and webViewBgArgb)
+    }
+    val initialBgHex = remember(surfaceLow) {
+        String.format(Locale.US, "#%06X", 0xFFFFFF and surfaceLow.toArgb())
     }
 
     Column(
@@ -732,11 +751,19 @@ fun TurnstileVerificationWidget(
                     modifier = Modifier.size(15.dp),
                 )
                 val statusLabel = when (status) {
-                    TurnstileStatus.LOADING -> "正在加载 Cloudflare 人机验证…"
-                    TurnstileStatus.READY -> "请手动完成下方人机验证"
-                    TurnstileStatus.VERIFIED -> "人机验证已通过"
-                    TurnstileStatus.EXPIRED -> "验证已过期，请重新完成"
-                    TurnstileStatus.ERROR -> "验证加载异常，请刷新重试"
+                    TurnstileStatus.LOADING -> "正在加载 Cloudflare 安全验证…"
+                    TurnstileStatus.READY -> if (hasVisibleWidget) {
+                        "请完成下方 Cloudflare 人机验证"
+                    } else {
+                        "正在自动完成安全环境检测…"
+                    }
+                    TurnstileStatus.VERIFIED -> if (hasVisibleWidget) {
+                        "人机验证已通过"
+                    } else {
+                        "Cloudflare 安全检测已自动通过，可直接登录"
+                    }
+                    TurnstileStatus.EXPIRED -> "验证已过期，请点击右侧刷新重试"
+                    TurnstileStatus.ERROR -> "验证加载异常，请点击右侧刷新或改用网页登录"
                 }
                 Text(
                     text = statusLabel,
@@ -755,6 +782,7 @@ fun TurnstileVerificationWidget(
             IconButton(
                 onClick = {
                     status = TurnstileStatus.LOADING
+                    hasVisibleWidget = false
                     latestOnTokenCleared()
                     manualReloadCount += 1
                 },
@@ -770,14 +798,19 @@ fun TurnstileVerificationWidget(
         }
 
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val useCompact = maxWidth < 300.dp
-            val widgetSize = if (useCompact) "compact" else "flexible"
-            val widgetHeight = if (useCompact) 144.dp else 72.dp
-            val htmlPayload = remember(isDark, widgetSize) {
+            val scaleFactor = if (maxWidth < 304.dp) {
+                (maxWidth.value / 304f).coerceIn(0.72f, 1f)
+            } else {
+                1f
+            }
+            val collapseSilentVerifiedBox = status == TurnstileStatus.VERIFIED && !hasVisibleWidget
+            val widgetHeight = if (collapseSilentVerifiedBox) 1.dp else 72.dp
+            val htmlPayload = remember(isDark, scaleFactor) {
                 buildTurnstileWidgetHtml(
                     siteKey = NodeSeekUrlNormalizer.TURNSTILE_SITE_KEY,
                     isDark = isDark,
-                    widgetSize = widgetSize,
+                    bgHex = initialBgHex,
+                    scaleFactor = scaleFactor,
                 )
             }
 
@@ -785,14 +818,19 @@ fun TurnstileVerificationWidget(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(widgetHeight)
-                    .clip(RoundedCornerShape(10.dp)),
+                    .clip(RoundedCornerShape(10.dp))
+                    .alpha(if (collapseSilentVerifiedBox) 0f else 1f),
                 contentAlignment = Alignment.Center,
             ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         WebView(ctx).apply {
-                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            setBackgroundColor(webViewBgArgb)
                             val cm = CookieManager.getInstance()
                             cm.setAcceptCookie(true)
                             cm.setAcceptThirdPartyCookies(this, true)
@@ -817,6 +855,13 @@ fun TurnstileVerificationWidget(
                                             if (status == TurnstileStatus.LOADING) {
                                                 status = TurnstileStatus.READY
                                             }
+                                        }
+                                    }
+
+                                    @JavascriptInterface
+                                    fun onWidgetVisible(visible: Boolean) {
+                                        post {
+                                            hasVisibleWidget = visible
                                         }
                                     }
 
@@ -856,9 +901,11 @@ fun TurnstileVerificationWidget(
                                     view: WebView?,
                                     request: WebResourceRequest?,
                                 ): Boolean {
-                                    val target = request?.url?.toString().orEmpty()
-                                    if (target.startsWith("http://", ignoreCase = true) ||
-                                        target.startsWith("https://", ignoreCase = true)
+                                    if (request?.isForMainFrame != true) return false
+                                    val target = request.url?.toString().orEmpty()
+                                    if (request.hasGesture() &&
+                                        (target.startsWith("http://", ignoreCase = true) ||
+                                            target.startsWith("https://", ignoreCase = true))
                                     ) {
                                         runCatching { uriHandler.openUri(target) }
                                         return true
@@ -868,7 +915,7 @@ fun TurnstileVerificationWidget(
                             }
 
                             webViewRef = this
-                            tag = Triple(isDark, widgetSize, manualReloadCount)
+                            tag = Triple(isDark, scaleFactor, manualReloadCount)
                             loadDataWithBaseURL(
                                 "${NodeSeekUrlNormalizer.ORIGIN}/",
                                 htmlPayload,
@@ -879,7 +926,12 @@ fun TurnstileVerificationWidget(
                         }
                     },
                     update = { view ->
-                        val desiredTag = Triple(isDark, widgetSize, manualReloadCount)
+                        view.setBackgroundColor(webViewBgArgb)
+                        view.evaluateJavascript(
+                            "if(document.documentElement)document.documentElement.style.backgroundColor='$webViewBgHex';if(document.body)document.body.style.backgroundColor='$webViewBgHex';",
+                            null,
+                        )
+                        val desiredTag = Triple(isDark, scaleFactor, manualReloadCount)
                         if (view.tag != desiredTag) {
                             view.tag = desiredTag
                             view.loadDataWithBaseURL(
@@ -893,11 +945,21 @@ fun TurnstileVerificationWidget(
                     },
                 )
 
-                if (status == TurnstileStatus.LOADING) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                    )
+                if ((status == TurnstileStatus.LOADING || status == TurnstileStatus.READY) && !hasVisibleWidget) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Text(
+                            text = "正在进行 Cloudflare 安全检测…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -909,9 +971,11 @@ private const val TURNSTILE_JS_BRIDGE = "__NodePulseTurnstileBridge"
 private fun buildTurnstileWidgetHtml(
     siteKey: String,
     isDark: Boolean,
-    widgetSize: String,
+    bgHex: String,
+    scaleFactor: Float,
 ): String {
     val theme = if (isDark) "dark" else "light"
+    val scaleString = String.format(Locale.US, "%.3f", scaleFactor.coerceIn(0.72f, 1f))
     return """
         <!DOCTYPE html>
         <html>
@@ -924,14 +988,22 @@ private fun buildTurnstileWidgetHtml(
               padding: 0;
               width: 100%;
               height: 100%;
-              background: transparent;
+              background: $bgHex;
               display: flex;
               align-items: center;
               justify-content: center;
               overflow: hidden;
             }
+            #cf-turnstile-wrap {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              transform: scale($scaleString);
+              transform-origin: center center;
+            }
             #cf-turnstile {
-              width: 100%;
+              min-width: 300px;
+              min-height: 65px;
               display: flex;
               align-items: center;
               justify-content: center;
@@ -939,28 +1011,83 @@ private fun buildTurnstileWidgetHtml(
           </style>
         </head>
         <body>
-          <div id="cf-turnstile"></div>
+          <div id="cf-turnstile-wrap">
+            <div id="cf-turnstile"></div>
+          </div>
           <script>
             var __widgetId = null;
+            var __lastVisible = null;
+            function __reportVisibility() {
+              var bridge = window.$TURNSTILE_JS_BRIDGE;
+              if (!bridge || !bridge.onWidgetVisible) return;
+              try {
+                var root = document.getElementById('cf-turnstile');
+                var iframe = root ? root.querySelector('iframe') : null;
+                if (!iframe) {
+                  if (__lastVisible !== false) {
+                    __lastVisible = false;
+                    bridge.onWidgetVisible(false);
+                  }
+                  return;
+                }
+                var rect = iframe.getBoundingClientRect();
+                var style = window.getComputedStyle(iframe);
+                var visible = style.display !== 'none' &&
+                  style.visibility !== 'hidden' &&
+                  Number(style.opacity || '1') > 0.05 &&
+                  rect.width >= 20 &&
+                  rect.height >= 20;
+                var flag = Boolean(visible);
+                if (flag !== __lastVisible) {
+                  __lastVisible = flag;
+                  bridge.onWidgetVisible(flag);
+                }
+              } catch (_) {}
+            }
+            function __observeVisibility() {
+              var root = document.getElementById('cf-turnstile');
+              if (!root) return;
+              try {
+                if (typeof MutationObserver !== 'undefined') {
+                  var mo = new MutationObserver(__reportVisibility);
+                  mo.observe(root, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['style', 'class', 'width', 'height']
+                  });
+                }
+                if (typeof ResizeObserver !== 'undefined') {
+                  var ro = new ResizeObserver(__reportVisibility);
+                  ro.observe(root);
+                }
+              } catch (_) {}
+            }
             function __renderTurnstile() {
               if (!window.turnstile) return;
               var bridge = window.$TURNSTILE_JS_BRIDGE;
+              __observeVisibility();
               try {
                 __widgetId = window.turnstile.render('#cf-turnstile', {
                   sitekey: '$siteKey',
                   theme: '$theme',
-                  size: '$widgetSize',
+                  size: 'normal',
+                  appearance: 'always',
                   callback: function(token) {
+                    __reportVisibility();
                     if (bridge && bridge.onToken) bridge.onToken(String(token || ''));
                   },
                   'expired-callback': function() {
+                    __reportVisibility();
                     if (bridge && bridge.onExpired) bridge.onExpired();
                   },
                   'error-callback': function() {
+                    __reportVisibility();
                     if (bridge && bridge.onError) bridge.onError();
                   }
                 });
                 if (bridge && bridge.onReady) bridge.onReady();
+                __reportVisibility();
               } catch (e) {
                 if (bridge && bridge.onError) bridge.onError();
               }
@@ -968,9 +1095,12 @@ private fun buildTurnstileWidgetHtml(
             window.__resetTurnstile = function() {
               try {
                 if (window.turnstile && __widgetId !== null) {
+                  __lastVisible = null;
                   window.turnstile.reset(__widgetId);
                   var bridge = window.$TURNSTILE_JS_BRIDGE;
+                  if (bridge && bridge.onWidgetVisible) bridge.onWidgetVisible(false);
                   if (bridge && bridge.onReady) bridge.onReady();
+                  __reportVisibility();
                   return 'ok';
                 }
               } catch (_) {}

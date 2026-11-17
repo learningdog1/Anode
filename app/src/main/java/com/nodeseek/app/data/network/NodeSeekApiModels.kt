@@ -464,11 +464,9 @@ data class PinCommentRequestDto(
     val action: String, // "add" or "remove"
 )
 
-@Serializable
+@Serializable(with = UnreadNotificationCountResponseSerializer::class)
 data class UnreadNotificationCountResponseDto(
-    @Serializable(with = WebsiteFlagSerializer::class)
     val success: Boolean? = null,
-    @JsonNames("unViewedCount", "data")
     val unreadCount: UnreadCountObjectDto = UnreadCountObjectDto(),
     val message: String? = null,
 ) {
@@ -477,17 +475,114 @@ data class UnreadNotificationCountResponseDto(
         @JsonNames("total", "count")
         @Serializable(with = LenientIntZeroSerializer::class)
         val all: Int = 0,
+        @JsonNames("replys", "replies", "replyCount", "reply_count")
         @Serializable(with = LenientIntZeroSerializer::class)
         val reply: Int = 0,
+        @JsonNames("atMe", "at_me", "mention", "mentions", "atCount", "at_count")
         @Serializable(with = LenientIntZeroSerializer::class)
         val at: Int = 0,
+        @JsonNames("messages", "pm", "dm", "messageCount", "message_count", "msg", "msgCount")
         @Serializable(with = LenientIntZeroSerializer::class)
         val message: Int = 0,
+        @JsonNames("sys", "systemCount", "system_count")
         @Serializable(with = LenientIntZeroSerializer::class)
         val system: Int = 0,
     ) {
         fun effectiveAll(): Int =
-            if (all > 0) all else (reply + at + message + system).coerceAtLeast(0)
+            maxOf(all, reply + at + message + system).coerceAtLeast(0)
+    }
+}
+
+private object UnreadNotificationCountResponseSerializer : KSerializer<UnreadNotificationCountResponseDto> {
+    override val descriptor: SerialDescriptor =
+        buildClassSerialDescriptor("UnreadNotificationCountResponseDto")
+
+    override fun deserialize(decoder: Decoder): UnreadNotificationCountResponseDto {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return UnreadNotificationCountResponseDto()
+        val obj = jsonDecoder.decodeJsonElement() as? JsonObject
+            ?: return UnreadNotificationCountResponseDto()
+
+        val success = (obj["success"] as? JsonPrimitive)?.let { prim ->
+            runCatching { WebsiteFlagSerializer.parsePrimitive(prim) }.getOrNull()
+        }
+        val rawMessagePrim = obj["message"] as? JsonPrimitive
+        val serverMessage = rawMessagePrim?.contentOrNull?.takeIf {
+            it.isNotBlank() && it.toIntOrNull() == null
+        }
+
+        val nestedElement = obj["unreadCount"] ?: obj["unViewedCount"] ?: obj["data"]
+        val parsedNested = when (nestedElement) {
+            is JsonObject -> parseCountObject(nestedElement)
+            is JsonPrimitive -> UnreadNotificationCountResponseDto.UnreadCountObjectDto(
+                all = parseLenientIntOrNull(nestedElement) ?: 0,
+            )
+            else -> null
+        }
+        val parsedTopLevel = parseCountObject(obj)
+        val resolved = if (parsedNested != null) {
+            UnreadNotificationCountResponseDto.UnreadCountObjectDto(
+                all = maxOf(parsedNested.all, parsedTopLevel.all),
+                reply = maxOf(parsedNested.reply, parsedTopLevel.reply),
+                at = maxOf(parsedNested.at, parsedTopLevel.at),
+                message = maxOf(parsedNested.message, parsedTopLevel.message),
+                system = maxOf(parsedNested.system, parsedTopLevel.system),
+            )
+        } else {
+            parsedTopLevel
+        }
+
+        return UnreadNotificationCountResponseDto(
+            success = success,
+            unreadCount = resolved,
+            message = serverMessage,
+        )
+    }
+
+    override fun serialize(encoder: Encoder, value: UnreadNotificationCountResponseDto) {
+        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder ?: return
+        val countsObj = JsonObject(
+            mapOf(
+                "all" to JsonPrimitive(value.unreadCount.all),
+                "reply" to JsonPrimitive(value.unreadCount.reply),
+                "at" to JsonPrimitive(value.unreadCount.at),
+                "message" to JsonPrimitive(value.unreadCount.message),
+                "system" to JsonPrimitive(value.unreadCount.system),
+            ),
+        )
+        val map = buildMap {
+            value.success?.let { put("success", JsonPrimitive(it)) }
+            put("unreadCount", countsObj)
+            value.message?.let { put("message", JsonPrimitive(it)) }
+        }
+        jsonEncoder.encodeJsonElement(JsonObject(map))
+    }
+
+    private fun parseCountObject(obj: JsonObject): UnreadNotificationCountResponseDto.UnreadCountObjectDto {
+        return UnreadNotificationCountResponseDto.UnreadCountObjectDto(
+            all = firstLenientInt(obj, "all", "total", "count"),
+            reply = firstLenientInt(obj, "reply", "replys", "replies", "replyCount", "reply_count"),
+            at = firstLenientInt(obj, "at", "atMe", "at_me", "mention", "mentions", "atCount", "at_count"),
+            message = firstLenientInt(obj, "message", "messages", "pm", "dm", "messageCount", "message_count", "msg", "msgCount"),
+            system = firstLenientInt(obj, "system", "sys", "systemCount", "system_count"),
+        )
+    }
+
+    private fun firstLenientInt(obj: JsonObject, vararg keys: String): Int {
+        for (key in keys) {
+            val elem = obj[key] as? JsonPrimitive ?: continue
+            parseLenientIntOrNull(elem)?.let { return it }
+        }
+        return 0
+    }
+
+    private fun parseLenientIntOrNull(element: JsonPrimitive): Int? {
+        if (!element.isString) {
+            return element.booleanOrNull?.let { if (it) 1 else 0 }
+                ?: element.intOrNull
+                ?: element.doubleOrNull?.toInt()
+        }
+        return element.content.replace(",", "").trim().toIntOrNull()
     }
 }
 
@@ -531,7 +626,7 @@ data class NoticeListResponseDto(
 
 @Serializable
 data class DirectMessageRowDto(
-    @JsonNames("msg_id", "message_id")
+    @JsonNames("msg_id", "message_id", "mid", "pm_id", "notice_id")
     @Serializable(with = LenientLongZeroSerializer::class)
     val id: Long = 0L,
     @SerialName("sender_id")

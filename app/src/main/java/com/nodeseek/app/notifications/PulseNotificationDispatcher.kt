@@ -77,6 +77,22 @@ open class PulseNotificationDispatcher(
         return runtimeGranted && NotificationManagerCompat.from(appContext).areNotificationsEnabled()
     }
 
+    open fun hasRequestedPostNotificationsOnce(): Boolean {
+        return runCatching {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_POST_NOTIF_REQUESTED_ONCE, false)
+        }.getOrDefault(false)
+    }
+
+    open fun markPostNotificationsRequestedOnce() {
+        runCatching {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_POST_NOTIF_REQUESTED_ONCE, true)
+                .apply()
+        }
+    }
+
     open fun isIgnoringBatteryOptimizations(): Boolean {
         val powerManager = appContext.getSystemService(PowerManager::class.java) ?: return false
         return powerManager.isIgnoringBatteryOptimizations(appContext.packageName)
@@ -265,6 +281,8 @@ open class PulseNotificationDispatcher(
             .setStyle(NotificationCompat.BigTextStyle().bigText(cleanPreview))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
             .setContentIntent(createTapPendingIntent(target, notificationId))
             .build()
@@ -315,6 +333,9 @@ open class PulseNotificationDispatcher(
         const val CHANNEL_TRACKED_REPLIES = "pulse_tracked_replies"
         const val CHANNEL_FORUM_INTERACTIONS = "pulse_forum_interactions"
         const val CHANNEL_DIRECT_MESSAGES = "pulse_direct_messages"
+
+        private const val PREFS_NAME = "nodepulse_notification_prefs"
+        private const val KEY_POST_NOTIF_REQUESTED_ONCE = "post_notifications_requested_once"
 
         const val ACTION_OPEN_RADAR_TARGET = "com.nodeseek.app.action.OPEN_RADAR_TARGET"
         private const val EXTRA_TARGET_PAYLOAD = "com.nodeseek.app.extra.RADAR_TARGET_PAYLOAD"

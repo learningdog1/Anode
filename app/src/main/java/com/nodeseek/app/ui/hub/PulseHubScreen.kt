@@ -2356,6 +2356,7 @@ private fun NativeCredentialSignInDialog(
     PulseAlertDialog(
         onDismissRequest = { if (!state.isSubmitting) onDismiss() },
         title = if (isOtpStep) "两步验证 (2FA)" else "账号密码登录",
+        modifier = Modifier.padding(horizontal = 18.dp),
         icon = if (isOtpStep) Icons.Rounded.Shield else Icons.Rounded.Key,
         tone = PulseDialogTone.PRIMARY,
         confirmText = if (isOtpStep) "验证并登录" else "登录",
@@ -2373,6 +2374,7 @@ private fun NativeCredentialSignInDialog(
         properties = DialogProperties(
             dismissOnBackPress = !state.isSubmitting,
             dismissOnClickOutside = !state.isSubmitting,
+            usePlatformDefaultWidth = false,
         ),
     ) {
         Column(
@@ -2412,7 +2414,7 @@ private fun NativeCredentialSignInDialog(
                 }
             } else {
                 Text(
-                    text = "输入账号密码后，请手动完成下方 Cloudflare 人机验证再点击登录。",
+                    text = "登录受 Cloudflare Turnstile 保护；若下方出现验证框请先完成确认。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

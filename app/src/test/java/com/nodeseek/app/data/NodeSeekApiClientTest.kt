@@ -729,4 +729,27 @@ class NodeSeekApiClientTest {
             assertEquals(1, fallbackCount) // Must not double-spend single-use Turnstile token on structured server error
         }
     }
+
+    @Test
+    fun `getUnreadNotificationCount supports plural camelCase keys, partial all vs sum, top-level counts, and primitive values`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"unreadCount":{"all":1,"replys":1,"atMe":1,"messages":2,"system":1}}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"unViewedCount":7}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"replys":2,"atMe":1,"messages":3,"message":"ok"}"""),
+        )
+
+        assertEquals(5, client.getUnreadNotificationCount())
+        assertEquals(7, client.getUnreadNotificationCount())
+        assertEquals(6, client.getUnreadNotificationCount())
+    }
 }

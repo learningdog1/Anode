@@ -1,5 +1,7 @@
 package com.nodeseek.app.data.repository
 
+import com.nodeseek.app.data.local.RadarWatermarkStore
+import com.nodeseek.app.data.local.RadarWatermarks
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
@@ -843,6 +845,231 @@ class InboxUnreadStateTest {
         } finally {
             popupJob.cancel()
             wakeJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `periodic DM sync emits popup even when unread-count stays zero`() = runTest {
+        val dmPhase = AtomicInteger(1)
+        val dmListCalls = AtomicInteger(0)
+
+        server.dispatcher = object : MockWebDispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody(htmlWithConfig(unreadAll = 0))
+                    "/api/notification/unread-count" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":0}}""")
+                    "/api/notification/reply-to-me/list",
+                    "/api/notification/at-me/list",
+                    -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[]}""")
+                    "/api/notification/message/list" -> {
+                        dmListCalls.incrementAndGet()
+                        val body = if (dmPhase.get() == 1) {
+                            """{"success":true,"msgArray":[]}"""
+                        } else {
+                            """
+                            {
+                              "success": true,
+                              "msgArray": [
+                                {"id": 901, "sender_id": 777, "sender_name": "PeerZ", "receiver_id": 101, "receiver_name": "Tester", "content": "你好，请问出吗", "is_markdown": false, "viewed": 0, "created_at": "2026-11-17T01:00:00Z"}
+                              ]
+                            }
+                            """.trimIndent()
+                        }
+                        MockResponse().setResponseCode(200).setBody(body)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val collectedPopups = mutableListOf<InAppMessagePopup>()
+        val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            inboxRepository.inAppPopupEvents.collect { collectedPopups += it }
+        }
+        try {
+            sessionRepository.refreshSession().getOrThrow()
+            inboxRepository.syncForegroundInbox().getOrThrow()
+            assertEquals(1, dmListCalls.get())
+            assertTrue(collectedPopups.isEmpty())
+
+            // New DM arrives, while /api/notification/unread-count continues returning 0.
+            dmPhase.set(2)
+            fakeClockMs.addAndGet(46_000L)
+            inboxRepository.syncForegroundInbox().getOrThrow()
+
+            assertEquals(2, dmListCalls.get())
+            assertEquals(1, collectedPopups.size)
+            val dmPopup = collectedPopups.single()
+            assertEquals(InAppMessageKind.DIRECT_MESSAGE, dmPopup.kind)
+            assertEquals(901L, dmPopup.itemId)
+            assertEquals(777L, dmPopup.peerUid)
+            assertEquals("PeerZ", dmPopup.peerName)
+            assertEquals("你好，请问出吗", dmPopup.previewText)
+        } finally {
+            popupJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `background getMessageThreads without active popup subscriber does not burn DM popup on resume`() = runTest {
+        val dmPhase = AtomicInteger(1)
+
+        server.dispatcher = object : MockWebDispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody(htmlWithConfig(unreadAll = 0))
+                    "/api/notification/unread-count" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":0}}""")
+                    "/api/notification/reply-to-me/list",
+                    "/api/notification/at-me/list",
+                    -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[]}""")
+                    "/api/notification/message/list" -> {
+                        val body = if (dmPhase.get() == 1) {
+                            """
+                            {
+                              "success": true,
+                              "msgArray": [
+                                {"id": 500, "sender_id": 888, "sender_name": "Bob", "receiver_id": 101, "receiver_name": "Tester", "content": "历史已读消息", "is_markdown": false, "viewed": 1, "created_at": "2026-11-17T00:10:00Z"}
+                              ]
+                            }
+                            """.trimIndent()
+                        } else {
+                            """
+                            {
+                              "success": true,
+                              "msgArray": [
+                                {"id": 501, "sender_id": 888, "sender_name": "Bob", "receiver_id": 101, "receiver_name": "Tester", "content": "后台到达的新私信", "is_markdown": false, "viewed": 0, "created_at": "2026-11-17T00:20:00Z"},
+                                {"id": 500, "sender_id": 888, "sender_name": "Bob", "receiver_id": 101, "receiver_name": "Tester", "content": "历史已读消息", "is_markdown": false, "viewed": 1, "created_at": "2026-11-17T00:10:00Z"}
+                              ]
+                            }
+                            """.trimIndent()
+                        }
+                        MockResponse().setResponseCode(200).setBody(body)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        // First initialize baselines silently while UI collector is attached, then detach UI (backgrounded).
+        val firstPopups = mutableListOf<InAppMessagePopup>()
+        val firstJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            inboxRepository.inAppPopupEvents.collect { firstPopups += it }
+        }
+        sessionRepository.refreshSession().getOrThrow()
+        inboxRepository.syncForegroundInbox().getOrThrow()
+        assertTrue(firstPopups.isEmpty())
+        firstJob.cancel()
+
+        // Background PulseRadarMonitor polls getMessageThreads() while inAppPopupEvents has 0 subscribers.
+        dmPhase.set(2)
+        inboxRepository.getMessageThreads().getOrThrow()
+
+        // User brings app back to foreground and attaches collector -> syncForegroundInbox flushes #501 immediately!
+        val resumedPopups = mutableListOf<InAppMessagePopup>()
+        val resumedJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            inboxRepository.inAppPopupEvents.collect { resumedPopups += it }
+        }
+        try {
+            fakeClockMs.addAndGet(2_000L) // Even inside 12s throttle window!
+            inboxRepository.syncForegroundInbox().getOrThrow()
+
+            assertEquals(1, resumedPopups.size)
+            assertEquals(501L, resumedPopups.single().itemId)
+            assertEquals("后台到达的新私信", resumedPopups.single().previewText)
+        } finally {
+            resumedJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `cold start with persisted watermark store suppresses old DMs and pops newly arrived DM`() = runTest {
+        val watermarkStore = object : RadarWatermarkStore {
+            private var state = RadarWatermarks(
+                inboxAccountUid = 101L,
+                lastNotifiedReplyId = 10L,
+                lastNotifiedMentionId = 20L,
+                dmInitialized = true,
+                lastNotifiedDmMap = mapOf(888L to 500L),
+            )
+
+            override suspend fun getWatermarks(): RadarWatermarks = state
+
+            override suspend fun updateWatermarks(
+                transform: (RadarWatermarks) -> RadarWatermarks,
+            ): RadarWatermarks {
+                state = transform(state)
+                return state
+            }
+        }
+
+        val coldSessionRepo = SessionRepositoryImpl(
+            apiClientProvider = { apiClient },
+            cookieBridge = cookieBridge,
+        )
+        val coldInboxRepo = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = coldSessionRepo,
+            clockMillis = { fakeClockMs.get() },
+            watermarkStore = watermarkStore,
+        )
+        val baseUrl = server.url("/")
+        val okHttp = NodeSeekApiClient.createDefaultHttpClient(
+            cookieBridge = cookieBridge,
+            userAgentProvider = UserAgentProvider("NodePulseColdStartTest/1.0"),
+            additionalTargetHost = baseUrl.host,
+        )
+        apiClient = NodeSeekApiClient(
+            httpClient = okHttp,
+            baseOrigin = baseUrl,
+            rssUrl = server.url("/rss.xml"),
+            nodeImageOrigin = baseUrl,
+            onConfigObserved = coldSessionRepo::onConfigPayloadObserved,
+        )
+
+        server.dispatcher = object : MockWebDispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody(htmlWithConfig(unreadAll = 2))
+                    "/api/notification/unread-count" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":2}}""")
+                    "/api/notification/reply-to-me/list",
+                    "/api/notification/at-me/list",
+                    -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[]}""")
+                    "/api/notification/message/list" -> MockResponse().setResponseCode(200).setBody(
+                        """
+                        {
+                          "success": true,
+                          "msgArray": [
+                            {"id": 500, "sender_id": 888, "sender_name": "Bob", "receiver_id": 101, "receiver_name": "Tester", "content": "冷启动前已知未读", "is_markdown": false, "viewed": 0, "created_at": "2026-11-17T00:00:00Z"},
+                            {"id": 502, "sender_id": 888, "sender_name": "Bob", "receiver_id": 101, "receiver_name": "Tester", "content": "杀进程期间到达的新私信", "is_markdown": false, "viewed": 0, "created_at": "2026-11-17T00:30:00Z"}
+                          ]
+                        }
+                        """.trimIndent(),
+                    )
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val collectedPopups = mutableListOf<InAppMessagePopup>()
+        val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coldInboxRepo.inAppPopupEvents.collect { collectedPopups += it }
+        }
+        try {
+            coldSessionRepo.refreshSession().getOrThrow()
+            coldInboxRepo.syncForegroundInbox().getOrThrow()
+
+            assertEquals(1, collectedPopups.size)
+            assertEquals(502L, collectedPopups.single().itemId)
+            assertEquals("杀进程期间到达的新私信", collectedPopups.single().previewText)
+            assertEquals(502L, watermarkStore.getWatermarks().lastNotifiedDmMap[888L])
+        } finally {
+            popupJob.cancel()
         }
     }
 }

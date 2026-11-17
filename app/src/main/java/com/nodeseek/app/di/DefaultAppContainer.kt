@@ -142,6 +142,7 @@ class DefaultAppContainer(
         InboxRepositoryImpl(
             apiClientProvider = { apiClient },
             sessionRepository = sessionRepositoryImpl,
+            watermarkStore = radarPreferencesStore,
         )
     }
 

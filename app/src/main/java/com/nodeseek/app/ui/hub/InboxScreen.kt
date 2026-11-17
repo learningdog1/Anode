@@ -54,11 +54,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -107,6 +109,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 @Composable
@@ -144,24 +147,35 @@ fun InboxScreen(
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
+    val initialTabIndex = previewUiState?.selectedTab?.index
+        ?: initialTab.coerceIn(0, InboxTab.entries.lastIndex)
     val pagerState = rememberPagerState(
-        initialPage = uiState.selectedTab.index,
+        initialPage = initialTabIndex,
         pageCount = { InboxTab.entries.size },
     )
+    val activeTab = previewUiState?.selectedTab ?: InboxTab.fromIndex(pagerState.targetPage)
     val coroutineScope = rememberCoroutineScope()
     val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
 
-    LaunchedEffect(uiState.selectedTab) {
-        if (pagerState.currentPage != uiState.selectedTab.index) {
-            pagerState.animateScrollToPage(uiState.selectedTab.index)
-        }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collect { page ->
+                val tab = InboxTab.fromIndex(page)
+                if (viewModel.uiState.value.selectedTab != tab) {
+                    viewModel.selectTab(tab)
+                }
+            }
     }
 
-    LaunchedEffect(pagerState.currentPage) {
-        val tab = InboxTab.entries.getOrNull(pagerState.currentPage) ?: return@LaunchedEffect
-        if (uiState.selectedTab != tab) {
-            viewModel.selectTab(tab)
+    var lastHandledInitialTab by rememberSaveable { mutableIntStateOf(initialTab) }
+    LaunchedEffect(initialTab) {
+        if (initialTab != lastHandledInitialTab) {
+            lastHandledInitialTab = initialTab
+            val targetTab = InboxTab.fromIndex(initialTab)
+            viewModel.selectTab(targetTab)
+            pagerState.animateScrollToPage(targetTab.index)
         }
     }
 
@@ -380,7 +394,7 @@ fun InboxScreen(
                             label = tab.label,
                             icon = tabIcon,
                             unreadCount = unreadBadge,
-                            isSelected = uiState.selectedTab == tab,
+                            isSelected = activeTab == tab,
                             onClick = {
                                 viewModel.selectTab(tab)
                                 coroutineScope.launch {
@@ -394,7 +408,7 @@ fun InboxScreen(
             }
         },
         floatingActionButton = {
-            if (uiState.selectedTab == InboxTab.DIRECT_MESSAGES) {
+            if (activeTab == InboxTab.DIRECT_MESSAGES) {
                 val primaryColor = MaterialTheme.colorScheme.primary
                 val fabGradient = Brush.linearGradient(
                     colors = listOf(
