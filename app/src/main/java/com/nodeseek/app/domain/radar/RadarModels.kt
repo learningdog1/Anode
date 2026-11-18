@@ -65,12 +65,44 @@ data class RadarPollingSettings(
     val replyTrackingEnabled: Boolean = true,
     val inboxPushEnabled: Boolean = true,
     val foregroundIntervalMinutes: Int = 2,
-    val backgroundIntervalMinutes: Int = 5,
+    val backgroundIntervalMinutes: Int = MIN_BACKGROUND_INTERVAL_MINUTES,
     val wifiOnlyInBackground: Boolean = false,
+    val requireBatteryNotLowInBackground: Boolean = true,
     val quietHoursEnabled: Boolean = false,
     val quietStartMinuteOfDay: Int = 23 * 60,
     val quietEndMinuteOfDay: Int = 7 * 60,
-)
+) {
+    companion object {
+        const val MIN_FOREGROUND_INTERVAL_MINUTES = 1
+        const val MAX_FOREGROUND_INTERVAL_MINUTES = 60
+        const val MIN_BACKGROUND_INTERVAL_MINUTES = 15
+        const val MAX_BACKGROUND_INTERVAL_MINUTES = 180
+    }
+}
+
+sealed interface RadarBackgroundPollOutcome {
+    data class Completed(
+        val keywordAlertsTriggered: Int = 0,
+        val trackedReplyAlertsTriggered: Int = 0,
+        val inboxNotificationsTriggered: Int = 0,
+        val skippedInboxUnauthenticated: Boolean = false,
+        val errorSummary: String? = null,
+    ) : RadarBackgroundPollOutcome
+
+    data class Retry(
+        val reason: String,
+    ) : RadarBackgroundPollOutcome
+
+    data class Skipped(
+        val reason: SkipReason,
+    ) : RadarBackgroundPollOutcome {
+        enum class SkipReason {
+            DISABLED,
+            BACKOFF_ACTIVE,
+            UNMETERED_NETWORK_REQUIRED,
+        }
+    }
+}
 
 data class RadarRuntimeStatus(
     val isRunningInForeground: Boolean = true,

@@ -84,6 +84,7 @@ import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.KeywordMatchMode
 import com.nodeseek.app.domain.radar.KeywordWatchRule
 import com.nodeseek.app.domain.radar.LocalAlertRecord
+import com.nodeseek.app.domain.radar.RadarBackgroundPollOutcome
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
@@ -418,6 +419,7 @@ internal class PreviewAppContainer(
         override fun stop() = Unit
         override fun onForegroundChanged(inForeground: Boolean) = Unit
         override fun triggerImmediateCheck() = Unit
+        override suspend fun runBackgroundPollPass() = RadarBackgroundPollOutcome.Completed()
     }
 
     override val notificationDispatcher: PulseNotificationDispatcher =

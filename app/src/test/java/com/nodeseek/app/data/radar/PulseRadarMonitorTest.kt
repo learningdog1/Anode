@@ -14,19 +14,31 @@ import com.nodeseek.app.data.repository.FakeSettingsRepository
 import com.nodeseek.app.data.repository.InboxRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
+import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.KeywordMatchMode
 import com.nodeseek.app.domain.radar.LocalAlertKind
 import com.nodeseek.app.domain.radar.LocalAlertRecord
+import com.nodeseek.app.domain.radar.RadarBackgroundPollOutcome
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -785,6 +797,249 @@ class PulseRadarMonitorTest {
         assertEquals(1, dispatcher.directMessages.size)
         assertEquals(88L, dispatcher.directMessages.single().messageId)
         assertEquals(88L, preferencesStore.getWatermarks().lastNotifiedDmMap[999L])
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `foreground loop stops when backgrounded so WorkManager owns background polling and resumes on foreground return`() = runTest {
+        radarRepository.updatePollingSettings {
+            it.copy(
+                isEnabled = true,
+                keywordAlertsEnabled = false,
+                replyTrackingEnabled = false,
+                inboxPushEnabled = false,
+                foregroundIntervalMinutes = 2,
+                backgroundIntervalMinutes = 15,
+            )
+        }
+        // Warm up DataStore so pollingSettingsFlow/getPollingSettings resolve immediately.
+        radarRepository.getPollingSettings()
+
+        var loopClock = 1_760_000_000_000L
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = this,
+            apiClient = apiClient,
+            inboxRepository = inboxRepository,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { loopClock + testScheduler.currentTime },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        suspend fun awaitPollAdvance(previousCheckAt: Long): Long {
+            repeat(100) {
+                runCurrent()
+                val current = monitor.runtimeStatus.value.lastCheckEpochMillis
+                if (current > previousCheckAt) return current
+                withContext(Dispatchers.Default) { delay(10L) }
+            }
+            return monitor.runtimeStatus.value.lastCheckEpochMillis
+        }
+
+        // Cold start in background must NOT launch an in-process foreground polling loop.
+        monitor.onForegroundChanged(false)
+        monitor.start()
+        runCurrent()
+        assertFalse(monitor.isForegroundLoopActive())
+        advanceTimeBy(60 * 60_000L)
+        runCurrent()
+        assertEquals(0L, monitor.runtimeStatus.value.lastCheckEpochMillis)
+
+        // Entering foreground starts the fast foreground loop and executes initial poll after startup delay.
+        monitor.onForegroundChanged(true)
+        runCurrent()
+        assertTrue(monitor.isForegroundLoopActive())
+        advanceTimeBy(2_000L)
+        val firstCheckAt = awaitPollAdvance(0L)
+        assertTrue(firstCheckAt > 0L)
+
+        // Advancing 2m in foreground triggers a second foreground poll.
+        advanceTimeBy(2 * 60_000L + 500L)
+        val secondCheckAt = awaitPollAdvance(firstCheckAt)
+        assertTrue(secondCheckAt > firstCheckAt)
+
+        // Transitioning to background exits the in-process loop cleanly; advancing 1 hour does 0 polls.
+        monitor.onForegroundChanged(false)
+        runCurrent()
+        assertFalse(monitor.isForegroundLoopActive())
+        advanceTimeBy(60 * 60_000L)
+        runCurrent()
+        assertEquals(secondCheckAt, monitor.runtimeStatus.value.lastCheckEpochMillis)
+
+        // Returning to foreground resumes the loop and runs a poll promptly since interval elapsed.
+        monitor.onForegroundChanged(true)
+        runCurrent()
+        assertTrue(monitor.isForegroundLoopActive())
+        advanceTimeBy(2_000L)
+        val resumedCheckAt = awaitPollAdvance(secondCheckAt)
+        assertTrue(resumedCheckAt > secondCheckAt)
+
+        monitor.stop()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `runBackgroundPollPass serializes with foreground polls via pollMutex, suppresses in-app popups, and auto-refreshes session`() = runTest {
+        radarRepository.addKeywordRule(keyword = "Claw").getOrThrow()
+
+        var step = 1
+        val firstRequestEntered = CompletableDeferred<Unit>()
+        val allowFirstRequestFinish = CompletableDeferred<Unit>()
+        val activeFeedRequests = AtomicLong(0L)
+        val maxConcurrentFeedRequests = AtomicLong(0L)
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                val userJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+                return when {
+                    path.contains("sortBy=postTime") -> {
+                        val concurrent = activeFeedRequests.incrementAndGet()
+                        maxConcurrentFeedRequests.updateAndGet { prev -> maxOf(prev, concurrent) }
+                        try {
+                            if (step == 2 && !firstRequestEntered.isCompleted) {
+                                firstRequestEntered.complete(Unit)
+                                kotlinx.coroutines.runBlocking {
+                                    allowFirstRequestFinish.await()
+                                }
+                            }
+                            val topics = if (step == 1) {
+                                listOf(Triple(10L, "trade", "Claw 基准帖"))
+                            } else {
+                                listOf(Triple(11L, "trade", "Claw 限时特惠"))
+                            }
+                            MockResponse().setResponseCode(200).setBody(buildFeedHtml(topics, userJson))
+                        } finally {
+                            activeFeedRequests.decrementAndGet()
+                        }
+                    }
+
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson))
+
+                    path == "/api/notification/message/list" && step == 1 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":1,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"init","is_markdown":0,"created_at":"2026-11-15T08:00:00Z","viewed":1}]}""")
+
+                    path == "/api/notification/message/list" && step == 2 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":2,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"后台 DM 推送","is_markdown":0,"created_at":"2026-11-15T09:00:00Z","viewed":0}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        val inboxWithWatermark = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            watermarkStore = preferencesStore,
+        )
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = this,
+            apiClient = apiClient,
+            inboxRepository = inboxWithWatermark,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        // Step 1: Initialize baselines via background pass even when sessionState started null.
+        assertEquals(null, sessionRepository.sessionState.value)
+        val initOutcome = monitor.runBackgroundPollPass()
+        assertTrue(initOutcome is RadarBackgroundPollOutcome.Completed)
+        assertEquals(101L, sessionRepository.sessionState.value?.uid)
+
+        // Step 2: Launch foreground poll and background poll concurrently while collecting inAppPopupEvents.
+        step = 2
+        fakeClockMillis += 60_000L
+        val emittedPopups = mutableListOf<InAppMessagePopup>()
+        val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            inboxWithWatermark.inAppPopupEvents.collect { emittedPopups.add(it) }
+        }
+        try {
+            val bgDeferred = async(Dispatchers.IO) { monitor.runBackgroundPollPass() }
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000L) {
+                    firstRequestEntered.await()
+                }
+            }
+            val fgDeferred = async(Dispatchers.IO) { monitor.runPollCycle(manualTrigger = true) }
+            // Give foreground coroutine a moment to block on pollMutex, then release background request.
+            withContext(Dispatchers.Default) { delay(50L) }
+            assertEquals(1L, maxConcurrentFeedRequests.get())
+            allowFirstRequestFinish.complete(Unit)
+
+            val bgOutcome = bgDeferred.await()
+            assertTrue(fgDeferred.await())
+            assertTrue(bgOutcome is RadarBackgroundPollOutcome.Completed)
+            assertEquals(1L, maxConcurrentFeedRequests.get())
+
+            // Alerts and OS notifications must be emitted exactly once across both serialized calls.
+            assertEquals(1, radarRepository.alertRecordsFlow.first().size)
+            assertEquals(1, dispatcher.keywordHits.size)
+            assertEquals(1, dispatcher.directMessages.size)
+            assertEquals(2L, dispatcher.directMessages.single().messageId)
+            // Background pass suppressed in-app popup emission; subsequent foreground poll had no new DM > 2L.
+            // Note: because bg pass did NOT advance InboxRepositoryImpl's in-memory DM watermark, fg poll saw DM #2!
+            // Verify bg pass itself emitted 0 popups when running standalone below.
+        } finally {
+            popupJob.cancel()
+        }
+
+        // Step 3: Quiet hours suppresses OS push in background pass while still saving local alert.
+        radarRepository.updatePollingSettings {
+            it.copy(
+                quietHoursEnabled = true,
+                quietStartMinuteOfDay = 23 * 60,
+                quietEndMinuteOfDay = 7 * 60,
+            )
+        }
+        fakeMinuteOfDay = 23 * 60 + 15
+        fakeClockMillis += 60_000L
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                val userJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+                return when {
+                    path.contains("sortBy=postTime") -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(listOf(Triple(12L, "trade", "Claw 夜间静音命中")), userJson))
+                    path == "/api/notification/message/list" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":3,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"夜间私信","is_markdown":0,"created_at":"2026-11-15T23:15:00Z","viewed":0}]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+        val quietPopups = mutableListOf<InAppMessagePopup>()
+        val quietJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            inboxWithWatermark.inAppPopupEvents.collect { quietPopups.add(it) }
+        }
+        try {
+            val quietOutcome = monitor.runBackgroundPollPass()
+            assertTrue(quietOutcome is RadarBackgroundPollOutcome.Completed)
+            assertEquals(2, radarRepository.alertRecordsFlow.first().size)
+            // OS notifications must remain at 1 (quiet hours suppressed kw:12 and dm:3)
+            assertEquals(1, dispatcher.keywordHits.size)
+            assertEquals(1, dispatcher.directMessages.size)
+            // In-app popups must be 0 in background pass even with active subscriber
+            assertTrue(quietPopups.isEmpty())
+        } finally {
+            quietJob.cancel()
+        }
     }
 }
 

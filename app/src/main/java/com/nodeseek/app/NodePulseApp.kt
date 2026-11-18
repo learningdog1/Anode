@@ -15,11 +15,12 @@ import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import coil3.svg.SvgDecoder
+import com.nodeseek.app.data.radar.AppContainerHost
 import com.nodeseek.app.di.DefaultAppContainer
 
-class NodePulseApp : Application(), SingletonImageLoader.Factory {
+class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHost {
 
-    lateinit var container: DefaultAppContainer
+    override lateinit var container: DefaultAppContainer
         private set
 
     private var startedActivityCount: Int = 0
@@ -29,6 +30,7 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         container = DefaultAppContainer(this)
         container.notificationDispatcher.ensureChannels()
+        container.startBackgroundRadarScheduling()
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
@@ -59,6 +61,7 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory {
                 override fun onActivityDestroyed(activity: Activity) = Unit
             },
         )
+        container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
         container.radarMonitorController.start()
     }
 

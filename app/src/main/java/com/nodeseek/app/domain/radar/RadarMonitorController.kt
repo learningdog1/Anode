@@ -9,4 +9,5 @@ interface RadarMonitorController {
     fun stop()
     fun onForegroundChanged(inForeground: Boolean)
     fun triggerImmediateCheck()
+    suspend fun runBackgroundPollPass(): RadarBackgroundPollOutcome
 }

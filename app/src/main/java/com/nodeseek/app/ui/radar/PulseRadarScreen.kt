@@ -282,6 +282,7 @@ fun PulseRadarScreen(
                 onSetForegroundInterval = viewModel::setForegroundIntervalMinutes,
                 onSetBackgroundInterval = viewModel::setBackgroundIntervalMinutes,
                 onSetWifiOnly = viewModel::setWifiOnlyInBackground,
+                onSetRequireBatteryNotLow = viewModel::setRequireBatteryNotLowInBackground,
                 onSetQuietHours = viewModel::setQuietHoursEnabled,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
@@ -417,7 +418,7 @@ private fun PulseRadarTopBar(
         runtimeStatus.isPollingNow -> "正在即时巡检社区更新…"
         !pollingSettings.isEnabled -> "定时监控已暂停"
         runtimeStatus.isRunningInForeground -> "前台守望 · 每 ${pollingSettings.foregroundIntervalMinutes} 分钟"
-        else -> "后台守望 · 每 ${pollingSettings.backgroundIntervalMinutes} 分钟"
+        else -> "后台 WorkManager 守望 · 每 ${pollingSettings.backgroundIntervalMinutes.coerceAtLeast(RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES)} 分钟"
     }
 
     Row(
@@ -584,6 +585,7 @@ private fun RadarEnvironmentBanner(
     onSetForegroundInterval: (Int) -> Unit,
     onSetBackgroundInterval: (Int) -> Unit,
     onSetWifiOnly: (Boolean) -> Unit,
+    onSetRequireBatteryNotLow: (Boolean) -> Unit,
     onSetQuietHours: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -635,7 +637,7 @@ private fun RadarEnvironmentBanner(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = "定时检查在客户端前台运行或退至手机后台期间工作，完全退出应用后自动停止；通知送达与后台轮询会受到手机「勿扰模式」与「电池优化/后台省电策略」影响。",
+                    text = "前台运行期间按短周期实时巡检；退至后台或应用被系统回收后，由 WorkManager 系统调度按 ≥15 分钟间隔与网络/电量约束周期巡检。通知送达与后台调度会受到手机「勿扰模式」与「电池优化/省电策略」影响。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -754,19 +756,6 @@ private fun RadarEnvironmentBanner(
                         enabled = pollingSettings.isEnabled,
                     )
                     FilterChip(
-                        selected = pollingSettings.wifiOnlyInBackground,
-                        onClick = { onSetWifiOnly(!pollingSettings.wifiOnlyInBackground) },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.Wifi,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                            )
-                        },
-                        label = { Text("后台仅 Wi-Fi") },
-                        enabled = pollingSettings.isEnabled,
-                    )
-                    FilterChip(
                         selected = pollingSettings.quietHoursEnabled,
                         onClick = { onSetQuietHours(!pollingSettings.quietHoursEnabled) },
                         leadingIcon = {
@@ -789,15 +778,124 @@ private fun RadarEnvironmentBanner(
                     onSelect = onSetForegroundInterval,
                 )
 
-                IntervalChipStrip(
-                    title = "后台巡检间隔",
-                    optionsMinutes = listOf(3, 5, 10, 15),
-                    selectedMinutes = pollingSettings.backgroundIntervalMinutes,
-                    enabled = pollingSettings.isEnabled,
-                    onSelect = onSetBackgroundInterval,
-                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(PulseArchitecturalShapes.SmallChip)
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.72f))
+                        .border(
+                            width = 0.8.dp,
+                            color = NodePulseThemeTokens.extendedColors.cardBorder,
+                            shape = PulseArchitecturalShapes.SmallChip,
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Radar,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Text(
+                            text = "后台系统调度 · WorkManager",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+
+                    IntervalChipStrip(
+                        title = "后台巡检间隔",
+                        optionsMinutes = listOf(15, 30, 60),
+                        selectedMinutes = pollingSettings.backgroundIntervalMinutes
+                            .coerceAtLeast(RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES),
+                        enabled = pollingSettings.isEnabled,
+                        onSelect = onSetBackgroundInterval,
+                    )
+
+                    RadarConstraintSwitchRow(
+                        icon = Icons.Rounded.Wifi,
+                        title = "后台仅 Wi-Fi",
+                        subtitle = "仅在非计费网络下触发 WorkManager 后台巡检",
+                        checked = pollingSettings.wifiOnlyInBackground,
+                        enabled = pollingSettings.isEnabled,
+                        onCheckedChange = onSetWifiOnly,
+                    )
+
+                    RadarConstraintSwitchRow(
+                        icon = Icons.Rounded.BatteryChargingFull,
+                        title = "低电量暂停后台巡检",
+                        subtitle = "WorkManager 系统约束：低电量时延后，电量恢复后继续",
+                        checked = pollingSettings.requireBatteryNotLowInBackground,
+                        enabled = pollingSettings.isEnabled,
+                        onCheckedChange = onSetRequireBatteryNotLow,
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun RadarConstraintSwitchRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .clickable(enabled = enabled, role = Role.Switch) {
+                onCheckedChange(!checked)
+            }
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (enabled && checked) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.size(18.dp),
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                },
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                    alpha = if (enabled) 1f else 0.6f,
+                ),
+            )
+        }
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+        )
     }
 }
 

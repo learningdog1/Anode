@@ -289,15 +289,33 @@ class PulseRadarViewModel(
     }
 
     fun setForegroundIntervalMinutes(minutes: Int) {
-        updatePollingSettings { it.copy(foregroundIntervalMinutes = minutes.coerceIn(1, 30)) }
+        updatePollingSettings {
+            it.copy(
+                foregroundIntervalMinutes = minutes.coerceIn(
+                    RadarPollingSettings.MIN_FOREGROUND_INTERVAL_MINUTES,
+                    RadarPollingSettings.MAX_FOREGROUND_INTERVAL_MINUTES,
+                ),
+            )
+        }
     }
 
     fun setBackgroundIntervalMinutes(minutes: Int) {
-        updatePollingSettings { it.copy(backgroundIntervalMinutes = minutes.coerceIn(3, 60)) }
+        updatePollingSettings {
+            it.copy(
+                backgroundIntervalMinutes = minutes.coerceIn(
+                    RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES,
+                    RadarPollingSettings.MAX_BACKGROUND_INTERVAL_MINUTES,
+                ),
+            )
+        }
     }
 
     fun setWifiOnlyInBackground(wifiOnly: Boolean) {
         updatePollingSettings { it.copy(wifiOnlyInBackground = wifiOnly) }
+    }
+
+    fun setRequireBatteryNotLowInBackground(requireBatteryNotLow: Boolean) {
+        updatePollingSettings { it.copy(requireBatteryNotLowInBackground = requireBatteryNotLow) }
     }
 
     fun setQuietHoursEnabled(enabled: Boolean) {

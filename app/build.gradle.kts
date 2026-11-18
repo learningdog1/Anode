@@ -154,10 +154,14 @@ dependencies {
     // WebView Control
     implementation(libs.androidx.webkit)
 
+    // Background Scheduling (WorkManager)
+    implementation(libs.androidx.work.runtime.ktx)
+
     // Unit Testing
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.androidx.work.testing)
 
     // Instrumented Testing
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
