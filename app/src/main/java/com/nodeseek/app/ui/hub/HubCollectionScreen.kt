@@ -81,6 +81,7 @@ fun HubCollectionScreen(
     modifier: Modifier = Modifier,
     onOpenAuthorProfile: ((uid: Long, usernameHint: String) -> Unit)? = null,
     onOpenCategory: ((slug: String) -> Unit)? = null,
+    selectedTopicId: Long? = null,
     previewUiState: PulseHubUiState? = null,
     viewModel: PulseHubViewModel = viewModel(
         factory = PulseHubViewModel.factory(LocalAppContainer.current),
@@ -250,6 +251,7 @@ fun HubCollectionScreen(
                                 PulseTopicCard(
                                     topic = cardModel,
                                     showCategoryTag = true,
+                                    selectedTopicId = selectedTopicId,
                                     onClick = {
                                         val floor = summary.lastReadFloor ?: 0
                                         onOpenTopic(item.topicId, floor, summary.title)
@@ -338,6 +340,7 @@ fun HubCollectionScreen(
                                     showCategoryTag = true,
                                     showEngagementMetrics = false,
                                     resumeBadgeTextOverride = resumeLabel,
+                                    selectedTopicId = selectedTopicId,
                                     onClick = {
                                         onOpenTopic(
                                             entry.topicId,

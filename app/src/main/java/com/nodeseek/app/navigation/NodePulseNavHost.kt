@@ -25,18 +25,26 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,11 +58,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,6 +87,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -92,6 +104,16 @@ import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InboxTargetResolver
 import com.nodeseek.app.domain.radar.NotificationTapTarget
+import com.nodeseek.app.ui.adaptive.AdaptivePostureTransition
+import com.nodeseek.app.ui.adaptive.DualPaneDestinationKind
+import com.nodeseek.app.ui.adaptive.LocalPulseAdaptiveLayout
+import com.nodeseek.app.ui.adaptive.PulseAdaptiveLayoutInfo
+import com.nodeseek.app.ui.adaptive.PulseDualPaneScaffold
+import com.nodeseek.app.ui.adaptive.PulseNavigationRail
+import com.nodeseek.app.ui.adaptive.SelectedPaneTopic
+import com.nodeseek.app.ui.adaptive.calculatePulseAdaptiveLayoutInfo
+import com.nodeseek.app.ui.adaptive.isDualPaneListHost
+import com.nodeseek.app.ui.adaptive.resolveAdaptivePostureTransition
 import com.nodeseek.app.ui.boards.BoardsScreen
 import com.nodeseek.app.ui.components.InAppMessagePopupOverlay
 import com.nodeseek.app.ui.components.PulseBottomDockOverlay
@@ -145,6 +167,7 @@ private data class WebViewAuthRequest(
 fun NodePulseRootShell(
     container: AppContainer,
     modifier: Modifier = Modifier,
+    windowSizeClass: WindowSizeClass? = null,
     deepLinkUriFlow: StateFlow<Uri?>? = null,
     onDeepLinkConsumed: () -> Unit = {},
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
@@ -172,22 +195,33 @@ fun NodePulseRootShell(
             onDarkThemeResolved(resolvedDark)
         }
 
-        NodePulseTheme(
-            themeMode = pulseThemeMode,
-            purePitchAmoled = settings.purePitchAmoled,
-            dynamicColor = settings.useDynamicColor,
-            fontScale = settings.fontScale,
-        ) {
-            Surface(
-                modifier = modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background,
-            ) {
-                NodePulseNavHost(
-                    container = container,
-                    deepLinkUriFlow = deepLinkUriFlow,
-                    onDeepLinkConsumed = onDeepLinkConsumed,
-                    notificationTapFlow = notificationTapFlow,
+        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            val adaptiveLayoutInfo = remember(windowSizeClass, maxWidth, maxHeight) {
+                calculatePulseAdaptiveLayoutInfo(
+                    windowWidthDp = maxWidth,
+                    windowHeightDp = maxHeight,
+                    explicitWindowSizeClass = windowSizeClass,
                 )
+            }
+            CompositionLocalProvider(LocalPulseAdaptiveLayout provides adaptiveLayoutInfo) {
+                NodePulseTheme(
+                    themeMode = pulseThemeMode,
+                    purePitchAmoled = settings.purePitchAmoled,
+                    dynamicColor = settings.useDynamicColor,
+                    fontScale = settings.fontScale,
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background,
+                    ) {
+                        NodePulseNavHost(
+                            container = container,
+                            deepLinkUriFlow = deepLinkUriFlow,
+                            onDeepLinkConsumed = onDeepLinkConsumed,
+                            notificationTapFlow = notificationTapFlow,
+                        )
+                    }
+                }
             }
         }
     }
@@ -222,6 +256,7 @@ fun NodePulseNavHost(
     val updateState by container.appUpdateManager.state.collectAsStateWithLifecycle()
 
     // Top-level 3-tab shell state
+    val adaptiveLayout = LocalPulseAdaptiveLayout.current
     var selectedTab by rememberSaveable { mutableStateOf(PulseNavTab.EXPLORE) }
     var fabExpanded by rememberSaveable { mutableStateOf(true) }
     var exploreScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
@@ -229,6 +264,15 @@ fun NodePulseNavHost(
     var isSeekMailDetailOpen by rememberSaveable { mutableStateOf(false) }
     var pendingExploreCategorySlug by rememberSaveable { mutableStateOf<String?>(null) }
     var lastSelectedCategorySlug by rememberSaveable { mutableStateOf("") }
+
+    // Dual-pane master-detail & fold/unfold continuity state
+    var selectedPaneTopic by rememberSaveable(stateSaver = SelectedPaneTopic.NullableSaver) {
+        mutableStateOf(null)
+    }
+    var isDetailPaneMaximized by rememberSaveable { mutableStateOf(false) }
+    var lastKnownDualPane by rememberSaveable { mutableStateOf(adaptiveLayout.isDualPane) }
+    val latestIsDualPane by rememberUpdatedState(adaptiveLayout.isDualPane)
+    val latestSelectedTab by rememberUpdatedState(selectedTab)
 
     // Centralized WebView session / challenge sheet state
     var activeWebViewRequest by remember { mutableStateOf<WebViewAuthRequest?>(null) }
@@ -378,10 +422,82 @@ fun NodePulseNavHost(
         }
     }
 
-    // Reset mail detail open flag whenever switching away from Seek Mail tab
+    // Reset mail detail & detail maximize flags whenever switching tabs
     LaunchedEffect(selectedTab) {
         if (selectedTab != PulseNavTab.SEEK_MAIL) {
             isSeekMailDetailOpen = false
+        }
+        if (selectedTab != PulseNavTab.EXPLORE && isDetailPaneMaximized) {
+            isDetailPaneMaximized = false
+        }
+    }
+
+    // Seamless fold / unfold continuity between single-pane TopicDetailRoute and dual-pane right pane
+    LaunchedEffect(adaptiveLayout.isDualPane) {
+        val previousDualPane = lastKnownDualPane
+        val currentDualPane = adaptiveLayout.isDualPane
+        if (previousDualPane == currentDualPane) return@LaunchedEffect
+        lastKnownDualPane = currentDualPane
+
+        val currentEntry = navController.currentBackStackEntry
+        val currentKind = resolveDestinationKind(
+            entry = currentEntry,
+            selectedTab = latestSelectedTab,
+        )
+        val previousKind = resolveDestinationKind(
+            entry = navController.previousBackStackEntry,
+            selectedTab = latestSelectedTab,
+        )
+        val currentTopicArgs = if (currentKind == DualPaneDestinationKind.TOPIC_DETAIL) {
+            runCatching { currentEntry?.toRoute<TopicDetailRoute>() }.getOrNull()?.let { route ->
+                SelectedPaneTopic(
+                    topicId = route.topicId,
+                    initialFloor = route.initialFloor,
+                    titleHint = route.titleHint,
+                )
+            }
+        } else {
+            null
+        }
+
+        when (
+            val transition = resolveAdaptivePostureTransition(
+                wasDualPane = previousDualPane,
+                isDualPane = currentDualPane,
+                currentDestination = currentKind,
+                previousDestination = previousKind,
+                selectedPaneTopic = selectedPaneTopic,
+                currentTopicDetailArgs = currentTopicArgs,
+            )
+        ) {
+            AdaptivePostureTransition.None -> Unit
+            AdaptivePostureTransition.ClearPaneState -> {
+                selectedPaneTopic = null
+                isDetailPaneMaximized = false
+            }
+
+            is AdaptivePostureTransition.PushTopicDetailAndClearPane -> {
+                selectedPaneTopic = null
+                isDetailPaneMaximized = false
+                navController.navigate(
+                    TopicDetailRoute(
+                        topicId = transition.topic.topicId,
+                        initialFloor = transition.topic.initialFloor,
+                        titleHint = transition.topic.titleHint,
+                    ),
+                ) {
+                    launchSingleTop = true
+                }
+            }
+
+            is AdaptivePostureTransition.PopTopicDetailToDualPane -> {
+                selectedPaneTopic = transition.topic
+                isDetailPaneMaximized = false
+                if (transition.switchToExploreTab) {
+                    selectedTab = PulseNavTab.EXPLORE
+                }
+                navController.popBackStack()
+            }
         }
     }
 
@@ -417,13 +533,105 @@ fun NodePulseNavHost(
     val openTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit = remember(navController) {
         { topicId, initialFloor, titleHint ->
             if (topicId > 0L) {
-                navController.navigate(
-                    TopicDetailRoute(
+                val sanitizedFloor = initialFloor.coerceAtLeast(0)
+                val currentKind = resolveDestinationKind(
+                    entry = navController.currentBackStackEntry,
+                    selectedTab = latestSelectedTab,
+                )
+                if (latestIsDualPane && currentKind.isDualPaneListHost()) {
+                    selectedPaneTopic = SelectedPaneTopic(
                         topicId = topicId,
-                        initialFloor = initialFloor.coerceAtLeast(0),
+                        initialFloor = sanitizedFloor,
                         titleHint = titleHint,
                     )
+                } else {
+                    navController.navigate(
+                        TopicDetailRoute(
+                            topicId = topicId,
+                            initialFloor = sanitizedFloor,
+                            titleHint = titleHint,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    val openTopicFromExternal: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit = remember(navController) {
+        { topicId, initialFloor, titleHint ->
+            if (topicId > 0L) {
+                val sanitizedFloor = initialFloor.coerceAtLeast(0)
+                val currentKind = resolveDestinationKind(
+                    entry = navController.currentBackStackEntry,
+                    selectedTab = latestSelectedTab,
                 )
+                when {
+                    latestIsDualPane && currentKind.isDualPaneListHost() -> {
+                        isDetailPaneMaximized = false
+                        selectedPaneTopic = SelectedPaneTopic(
+                            topicId = topicId,
+                            initialFloor = sanitizedFloor,
+                            titleHint = titleHint,
+                        )
+                    }
+
+                    latestIsDualPane &&
+                        currentKind == DualPaneDestinationKind.EXPLORE_OTHER_TAB &&
+                        latestSelectedTab != PulseNavTab.SEEK_MAIL -> {
+                        selectedTab = PulseNavTab.EXPLORE
+                        isDetailPaneMaximized = false
+                        selectedPaneTopic = SelectedPaneTopic(
+                            topicId = topicId,
+                            initialFloor = sanitizedFloor,
+                            titleHint = titleHint,
+                        )
+                    }
+
+                    else -> {
+                        navController.navigate(
+                            TopicDetailRoute(
+                                topicId = topicId,
+                                initialFloor = sanitizedFloor,
+                                titleHint = titleHint,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    val editTopic: (topicId: Long, categorySlug: String) -> Unit = remember(navController) {
+        { topicId, categorySlug ->
+            navController.navigate(
+                ComposerRoute(
+                    editTopicId = topicId,
+                    initialCategorySlug = categorySlug.ifBlank { "daily" },
+                ),
+            )
+        }
+    }
+
+    val requestTopicWebViewAuth: (url: String) -> Unit = remember(openWebViewAuth) {
+        { url ->
+            openWebViewAuth(
+                url,
+                url.contains("signIn", ignoreCase = true),
+            )
+        }
+    }
+
+    val closeDualPaneTopic: () -> Unit = remember {
+        {
+            selectedPaneTopic = null
+            isDetailPaneMaximized = false
+        }
+    }
+
+    val toggleDualPaneMaximize: () -> Unit = remember {
+        {
+            if (selectedPaneTopic != null) {
+                isDetailPaneMaximized = !isDetailPaneMaximized
             }
         }
     }
@@ -469,10 +677,11 @@ fun NodePulseNavHost(
                             container.inboxRepository.markNotificationsRead(nKind, ids = listOf(nId))
                         }
                     }
-                    openTopic(target.topicId, target.initialFloor, target.titleHint)
+                    openTopicFromExternal(target.topicId, target.initialFloor, target.titleHint)
                 }
 
                 is NotificationTapTarget.OpenDirectMessage -> {
+                    isDetailPaneMaximized = false
                     appScope.launch {
                         container.inboxRepository.markThreadRead(target.peerUid)
                     }
@@ -485,6 +694,7 @@ fun NodePulseNavHost(
                 }
 
                 NotificationTapTarget.OpenRadarAlerts -> {
+                    isDetailPaneMaximized = false
                     openRadar(0)
                 }
             }
@@ -533,6 +743,7 @@ fun NodePulseNavHost(
             pendingExploreCategorySlug = normalized
             selectedTab = PulseNavTab.EXPLORE
             fabExpanded = true
+            isDetailPaneMaximized = false
             exploreScrollToTopTrigger += 1
             navController.popBackStack(ExploreRoute, inclusive = false)
         }
@@ -544,7 +755,7 @@ fun NodePulseNavHost(
         val uri = incomingDeepLinkUri ?: return@LaunchedEffect
         when (val parsed = DeepLinkParser.parseUri(uri)) {
             is NodePulseDeepLink.TopicDetail -> {
-                openTopic(parsed.topicId, parsed.initialFloor, "")
+                openTopicFromExternal(parsed.topicId, parsed.initialFloor, "")
             }
             is NodePulseDeepLink.CategoryBoard -> {
                 selectBoardAndOpenExplore(parsed.slug)
@@ -568,7 +779,12 @@ fun NodePulseNavHost(
     }
 
     val tabStateHolder = rememberSaveableStateHolder()
-    val dockedBottomPadding = 92.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val navBottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val dockedBottomPadding = 92.dp + navBottomInset
+    val exploreBottomPadding = if (adaptiveLayout.useNavigationRail) navBottomInset + 8.dp else dockedBottomPadding
+    val seekMailBottomPadding = if (adaptiveLayout.useNavigationRail) 0.dp else dockedBottomPadding
+    val pulseHubBottomPadding = if (adaptiveLayout.useNavigationRail) 0.dp else dockedBottomPadding
+    val searchBottomPadding = 24.dp + navBottomInset
 
     Box(modifier = modifier.fillMaxSize()) {
         NavHost(
@@ -615,179 +831,246 @@ fun NodePulseNavHost(
             },
         ) {
             // Root 3-tab container preserving scroll & ViewModel state across Explore / Seek Mail / Pulse Hub
-            composable<ExploreRoute> {
-                // Placed before tab content so child BackHandlers (e.g. Seek Mail detail) run first
+            composable<ExploreRoute> { backStackEntry ->
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+
+                // Placed before tab content so child BackHandlers (e.g. Seek Mail detail, dual-pane detail) run first
                 BackHandler(enabled = selectedTab != PulseNavTab.EXPLORE) {
                     selectedTab = PulseNavTab.EXPLORE
                     fabExpanded = true
                 }
 
-                Box(modifier = Modifier.fillMaxSize()) {
-                    AnimatedContent(
-                        targetState = selectedTab,
-                        transitionSpec = {
-                            val forward = targetState.ordinal >= initialState.ordinal
-                            (
-                                slideInHorizontally(
-                                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                                    initialOffsetX = { fullWidth ->
-                                        if (forward) (fullWidth * 0.05f).toInt() else -(fullWidth * 0.05f).toInt()
-                                    },
-                                ) + fadeIn(tween(durationMillis = 180))
-                            ) togetherWith (
-                                slideOutHorizontally(
-                                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                                    targetOffsetX = { fullWidth ->
-                                        if (forward) -(fullWidth * 0.04f).toInt() else (fullWidth * 0.04f).toInt()
-                                    },
-                                ) + fadeOut(tween(durationMillis = 140))
-                            )
-                        },
-                        label = "rootTabTransition",
-                    ) { tab ->
-                        tabStateHolder.SaveableStateProvider(tab.name) {
-                            when (tab) {
-                                PulseNavTab.EXPLORE -> {
-                                    ExploreScreen(
-                                        onOpenTopic = openTopic,
-                                        onOpenSearch = {
-                                            navController.navigate(SearchRoute) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onOpenBoardsTab = {},
-                                        onOpenAuthorProfile = navigateToUser,
-                                        onRequestWebViewAuth = {
-                                            openWebViewAuth(SIGN_IN_URL, session == null)
-                                        },
-                                        externalCategorySlug = pendingExploreCategorySlug,
-                                        scrollToTopTrigger = exploreScrollToTopTrigger,
-                                        onScrollDirectionChanged = { isScrollingUp ->
-                                            fabExpanded = isScrollingUp
-                                        },
-                                        bottomContentPadding = dockedBottomPadding,
-                                    )
-                                }
-
-                                PulseNavTab.SEEK_MAIL -> {
-                                    SeekMailScreen(
-                                        onBack = { selectedTab = PulseNavTab.EXPLORE },
-                                        onOpenSettings = {
-                                            navController.navigate(SettingsRoute) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        showBackButton = false,
-                                        bottomContentPadding = dockedBottomPadding,
-                                        reselectTrigger = mailReselectTrigger,
-                                        onMailDetailOpenChanged = { isSeekMailDetailOpen = it },
-                                        container = container,
-                                    )
-                                }
-
-                                PulseNavTab.PULSE_HUB -> {
-                                    PulseHubScreen(
-                                        onOpenTopic = openTopic,
-                                        onOpenUserProfile = navigateToUser,
-                                        onOpenCheckInBoard = {
-                                            navController.navigate(CheckInBoardRoute) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onOpenInbox = { initialTab ->
-                                            navController.navigate(InboxRoute(initialTab = initialTab)) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onOpenRadar = openRadar,
-                                        onOpenSeekMail = { openSeekMail(0L, 0L) },
-                                        onOpenBookmarks = {
-                                            navController.navigate(HubCollectionRoute(initialTab = 0)) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onOpenReadHistory = {
-                                            navController.navigate(HubCollectionRoute(initialTab = 1)) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onOpenSettings = {
-                                            navController.navigate(SettingsRoute) {
-                                                launchSingleTop = true
-                                            }
-                                        },
-                                        onRequestWebViewAuth = {
-                                            openWebViewAuth(SIGN_IN_URL, true)
-                                        },
-                                        contentBottomPadding = dockedBottomPadding,
+                val onTabSelected: (PulseNavTab) -> Unit = { targetTab ->
+                    selectedTab = targetTab
+                    if (targetTab == PulseNavTab.EXPLORE) {
+                        fabExpanded = true
+                    } else {
+                        isDetailPaneMaximized = false
+                    }
+                }
+                val onTabReselected: (PulseNavTab) -> Unit = { reselectedTab ->
+                    when (reselectedTab) {
+                        PulseNavTab.EXPLORE -> {
+                            exploreScrollToTopTrigger += 1
+                            fabExpanded = true
+                        }
+                        PulseNavTab.SEEK_MAIL -> {
+                            mailReselectTrigger += 1
+                        }
+                        PulseNavTab.PULSE_HUB -> {
+                            appScope.launch {
+                                container.sessionRepository.refreshSession()
+                                if (container.sessionRepository.sessionState.value != null) {
+                                    container.checkInRepository.getCheckInBoard(
+                                        page = 1,
+                                        forceRefresh = true,
                                     )
                                 }
                             }
                         }
                     }
+                }
+                val onComposeFabClick: () -> Unit = {
+                    val defaultSlug = lastSelectedCategorySlug
+                        .takeIf { it.isNotBlank() && it != "meaningless" && it != "sandbox" }
+                        ?: "daily"
+                    if (session != null) {
+                        navController.navigate(
+                            ComposerRoute(
+                                editTopicId = null,
+                                initialCategorySlug = defaultSlug,
+                            ),
+                        )
+                    } else {
+                        pendingComposerSlugAfterAuth = defaultSlug
+                        appScope.launch {
+                            rootSnackbarHostState.showSnackbar("请先登录 NodeSeek 账号后再发布新帖")
+                        }
+                        openWebViewAuth(SIGN_IN_URL, true)
+                    }
+                }
+                val hubUnreadCount = (if (session != null) unreadCount else 0) + radarUnreadCount
+                val hasPendingCheckIn = session != null &&
+                    sharedCheckInStatus != null &&
+                    !sharedCheckInStatus!!.hasCheckedInToday
 
-                    AnimatedVisibility(
-                        visible = !(selectedTab == PulseNavTab.SEEK_MAIL && isSeekMailDetailOpen),
-                        enter = fadeIn() + expandVertically(),
-                        exit = fadeOut() + shrinkVertically(),
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                    ) {
-                        PulseBottomDockOverlay(
-                            selectedTab = selectedTab,
-                            onSelectTab = { targetTab ->
-                                selectedTab = targetTab
-                                if (targetTab == PulseNavTab.EXPLORE) {
-                                    fabExpanded = true
-                                }
+                val movableTabContent = remember {
+                    movableContentOf { render: @Composable () -> Unit ->
+                        render()
+                    }
+                }
+                val renderTabContent: @Composable () -> Unit = {
+                    AnimatedContent(
+                            targetState = selectedTab,
+                            transitionSpec = {
+                                val forward = targetState.ordinal >= initialState.ordinal
+                                (
+                                    slideInHorizontally(
+                                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                        initialOffsetX = { fullWidth ->
+                                            if (forward) (fullWidth * 0.05f).toInt() else -(fullWidth * 0.05f).toInt()
+                                        },
+                                    ) + fadeIn(tween(durationMillis = 180))
+                                ) togetherWith (
+                                    slideOutHorizontally(
+                                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                                        targetOffsetX = { fullWidth ->
+                                            if (forward) -(fullWidth * 0.04f).toInt() else (fullWidth * 0.04f).toInt()
+                                        },
+                                    ) + fadeOut(tween(durationMillis = 140))
+                                )
                             },
-                            onReselectTab = { reselectedTab ->
-                                when (reselectedTab) {
+                            label = "rootTabTransition",
+                        ) { tab ->
+                            tabStateHolder.SaveableStateProvider(tab.name) {
+                                when (tab) {
                                     PulseNavTab.EXPLORE -> {
-                                        exploreScrollToTopTrigger += 1
-                                        fabExpanded = true
-                                    }
-                                    PulseNavTab.SEEK_MAIL -> {
-                                        mailReselectTrigger += 1
-                                    }
-                                    PulseNavTab.PULSE_HUB -> {
-                                        appScope.launch {
-                                            container.sessionRepository.refreshSession()
-                                            if (container.sessionRepository.sessionState.value != null) {
-                                                container.checkInRepository.getCheckInBoard(
-                                                    page = 1,
-                                                    forceRefresh = true,
-                                                )
-                                            }
+                                        AdaptiveMasterDetailContainer(
+                                            adaptiveLayout = adaptiveLayout,
+                                            selectedPaneTopic = selectedPaneTopic,
+                                            isDetailPaneMaximized = isDetailPaneMaximized,
+                                            allowBackToCloseDetail = true,
+                                            refreshTrigger = refreshTrigger,
+                                            onCloseDetailPane = closeDualPaneTopic,
+                                            onToggleMaximizePane = toggleDualPaneMaximize,
+                                            onNavigateToUser = navigateToUser,
+                                            onNavigateToCategory = selectBoardAndOpenExplore,
+                                            onOpenTopic = openTopic,
+                                            onEditTopic = editTopic,
+                                            onRequestWebViewAuth = requestTopicWebViewAuth,
+                                        ) {
+                                            ExploreScreen(
+                                                onOpenTopic = openTopic,
+                                                onOpenSearch = {
+                                                    navController.navigate(SearchRoute) {
+                                                        launchSingleTop = true
+                                                    }
+                                                },
+                                                onOpenBoardsTab = {},
+                                                onOpenAuthorProfile = navigateToUser,
+                                                onRequestWebViewAuth = {
+                                                    openWebViewAuth(SIGN_IN_URL, session == null)
+                                                },
+                                                externalCategorySlug = pendingExploreCategorySlug,
+                                                scrollToTopTrigger = exploreScrollToTopTrigger,
+                                                onScrollDirectionChanged = { isScrollingUp ->
+                                                    fabExpanded = isScrollingUp
+                                                },
+                                                bottomContentPadding = exploreBottomPadding,
+                                                selectedTopicId = if (adaptiveLayout.isDualPane) {
+                                                    selectedPaneTopic?.topicId
+                                                } else {
+                                                    null
+                                                },
+                                            )
                                         }
                                     }
-                                }
-                            },
-                            onFabClick = {
-                                val defaultSlug = lastSelectedCategorySlug
-                                    .takeIf { it.isNotBlank() && it != "meaningless" && it != "sandbox" }
-                                    ?: "daily"
-                                if (session != null) {
-                                    navController.navigate(
-                                        ComposerRoute(
-                                            editTopicId = null,
-                                            initialCategorySlug = defaultSlug,
+
+                                    PulseNavTab.SEEK_MAIL -> {
+                                        SeekMailScreen(
+                                            onBack = { selectedTab = PulseNavTab.EXPLORE },
+                                            onOpenSettings = {
+                                                navController.navigate(SettingsRoute) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            showBackButton = false,
+                                            bottomContentPadding = seekMailBottomPadding,
+                                            reselectTrigger = mailReselectTrigger,
+                                            onMailDetailOpenChanged = { isSeekMailDetailOpen = it },
+                                            container = container,
                                         )
-                                    )
-                                } else {
-                                    pendingComposerSlugAfterAuth = defaultSlug
-                                    appScope.launch {
-                                        rootSnackbarHostState.showSnackbar("请先登录 NodeSeek 账号后再发布新帖")
                                     }
-                                    openWebViewAuth(SIGN_IN_URL, true)
+
+                                    PulseNavTab.PULSE_HUB -> {
+                                        PulseHubScreen(
+                                            onOpenTopic = openTopic,
+                                            onOpenUserProfile = navigateToUser,
+                                            onOpenCheckInBoard = {
+                                                navController.navigate(CheckInBoardRoute) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            onOpenInbox = { initialTab ->
+                                                navController.navigate(InboxRoute(initialTab = initialTab)) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            onOpenRadar = openRadar,
+                                            onOpenSeekMail = { openSeekMail(0L, 0L) },
+                                            onOpenBookmarks = {
+                                                navController.navigate(HubCollectionRoute(initialTab = 0)) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            onOpenReadHistory = {
+                                                navController.navigate(HubCollectionRoute(initialTab = 1)) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            onOpenSettings = {
+                                                navController.navigate(SettingsRoute) {
+                                                    launchSingleTop = true
+                                                }
+                                            },
+                                            onRequestWebViewAuth = {
+                                                openWebViewAuth(SIGN_IN_URL, true)
+                                            },
+                                            contentBottomPadding = pulseHubBottomPadding,
+                                        )
+                                    }
                                 }
-                            },
+                            }
+                        }
+                    }
+
+                if (adaptiveLayout.useNavigationRail) {
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        PulseNavigationRail(
+                            selectedTab = selectedTab,
+                            onSelectTab = onTabSelected,
+                            onFabClick = onComposeFabClick,
                             showFab = selectedTab == PulseNavTab.EXPLORE,
-                            fabExpanded = fabExpanded,
-                            unreadNotificationCount = (if (session != null) unreadCount else 0) + radarUnreadCount,
-                            hasPendingCheckIn = session != null &&
-                                sharedCheckInStatus != null &&
-                                !sharedCheckInStatus!!.hasCheckedInToday,
+                            unreadNotificationCount = hubUnreadCount,
+                            hasPendingCheckIn = hasPendingCheckIn,
+                            onReselectTab = onTabReselected,
                         )
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .consumeWindowInsets(
+                                    WindowInsets.systemBars
+                                        .union(WindowInsets.displayCutout)
+                                        .only(WindowInsetsSides.Start),
+                                ),
+                        ) {
+                            movableTabContent(renderTabContent)
+                        }
+                    }
+                } else {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        movableTabContent(renderTabContent)
+
+                        AnimatedVisibility(
+                            visible = !(selectedTab == PulseNavTab.SEEK_MAIL && isSeekMailDetailOpen),
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically(),
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        ) {
+                            PulseBottomDockOverlay(
+                                selectedTab = selectedTab,
+                                onSelectTab = onTabSelected,
+                                onReselectTab = onTabReselected,
+                                onFabClick = onComposeFabClick,
+                                showFab = selectedTab == PulseNavTab.EXPLORE,
+                                fabExpanded = fabExpanded,
+                                unreadNotificationCount = hubUnreadCount,
+                                hasPendingCheckIn = hasPendingCheckIn,
+                            )
+                        }
                     }
                 }
             }
@@ -811,33 +1094,79 @@ fun NodePulseNavHost(
             }
 
             // Standalone Unified Search (posts, users & boards)
-            composable<SearchRoute> {
+            composable<SearchRoute> { backStackEntry ->
                 var shouldAutoFocusSearch by rememberSaveable { mutableStateOf(true) }
-                BoardsScreen(
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+                AdaptiveMasterDetailContainer(
+                    adaptiveLayout = adaptiveLayout,
+                    selectedPaneTopic = selectedPaneTopic,
+                    isDetailPaneMaximized = isDetailPaneMaximized,
+                    allowBackToCloseDetail = false,
+                    refreshTrigger = refreshTrigger,
+                    onCloseDetailPane = closeDualPaneTopic,
+                    onToggleMaximizePane = toggleDualPaneMaximize,
+                    onNavigateToUser = navigateToUser,
+                    onNavigateToCategory = selectBoardAndOpenExplore,
                     onOpenTopic = openTopic,
-                    autoFocusSearch = shouldAutoFocusSearch,
-                    onAutoFocusConsumed = { shouldAutoFocusSearch = false },
-                    standaloneSearchMode = true,
-                    onBack = safePopBackStack,
-                    onSelectBoard = selectBoardAndOpenExplore,
-                    onOpenUserProfile = navigateToUser,
-                    onRequestWebViewAuth = {
-                        openWebViewAuth(SIGN_IN_URL, session == null)
-                    },
-                    bottomContentPadding = 24.dp,
-                )
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
+                ) {
+                    BoardsScreen(
+                        onOpenTopic = openTopic,
+                        autoFocusSearch = shouldAutoFocusSearch,
+                        onAutoFocusConsumed = { shouldAutoFocusSearch = false },
+                        standaloneSearchMode = true,
+                        onBack = safePopBackStack,
+                        onSelectBoard = selectBoardAndOpenExplore,
+                        onOpenUserProfile = navigateToUser,
+                        onRequestWebViewAuth = {
+                            openWebViewAuth(SIGN_IN_URL, session == null)
+                        },
+                        bottomContentPadding = searchBottomPadding,
+                        selectedTopicId = if (adaptiveLayout.isDualPane) {
+                            selectedPaneTopic?.topicId
+                        } else {
+                            null
+                        },
+                    )
+                }
             }
 
             // Bookmarks & Read History Collection
             composable<HubCollectionRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<HubCollectionRoute>()
-                HubCollectionScreen(
-                    initialTab = route.initialTab,
-                    onBack = safePopBackStack,
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+                AdaptiveMasterDetailContainer(
+                    adaptiveLayout = adaptiveLayout,
+                    selectedPaneTopic = selectedPaneTopic,
+                    isDetailPaneMaximized = isDetailPaneMaximized,
+                    allowBackToCloseDetail = false,
+                    refreshTrigger = refreshTrigger,
+                    onCloseDetailPane = closeDualPaneTopic,
+                    onToggleMaximizePane = toggleDualPaneMaximize,
+                    onNavigateToUser = navigateToUser,
+                    onNavigateToCategory = selectBoardAndOpenExplore,
                     onOpenTopic = openTopic,
-                    onOpenAuthorProfile = navigateToUser,
-                    onOpenCategory = selectBoardAndOpenExplore,
-                )
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
+                ) {
+                    HubCollectionScreen(
+                        initialTab = route.initialTab,
+                        onBack = safePopBackStack,
+                        onOpenTopic = openTopic,
+                        onOpenAuthorProfile = navigateToUser,
+                        onOpenCategory = selectBoardAndOpenExplore,
+                        selectedTopicId = if (adaptiveLayout.isDualPane) {
+                            selectedPaneTopic?.topicId
+                        } else {
+                            null
+                        },
+                    )
+                }
             }
 
             // Topic Detail Reader
@@ -855,20 +1184,8 @@ fun NodePulseNavHost(
                     onNavigateToUser = navigateToUser,
                     onNavigateToCategory = selectBoardAndOpenExplore,
                     onOpenTopic = openTopic,
-                    onEditTopic = { topicId, categorySlug ->
-                        navController.navigate(
-                            ComposerRoute(
-                                editTopicId = topicId,
-                                initialCategorySlug = categorySlug.ifBlank { "daily" },
-                            )
-                        )
-                    },
-                    onRequestWebViewAuth = { url ->
-                        openWebViewAuth(
-                            url,
-                            url.contains("signIn", ignoreCase = true),
-                        )
-                    },
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
                 )
             }
 
@@ -899,22 +1216,41 @@ fun NodePulseNavHost(
             // Unified Inbox (@Me, Replies, System, Direct Message Threads)
             composable<InboxRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<InboxRoute>()
-                InboxScreen(
-                    initialTab = route.initialTab,
-                    onBack = safePopBackStack,
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+                AdaptiveMasterDetailContainer(
+                    adaptiveLayout = adaptiveLayout,
+                    selectedPaneTopic = selectedPaneTopic,
+                    isDetailPaneMaximized = isDetailPaneMaximized,
+                    allowBackToCloseDetail = false,
+                    refreshTrigger = refreshTrigger,
+                    onCloseDetailPane = closeDualPaneTopic,
+                    onToggleMaximizePane = toggleDualPaneMaximize,
+                    onNavigateToUser = navigateToUser,
+                    onNavigateToCategory = selectBoardAndOpenExplore,
                     onOpenTopic = openTopic,
-                    onOpenDirectMessage = { peerUid, peerName ->
-                        navController.navigate(
-                            DirectMessageRoute(
-                                peerUid = peerUid,
-                                peerName = peerName,
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
+                ) {
+                    InboxScreen(
+                        initialTab = route.initialTab,
+                        onBack = safePopBackStack,
+                        onOpenTopic = openTopic,
+                        onOpenDirectMessage = { peerUid, peerName ->
+                            isDetailPaneMaximized = false
+                            navController.navigate(
+                                DirectMessageRoute(
+                                    peerUid = peerUid,
+                                    peerName = peerName,
+                                ),
                             )
-                        )
-                    },
-                    onOpenUserProfile = navigateToUser,
-                    onOpenRadar = openRadar,
-                    onOpenSeekMail = { openSeekMail(0L, 0L) },
-                )
+                        },
+                        onOpenUserProfile = navigateToUser,
+                        onOpenRadar = openRadar,
+                        onOpenSeekMail = { openSeekMail(0L, 0L) },
+                    )
+                }
             }
 
             // 1-on-1 Direct Message Chat
@@ -973,12 +1309,30 @@ fun NodePulseNavHost(
             // Pulse Radar: Keyword Alerts, Reply Tracking & Local Alert Records
             composable<PulseRadarRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<PulseRadarRoute>()
-                PulseRadarScreen(
-                    initialTab = route.initialTab,
-                    onBack = safePopBackStack,
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+                AdaptiveMasterDetailContainer(
+                    adaptiveLayout = adaptiveLayout,
+                    selectedPaneTopic = selectedPaneTopic,
+                    isDetailPaneMaximized = isDetailPaneMaximized,
+                    allowBackToCloseDetail = false,
+                    refreshTrigger = refreshTrigger,
+                    onCloseDetailPane = closeDualPaneTopic,
+                    onToggleMaximizePane = toggleDualPaneMaximize,
+                    onNavigateToUser = navigateToUser,
+                    onNavigateToCategory = selectBoardAndOpenExplore,
                     onOpenTopic = openTopic,
-                    container = container,
-                )
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
+                ) {
+                    PulseRadarScreen(
+                        initialTab = route.initialTab,
+                        onBack = safePopBackStack,
+                        onOpenTopic = openTopic,
+                        container = container,
+                    )
+                }
             }
 
             // Seek Mail (seek.li OpenAPI Mailbox & OTP Client)
@@ -1019,6 +1373,8 @@ fun NodePulseNavHost(
                     val targetUrl = when {
                         activeTopicRoute != null && activeTopicRoute.topicId > 0L ->
                             "https://www.nodeseek.com/post-${activeTopicRoute.topicId}-1"
+                        adaptiveLayout.isDualPane && selectedPaneTopic != null ->
+                            "https://www.nodeseek.com/post-${selectedPaneTopic!!.topicId}-1"
                         activeUserRoute != null && activeUserRoute.uid > 0L ->
                             "https://www.nodeseek.com/space/${activeUserRoute.uid}"
                         else -> CHALLENGE_VERIFY_URL
@@ -1049,7 +1405,7 @@ fun NodePulseNavHost(
                                 )
                             }
                         }
-                        openTopic(target.topicId, target.initialFloor, target.titleHint)
+                        openTopicFromExternal(target.topicId, target.initialFloor, target.titleHint)
                     }
 
                     is NotificationTapTarget.OpenDirectMessage -> {
@@ -1085,7 +1441,7 @@ fun NodePulseNavHost(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 94.dp),
+                .padding(bottom = if (adaptiveLayout.useNavigationRail) 16.dp else 94.dp),
             pillModifier = Modifier,
         )
 
@@ -1259,5 +1615,105 @@ private fun ChallengeVerificationBanner(
                 modifier = Modifier.size(18.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun AdaptiveMasterDetailContainer(
+    adaptiveLayout: PulseAdaptiveLayoutInfo,
+    selectedPaneTopic: SelectedPaneTopic?,
+    isDetailPaneMaximized: Boolean,
+    allowBackToCloseDetail: Boolean,
+    refreshTrigger: Long,
+    onCloseDetailPane: () -> Unit,
+    onToggleMaximizePane: () -> Unit,
+    onNavigateToUser: (uid: Long, usernameHint: String) -> Unit,
+    onNavigateToCategory: (slug: String) -> Unit,
+    onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
+    onEditTopic: (topicId: Long, categorySlug: String) -> Unit,
+    onRequestWebViewAuth: (url: String) -> Unit,
+    modifier: Modifier = Modifier,
+    listContent: @Composable () -> Unit,
+) {
+    val movableList = remember {
+        movableContentOf { render: @Composable () -> Unit ->
+            render()
+        }
+    }
+
+    if (!adaptiveLayout.isDualPane) {
+        Box(modifier = modifier.fillMaxSize()) {
+            movableList(listContent)
+        }
+    } else {
+        PulseDualPaneScaffold(
+            adaptiveLayout = adaptiveLayout,
+            hasDetailContent = selectedPaneTopic != null,
+            isDetailMaximized = isDetailPaneMaximized && selectedPaneTopic != null,
+            modifier = modifier,
+            listPane = {
+                movableList(listContent)
+            },
+            detailPane = {
+                if (selectedPaneTopic != null) {
+                    key(selectedPaneTopic.topicId, selectedPaneTopic.initialFloor) {
+                        TopicDetailScreen(
+                            topicId = selectedPaneTopic.topicId,
+                            onBack = onCloseDetailPane,
+                            initialFloor = selectedPaneTopic.initialFloor,
+                            titleHint = selectedPaneTopic.titleHint,
+                            refreshTrigger = refreshTrigger,
+                            onNavigateToUser = onNavigateToUser,
+                            onNavigateToCategory = onNavigateToCategory,
+                            onOpenTopic = onOpenTopic,
+                            onEditTopic = onEditTopic,
+                            onRequestWebViewAuth = onRequestWebViewAuth,
+                            isEmbeddedInDualPane = true,
+                            isDetailPaneMaximized = isDetailPaneMaximized,
+                            onCloseDetailPane = onCloseDetailPane,
+                            onToggleMaximizePane = onToggleMaximizePane,
+                        )
+                    }
+                }
+            },
+        )
+
+        // Registered after PulseDualPaneScaffold so it takes LIFO priority over list BackHandlers
+        BackHandler(
+            enabled = selectedPaneTopic != null && (isDetailPaneMaximized || allowBackToCloseDetail),
+        ) {
+            if (isDetailPaneMaximized) {
+                onToggleMaximizePane()
+            } else {
+                onCloseDetailPane()
+            }
+        }
+    }
+}
+
+private fun resolveDestinationKind(
+    entry: NavBackStackEntry?,
+    selectedTab: PulseNavTab,
+): DualPaneDestinationKind {
+    val dest = entry?.destination ?: return DualPaneDestinationKind.OTHER
+    return when {
+        dest.hasRoute<ExploreRoute>() -> {
+            if (selectedTab == PulseNavTab.EXPLORE) {
+                DualPaneDestinationKind.EXPLORE_FEED
+            } else {
+                DualPaneDestinationKind.EXPLORE_OTHER_TAB
+            }
+        }
+        dest.hasRoute<SearchRoute>() || dest.hasRoute<BoardsRoute>() ->
+            DualPaneDestinationKind.BOARDS_OR_SEARCH
+        dest.hasRoute<HubCollectionRoute>() ->
+            DualPaneDestinationKind.HUB_COLLECTION
+        dest.hasRoute<InboxRoute>() ->
+            DualPaneDestinationKind.INBOX
+        dest.hasRoute<PulseRadarRoute>() ->
+            DualPaneDestinationKind.PULSE_RADAR
+        dest.hasRoute<TopicDetailRoute>() ->
+            DualPaneDestinationKind.TOPIC_DETAIL
+        else -> DualPaneDestinationKind.OTHER
     }
 }

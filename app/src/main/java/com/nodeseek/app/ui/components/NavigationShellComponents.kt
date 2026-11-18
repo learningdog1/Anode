@@ -75,6 +75,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -115,6 +116,80 @@ enum class PulseNavTab(
 }
 
 /**
+ * Shared tonal gradient brush for active top-level navigation indicators in both
+ * [FloatingPillDock] and `PulseNavigationRail`.
+ */
+@Composable
+fun pulseNavActiveIndicatorBrush(isDark: Boolean = NodePulseThemeTokens.isDark): Brush =
+    Brush.horizontalGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.82f else 0.96f),
+            blendColor(
+                source = MaterialTheme.colorScheme.primaryContainer,
+                target = MaterialTheme.colorScheme.secondaryContainer,
+                fraction = 0.38f,
+            ).copy(alpha = if (isDark) 0.78f else 0.92f),
+        ),
+    )
+
+/**
+ * Shared icon + unread badge / check-in dot rendering for top-level [PulseNavTab] items.
+ */
+@Composable
+fun PulseNavTabIconWithBadge(
+    tab: PulseNavTab,
+    isSelected: Boolean,
+    contentColor: Color,
+    cutoutBorderColor: Color,
+    unreadNotificationCount: Int = 0,
+    hasPendingCheckIn: Boolean = false,
+    iconSize: Dp = 20.dp,
+    containerSize: Dp = 20.dp,
+    iconScale: Float = 1f,
+) {
+    val badgeBrush = if (tab == PulseNavTab.PULSE_HUB) {
+        Brush.horizontalGradient(
+            colors = listOf(
+                MaterialTheme.colorScheme.error,
+                blendColor(
+                    source = MaterialTheme.colorScheme.error,
+                    target = MaterialTheme.colorScheme.tertiary,
+                    fraction = 0.28f,
+                ),
+            ),
+        )
+    } else {
+        null
+    }
+    CornerCountBadgeBox(
+        count = if (tab == PulseNavTab.PULSE_HUB) unreadNotificationCount else 0,
+        containerSize = containerSize,
+        badgeOffset = DpOffset(x = 4.dp, y = (-7).dp),
+        containerBrush = badgeBrush,
+        contentColor = MaterialTheme.colorScheme.onError,
+        cutoutBorderColor = cutoutBorderColor,
+        cutoutBorderWidth = 1.dp,
+        badgeMinHeight = 18.dp,
+        showIndicatorDotWhenZero = tab == PulseNavTab.PULSE_HUB && hasPendingCheckIn,
+        indicatorDotBrush = PulseBrushes.drumstickGoldGradient(),
+        indicatorDotSize = 8.dp,
+        indicatorDotOffset = DpOffset(x = 3.dp, y = (-2).dp),
+    ) {
+        Icon(
+            imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
+            contentDescription = tab.label,
+            tint = contentColor,
+            modifier = Modifier
+                .size(iconSize)
+                .graphicsLayer {
+                    scaleX = iconScale
+                    scaleY = iconScale
+                },
+        )
+    }
+}
+
+/**
  * Edge-to-edge Floating Glass Pill Dock (`首页` / `邮箱` / `我的`).
  * Features a translucent beveled glass capsule, spring-driven gradient pill indicator,
  * subtle icon bounce, and crisp unread / check-in telemetry badges.
@@ -145,16 +220,7 @@ fun FloatingPillDock(
             ext.glassBorder,
         ),
     )
-    val indicatorBrush = Brush.horizontalGradient(
-        colors = listOf(
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.82f else 0.96f),
-            blendColor(
-                source = MaterialTheme.colorScheme.primaryContainer,
-                target = MaterialTheme.colorScheme.secondaryContainer,
-                fraction = 0.38f,
-            ).copy(alpha = if (isDark) 0.78f else 0.92f),
-        ),
-    )
+    val indicatorBrush = pulseNavActiveIndicatorBrush(isDark = isDark)
 
     Box(
         modifier = modifier
@@ -280,46 +346,17 @@ fun FloatingPillDock(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            val badgeBrush = if (tab == PulseNavTab.PULSE_HUB) {
-                                Brush.horizontalGradient(
-                                    colors = listOf(
-                                        MaterialTheme.colorScheme.error,
-                                        blendColor(
-                                            source = MaterialTheme.colorScheme.error,
-                                            target = MaterialTheme.colorScheme.tertiary,
-                                            fraction = 0.28f,
-                                        ),
-                                    ),
-                                )
-                            } else {
-                                null
-                            }
-                            CornerCountBadgeBox(
-                                count = if (tab == PulseNavTab.PULSE_HUB) unreadNotificationCount else 0,
-                                containerSize = 20.dp,
-                                badgeOffset = DpOffset(x = 4.dp, y = (-7).dp),
-                                containerBrush = badgeBrush,
-                                contentColor = MaterialTheme.colorScheme.onError,
+                            PulseNavTabIconWithBadge(
+                                tab = tab,
+                                isSelected = isSelected,
+                                contentColor = contentColor,
                                 cutoutBorderColor = glassFill,
-                                cutoutBorderWidth = 1.dp,
-                                badgeMinHeight = 18.dp,
-                                showIndicatorDotWhenZero = tab == PulseNavTab.PULSE_HUB && hasPendingCheckIn,
-                                indicatorDotBrush = PulseBrushes.drumstickGoldGradient(),
-                                indicatorDotSize = 8.dp,
-                                indicatorDotOffset = DpOffset(x = 3.dp, y = (-2).dp),
-                            ) {
-                                Icon(
-                                    imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
-                                    contentDescription = tab.label,
-                                    tint = contentColor,
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .graphicsLayer {
-                                            scaleX = iconScale
-                                            scaleY = iconScale
-                                        },
-                                )
-                            }
+                                unreadNotificationCount = unreadNotificationCount,
+                                hasPendingCheckIn = hasPendingCheckIn,
+                                iconSize = 20.dp,
+                                containerSize = 20.dp,
+                                iconScale = iconScale,
+                            )
                             Text(
                                 text = tab.label,
                                 style = MaterialTheme.typography.labelLarge,

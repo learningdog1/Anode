@@ -9,6 +9,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import com.nodeseek.app.domain.radar.NotificationTapTarget
 import com.nodeseek.app.navigation.NodePulseRootShell
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
@@ -39,8 +41,11 @@ class MainActivity : ComponentActivity() {
         val appContainer = (application as NodePulseApp).container
 
         setContent {
+            @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
+            val windowSizeClass = calculateWindowSizeClass(this)
             NodePulseRootShell(
                 container = appContainer,
+                windowSizeClass = windowSizeClass,
                 deepLinkUriFlow = pendingDeepLinkUri.asStateFlow(),
                 onDeepLinkConsumed = {
                     pendingDeepLinkUri.value = null

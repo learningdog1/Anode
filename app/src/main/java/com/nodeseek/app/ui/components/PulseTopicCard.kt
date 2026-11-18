@@ -35,9 +35,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +95,8 @@ fun PulseTopicCard(
     showEngagementMetrics: Boolean = true,
     resumeBadgeTextOverride: String? = null,
     contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 3.5.dp),
+    selectedTopicId: Long? = null,
+    isSelected: Boolean = selectedTopicId != null && selectedTopicId == topic.id,
     onBookmarkToggle: (() -> Unit)? = null,
     onAuthorClick: ((Long) -> Unit)? = null,
     onCategoryClick: ((String) -> Unit)? = null,
@@ -101,16 +108,25 @@ fun PulseTopicCard(
     val haptics = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
     val cardShape = RoundedCornerShape(14.dp)
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val selectedFillColor = MaterialTheme.colorScheme.primaryContainer.copy(
+        alpha = if (isDark) 0.28f else 0.36f,
+    )
+    val cardBorderColor = if (isSelected) {
+        primaryColor.copy(alpha = if (isDark) 0.72f else 0.56f)
+    } else {
+        ext.cardBorder
+    }
 
-    val titleColor = if (topic.isRead) {
+    val titleColor = if (topic.isRead && !isSelected) {
         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = ext.readTitleAlpha)
     } else {
         MaterialTheme.colorScheme.onSurface
     }
-    val titleStyle = (if (topic.isRead) extraType.titleMediumRead else extraType.titleMediumUnread).copy(
+    val titleStyle = (if (topic.isRead && !isSelected) extraType.titleMediumRead else extraType.titleMediumUnread).copy(
         fontSize = (15.5f * fontScale).sp,
         lineHeight = (21.5f * fontScale).sp,
-        fontWeight = if (topic.isRead) FontWeight.Normal else FontWeight.SemiBold,
+        fontWeight = if (topic.isRead && !isSelected) FontWeight.Normal else FontWeight.SemiBold,
     )
     val hasCategoryTag = showCategoryTag &&
         (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank())
@@ -127,12 +143,36 @@ fun PulseTopicCard(
                 .fillMaxWidth()
                 .pulsePressScale(interactionSource = interactionSource, pressedScale = 0.985f)
                 .clip(cardShape)
+                .then(
+                    if (isSelected) {
+                        Modifier.background(selectedFillColor)
+                    } else {
+                        Modifier
+                    },
+                )
                 .border(
-                    width = 0.85.dp,
-                    color = ext.cardBorder,
+                    width = if (isSelected) 1.4.dp else 0.85.dp,
+                    color = cardBorderColor,
                     shape = cardShape,
                 )
+                .drawWithContent {
+                    drawContent()
+                    if (isSelected) {
+                        val barW = 3.dp.toPx()
+                        val vPad = 11.dp.toPx()
+                        if (size.height > vPad * 2f) {
+                            val r = 2.dp.toPx()
+                            drawRoundRect(
+                                color = primaryColor,
+                                topLeft = Offset(0f, vPad),
+                                size = Size(barW, size.height - vPad * 2f),
+                                cornerRadius = CornerRadius(r, r),
+                            )
+                        }
+                    }
+                }
                 .semantics {
+                    selected = isSelected
                     stateDescription = if (topic.isRead) "已读" else "未读"
                 }
                 .clickable(
