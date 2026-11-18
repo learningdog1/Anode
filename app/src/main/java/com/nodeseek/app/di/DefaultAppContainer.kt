@@ -3,6 +3,9 @@ package com.nodeseek.app.di
 import android.content.Context
 import android.os.Build
 import com.nodeseek.app.BuildConfig
+import com.nodeseek.app.data.backup.BackupManagerImpl
+import com.nodeseek.app.data.local.BlockedUsersCache
+import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
 import com.nodeseek.app.data.local.DraftRepositoryImpl
 import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.local.NodePulseDatabase
@@ -30,6 +33,8 @@ import com.nodeseek.app.data.repository.UserRepositoryImpl
 import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
+import com.nodeseek.app.domain.backup.BackupManager
+import com.nodeseek.app.domain.backup.NoOpContentFilterBackupBridge
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
@@ -195,10 +200,15 @@ class DefaultAppContainer(
         )
     }
 
+    private val blockedUsersCache: BlockedUsersCache by lazy {
+        DataStoreBlockedUsersCache(appContext)
+    }
+
     override val userRepository: UserRepository by lazy {
         UserRepositoryImpl(
             apiClientProvider = { apiClient },
             sessionRepository = sessionRepositoryImpl,
+            blockedUsersCache = blockedUsersCache,
         )
     }
 
@@ -281,6 +291,20 @@ class DefaultAppContainer(
             cacheFile = File(appContext.filesDir, AppUpdateManagerImpl.CACHE_FILE_NAME),
             apkDirectory = File(appContext.cacheDir, AppUpdateManagerImpl.APK_CACHE_DIR_NAME),
             externalScope = applicationScope,
+        )
+    }
+
+    override val backupManager: BackupManager by lazy {
+        BackupManagerImpl(
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            draftRepository = draftRepository,
+            userRepository = userRepository,
+            sessionRepository = sessionRepository,
+            blockedUsersCache = blockedUsersCache,
+            // @integrator: plug ContentFilterRepository into ContentFilterBackupBridge after branch merge.
+            contentFilterBackupBridge = NoOpContentFilterBackupBridge,
         )
     }
 }

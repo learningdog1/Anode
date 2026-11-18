@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.repository
 
+import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
@@ -26,4 +27,7 @@ interface SettingsRepository {
     suspend fun addRecentSearchQuery(query: String)
     suspend fun removeRecentSearchQuery(query: String)
     suspend fun clearRecentSearchQueries()
+
+    suspend fun exportSettingsForBackup(includeApiKeys: Boolean = true): AppSettingsBackupDto
+    suspend fun restoreSettingsFromBackup(backup: AppSettingsBackupDto, merge: Boolean)
 }

@@ -882,6 +882,16 @@ fun SettingsScreen(
                     }
                 }
 
+                // ── Group 5b: 数据备份与恢复 ──
+                item(key = "settings_backup_restore") {
+                    PulseStaggeredEntrance(index = 4) {
+                        BackupRestoreSettingsSection(
+                            backupManager = appContainer.backupManager,
+                            snackbarHostState = snackbarHostState,
+                        )
+                    }
+                }
+
                 // ── Group 6: 关于与更新 ──
                 item(key = "settings_app_update") {
                     val latestRelease = updateState.latestRelease

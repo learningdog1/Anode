@@ -2,6 +2,7 @@ package com.nodeseek.app.data.local
 
 import androidx.room.Dao
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -43,4 +44,21 @@ interface DraftDao {
 
     @Query("DELETE FROM editor_drafts WHERE accountUid = :accountUid")
     suspend fun clearForAccount(accountUid: Long)
+
+    @Query("SELECT * FROM editor_drafts ORDER BY updatedAtMillis DESC")
+    suspend fun getAllDrafts(): List<DraftEntity>
+
+    @Upsert
+    suspend fun upsertAll(entities: List<DraftEntity>)
+
+    @Query("DELETE FROM editor_drafts")
+    suspend fun clearAll()
+
+    @Transaction
+    suspend fun replaceAllDrafts(entities: List<DraftEntity>) {
+        clearAll()
+        if (entities.isNotEmpty()) {
+            upsertAll(entities)
+        }
+    }
 }

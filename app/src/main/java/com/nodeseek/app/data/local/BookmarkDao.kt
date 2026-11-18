@@ -2,6 +2,7 @@ package com.nodeseek.app.data.local
 
 import androidx.room.Dao
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -53,4 +54,18 @@ interface BookmarkDao {
 
     @Query("DELETE FROM bookmarks WHERE accountUid = :accountUid")
     suspend fun clearForAccount(accountUid: Long)
+
+    @Query("SELECT * FROM bookmarks ORDER BY savedAtEpochMillis DESC")
+    suspend fun getAllBookmarks(): List<BookmarkEntity>
+
+    @Query("DELETE FROM bookmarks")
+    suspend fun clearAll()
+
+    @Transaction
+    suspend fun replaceAllBookmarks(entities: List<BookmarkEntity>) {
+        clearAll()
+        if (entities.isNotEmpty()) {
+            upsertAll(entities)
+        }
+    }
 }

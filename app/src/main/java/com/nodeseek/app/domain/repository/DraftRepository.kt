@@ -9,4 +9,10 @@ interface DraftRepository {
     suspend fun deleteDraft(accountUid: Long, draftKey: String)
     fun observeDrafts(accountUid: Long): Flow<List<EditorDraft>>
     fun observeDraft(accountUid: Long, draftKey: String): Flow<EditorDraft?>
+
+    suspend fun getAllDrafts(): List<EditorDraft> = emptyList()
+    suspend fun restoreDrafts(
+        items: List<EditorDraft>,
+        replaceExisting: Boolean,
+    ) = Unit
 }

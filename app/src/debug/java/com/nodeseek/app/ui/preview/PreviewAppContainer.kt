@@ -46,8 +46,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.R
+import com.nodeseek.app.data.backup.BackupManagerImpl
+import com.nodeseek.app.data.local.InMemoryBlockedUsersCache
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.backup.AppSettingsBackupDto
+import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -305,6 +309,26 @@ internal class PreviewAppContainer(
         override suspend fun addRecentSearchQuery(query: String) = Unit
         override suspend fun removeRecentSearchQuery(query: String) = Unit
         override suspend fun clearRecentSearchQueries() = Unit
+        override suspend fun exportSettingsForBackup(includeApiKeys: Boolean): AppSettingsBackupDto {
+            val s = state.value
+            return AppSettingsBackupDto(
+                themeMode = s.themeMode,
+                purePitchAmoled = s.purePitchAmoled,
+                useDynamicColor = s.useDynamicColor,
+                fontScale = s.fontScale,
+                preferRandomCheckIn = s.preferRandomCheckIn,
+                pinnedCategorySlugs = s.pinnedCategorySlugs,
+                includeBlockedTopics = s.includeBlockedTopics,
+                preferRssFallback = s.preferRssFallback,
+                nodeImageApiKey = if (includeApiKeys) s.nodeImageApiKey else "",
+                seekMailApiKey = if (includeApiKeys) s.seekMailApiKey else "",
+                autoCheckUpdates = s.autoCheckUpdates,
+                includePrereleaseUpdates = s.includePrereleaseUpdates,
+                ignoredUpdateTag = s.ignoredUpdateTag,
+                recentSearchQueries = recentSearchQueries.value,
+            )
+        }
+        override suspend fun restoreSettingsFromBackup(backup: AppSettingsBackupDto, merge: Boolean) = Unit
     }
 
     override val draftRepository: DraftRepository = object : DraftRepository {
@@ -442,6 +466,16 @@ internal class PreviewAppContainer(
         override fun openUnknownSourcesSettings(): Boolean = false
         override fun onAppResumed() = Unit
     }
+
+    override val backupManager: BackupManager = BackupManagerImpl(
+        settingsRepository = settingsRepository,
+        radarRepository = radarRepository,
+        bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+        draftRepository = draftRepository,
+        userRepository = userRepository,
+        sessionRepository = sessionRepository,
+        blockedUsersCache = InMemoryBlockedUsersCache(),
+    )
 }
 
 private val SHOWCASE_AVATAR_POOL = intArrayOf(

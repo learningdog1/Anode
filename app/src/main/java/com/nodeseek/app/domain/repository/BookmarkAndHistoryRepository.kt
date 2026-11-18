@@ -23,6 +23,13 @@ interface BookmarkAndHistoryRepository {
     suspend fun getOfflineBookmarkSnapshot(topicId: Long): TopicDetailPage? = null
     suspend fun removeLocalBookmark(topicId: Long) = Unit
 
+    // Bulk backup export & restore helpers
+    suspend fun getAllBookmarksForBackup(): List<BookmarkedTopic> = emptyList()
+    suspend fun restoreBookmarks(
+        items: List<BookmarkedTopic>,
+        replaceExisting: Boolean,
+    ) = Unit
+
     // Local Room-backed read history
     fun observeReadHistory(): Flow<List<ReadHistoryEntry>>
     fun observeReadStateMap(topicIds: Collection<Long>): Flow<Map<Long, ReadHistoryEntry>>

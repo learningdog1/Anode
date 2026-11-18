@@ -202,6 +202,91 @@ class BookmarkAndHistoryRepositoryImpl(
         bookmarkDao.deleteBookmark(accountUid = currentAccountUid, topicId = topicId)
     }
 
+    override suspend fun getAllBookmarksForBackup(): List<BookmarkedTopic> =
+        bookmarkDao.getAllBookmarks().map(BookmarkEntity::toDomain)
+
+    override suspend fun restoreBookmarks(
+        items: List<BookmarkedTopic>,
+        replaceExisting: Boolean,
+    ) {
+        val deduped = LinkedHashMap<Pair<Long, Long>, BookmarkedTopic>()
+        for (raw in items) {
+            if (raw.topicId <= 0L) continue
+            val normalized = raw.copy(
+                summary = raw.summary.copy(id = raw.topicId, isBookmarked = true),
+            )
+            val key = normalized.accountUid to normalized.topicId
+            val prev = deduped[key]
+            if (prev == null) {
+                deduped[key] = normalized
+            } else {
+                val mergedSnapshot = when {
+                    normalized.offlineDetailSnapshot != null && prev.offlineDetailSnapshot != null ->
+                        if (normalized.savedAtEpochMillis >= prev.savedAtEpochMillis) {
+                            normalized.offlineDetailSnapshot
+                        } else {
+                            prev.offlineDetailSnapshot
+                        }
+                    else -> normalized.offlineDetailSnapshot ?: prev.offlineDetailSnapshot
+                }
+                deduped[key] = normalized.copy(
+                    offlineDetailSnapshot = mergedSnapshot,
+                    savedAtEpochMillis = maxOf(prev.savedAtEpochMillis, normalized.savedAtEpochMillis),
+                    isSyncedWithServer = prev.isSyncedWithServer || normalized.isSyncedWithServer,
+                )
+            }
+        }
+
+        if (replaceExisting) {
+            bookmarkDao.replaceAllBookmarks(deduped.values.map(BookmarkedTopic::toEntity))
+            return
+        }
+
+        val toUpsert = buildList {
+            for (item in deduped.values) {
+                val incomingEntity = item.toEntity()
+                val existing = bookmarkDao.getBookmark(
+                    accountUid = item.accountUid,
+                    topicId = item.topicId,
+                )
+                if (existing == null) {
+                    add(incomingEntity)
+                } else {
+                    val mergedOfflineJson = when {
+                        incomingEntity.offlineDetailJson != null && existing.offlineDetailJson != null ->
+                            if (incomingEntity.savedAtEpochMillis >= existing.savedAtEpochMillis) {
+                                incomingEntity.offlineDetailJson
+                            } else {
+                                existing.offlineDetailJson
+                            }
+                        else -> incomingEntity.offlineDetailJson ?: existing.offlineDetailJson
+                    }
+                    add(
+                        incomingEntity.copy(
+                            title = incomingEntity.title.ifBlank { existing.title },
+                            categorySlug = incomingEntity.categorySlug.ifBlank { existing.categorySlug },
+                            categoryName = incomingEntity.categoryName.ifBlank { existing.categoryName },
+                            authorId = incomingEntity.authorId ?: existing.authorId,
+                            authorName = incomingEntity.authorName.ifBlank { existing.authorName },
+                            authorAvatarUrl = incomingEntity.authorAvatarUrl.ifBlank { existing.authorAvatarUrl },
+                            authorLevel = incomingEntity.authorLevel ?: existing.authorLevel,
+                            viewCount = maxOf(incomingEntity.viewCount, existing.viewCount),
+                            replyCount = maxOf(incomingEntity.replyCount, existing.replyCount),
+                            lastActivityIso = incomingEntity.lastActivityIso.ifBlank { existing.lastActivityIso },
+                            requiredViewLevel = incomingEntity.requiredViewLevel ?: existing.requiredViewLevel,
+                            offlineDetailJson = mergedOfflineJson,
+                            isSyncedWithServer = existing.isSyncedWithServer || incomingEntity.isSyncedWithServer,
+                            savedAtEpochMillis = maxOf(existing.savedAtEpochMillis, incomingEntity.savedAtEpochMillis),
+                        ),
+                    )
+                }
+            }
+        }
+        if (toUpsert.isNotEmpty()) {
+            bookmarkDao.upsertAll(toUpsert)
+        }
+    }
+
     override fun observeReadHistory(): Flow<List<ReadHistoryEntry>> =
         currentAccountUidFlow.flatMapLatest { uid ->
             readHistoryDao.observeHistory(accountUid = uid)

@@ -892,6 +892,9 @@ internal class FakeRadarDao : RadarDao {
         return assignedId
     }
 
+    override suspend fun insertKeywordRules(entities: List<KeywordWatchRuleEntity>): List<Long> =
+        entities.map { insertKeywordRule(it) }
+
     override suspend fun setKeywordRuleEnabled(ruleId: Long, enabled: Boolean) {
         rulesState.value = rulesState.value.map {
             if (it.id == ruleId) it.copy(isEnabled = enabled) else it
@@ -900,6 +903,10 @@ internal class FakeRadarDao : RadarDao {
 
     override suspend fun deleteKeywordRule(ruleId: Long) {
         rulesState.value = rulesState.value.filterNot { it.id == ruleId }
+    }
+
+    override suspend fun clearKeywordRules() {
+        rulesState.value = emptyList()
     }
 
     override fun observeTrackedTopics(): Flow<List<TrackedTopicEntity>> =
@@ -924,12 +931,28 @@ internal class FakeRadarDao : RadarDao {
                     .thenByDescending { it.createdAtEpochMillis },
             )
 
+    override suspend fun getAllTrackedTopics(): List<TrackedTopicEntity> =
+        trackedState.value.sortedWith(
+            compareByDescending<TrackedTopicEntity> { it.lastUpdatedEpochMillis }
+                .thenByDescending { it.createdAtEpochMillis },
+        )
+
     override suspend fun upsertTrackedTopic(entity: TrackedTopicEntity) {
         trackedState.value = trackedState.value.filterNot { it.topicId == entity.topicId } + entity
     }
 
+    override suspend fun upsertTrackedTopics(entities: List<TrackedTopicEntity>) {
+        for (entity in entities) {
+            upsertTrackedTopic(entity)
+        }
+    }
+
     override suspend fun deleteTrackedTopic(topicId: Long) {
         trackedState.value = trackedState.value.filterNot { it.topicId == topicId }
+    }
+
+    override suspend fun clearTrackedTopics() {
+        trackedState.value = emptyList()
     }
 
     override suspend fun markTopicFloorSeen(

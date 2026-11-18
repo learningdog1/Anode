@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.repository.SettingsRepository
@@ -18,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.encodeToString
@@ -193,6 +195,101 @@ class SettingsRepositoryImpl(
             prefs.remove(Keys.RECENT_SEARCH_QUERIES)
         }
     }
+
+    override suspend fun exportSettingsForBackup(includeApiKeys: Boolean): AppSettingsBackupDto {
+        val prefs = safePreferencesFlow.first()
+        val current = prefs.toAppSettings()
+        val queries = decodeRecentSearchQueries(prefs[Keys.RECENT_SEARCH_QUERIES])
+        return AppSettingsBackupDto(
+            themeMode = current.themeMode,
+            purePitchAmoled = current.purePitchAmoled,
+            useDynamicColor = current.useDynamicColor,
+            fontScale = current.fontScale,
+            preferRandomCheckIn = current.preferRandomCheckIn,
+            pinnedCategorySlugs = current.pinnedCategorySlugs,
+            includeBlockedTopics = current.includeBlockedTopics,
+            preferRssFallback = current.preferRssFallback,
+            nodeImageApiKey = if (includeApiKeys) current.nodeImageApiKey else "",
+            seekMailApiKey = if (includeApiKeys) current.seekMailApiKey else "",
+            autoCheckUpdates = current.autoCheckUpdates,
+            includePrereleaseUpdates = current.includePrereleaseUpdates,
+            ignoredUpdateTag = current.ignoredUpdateTag,
+            recentSearchQueries = queries,
+        )
+    }
+
+    override suspend fun restoreSettingsFromBackup(
+        backup: AppSettingsBackupDto,
+        merge: Boolean,
+    ) {
+        dataStore.edit { prefs ->
+            val current = prefs.toAppSettings()
+            val existingQueries = decodeRecentSearchQueries(prefs[Keys.RECENT_SEARCH_QUERIES])
+
+            val resolvedNodeImageKey = if (
+                merge && backup.nodeImageApiKey.isBlank() && current.nodeImageApiKey.isNotBlank()
+            ) {
+                current.nodeImageApiKey
+            } else {
+                backup.nodeImageApiKey.trim()
+            }
+
+            val resolvedSeekMailKey = if (
+                merge && backup.seekMailApiKey.isBlank() && current.seekMailApiKey.isNotBlank()
+            ) {
+                current.seekMailApiKey
+            } else {
+                backup.seekMailApiKey.trim()
+            }
+
+            val resolvedIgnoredTag = if (
+                merge && backup.ignoredUpdateTag.isBlank() && current.ignoredUpdateTag.isNotBlank()
+            ) {
+                current.ignoredUpdateTag
+            } else {
+                backup.ignoredUpdateTag.trim()
+            }
+
+            val cleanedPinned = backup.pinnedCategorySlugs
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+
+            val resolvedQueries = if (merge) {
+                (backup.recentSearchQueries + existingQueries)
+            } else {
+                backup.recentSearchQueries
+            }
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinctBy { it.lowercase() }
+                .take(MAX_RECENT_SEARCHES)
+
+            prefs[Keys.THEME_MODE] = backup.themeMode.name
+            prefs[Keys.PURE_PITCH_AMOLED] = backup.purePitchAmoled
+            prefs[Keys.USE_DYNAMIC_COLOR] = backup.useDynamicColor
+            prefs[Keys.FONT_SCALE] = backup.fontScale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE)
+            prefs[Keys.PREFER_RANDOM_CHECK_IN] = backup.preferRandomCheckIn
+            prefs[Keys.PINNED_CATEGORY_SLUGS] = json.encodeToString(cleanedPinned)
+            prefs[Keys.INCLUDE_BLOCKED_TOPICS] = backup.includeBlockedTopics
+            prefs[Keys.PREFER_RSS_FALLBACK] = backup.preferRssFallback
+            prefs[Keys.NODE_IMAGE_API_KEY] = resolvedNodeImageKey
+            prefs[Keys.SEEK_MAIL_API_KEY] = resolvedSeekMailKey
+            prefs[Keys.AUTO_CHECK_UPDATES] = backup.autoCheckUpdates
+            prefs[Keys.INCLUDE_PRERELEASE_UPDATES] = backup.includePrereleaseUpdates
+            prefs[Keys.IGNORED_UPDATE_TAG] = resolvedIgnoredTag
+            if (resolvedQueries.isEmpty()) {
+                prefs.remove(Keys.RECENT_SEARCH_QUERIES)
+            } else {
+                prefs[Keys.RECENT_SEARCH_QUERIES] = json.encodeToString(resolvedQueries)
+            }
+        }
+    }
+
+    private fun decodeRecentSearchQueries(raw: String?): List<String> =
+        raw?.let { encoded ->
+            runCatching { json.decodeFromString<List<String>>(encoded) }.getOrNull()
+        } ?: emptyList()
 
     private fun Preferences.toAppSettings(): AppSettings {
         val mode = this[Keys.THEME_MODE]?.let { raw ->
