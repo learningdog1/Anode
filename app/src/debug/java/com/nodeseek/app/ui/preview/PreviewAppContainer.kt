@@ -48,6 +48,10 @@ import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.R
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.filter.ContentBlockRule
+import com.nodeseek.app.domain.filter.ContentFilterConfig
+import com.nodeseek.app.domain.filter.ContentFilterEngine
+import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -115,6 +119,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.update
 
 internal class PreviewNotificationDispatcher(
     context: Context,
@@ -418,6 +423,44 @@ internal class PreviewAppContainer(
         override fun stop() = Unit
         override fun onForegroundChanged(inForeground: Boolean) = Unit
         override fun triggerImmediateCheck() = Unit
+    }
+
+    override val contentFilterRepository: ContentFilterRepository = object : ContentFilterRepository {
+        private val state = MutableStateFlow(
+            ContentFilterConfig(
+                isEnabled = true,
+                mutedCategorySlugs = setOf("meaningless"),
+                rules = listOf(
+                    ContentFilterEngine.CURATED_PRESETS[0].toRule(createdAtEpochMillis = 1_700_000_000_000L),
+                    ContentFilterEngine.CURATED_PRESETS[1].toRule(createdAtEpochMillis = 1_700_000_001_000L),
+                ),
+            ),
+        )
+        override val config: StateFlow<ContentFilterConfig> = state.asStateFlow()
+        override suspend fun setEnabled(enabled: Boolean) {
+            state.update { it.copy(isEnabled = enabled) }
+        }
+        override suspend fun upsertRule(rule: ContentBlockRule) {
+            state.update { ContentFilterEngine.upsertRule(it, rule) }
+        }
+        override suspend fun removeRule(ruleId: String) {
+            state.update { ContentFilterEngine.removeRule(it, ruleId) }
+        }
+        override suspend fun setRuleEnabled(ruleId: String, enabled: Boolean) {
+            state.update { ContentFilterEngine.setRuleEnabled(it, ruleId, enabled) }
+        }
+        override suspend fun toggleMutedCategory(categorySlug: String) {
+            state.update { ContentFilterEngine.toggleMutedCategory(it, categorySlug) }
+        }
+        override suspend fun setMutedCategories(categorySlugs: Set<String>) {
+            state.update { ContentFilterEngine.setMutedCategories(it, categorySlugs) }
+        }
+        override suspend fun replaceConfig(config: ContentFilterConfig) {
+            state.value = ContentFilterEngine.normalizeConfig(config)
+        }
+        override suspend fun mergeConfig(config: ContentFilterConfig) {
+            state.update { ContentFilterEngine.mergeConfigs(it, config) }
+        }
     }
 
     override val notificationDispatcher: PulseNotificationDispatcher =
