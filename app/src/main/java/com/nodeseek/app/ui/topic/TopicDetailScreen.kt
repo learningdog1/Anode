@@ -37,15 +37,22 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -61,6 +68,8 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EmojiEvents
@@ -77,6 +86,7 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.OfflinePin
+import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
@@ -221,6 +231,10 @@ fun TopicDetailScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit = { _, _, _ -> },
     onEditTopic: (topicId: Long, categorySlug: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: ((url: String) -> Unit)? = null,
+    isEmbeddedInDualPane: Boolean = false,
+    isDetailPaneMaximized: Boolean = false,
+    onCloseDetailPane: (() -> Unit)? = null,
+    onToggleMaximizePane: (() -> Unit)? = null,
     previewUiState: TopicDetailUiState? = null,
     viewModel: TopicDetailViewModel = viewModel(
         key = "topic_detail_${topicId}_$initialFloor",
@@ -441,7 +455,11 @@ fun TopicDetailScreen(
                 isTrackingReplies = uiState.isTrackingReplies,
                 currentPage = uiState.currentPage,
                 totalPages = uiState.totalPages,
+                isEmbeddedInDualPane = isEmbeddedInDualPane,
+                isDetailPaneMaximized = isDetailPaneMaximized,
                 onBack = onBack,
+                onCloseDetailPane = onCloseDetailPane,
+                onToggleMaximizePane = onToggleMaximizePane,
                 onAuthorClick = {
                     uiState.pageData?.author?.let { onNavigateToUser(it.uid, it.username) }
                 },
@@ -491,6 +509,7 @@ fun TopicDetailScreen(
                     },
                     onShare = shareTopic,
                     onOpenFloorJumpSheet = { viewModel.setFloorJumpSheetVisible(true) },
+                    isEmbeddedInDualPane = isEmbeddedInDualPane,
                 )
             }
         },
@@ -498,7 +517,13 @@ fun TopicDetailScreen(
             PulseSnackbarHost(
                 hostState = snackbarHostState,
                 modifier = if (uiState.pageData == null) {
-                    Modifier.navigationBarsPadding()
+                    if (isEmbeddedInDualPane) {
+                        Modifier.windowInsetsPadding(
+                            WindowInsets.navigationBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.End),
+                        )
+                    } else {
+                        Modifier.navigationBarsPadding()
+                    }
                 } else {
                     Modifier
                 },
@@ -522,7 +547,7 @@ fun TopicDetailScreen(
                         session = uiState.session,
                         onRequestWebViewAuth = triggerWebViewAuth,
                         onRetry = viewModel::retryLoad,
-                        onBack = onBack,
+                        onBack = if (isEmbeddedInDualPane) (onCloseDetailPane ?: onBack) else onBack,
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
                 }
@@ -855,7 +880,11 @@ private fun TopicReaderTopBar(
     isTrackingReplies: Boolean,
     currentPage: Int,
     totalPages: Int,
+    isEmbeddedInDualPane: Boolean,
+    isDetailPaneMaximized: Boolean,
     onBack: () -> Unit,
+    onCloseDetailPane: (() -> Unit)?,
+    onToggleMaximizePane: (() -> Unit)?,
     onAuthorClick: () -> Unit,
     onToggleOpOnly: () -> Unit,
     onToggleReverseOrder: () -> Unit,
@@ -883,7 +912,17 @@ private fun TopicReaderTopBar(
                 showBottomBorder = !isPageSwitching,
                 tonalAccent = categoryAccent,
             )
-            .statusBarsPadding(),
+            .then(
+                if (isEmbeddedInDualPane) {
+                    Modifier.windowInsetsPadding(
+                        WindowInsets.statusBars
+                            .union(WindowInsets.displayCutout)
+                            .only(WindowInsetsSides.Top + WindowInsetsSides.End),
+                    )
+                } else {
+                    Modifier.statusBarsPadding()
+                },
+            ),
     ) {
         Row(
             modifier = Modifier
@@ -893,12 +932,26 @@ private fun TopicReaderTopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "返回",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
+            if (isEmbeddedInDualPane) {
+                IconButton(
+                    onClick = onCloseDetailPane ?: onBack,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "关闭帖子详情",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            } else {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "返回",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
 
             Box(
@@ -1003,8 +1056,29 @@ private fun TopicReaderTopBar(
                 )
             }
 
+            if (isEmbeddedInDualPane && onToggleMaximizePane != null) {
+                IconButton(
+                    onClick = onToggleMaximizePane,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = if (isDetailPaneMaximized) {
+                            Icons.Rounded.CloseFullscreen
+                        } else {
+                            Icons.Rounded.OpenInFull
+                        },
+                        contentDescription = if (isDetailPaneMaximized) "退出全屏展开" else "全屏展开阅读",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+
             Box {
-                IconButton(onClick = { menuExpanded = true }) {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = if (isEmbeddedInDualPane) Modifier.size(40.dp) else Modifier,
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.MoreVert,
                         contentDescription = "更多选项",
@@ -2349,6 +2423,7 @@ private fun AnchoredQuickReplyBar(
     onShare: () -> Unit,
     onOpenFloorJumpSheet: () -> Unit,
     categorySlug: String? = null,
+    isEmbeddedInDualPane: Boolean = false,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val categoryAccent = categorySlug?.takeIf { it.isNotBlank() }?.let {
@@ -2386,7 +2461,15 @@ private fun AnchoredQuickReplyBar(
                 showBottomBorder = false,
                 tonalAccent = categoryAccent,
             )
-            .navigationBarsPadding(),
+            .then(
+                if (isEmbeddedInDualPane) {
+                    Modifier.windowInsetsPadding(
+                        WindowInsets.navigationBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.End),
+                    )
+                } else {
+                    Modifier.navigationBarsPadding()
+                },
+            ),
     ) {
         Row(
             modifier = Modifier

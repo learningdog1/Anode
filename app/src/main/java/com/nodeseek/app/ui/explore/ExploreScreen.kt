@@ -142,6 +142,7 @@ fun ExploreScreen(
     scrollToTopTrigger: Int = 0,
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)? = null,
     bottomContentPadding: Dp = 88.dp,
+    selectedTopicId: Long? = null,
     listState: LazyListState = rememberLazyListState(),
     previewUiState: ExploreUiState? = null,
     viewModel: ExploreViewModel = viewModel(
@@ -433,6 +434,7 @@ fun ExploreScreen(
                 listState = pageListState,
                 scrollToTopTrigger = scrollToTopTrigger,
                 bottomContentPadding = bottomContentPadding,
+                selectedTopicId = selectedTopicId,
                 onScrollDirectionChanged = onScrollDirectionChanged,
                 onRefresh = { viewModel.refresh(board.slug) },
                 onLoadNextPage = { viewModel.loadNextPage(board.slug) },
@@ -649,6 +651,7 @@ private fun ExploreBoardFeedPage(
     listState: LazyListState,
     scrollToTopTrigger: Int,
     bottomContentPadding: Dp,
+    selectedTopicId: Long?,
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)?,
     onRefresh: () -> Unit,
     onLoadNextPage: () -> Unit,
@@ -790,6 +793,7 @@ private fun ExploreBoardFeedPage(
                         PulseTopicCard(
                             topic = topic.toCardModel(),
                             showCategoryTag = showCategoryOnRow,
+                            selectedTopicId = selectedTopicId,
                             onClick = {
                                 onOpenTopic(
                                     topic.id,

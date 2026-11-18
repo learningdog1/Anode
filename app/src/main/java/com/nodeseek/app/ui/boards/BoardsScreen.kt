@@ -230,6 +230,7 @@ fun BoardsScreen(
     bottomContentPadding: Dp = 98.dp,
     standaloneSearchMode: Boolean = false,
     onBack: (() -> Unit)? = null,
+    selectedTopicId: Long? = null,
     previewUiState: BoardsUiState? = null,
     viewModel: BoardsViewModel = viewModel(
         factory = BoardsViewModel.factory(
@@ -432,6 +433,7 @@ fun BoardsScreen(
                         InlineBoardFeedContent(
                             uiState = uiState,
                             bottomContentPadding = bottomContentPadding,
+                            selectedTopicId = selectedTopicId,
                             onOpenTopic = { topicId, initialFloor, titleHint ->
                                 dismissSearchKeyboard()
                                 onOpenTopic(topicId, initialFloor, titleHint)
@@ -453,6 +455,7 @@ fun BoardsScreen(
                             uiState = uiState,
                             listState = searchListState,
                             bottomContentPadding = bottomContentPadding,
+                            selectedTopicId = selectedTopicId,
                             onSelectRecentQuery = { q ->
                                 dismissSearchKeyboard()
                                 viewModel.submitSearch(q)
@@ -1848,6 +1851,7 @@ private fun BentoPinStarButton(
 private fun UnifiedSearchContent(
     uiState: BoardsUiState,
     bottomContentPadding: Dp,
+    selectedTopicId: Long?,
     onSelectRecentQuery: (String) -> Unit,
     onRemoveRecentQuery: (String) -> Unit,
     onClearRecentQueries: () -> Unit,
@@ -2314,6 +2318,7 @@ private fun UnifiedSearchContent(
                     ) { topic ->
                         PulseTopicCard(
                             topic = topic.toCardModel(),
+                            selectedTopicId = selectedTopicId,
                             onClick = {
                                 onOpenTopic(topic.id, topic.lastReadFloor ?: 0, topic.title)
                             },
@@ -2541,6 +2546,7 @@ private fun MemberSearchResultCard(
 private fun InlineBoardFeedContent(
     uiState: BoardsUiState,
     bottomContentPadding: Dp,
+    selectedTopicId: Long?,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenUserProfile: (uid: Long, usernameHint: String) -> Unit,
     onBookmarkToggle: (TopicSummary) -> Unit,
@@ -2672,6 +2678,7 @@ private fun InlineBoardFeedContent(
                         PulseTopicCard(
                             topic = topic.toCardModel(),
                             showCategoryTag = false,
+                            selectedTopicId = selectedTopicId,
                             onClick = {
                                 onOpenTopic(topic.id, topic.lastReadFloor ?: 0, topic.title)
                             },
