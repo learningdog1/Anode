@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.filter.ContentFilterEngine
+import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.Category
@@ -141,6 +143,7 @@ class ExploreViewModel(
     private val sessionRepository: SessionRepository,
     private val bookmarkAndHistoryRepository: BookmarkAndHistoryRepository,
     private val settingsRepository: SettingsRepository,
+    private val contentFilterRepository: ContentFilterRepository,
     initialCategorySlug: String = "",
 ) : ViewModel() {
 
@@ -187,10 +190,16 @@ class ExploreViewModel(
         categoriesFlow,
         settingsRepository.settings,
         sessionRepository.sessionState,
-        combine(bookmarkedIdsFlow, readStateMapFlow) { bookmarks, reads -> bookmarks to reads },
-    ) { raw, categories, settings, session, (bookmarkedIds, readMap) ->
+        combine(
+            bookmarkedIdsFlow,
+            readStateMapFlow,
+            contentFilterRepository.config,
+        ) { bookmarks, reads, filterConfig ->
+            Triple(bookmarks, reads, filterConfig)
+        },
+    ) { raw, categories, settings, session, (bookmarkedIds, readMap, filterConfig) ->
         val challengeActive = sessionRepository.challengeRequired.value
-        val bySlug = categories.associateBy { it.slug }
+        val includeBlocked = settings.includeBlockedTopics
         val orderedTabs = buildOrderedTabs(
             categories = categories,
             pinnedCategorySlugs = settings.pinnedCategorySlugs,
@@ -201,13 +210,25 @@ class ExploreViewModel(
             orderedTabs.forEach { tab ->
                 val tabSort = effectiveSortForCategory(tab.slug, raw.selectedSort)
                 val slice = raw.slices[FeedSliceKey(tab.slug, tabSort)] ?: BoardPageSlice()
+                val visiblePinned = ContentFilterEngine.filterTopics(
+                    topics = slice.rawPinnedTopics,
+                    config = filterConfig,
+                    includeBlockedTopics = includeBlocked,
+                    activeBoardSlug = tab.slug,
+                ).map { it.enrichWithLocalState(bookmarkedIds, readMap) }
+                val visibleTopics = ContentFilterEngine.filterTopics(
+                    topics = slice.rawTopics,
+                    config = filterConfig,
+                    includeBlockedTopics = includeBlocked,
+                    activeBoardSlug = tab.slug,
+                ).map { it.enrichWithLocalState(bookmarkedIds, readMap) }
                 put(
                     tab.slug,
                     ExploreBoardSliceUiState(
                         categorySlug = tab.slug,
                         sort = tabSort,
-                        pinnedTopics = slice.rawPinnedTopics.map { it.enrichWithLocalState(bookmarkedIds, readMap) },
-                        topics = slice.rawTopics.map { it.enrichWithLocalState(bookmarkedIds, readMap) },
+                        pinnedTopics = visiblePinned,
+                        topics = visibleTopics,
                         isInitialLoading = slice.isInitialLoading,
                         isRefreshing = slice.isRefreshing,
                         isManualRefreshing = slice.isManualRefreshing,
@@ -789,6 +810,7 @@ class ExploreViewModel(
                     sessionRepository = container.sessionRepository,
                     bookmarkAndHistoryRepository = container.bookmarkAndHistoryRepository,
                     settingsRepository = container.settingsRepository,
+                    contentFilterRepository = container.contentFilterRepository,
                     initialCategorySlug = initialCategorySlug,
                 )
             }

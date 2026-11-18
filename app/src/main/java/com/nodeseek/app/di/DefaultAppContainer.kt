@@ -3,6 +3,7 @@ package com.nodeseek.app.di
 import android.content.Context
 import android.os.Build
 import com.nodeseek.app.BuildConfig
+import com.nodeseek.app.data.local.ContentFilterRepositoryImpl
 import com.nodeseek.app.data.local.DraftRepositoryImpl
 import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.local.NodePulseDatabase
@@ -30,6 +31,7 @@ import com.nodeseek.app.data.repository.UserRepositoryImpl
 import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
+import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
@@ -112,6 +114,13 @@ class DefaultAppContainer(
 
     override val settingsRepository: SettingsRepository by lazy {
         SettingsRepositoryImpl(
+            context = appContext,
+            externalScope = applicationScope,
+        )
+    }
+
+    override val contentFilterRepository: ContentFilterRepository by lazy {
+        ContentFilterRepositoryImpl(
             context = appContext,
             externalScope = applicationScope,
         )

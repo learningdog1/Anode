@@ -7,10 +7,15 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.filter.ContentFilterConfig
+import com.nodeseek.app.domain.filter.ContentFilterEngine
+import com.nodeseek.app.domain.filter.ContentFilterRepository
+import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.FloorAuthor
+import com.nodeseek.app.domain.model.ReadHistoryEntry
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.ForumRepository
@@ -125,6 +130,13 @@ private data class InternalBoardsState(
     val snackbarMessage: String? = null,
 )
 
+private data class BoardsLocalOverlay(
+    val session: AccountSession?,
+    val bookmarkedIds: Set<Long>,
+    val readMap: Map<Long, ReadHistoryEntry>,
+    val filterConfig: ContentFilterConfig,
+)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class BoardsViewModel(
     private val forumRepository: ForumRepository,
@@ -132,6 +144,7 @@ class BoardsViewModel(
     private val sessionRepository: SessionRepository,
     private val bookmarkAndHistoryRepository: BookmarkAndHistoryRepository,
     private val settingsRepository: SettingsRepository,
+    private val contentFilterRepository: ContentFilterRepository,
     initialCategorySlug: String = "",
     autoFocusSearch: Boolean = false,
 ) : ViewModel() {
@@ -177,20 +190,36 @@ class BoardsViewModel(
             sessionRepository.sessionState,
             bookmarkedIdsFlow,
             readStateMapFlow,
-        ) { session, bookmarks, reads -> Triple(session, bookmarks, reads) },
-    ) { s, categories, settings, recentQueries, (session, bookmarks, reads) ->
+            contentFilterRepository.config,
+        ) { session, bookmarks, reads, filterConfig ->
+            BoardsLocalOverlay(
+                session = session,
+                bookmarkedIds = bookmarks,
+                readMap = reads,
+                filterConfig = filterConfig,
+            )
+        },
+    ) { s, categories, settings, recentQueries, overlay ->
+        val includeBlocked = settings.includeBlockedTopics
+        val filterConfig = overlay.filterConfig
+        val activeInlineSlug = s.activeInlineBoardSlug.orEmpty()
         BoardsUiState(
             categories = categories,
             pinnedCategorySlugs = settings.pinnedCategorySlugs,
             recentSearchQueries = recentQueries,
-            isSignedIn = session != null,
+            isSignedIn = overlay.session != null,
             queryInput = s.queryInput,
             submittedQuery = s.submittedQuery,
             isSearchModeActive = s.isSearchModeActive,
             searchScope = s.searchScope,
             searchCategoryFilterSlug = s.searchCategoryFilterSlug,
             searchSort = s.searchSort,
-            searchTopics = s.rawSearchTopics.map { it.enrichWithLocalState(bookmarks, reads) },
+            searchTopics = ContentFilterEngine.filterTopics(
+                topics = s.rawSearchTopics,
+                config = filterConfig,
+                includeBlockedTopics = includeBlocked,
+                activeBoardSlug = s.searchCategoryFilterSlug,
+            ).map { it.enrichWithLocalState(overlay.bookmarkedIds, overlay.readMap) },
             searchUsers = s.searchUsers,
             isSearching = s.isSearching,
             isSearchingNextPage = s.isSearchingNextPage,
@@ -200,12 +229,18 @@ class BoardsViewModel(
             isSearchChallengeRequired = s.isSearchChallengeRequired,
             activeInlineBoardSlug = s.activeInlineBoardSlug,
             inlineBoardSort = s.inlineBoardSort,
-            inlineBoardPinnedTopics = s.rawInlineBoardPinnedTopics.map {
-                it.enrichWithLocalState(bookmarks, reads)
-            },
-            inlineBoardTopics = s.rawInlineBoardTopics.map {
-                it.enrichWithLocalState(bookmarks, reads)
-            },
+            inlineBoardPinnedTopics = ContentFilterEngine.filterTopics(
+                topics = s.rawInlineBoardPinnedTopics,
+                config = filterConfig,
+                includeBlockedTopics = includeBlocked,
+                activeBoardSlug = activeInlineSlug,
+            ).map { it.enrichWithLocalState(overlay.bookmarkedIds, overlay.readMap) },
+            inlineBoardTopics = ContentFilterEngine.filterTopics(
+                topics = s.rawInlineBoardTopics,
+                config = filterConfig,
+                includeBlockedTopics = includeBlocked,
+                activeBoardSlug = activeInlineSlug,
+            ).map { it.enrichWithLocalState(overlay.bookmarkedIds, overlay.readMap) },
             isInlineBoardLoading = s.isInlineBoardLoading,
             isInlineBoardRefreshing = s.isInlineBoardRefreshing,
             isInlineBoardLoadingMore = s.isInlineBoardLoadingMore,
@@ -623,6 +658,7 @@ class BoardsViewModel(
                     sessionRepository = container.sessionRepository,
                     bookmarkAndHistoryRepository = container.bookmarkAndHistoryRepository,
                     settingsRepository = container.settingsRepository,
+                    contentFilterRepository = container.contentFilterRepository,
                     initialCategorySlug = initialCategorySlug,
                     autoFocusSearch = autoFocusSearch,
                 )

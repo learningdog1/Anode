@@ -117,6 +117,8 @@ import coil3.SingletonImageLoader
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.filter.ContentFilterConfig
+import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.FloorAuthor
@@ -385,6 +387,7 @@ fun SettingsScreen(
     previewRadarPollingSettings: RadarPollingSettings? = null,
     previewRadarUnreadCount: Int? = null,
     previewUpdateState: AppUpdateState? = null,
+    previewContentFilterConfig: ContentFilterConfig? = null,
     viewModel: SettingsViewModel = viewModel(
         factory = SettingsViewModel.factory(LocalAppContainer.current),
     ),
@@ -400,6 +403,8 @@ fun SettingsScreen(
     val radarUnreadCount = previewRadarUnreadCount ?: observedRadarUnreadCount
     val observedUpdateState by appContainer.appUpdateManager.state.collectAsStateWithLifecycle()
     val updateState = previewUpdateState ?: observedUpdateState
+    val observedContentFilterConfig by appContainer.contentFilterRepository.config.collectAsStateWithLifecycle()
+    val contentFilterConfig = previewContentFilterConfig ?: observedContentFilterConfig
     val settingsScope = rememberCoroutineScope()
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
@@ -745,6 +750,61 @@ fun SettingsScreen(
                                 )
                             }
                         }
+                    }
+                }
+
+                // ── Group 3.5: 内容屏蔽 ──
+                item(key = "settings_content_filter") {
+                    PulseStaggeredEntrance(index = 3) {
+                        ContentFilterSettingsSection(
+                            config = contentFilterConfig,
+                            includeBlockedTopics = settings.includeBlockedTopics,
+                            onSetEnabled = { enabled ->
+                                settingsScope.launch {
+                                    appContainer.contentFilterRepository.setEnabled(enabled)
+                                }
+                            },
+                            onTogglePreset = { preset ->
+                                settingsScope.launch {
+                                    val existing = ContentFilterEngine.findMatchingRuleForPreset(
+                                        preset = preset,
+                                        rules = contentFilterConfig.rules,
+                                    )
+                                    if (existing != null) {
+                                        if (existing.isEnabled) {
+                                            appContainer.contentFilterRepository.removeRule(existing.id)
+                                        } else {
+                                            appContainer.contentFilterRepository.setRuleEnabled(existing.id, true)
+                                        }
+                                    } else {
+                                        appContainer.contentFilterRepository.upsertRule(preset.toRule())
+                                    }
+                                }
+                            },
+                            onUpsertRule = { rule ->
+                                settingsScope.launch {
+                                    appContainer.contentFilterRepository.upsertRule(rule)
+                                }
+                            },
+                            onToggleRuleEnabled = { ruleId, enabled ->
+                                settingsScope.launch {
+                                    appContainer.contentFilterRepository.setRuleEnabled(ruleId, enabled)
+                                }
+                            },
+                            onRemoveRule = { ruleId ->
+                                settingsScope.launch {
+                                    appContainer.contentFilterRepository.removeRule(ruleId)
+                                }
+                            },
+                            onToggleMutedCategory = { slug ->
+                                settingsScope.launch {
+                                    appContainer.contentFilterRepository.toggleMutedCategory(slug)
+                                }
+                            },
+                            onDisableIncludeBlockedTopics = {
+                                viewModel.setIncludeBlockedTopics(false)
+                            },
+                        )
                     }
                 }
 
