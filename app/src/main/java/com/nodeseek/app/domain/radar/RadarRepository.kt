@@ -56,7 +56,22 @@ interface RadarRepository {
     suspend fun deleteAlert(alertId: Long)
     suspend fun clearReadAlerts()
     suspend fun clearAllAlerts()
+
+    // Bulk backup export & restore helpers
+    suspend fun getKeywordRulesForBackup(): List<KeywordWatchRule> = emptyList()
+    suspend fun getTrackedTopicsForBackup(): List<TrackedTopic> = emptyList()
+    suspend fun restoreFromBackup(
+        pollingSettings: RadarPollingSettings,
+        keywordRules: List<KeywordWatchRule>,
+        trackedTopics: List<TrackedTopic>,
+        replaceExisting: Boolean,
+    ): RadarBackupRestoreResult = RadarBackupRestoreResult()
 }
+
+data class RadarBackupRestoreResult(
+    val keywordRulesImported: Int = 0,
+    val trackedTopicsImported: Int = 0,
+)
 
 /**
  * Optional internal/engine sync capability implemented by [com.nodeseek.app.data.repository.RadarRepositoryImpl]

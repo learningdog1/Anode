@@ -1,5 +1,6 @@
 package com.nodeseek.app.data.repository
 
+import com.nodeseek.app.data.local.BlockedUsersCache
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.data.parser.NodeSeekHtmlParser
@@ -19,6 +20,7 @@ import kotlinx.coroutines.coroutineScope
 class UserRepositoryImpl(
     private val apiClientProvider: () -> NodeSeekApiClient,
     private val sessionRepository: SessionRepositoryImpl,
+    private val blockedUsersCache: BlockedUsersCache? = null,
 ) : UserRepository {
 
     override suspend fun getUserProfile(
@@ -204,23 +206,27 @@ class UserRepositoryImpl(
 
     override suspend fun getBlockedUsers(): Result<List<FloorAuthor>> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            apiClientProvider().listBlockedUsers().data.map { blocked ->
+            val users = apiClientProvider().listBlockedUsers().data.map { blocked ->
                 FloorAuthor(
                     uid = blocked.blockMemberId,
                     username = blocked.blockMemberName,
                     avatarUrl = avatarUrlForUid(blocked.blockMemberId),
                 )
             }
+            blockedUsersCache?.replaceAll(users)
+            users
         }
 
     override suspend fun blockUserByName(username: String): Result<Unit> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
             apiClientProvider().blockUserByName(username)
+            blockedUsersCache?.recordBlockedByName(username)
         }
 
     override suspend fun unblockUserById(targetUid: Long): Result<Unit> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
             apiClientProvider().unblockUserById(targetUid)
+            blockedUsersCache?.removeByUid(targetUid)
         }
 
     companion object {

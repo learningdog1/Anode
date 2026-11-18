@@ -1,6 +1,7 @@
 package com.nodeseek.app.di
 
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.RadarMonitorController
@@ -33,6 +34,7 @@ interface AppContainer {
     val contentFilterRepository: ContentFilterRepository
     val notificationDispatcher: PulseNotificationDispatcher
     val appUpdateManager: AppUpdateManager
+    val backupManager: BackupManager
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

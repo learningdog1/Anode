@@ -36,4 +36,50 @@ class DraftRepositoryImpl(
     override fun observeDraft(accountUid: Long, draftKey: String): Flow<EditorDraft?> =
         draftDao.observeDraft(accountUid = accountUid, draftKey = draftKey)
             .map { entity -> entity?.toDomain() }
+
+    override suspend fun getAllDrafts(): List<EditorDraft> =
+        draftDao.getAllDrafts().map(DraftEntity::toDomain)
+
+    override suspend fun restoreDrafts(
+        items: List<EditorDraft>,
+        replaceExisting: Boolean,
+    ) {
+        val now = System.currentTimeMillis()
+        val deduped = LinkedHashMap<Pair<Long, String>, EditorDraft>()
+        for (raw in items) {
+            val cleanKey = raw.draftKey.trim()
+            if (cleanKey.isEmpty()) continue
+            if (raw.title.isBlank() && raw.markdownContent.isBlank()) continue
+            val normalized = raw.copy(
+                draftKey = cleanKey,
+                categorySlug = raw.categorySlug.trim().ifBlank { "daily" },
+                updatedAtMillis = if (raw.updatedAtMillis > 0L) raw.updatedAtMillis else now,
+            )
+            val mapKey = normalized.accountUid to normalized.draftKey
+            val prev = deduped[mapKey]
+            if (prev == null || normalized.updatedAtMillis >= prev.updatedAtMillis) {
+                deduped[mapKey] = normalized
+            }
+        }
+
+        if (replaceExisting) {
+            draftDao.replaceAllDrafts(deduped.values.map(EditorDraft::toEntity))
+            return
+        }
+
+        val toUpsert = buildList {
+            for (draft in deduped.values) {
+                val existing = draftDao.getDraft(
+                    accountUid = draft.accountUid,
+                    draftKey = draft.draftKey,
+                )
+                if (existing == null || draft.updatedAtMillis >= existing.updatedAtMillis) {
+                    add(draft.toEntity())
+                }
+            }
+        }
+        if (toUpsert.isNotEmpty()) {
+            draftDao.upsertAll(toUpsert)
+        }
+    }
 }

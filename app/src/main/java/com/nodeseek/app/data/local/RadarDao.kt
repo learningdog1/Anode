@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -33,11 +34,25 @@ interface RadarDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertKeywordRule(entity: KeywordWatchRuleEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertKeywordRules(entities: List<KeywordWatchRuleEntity>): List<Long>
+
     @Query("UPDATE radar_keyword_rules SET isEnabled = :enabled WHERE id = :ruleId")
     suspend fun setKeywordRuleEnabled(ruleId: Long, enabled: Boolean)
 
     @Query("DELETE FROM radar_keyword_rules WHERE id = :ruleId")
     suspend fun deleteKeywordRule(ruleId: Long)
+
+    @Query("DELETE FROM radar_keyword_rules")
+    suspend fun clearKeywordRules()
+
+    @Transaction
+    suspend fun replaceAllKeywordRules(entities: List<KeywordWatchRuleEntity>) {
+        clearKeywordRules()
+        if (entities.isNotEmpty()) {
+            insertKeywordRules(entities)
+        }
+    }
 
     // =========================================================================
     // Tracked Topics
@@ -73,11 +88,33 @@ interface RadarDao {
     )
     suspend fun getActiveTrackedTopics(): List<TrackedTopicEntity>
 
+    @Query(
+        """
+        SELECT * FROM radar_tracked_topics
+        ORDER BY lastUpdatedEpochMillis DESC, createdAtEpochMillis DESC
+        """
+    )
+    suspend fun getAllTrackedTopics(): List<TrackedTopicEntity>
+
     @Upsert
     suspend fun upsertTrackedTopic(entity: TrackedTopicEntity)
 
+    @Upsert
+    suspend fun upsertTrackedTopics(entities: List<TrackedTopicEntity>)
+
     @Query("DELETE FROM radar_tracked_topics WHERE topicId = :topicId")
     suspend fun deleteTrackedTopic(topicId: Long)
+
+    @Query("DELETE FROM radar_tracked_topics")
+    suspend fun clearTrackedTopics()
+
+    @Transaction
+    suspend fun replaceAllTrackedTopics(entities: List<TrackedTopicEntity>) {
+        clearTrackedTopics()
+        if (entities.isNotEmpty()) {
+            upsertTrackedTopics(entities)
+        }
+    }
 
     @Query(
         """

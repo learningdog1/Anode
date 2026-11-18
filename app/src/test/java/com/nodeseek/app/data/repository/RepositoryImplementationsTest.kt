@@ -12,6 +12,7 @@ import com.nodeseek.app.data.local.SettingsRepositoryImpl
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
+import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.NotificationKind
@@ -672,7 +673,8 @@ class RepositoryImplementationsTest {
 internal class FakeSettingsRepository : SettingsRepository {
     private val _settings = MutableStateFlow(AppSettings())
     override val settings: StateFlow<AppSettings> = _settings
-    override val recentSearchQueries: StateFlow<List<String>> = MutableStateFlow(emptyList())
+    private val _recentSearchQueries = MutableStateFlow<List<String>>(emptyList())
+    override val recentSearchQueries: StateFlow<List<String>> = _recentSearchQueries
 
     override suspend fun setThemeMode(mode: ThemeMode) {
         _settings.value = _settings.value.copy(themeMode = mode)
@@ -714,9 +716,78 @@ internal class FakeSettingsRepository : SettingsRepository {
     override suspend fun setIgnoredUpdateTag(tag: String) {
         _settings.value = _settings.value.copy(ignoredUpdateTag = tag.trim())
     }
-    override suspend fun addRecentSearchQuery(query: String) = Unit
-    override suspend fun removeRecentSearchQuery(query: String) = Unit
-    override suspend fun clearRecentSearchQueries() = Unit
+    override suspend fun addRecentSearchQuery(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return
+        _recentSearchQueries.value = (listOf(trimmed) + _recentSearchQueries.value)
+            .distinctBy { it.lowercase() }
+            .take(SettingsRepositoryImpl.MAX_RECENT_SEARCHES)
+    }
+    override suspend fun removeRecentSearchQuery(query: String) {
+        _recentSearchQueries.value = _recentSearchQueries.value.filterNot { it == query }
+    }
+    override suspend fun clearRecentSearchQueries() {
+        _recentSearchQueries.value = emptyList()
+    }
+    override suspend fun exportSettingsForBackup(includeApiKeys: Boolean): AppSettingsBackupDto {
+        val cur = _settings.value
+        return AppSettingsBackupDto(
+            themeMode = cur.themeMode,
+            purePitchAmoled = cur.purePitchAmoled,
+            useDynamicColor = cur.useDynamicColor,
+            fontScale = cur.fontScale,
+            preferRandomCheckIn = cur.preferRandomCheckIn,
+            pinnedCategorySlugs = cur.pinnedCategorySlugs,
+            includeBlockedTopics = cur.includeBlockedTopics,
+            preferRssFallback = cur.preferRssFallback,
+            nodeImageApiKey = if (includeApiKeys) cur.nodeImageApiKey else "",
+            seekMailApiKey = if (includeApiKeys) cur.seekMailApiKey else "",
+            autoCheckUpdates = cur.autoCheckUpdates,
+            includePrereleaseUpdates = cur.includePrereleaseUpdates,
+            ignoredUpdateTag = cur.ignoredUpdateTag,
+            recentSearchQueries = _recentSearchQueries.value,
+        )
+    }
+    override suspend fun restoreSettingsFromBackup(backup: AppSettingsBackupDto, merge: Boolean) {
+        val cur = _settings.value
+        val nodeKey = if (merge && backup.nodeImageApiKey.isBlank() && cur.nodeImageApiKey.isNotBlank()) {
+            cur.nodeImageApiKey
+        } else {
+            backup.nodeImageApiKey.trim()
+        }
+        val mailKey = if (merge && backup.seekMailApiKey.isBlank() && cur.seekMailApiKey.isNotBlank()) {
+            cur.seekMailApiKey
+        } else {
+            backup.seekMailApiKey.trim()
+        }
+        val ignored = if (merge && backup.ignoredUpdateTag.isBlank() && cur.ignoredUpdateTag.isNotBlank()) {
+            cur.ignoredUpdateTag
+        } else {
+            backup.ignoredUpdateTag.trim()
+        }
+        _settings.value = AppSettings(
+            themeMode = backup.themeMode,
+            purePitchAmoled = backup.purePitchAmoled,
+            useDynamicColor = backup.useDynamicColor,
+            fontScale = backup.fontScale.coerceIn(SettingsRepositoryImpl.MIN_FONT_SCALE, SettingsRepositoryImpl.MAX_FONT_SCALE),
+            preferRandomCheckIn = backup.preferRandomCheckIn,
+            pinnedCategorySlugs = backup.pinnedCategorySlugs.map { it.trim() }.filter { it.isNotEmpty() }.toCollection(LinkedHashSet()),
+            includeBlockedTopics = backup.includeBlockedTopics,
+            preferRssFallback = backup.preferRssFallback,
+            nodeImageApiKey = nodeKey,
+            seekMailApiKey = mailKey,
+            autoCheckUpdates = backup.autoCheckUpdates,
+            includePrereleaseUpdates = backup.includePrereleaseUpdates,
+            ignoredUpdateTag = ignored,
+        )
+        _recentSearchQueries.value = (
+            if (merge) backup.recentSearchQueries + _recentSearchQueries.value else backup.recentSearchQueries
+            )
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+            .take(SettingsRepositoryImpl.MAX_RECENT_SEARCHES)
+    }
 }
 
 internal class FakeCategoryDao : CategoryDao {
@@ -828,5 +899,12 @@ internal class FakeBookmarkDao : BookmarkDao {
 
     override suspend fun clearForAccount(accountUid: Long) {
         state.value = state.value.filterNot { it.accountUid == accountUid }
+    }
+
+    override suspend fun getAllBookmarks(): List<BookmarkEntity> =
+        state.value.sortedByDescending { it.savedAtEpochMillis }
+
+    override suspend fun clearAll() {
+        state.value = emptyList()
     }
 }
