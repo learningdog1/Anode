@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.StateFlow
 interface ContentFilterRepository {
     val config: StateFlow<ContentFilterConfig>
 
+    /** Returns the latest persisted [ContentFilterConfig], awaiting initial load if needed. */
+    suspend fun getConfigSnapshot(): ContentFilterConfig = config.value
+
     suspend fun setEnabled(enabled: Boolean)
 
     suspend fun upsertRule(rule: ContentBlockRule)

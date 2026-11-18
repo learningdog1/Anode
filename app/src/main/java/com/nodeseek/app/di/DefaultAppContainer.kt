@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.data.backup.BackupManagerImpl
+import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
 import com.nodeseek.app.data.local.BlockedUsersCache
 import com.nodeseek.app.data.local.ContentFilterRepositoryImpl
 import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
@@ -36,7 +37,6 @@ import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
 import com.nodeseek.app.domain.backup.BackupManager
-import com.nodeseek.app.domain.backup.NoOpContentFilterBackupBridge
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.RadarMonitorController
@@ -324,8 +324,8 @@ class DefaultAppContainer(
             userRepository = userRepository,
             sessionRepository = sessionRepository,
             blockedUsersCache = blockedUsersCache,
-            // @integrator: plug ContentFilterRepository into ContentFilterBackupBridge after branch merge.
-            contentFilterBackupBridge = NoOpContentFilterBackupBridge,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(contentFilterRepository),
+            onRadarSettingsRestored = { restored -> radarWorkScheduler.sync(restored) },
         )
     }
 }

@@ -65,7 +65,7 @@ data class RadarPollingSettingsDto(
     val replyTrackingEnabled: Boolean = true,
     val inboxPushEnabled: Boolean = true,
     val foregroundIntervalMinutes: Int = 2,
-    val backgroundIntervalMinutes: Int = 5,
+    val backgroundIntervalMinutes: Int = RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES,
     val wifiOnlyInBackground: Boolean = false,
     val requireBatteryNotLowInBackground: Boolean = true,
     val quietHoursEnabled: Boolean = false,
@@ -77,20 +77,23 @@ data class RadarPollingSettingsDto(
         keywordAlertsEnabled = keywordAlertsEnabled,
         replyTrackingEnabled = replyTrackingEnabled,
         inboxPushEnabled = inboxPushEnabled,
-        foregroundIntervalMinutes = foregroundIntervalMinutes,
-        backgroundIntervalMinutes = backgroundIntervalMinutes,
+        foregroundIntervalMinutes = foregroundIntervalMinutes.coerceIn(
+            RadarPollingSettings.MIN_FOREGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_FOREGROUND_INTERVAL_MINUTES,
+        ),
+        backgroundIntervalMinutes = backgroundIntervalMinutes.coerceIn(
+            RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_BACKGROUND_INTERVAL_MINUTES,
+        ),
         wifiOnlyInBackground = wifiOnlyInBackground,
-        // Note: requireBatteryNotLowInBackground is preserved in DTO for forward compatibility
-        // with the WorkManager branch and can be wired directly during integration.
+        requireBatteryNotLowInBackground = requireBatteryNotLowInBackground,
         quietHoursEnabled = quietHoursEnabled,
-        quietStartMinuteOfDay = quietStartMinuteOfDay,
-        quietEndMinuteOfDay = quietEndMinuteOfDay,
+        quietStartMinuteOfDay = quietStartMinuteOfDay.coerceIn(0, 1439),
+        quietEndMinuteOfDay = quietEndMinuteOfDay.coerceIn(0, 1439),
     )
 }
 
-fun RadarPollingSettings.toBackupDto(
-    requireBatteryNotLowInBackground: Boolean = true,
-): RadarPollingSettingsDto = RadarPollingSettingsDto(
+fun RadarPollingSettings.toBackupDto(): RadarPollingSettingsDto = RadarPollingSettingsDto(
     isEnabled = isEnabled,
     keywordAlertsEnabled = keywordAlertsEnabled,
     replyTrackingEnabled = replyTrackingEnabled,

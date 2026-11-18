@@ -1,7 +1,12 @@
 package com.nodeseek.app.data.backup
 
+import android.annotation.SuppressLint
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequest
 import com.nodeseek.app.data.local.BookmarkEntity
+import com.nodeseek.app.data.local.ContentFilterRepositoryImpl
 import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
 import com.nodeseek.app.data.local.DraftDao
 import com.nodeseek.app.data.local.DraftEntity
@@ -12,6 +17,8 @@ import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.data.radar.FakeRadarDao
+import com.nodeseek.app.data.radar.RadarWorkManagerGateway
+import com.nodeseek.app.data.radar.RadarWorkScheduler
 import com.nodeseek.app.data.repository.BookmarkAndHistoryRepositoryImpl
 import com.nodeseek.app.data.repository.FakeBookmarkDao
 import com.nodeseek.app.data.repository.FakeReadHistoryDao
@@ -24,6 +31,8 @@ import com.nodeseek.app.domain.backup.ContentFilterBackupDto
 import com.nodeseek.app.domain.backup.ContentFilterRuleBackupDto
 import com.nodeseek.app.domain.backup.NodePulseBackupBundle
 import com.nodeseek.app.domain.backup.RestoreStrategy
+import com.nodeseek.app.domain.filter.ContentBlockRule
+import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.EditorDraft
@@ -768,6 +777,233 @@ class BackupManagerTest {
             zoneId = ZoneOffset.UTC,
         )
         assertEquals("nodepulse-backup-20251118-1533.json", fileName)
+    }
+
+    @Test
+    fun `BackupManager round-trips real ContentFilterRepositoryImpl rules and muted categories across MERGE and OVERWRITE`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(503)
+        }
+
+        val sourceFilterStore = PreferenceDataStoreFactory.create(
+            scope = ioScope,
+            produceFile = { File(tempDir, "cf_source.preferences_pb") },
+        )
+        val targetFilterStore = PreferenceDataStoreFactory.create(
+            scope = ioScope,
+            produceFile = { File(tempDir, "cf_target.preferences_pb") },
+        )
+        val sourceFilterRepo = ContentFilterRepositoryImpl(sourceFilterStore, ioScope)
+        val targetFilterRepo = ContentFilterRepositoryImpl(targetFilterStore, ioScope)
+
+        sourceFilterRepo.replaceConfig(
+            ContentFilterConfig(
+                isEnabled = true,
+                mutedCategorySlugs = setOf("promotion", "carpool"),
+                rules = listOf(
+                    ContentBlockRule(
+                        id = "cf_regex_buy",
+                        pattern = """(^|\s)(收|求购)""",
+                        matchMode = KeywordMatchMode.REGEX,
+                        categorySlug = "trade",
+                        isEnabled = true,
+                        note = "屏蔽求购",
+                        createdAtEpochMillis = 1_763_000_100_000L,
+                    ),
+                    ContentBlockRule(
+                        id = "cf_plain_aff",
+                        pattern = "AFF",
+                        matchMode = KeywordMatchMode.CONTAINS,
+                        categorySlug = "",
+                        isEnabled = false,
+                        note = "推广词",
+                        createdAtEpochMillis = 1_763_000_200_000L,
+                    ),
+                ),
+            ),
+        )
+
+        targetFilterRepo.replaceConfig(
+            ContentFilterConfig(
+                isEnabled = true,
+                mutedCategorySlugs = setOf("meaningless"),
+                rules = listOf(
+                    ContentBlockRule(
+                        id = "cf_local_only",
+                        pattern = "每日一水",
+                        matchMode = KeywordMatchMode.CONTAINS,
+                        categorySlug = "daily",
+                        isEnabled = true,
+                        note = "本地规则",
+                        createdAtEpochMillis = 1_763_000_050_000L,
+                    ),
+                ),
+            ),
+        )
+
+        val sourceStack = TestNodeStack("cf_src", tempDir, ioScope, server)
+        val sourceManager = BackupManagerImpl(
+            settingsRepository = sourceStack.settingsRepository,
+            radarRepository = sourceStack.radarRepository,
+            bookmarkAndHistoryRepository = sourceStack.bookmarkRepository,
+            draftRepository = sourceStack.draftRepository,
+            userRepository = sourceStack.userRepository,
+            sessionRepository = sourceStack.sessionRepository,
+            blockedUsersCache = sourceStack.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(sourceFilterRepo),
+            appVersionProvider = { "2.0.1-test" },
+            clockMillis = { 1_763_480_000_000L },
+        )
+
+        val exportedJson = sourceManager.exportBackupJson().getOrThrow()
+        val preview = sourceManager.inspectBackup(exportedJson).getOrThrow()
+        assertEquals(2, preview.contentFilterRuleCount)
+        assertEquals(2, preview.mutedCategoryCount)
+
+        val targetStack = TestNodeStack("cf_dst", tempDir, ioScope, server)
+        val targetManager = BackupManagerImpl(
+            settingsRepository = targetStack.settingsRepository,
+            radarRepository = targetStack.radarRepository,
+            bookmarkAndHistoryRepository = targetStack.bookmarkRepository,
+            draftRepository = targetStack.draftRepository,
+            userRepository = targetStack.userRepository,
+            sessionRepository = targetStack.sessionRepository,
+            blockedUsersCache = targetStack.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(targetFilterRepo),
+            appVersionProvider = { "2.0.1-test" },
+            clockMillis = { 1_763_480_000_000L },
+        )
+
+        // 1. MERGE retains existing local rule & muted board while adding backup rules & muted boards
+        val mergeSummary = targetManager.restoreBackup(exportedJson, RestoreStrategy.MERGE).getOrThrow()
+        assertEquals(2, mergeSummary.contentFilterRulesImported)
+        assertEquals(2, mergeSummary.mutedCategoriesCount)
+
+        val mergedConfig = targetFilterRepo.getConfigSnapshot()
+        assertTrue(mergedConfig.isEnabled)
+        assertEquals(setOf("meaningless", "promotion", "carpool"), mergedConfig.mutedCategorySlugs)
+        assertEquals(3, mergedConfig.rules.size)
+        val mergedRegex = mergedConfig.rules.first { it.id == "cf_regex_buy" }
+        assertEquals(KeywordMatchMode.REGEX, mergedRegex.matchMode)
+        assertEquals("trade", mergedRegex.categorySlug)
+        assertEquals("屏蔽求购", mergedRegex.note)
+        assertEquals(1_763_000_100_000L, mergedRegex.createdAtEpochMillis)
+        val mergedDisabled = mergedConfig.rules.first { it.id == "cf_plain_aff" }
+        assertFalse(mergedDisabled.isEnabled)
+
+        // 2. OVERWRITE replaces local content filter state completely (including disabled state)
+        sourceFilterRepo.setEnabled(false)
+        val disabledExportJson = sourceManager.exportBackupJson().getOrThrow()
+        targetManager.restoreBackup(disabledExportJson, RestoreStrategy.OVERWRITE).getOrThrow()
+
+        val overwrittenConfig = targetFilterRepo.getConfigSnapshot()
+        assertFalse(overwrittenConfig.isEnabled)
+        assertEquals(setOf("promotion", "carpool"), overwrittenConfig.mutedCategorySlugs)
+        assertEquals(setOf("cf_regex_buy", "cf_plain_aff"), overwrittenConfig.rules.map { it.id }.toSet())
+
+        // Verify persistence survives fresh repository instantiation against same DataStore
+        val reloadedRepo = ContentFilterRepositoryImpl(targetFilterStore, ioScope)
+        val reloadedConfig = reloadedRepo.getConfigSnapshot()
+        assertEquals(overwrittenConfig, reloadedConfig)
+    }
+
+    @SuppressLint("RestrictedApi")
+    @Test
+    fun `BackupManager preserves requireBatteryNotLowInBackground and triggers RadarWorkScheduler sync on restore`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(503)
+        }
+
+        class RecordingGateway : RadarWorkManagerGateway {
+            val enqueued = CopyOnWriteArrayList<Pair<ExistingPeriodicWorkPolicy, PeriodicWorkRequest>>()
+            val cancelled = CopyOnWriteArrayList<String>()
+
+            override fun enqueueUniquePeriodicWork(
+                uniqueWorkName: String,
+                existingPeriodicWorkPolicy: ExistingPeriodicWorkPolicy,
+                request: PeriodicWorkRequest,
+            ) {
+                enqueued.add(existingPeriodicWorkPolicy to request)
+            }
+
+            override fun cancelUniqueWork(uniqueWorkName: String) {
+                cancelled.add(uniqueWorkName)
+            }
+        }
+
+        val sourceStack = TestNodeStack("wm_src", tempDir, ioScope, server)
+        sourceStack.radarRepository.updatePollingSettings {
+            RadarPollingSettings(
+                isEnabled = true,
+                keywordAlertsEnabled = true,
+                replyTrackingEnabled = true,
+                inboxPushEnabled = true,
+                foregroundIntervalMinutes = 3,
+                backgroundIntervalMinutes = 60,
+                wifiOnlyInBackground = true,
+                requireBatteryNotLowInBackground = false,
+            )
+        }
+        val exportedEnabledJson = sourceStack.backupManager.exportBackupJson().getOrThrow()
+        assertTrue(exportedEnabledJson.contains("\"requireBatteryNotLowInBackground\": false"))
+
+        val targetStack = TestNodeStack("wm_dst", tempDir, ioScope, server)
+        val gateway = RecordingGateway()
+        val scheduler = RadarWorkScheduler(gateway)
+        scheduler.observePollingSettings(
+            scope = ioScope,
+            pollingSettingsFlow = targetStack.radarRepository.pollingSettingsFlow,
+        )
+        val targetManager = BackupManagerImpl(
+            settingsRepository = targetStack.settingsRepository,
+            radarRepository = targetStack.radarRepository,
+            bookmarkAndHistoryRepository = targetStack.bookmarkRepository,
+            draftRepository = targetStack.draftRepository,
+            userRepository = targetStack.userRepository,
+            sessionRepository = targetStack.sessionRepository,
+            blockedUsersCache = targetStack.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(
+                ContentFilterRepositoryImpl(
+                    PreferenceDataStoreFactory.create(
+                        scope = ioScope,
+                        produceFile = { File(tempDir, "wm_dst_cf.preferences_pb") },
+                    ),
+                    ioScope,
+                ),
+            ),
+            onRadarSettingsRestored = { restored -> scheduler.sync(restored) },
+        )
+
+        targetManager.restoreBackup(exportedEnabledJson, RestoreStrategy.OVERWRITE).getOrThrow()
+
+        val restoredPolling = targetStack.radarRepository.getPollingSettings()
+        assertEquals(60, restoredPolling.backgroundIntervalMinutes)
+        assertTrue(restoredPolling.wifiOnlyInBackground)
+        assertFalse(restoredPolling.requireBatteryNotLowInBackground)
+
+        assertTrue(gateway.enqueued.isNotEmpty())
+        val (policy, request) = gateway.enqueued.last()
+        assertEquals(ExistingPeriodicWorkPolicy.UPDATE, policy)
+        assertEquals(60L * 60_000L, request.workSpec.intervalDuration)
+        assertEquals(NetworkType.UNMETERED, request.workSpec.constraints.requiredNetworkType)
+        assertFalse(request.workSpec.constraints.requiresBatteryNotLow())
+
+        // Restoring disabled radar settings (even with legacy <15m interval) coerces interval >= 15 and cancels WorkManager
+        val disabledLegacyJson = exportedEnabledJson
+            .replace("\"isEnabled\": true", "\"isEnabled\": false")
+            .replace("\"backgroundIntervalMinutes\": 60", "\"backgroundIntervalMinutes\": 5")
+            .replace("\"requireBatteryNotLowInBackground\": false", "\"requireBatteryNotLowInBackground\": true")
+        targetManager.restoreBackup(disabledLegacyJson, RestoreStrategy.OVERWRITE).getOrThrow()
+
+        val disabledPolling = targetStack.radarRepository.getPollingSettings()
+        assertFalse(disabledPolling.isEnabled)
+        assertEquals(15, disabledPolling.backgroundIntervalMinutes)
+        assertTrue(disabledPolling.requireBatteryNotLowInBackground)
+        assertTrue(gateway.cancelled.contains(RadarWorkScheduler.UNIQUE_WORK_NAME))
+
+        scheduler.stopObserving()
     }
 }
 

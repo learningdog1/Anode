@@ -44,6 +44,7 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.BrightnessAuto
@@ -66,6 +67,7 @@ import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -867,14 +869,47 @@ fun SettingsScreen(
                                     SettingsGroupDivider()
 
                                     SettingsIntervalPresetRow(
-                                        title = "后台检查间隔",
-                                        optionsMinutes = listOf(3, 5, 10, 15),
-                                        selectedMinutes = radarPollingSettings.backgroundIntervalMinutes,
+                                        title = "后台巡检间隔 (WorkManager)",
+                                        optionsMinutes = listOf(15, 30, 60),
+                                        selectedMinutes = radarPollingSettings.backgroundIntervalMinutes
+                                            .coerceAtLeast(RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES),
                                         enabled = radarPollingSettings.isEnabled,
                                         onSelect = { minutes ->
                                             settingsScope.launch {
                                                 appContainer.radarRepository.updatePollingSettings {
                                                     it.copy(backgroundIntervalMinutes = minutes)
+                                                }
+                                            }
+                                        },
+                                    )
+
+                                    SettingsGroupDivider()
+
+                                    SettingsSwitchRow(
+                                        icon = Icons.Rounded.Wifi,
+                                        title = "后台仅 Wi-Fi",
+                                        subtitle = "仅在非计费网络下触发 WorkManager 后台巡检",
+                                        checked = radarPollingSettings.wifiOnlyInBackground,
+                                        onCheckedChange = { wifiOnly ->
+                                            settingsScope.launch {
+                                                appContainer.radarRepository.updatePollingSettings {
+                                                    it.copy(wifiOnlyInBackground = wifiOnly)
+                                                }
+                                            }
+                                        },
+                                    )
+
+                                    SettingsGroupDivider()
+
+                                    SettingsSwitchRow(
+                                        icon = Icons.Rounded.BatteryChargingFull,
+                                        title = "低电量暂停后台巡检",
+                                        subtitle = "WorkManager 系统约束：低电量时延后，电量恢复后继续",
+                                        checked = radarPollingSettings.requireBatteryNotLowInBackground,
+                                        onCheckedChange = { requireBatteryNotLow ->
+                                            settingsScope.launch {
+                                                appContainer.radarRepository.updatePollingSettings {
+                                                    it.copy(requireBatteryNotLowInBackground = requireBatteryNotLow)
                                                 }
                                             }
                                         },

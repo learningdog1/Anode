@@ -47,6 +47,7 @@ import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.R
 import com.nodeseek.app.data.backup.BackupManagerImpl
+import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
 import com.nodeseek.app.data.local.InMemoryBlockedUsersCache
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
@@ -520,6 +521,7 @@ internal class PreviewAppContainer(
         userRepository = userRepository,
         sessionRepository = sessionRepository,
         blockedUsersCache = InMemoryBlockedUsersCache(),
+        contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(contentFilterRepository),
     )
 }
 

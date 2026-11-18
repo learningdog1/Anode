@@ -33,6 +33,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -816,9 +818,11 @@ class PulseRadarMonitorTest {
         radarRepository.getPollingSettings()
 
         var loopClock = 1_760_000_000_000L
+        val loopScheduler = TestCoroutineScheduler()
+        val loopScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(loopScheduler))
         val monitor = PulseRadarMonitor(
             appContext = ContextWrapper(null),
-            scope = this,
+            scope = loopScope,
             apiClient = apiClient,
             inboxRepository = inboxRepository,
             sessionRepository = sessionRepository,
@@ -826,60 +830,75 @@ class PulseRadarMonitorTest {
             radarRepository = radarRepository,
             notificationDispatcher = dispatcher,
             watermarkStore = preferencesStore,
-            clockMillis = { loopClock + testScheduler.currentTime },
+            clockMillis = { loopClock + loopScheduler.currentTime },
             isUnmeteredNetwork = { fakeUnmeteredNetwork },
             currentMinuteOfDay = { fakeMinuteOfDay },
         )
 
+        suspend fun settleLoop() {
+            repeat(5) {
+                loopScheduler.runCurrent()
+                withContext(Dispatchers.Default) { delay(5L) }
+            }
+            loopScheduler.runCurrent()
+        }
+
         suspend fun awaitPollAdvance(previousCheckAt: Long): Long {
             repeat(100) {
-                runCurrent()
+                loopScheduler.runCurrent()
                 val current = monitor.runtimeStatus.value.lastCheckEpochMillis
-                if (current > previousCheckAt) return current
+                if (current > previousCheckAt) {
+                    settleLoop()
+                    return current
+                }
                 withContext(Dispatchers.Default) { delay(10L) }
             }
             return monitor.runtimeStatus.value.lastCheckEpochMillis
         }
 
-        // Cold start in background must NOT launch an in-process foreground polling loop.
-        monitor.onForegroundChanged(false)
-        monitor.start()
-        runCurrent()
-        assertFalse(monitor.isForegroundLoopActive())
-        advanceTimeBy(60 * 60_000L)
-        runCurrent()
-        assertEquals(0L, monitor.runtimeStatus.value.lastCheckEpochMillis)
+        try {
+            // Cold start in background must NOT launch an in-process foreground polling loop.
+            monitor.onForegroundChanged(false)
+            monitor.start()
+            settleLoop()
+            assertFalse(monitor.isForegroundLoopActive())
+            loopScheduler.advanceTimeBy(60 * 60_000L)
+            settleLoop()
+            assertEquals(0L, monitor.runtimeStatus.value.lastCheckEpochMillis)
 
-        // Entering foreground starts the fast foreground loop and executes initial poll after startup delay.
-        monitor.onForegroundChanged(true)
-        runCurrent()
-        assertTrue(monitor.isForegroundLoopActive())
-        advanceTimeBy(2_000L)
-        val firstCheckAt = awaitPollAdvance(0L)
-        assertTrue(firstCheckAt > 0L)
+            // Entering foreground starts the fast foreground loop and executes initial poll after startup delay.
+            monitor.onForegroundChanged(true)
+            settleLoop()
+            assertTrue(monitor.isForegroundLoopActive())
+            loopScheduler.advanceTimeBy(2_000L)
+            val firstCheckAt = awaitPollAdvance(0L)
+            assertTrue(firstCheckAt > 0L)
 
-        // Advancing 2m in foreground triggers a second foreground poll.
-        advanceTimeBy(2 * 60_000L + 500L)
-        val secondCheckAt = awaitPollAdvance(firstCheckAt)
-        assertTrue(secondCheckAt > firstCheckAt)
+            // Advancing 2m in foreground triggers a second foreground poll.
+            loopScheduler.advanceTimeBy(2 * 60_000L + 500L)
+            val secondCheckAt = awaitPollAdvance(firstCheckAt)
+            assertTrue(secondCheckAt > firstCheckAt)
 
-        // Transitioning to background exits the in-process loop cleanly; advancing 1 hour does 0 polls.
-        monitor.onForegroundChanged(false)
-        runCurrent()
-        assertFalse(monitor.isForegroundLoopActive())
-        advanceTimeBy(60 * 60_000L)
-        runCurrent()
-        assertEquals(secondCheckAt, monitor.runtimeStatus.value.lastCheckEpochMillis)
+            // Transitioning to background exits the in-process loop cleanly; advancing 1 hour does 0 polls.
+            monitor.onForegroundChanged(false)
+            settleLoop()
+            assertFalse(monitor.isForegroundLoopActive())
+            loopScheduler.advanceTimeBy(60 * 60_000L)
+            settleLoop()
+            assertEquals(secondCheckAt, monitor.runtimeStatus.value.lastCheckEpochMillis)
 
-        // Returning to foreground resumes the loop and runs a poll promptly since interval elapsed.
-        monitor.onForegroundChanged(true)
-        runCurrent()
-        assertTrue(monitor.isForegroundLoopActive())
-        advanceTimeBy(2_000L)
-        val resumedCheckAt = awaitPollAdvance(secondCheckAt)
-        assertTrue(resumedCheckAt > secondCheckAt)
+            // Returning to foreground resumes the loop and runs a poll promptly since interval elapsed.
+            monitor.onForegroundChanged(true)
+            settleLoop()
+            assertTrue(monitor.isForegroundLoopActive())
+            loopScheduler.advanceTimeBy(2_000L)
+            val resumedCheckAt = awaitPollAdvance(secondCheckAt)
+            assertTrue(resumedCheckAt > secondCheckAt)
 
-        monitor.stop()
+            monitor.stop()
+        } finally {
+            loopScope.cancel()
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

@@ -16,6 +16,8 @@ import com.nodeseek.app.data.repository.InboxRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.backup.BackupManager
+import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.KeywordMatchMode
@@ -99,8 +101,10 @@ class PulseRadarWorkerTest {
                 override val radarRepository: RadarRepository get() = error("unused")
                 override val radarMonitorController: RadarMonitorController
                     get() = controllerProvider?.invoke() ?: error("no controller provided")
+                override val contentFilterRepository: ContentFilterRepository get() = error("unused")
                 override val notificationDispatcher: PulseNotificationDispatcher get() = error("unused")
                 override val appUpdateManager: AppUpdateManager get() = error("unused")
+                override val backupManager: BackupManager get() = error("unused")
             }
         }
     }

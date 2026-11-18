@@ -12,6 +12,7 @@ import com.nodeseek.app.domain.filter.ContentBlockRule
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.filter.ContentFilterRepository
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -46,6 +48,7 @@ class ContentFilterRepositoryImpl(
     }
 
     private val writeMutex = Mutex()
+    private val initialLoadReady = CompletableDeferred<Unit>()
     private var lastAppliedDiskRevision: Long = 0L
 
     private val _config = MutableStateFlow(ContentFilterConfig())
@@ -53,7 +56,34 @@ class ContentFilterRepositoryImpl(
 
     init {
         externalScope.launch {
-            dataStore.data
+            try {
+                dataStore.data
+                    .catch { exception ->
+                        if (exception is IOException) {
+                            emit(emptyPreferences())
+                        } else {
+                            throw exception
+                        }
+                    }
+                    .collect { prefs ->
+                        writeMutex.withLock {
+                            val diskRevision = prefs[Keys.REVISION] ?: 0L
+                            if (diskRevision >= lastAppliedDiskRevision) {
+                                lastAppliedDiskRevision = diskRevision
+                                _config.value = prefs.toContentFilterConfig()
+                            }
+                        }
+                        initialLoadReady.complete(Unit)
+                    }
+            } finally {
+                initialLoadReady.complete(Unit)
+            }
+        }
+    }
+
+    override suspend fun getConfigSnapshot(): ContentFilterConfig {
+        if (!initialLoadReady.isCompleted) {
+            val loaded = dataStore.data
                 .catch { exception ->
                     if (exception is IOException) {
                         emit(emptyPreferences())
@@ -61,16 +91,17 @@ class ContentFilterRepositoryImpl(
                         throw exception
                     }
                 }
-                .collect { prefs ->
-                    writeMutex.withLock {
-                        val diskRevision = prefs[Keys.REVISION] ?: 0L
-                        if (diskRevision >= lastAppliedDiskRevision) {
-                            lastAppliedDiskRevision = diskRevision
-                            _config.value = prefs.toContentFilterConfig()
-                        }
-                    }
+                .first()
+            writeMutex.withLock {
+                val diskRevision = loaded[Keys.REVISION] ?: 0L
+                if (diskRevision >= lastAppliedDiskRevision) {
+                    lastAppliedDiskRevision = diskRevision
+                    _config.value = loaded.toContentFilterConfig()
                 }
+            }
+            initialLoadReady.complete(Unit)
         }
+        return writeMutex.withLock { _config.value }
     }
 
     override suspend fun setEnabled(enabled: Boolean) {

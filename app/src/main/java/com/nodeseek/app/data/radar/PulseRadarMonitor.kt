@@ -284,6 +284,9 @@ class PulseRadarMonitor(
             }
 
             val settings = radarRepository.getPollingSettings()
+            if (!_runtimeStatus.value.isRunningInForeground && !pendingManualTrigger.get()) {
+                continue
+            }
             if (!settings.isEnabled) {
                 wakeSignal.receive()
                 continue

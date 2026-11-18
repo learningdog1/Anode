@@ -15,6 +15,7 @@ import com.nodeseek.app.domain.backup.RadarBackupDto
 import com.nodeseek.app.domain.backup.RestoreStrategy
 import com.nodeseek.app.domain.backup.toBackupDto
 import com.nodeseek.app.domain.backup.toBlockedUserBackupDto
+import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.DraftRepository
@@ -35,6 +36,7 @@ class BackupManagerImpl(
     private val sessionRepository: SessionRepository,
     private val blockedUsersCache: BlockedUsersCache,
     private val contentFilterBackupBridge: ContentFilterBackupBridge = NoOpContentFilterBackupBridge,
+    private val onRadarSettingsRestored: (suspend (RadarPollingSettings) -> Unit)? = null,
     private val appVersionProvider: () -> String = { BuildConfig.VERSION_NAME },
     private val clockMillis: () -> Long = System::currentTimeMillis,
 ) : BackupManager {
@@ -148,6 +150,7 @@ class BackupManagerImpl(
                 trackedTopics = bundle.radar.trackedTopics.map { it.toDomain() },
                 replaceExisting = replaceExisting,
             )
+            onRadarSettingsRestored?.invoke(radarRepository.getPollingSettings())
 
             contentFilterBackupBridge.restore(
                 dto = bundle.blocklist.contentFilter,
