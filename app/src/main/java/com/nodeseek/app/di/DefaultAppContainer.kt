@@ -23,6 +23,7 @@ import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.data.network.WebViewSameOriginActionRunner
 import com.nodeseek.app.data.radar.PulseRadarMonitor
+import com.nodeseek.app.data.radar.RadarWorkScheduler
 import com.nodeseek.app.data.repository.BookmarkAndHistoryRepositoryImpl
 import com.nodeseek.app.data.repository.CheckInRepositoryImpl
 import com.nodeseek.app.data.repository.ForumRepositoryImpl
@@ -280,6 +281,17 @@ class DefaultAppContainer(
             radarRepository = radarRepositoryImpl,
             notificationDispatcher = notificationDispatcher,
             watermarkStore = radarPreferencesStore,
+        )
+    }
+
+    val radarWorkScheduler: RadarWorkScheduler by lazy {
+        RadarWorkScheduler(appContext)
+    }
+
+    fun startBackgroundRadarScheduling() {
+        radarWorkScheduler.observePollingSettings(
+            scope = applicationScope,
+            pollingSettingsFlow = radarRepository.pollingSettingsFlow,
         )
     }
 

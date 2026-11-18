@@ -15,8 +15,11 @@ import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.InboxTargetResolver
 import com.nodeseek.app.domain.repository.InboxRepository
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +28,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+internal object SuppressInAppPopupsContext : CoroutineContext.Key<SuppressInAppPopupsElement>
+
+internal object SuppressInAppPopupsElement : AbstractCoroutineContextElement(SuppressInAppPopupsContext)
 
 /**
  * Concrete [InboxRepository] syncing unread counts from both HTML `__config__.user.unViewedCount.all`
@@ -240,13 +247,14 @@ class InboxRepositoryImpl(
 
                 ensurePersistedBaselineSeeded(viewerUid)
 
+                val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
                 var pendingLoadedPopups: List<InAppMessagePopup> = emptyList()
                 var pendingReplyPersist: Long? = null
                 var pendingMentionPersist: Long? = null
                 var pendingDmPersist: Map<Long, Long> = emptyMap()
                 val (initReplies, initMentions, initDm) = synchronized(stateLock) {
                     syncAccountLocked()
-                    val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
+                    val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
                     if (allowEmit) {
                         val flushResult = flushPendingPopupsFromLoadedStateLocked(now = now, viewerUid = viewerUid)
                         pendingLoadedPopups = flushResult.popups
@@ -438,6 +446,7 @@ class InboxRepositoryImpl(
                     senderAvatarUrl = avatarUrlForUid(row.commenterId),
                 )
             }
+            val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
             var viewerUidForPersist = 0L
             var updatedWatermarkForPersist: Long? = null
@@ -446,7 +455,7 @@ class InboxRepositoryImpl(
                 val now = clockMillis()
                 val viewerUid = sessionRepository.sessionState.value?.uid ?: 0L
                 viewerUidForPersist = viewerUid
-                val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
+                val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
                 raw.forEach { item ->
@@ -625,6 +634,7 @@ class InboxRepositoryImpl(
                 )
             }
 
+            val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
             var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
             val effective = synchronized(stateLock) {
@@ -657,7 +667,7 @@ class InboxRepositoryImpl(
                 val resolvedEffective = effectiveThreadsLocked(now)
                 _messageThreads.value = resolvedEffective
                 raiseTotalToKnownFloorLocked(now)
-                val allowEmit = _inAppPopupEvents.subscriptionCount.value > 0
+                val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
                 popupsToEmit = detectDmPopupsLocked(
                     effectiveThreads = resolvedEffective,
                     viewerUid = viewerUid,

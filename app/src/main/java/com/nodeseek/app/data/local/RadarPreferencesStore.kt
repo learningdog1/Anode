@@ -74,6 +74,7 @@ class RadarPreferencesStore(
             prefs[Keys.FOREGROUND_INTERVAL_MINUTES] = updated.foregroundIntervalMinutes
             prefs[Keys.BACKGROUND_INTERVAL_MINUTES] = updated.backgroundIntervalMinutes
             prefs[Keys.WIFI_ONLY_IN_BACKGROUND] = updated.wifiOnlyInBackground
+            prefs[Keys.REQUIRE_BATTERY_NOT_LOW_IN_BACKGROUND] = updated.requireBatteryNotLowInBackground
             prefs[Keys.QUIET_HOURS_ENABLED] = updated.quietHoursEnabled
             prefs[Keys.QUIET_START_MINUTE] = updated.quietStartMinuteOfDay
             prefs[Keys.QUIET_END_MINUTE] = updated.quietEndMinuteOfDay
@@ -115,17 +116,32 @@ class RadarPreferencesStore(
         keywordAlertsEnabled = this[Keys.KEYWORD_ALERTS_ENABLED] ?: true,
         replyTrackingEnabled = this[Keys.REPLY_TRACKING_ENABLED] ?: true,
         inboxPushEnabled = this[Keys.INBOX_PUSH_ENABLED] ?: true,
-        foregroundIntervalMinutes = (this[Keys.FOREGROUND_INTERVAL_MINUTES] ?: 2).coerceIn(1, 60),
-        backgroundIntervalMinutes = (this[Keys.BACKGROUND_INTERVAL_MINUTES] ?: 5).coerceIn(1, 180),
+        foregroundIntervalMinutes = (this[Keys.FOREGROUND_INTERVAL_MINUTES] ?: 2).coerceIn(
+            RadarPollingSettings.MIN_FOREGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_FOREGROUND_INTERVAL_MINUTES,
+        ),
+        backgroundIntervalMinutes = (
+            this[Keys.BACKGROUND_INTERVAL_MINUTES] ?: RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES
+            ).coerceIn(
+            RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_BACKGROUND_INTERVAL_MINUTES,
+        ),
         wifiOnlyInBackground = this[Keys.WIFI_ONLY_IN_BACKGROUND] ?: false,
+        requireBatteryNotLowInBackground = this[Keys.REQUIRE_BATTERY_NOT_LOW_IN_BACKGROUND] ?: true,
         quietHoursEnabled = this[Keys.QUIET_HOURS_ENABLED] ?: false,
         quietStartMinuteOfDay = (this[Keys.QUIET_START_MINUTE] ?: (23 * 60)).coerceIn(0, 1439),
         quietEndMinuteOfDay = (this[Keys.QUIET_END_MINUTE] ?: (7 * 60)).coerceIn(0, 1439),
     )
 
     private fun RadarPollingSettings.normalized(): RadarPollingSettings = copy(
-        foregroundIntervalMinutes = foregroundIntervalMinutes.coerceIn(1, 60),
-        backgroundIntervalMinutes = backgroundIntervalMinutes.coerceIn(1, 180),
+        foregroundIntervalMinutes = foregroundIntervalMinutes.coerceIn(
+            RadarPollingSettings.MIN_FOREGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_FOREGROUND_INTERVAL_MINUTES,
+        ),
+        backgroundIntervalMinutes = backgroundIntervalMinutes.coerceIn(
+            RadarPollingSettings.MIN_BACKGROUND_INTERVAL_MINUTES,
+            RadarPollingSettings.MAX_BACKGROUND_INTERVAL_MINUTES,
+        ),
         quietStartMinuteOfDay = quietStartMinuteOfDay.coerceIn(0, 1439),
         quietEndMinuteOfDay = quietEndMinuteOfDay.coerceIn(0, 1439),
     )
@@ -168,6 +184,7 @@ class RadarPreferencesStore(
         val FOREGROUND_INTERVAL_MINUTES = intPreferencesKey("radar_fg_interval_minutes")
         val BACKGROUND_INTERVAL_MINUTES = intPreferencesKey("radar_bg_interval_minutes")
         val WIFI_ONLY_IN_BACKGROUND = booleanPreferencesKey("radar_wifi_only_bg")
+        val REQUIRE_BATTERY_NOT_LOW_IN_BACKGROUND = booleanPreferencesKey("radar_require_battery_not_low_bg")
         val QUIET_HOURS_ENABLED = booleanPreferencesKey("radar_quiet_hours_enabled")
         val QUIET_START_MINUTE = intPreferencesKey("radar_quiet_start_minute")
         val QUIET_END_MINUTE = intPreferencesKey("radar_quiet_end_minute")
