@@ -8,8 +8,8 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-val appVersionName = "2.0.0"
-val appVersionCode = 5
+val appVersionName = "2.0.1"
+val appVersionCode = 6
 
 base {
     archivesName.set("Anode-v$appVersionName")

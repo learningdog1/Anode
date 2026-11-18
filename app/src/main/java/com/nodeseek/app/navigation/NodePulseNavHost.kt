@@ -812,9 +812,11 @@ fun NodePulseNavHost(
 
             // Standalone Unified Search (posts, users & boards)
             composable<SearchRoute> {
+                var shouldAutoFocusSearch by rememberSaveable { mutableStateOf(true) }
                 BoardsScreen(
                     onOpenTopic = openTopic,
-                    autoFocusSearch = true,
+                    autoFocusSearch = shouldAutoFocusSearch,
+                    onAutoFocusConsumed = { shouldAutoFocusSearch = false },
                     standaloneSearchMode = true,
                     onBack = safePopBackStack,
                     onSelectBoard = selectBoardAndOpenExplore,

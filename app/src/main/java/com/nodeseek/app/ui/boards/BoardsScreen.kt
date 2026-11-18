@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -92,8 +93,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -159,6 +162,7 @@ import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 private val TECH_INTEL_SLUGS = setOf("tech", "dev", "info", "review", "inside", "sandbox")
 private val TRADE_CARPOOL_SLUGS = setOf("trade", "carpool", "promotion")
@@ -181,6 +185,21 @@ private enum class BoardsDisplayMode {
     DIRECTORY,
     SEARCH,
     INLINE_BOARD,
+}
+
+internal fun shouldRequestSearchAutoFocus(
+    autoFocusSearch: Boolean,
+    hasConsumedInitialAutoFocus: Boolean,
+    submittedQuery: String,
+    focusSearchTrigger: Int,
+    lastHandledFocusTrigger: Int,
+): Boolean {
+    val initialAutoFocus = autoFocusSearch &&
+        !hasConsumedInitialAutoFocus &&
+        submittedQuery.isBlank()
+    val explicitTrigger = focusSearchTrigger > 0 &&
+        focusSearchTrigger != lastHandledFocusTrigger
+    return initialAutoFocus || explicitTrigger
 }
 
 /**
@@ -227,7 +246,15 @@ fun BoardsScreen(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val uriHandler = LocalUriHandler.current
+    val coroutineScope = rememberCoroutineScope()
+    val searchListState = rememberLazyListState()
+    var hasConsumedInitialAutoFocus by rememberSaveable { mutableStateOf(false) }
+    var lastHandledFocusTrigger by rememberSaveable { mutableIntStateOf(0) }
     var showBuiltInWebViewSheet by rememberSaveable { mutableStateOf(false) }
+    val dismissSearchKeyboard: () -> Unit = {
+        focusManager.clearFocus()
+        keyboardController?.hide()
+    }
 
     // Remember last inline slug so header transition doesn't flicker during exit animation.
     var lastInlineSlug by rememberSaveable { mutableStateOf(initialCategorySlug) }
@@ -254,16 +281,35 @@ fun BoardsScreen(
         }
     }
 
-    // Auto-focus search bar when navigated from Explore's Search Pill
+    // Auto-focus search bar once on initial entry (never again when returning from a post)
     LaunchedEffect(autoFocusSearch, focusSearchTrigger) {
-        if (autoFocusSearch || focusSearchTrigger > 0) {
+        if (
+            shouldRequestSearchAutoFocus(
+                autoFocusSearch = autoFocusSearch,
+                hasConsumedInitialAutoFocus = hasConsumedInitialAutoFocus,
+                submittedQuery = uiState.submittedQuery,
+                focusSearchTrigger = focusSearchTrigger,
+                lastHandledFocusTrigger = lastHandledFocusTrigger,
+            )
+        ) {
+            val consumedInitial = autoFocusSearch && !hasConsumedInitialAutoFocus
+            hasConsumedInitialAutoFocus = true
+            if (focusSearchTrigger > 0) {
+                lastHandledFocusTrigger = focusSearchTrigger
+            }
             viewModel.setSearchModeActive(true)
             delay(80)
             runCatching { focusRequester.requestFocus() }
             keyboardController?.show()
-            if (autoFocusSearch) {
+            if (consumedInitial) {
                 onAutoFocusConsumed()
             }
+        }
+    }
+
+    LaunchedEffect(searchListState.isScrollInProgress) {
+        if (searchListState.isScrollInProgress) {
+            dismissSearchKeyboard()
         }
     }
 
@@ -280,12 +326,11 @@ fun BoardsScreen(
         when {
             uiState.activeInlineBoardSlug != null -> viewModel.closeInlineBoard()
             standaloneSearchMode -> {
-                focusManager.clearFocus()
-                keyboardController?.hide()
+                dismissSearchKeyboard()
                 onBack?.invoke()
             }
             uiState.isSearchModeActive -> {
-                focusManager.clearFocus()
+                dismissSearchKeyboard()
                 viewModel.setSearchModeActive(false)
             }
         }
@@ -347,12 +392,14 @@ fun BoardsScreen(
                         onQueryChange = viewModel::updateQueryInput,
                         onFocusSearch = { viewModel.setSearchModeActive(true) },
                         onSubmitSearch = {
-                            keyboardController?.hide()
+                            dismissSearchKeyboard()
                             viewModel.submitSearch()
+                            coroutineScope.launch {
+                                searchListState.scrollToItem(0)
+                            }
                         },
                         onCancelSearch = {
-                            focusManager.clearFocus()
-                            keyboardController?.hide()
+                            dismissSearchKeyboard()
                             if (standaloneSearchMode) {
                                 onBack?.invoke()
                             } else {
@@ -385,8 +432,14 @@ fun BoardsScreen(
                         InlineBoardFeedContent(
                             uiState = uiState,
                             bottomContentPadding = bottomContentPadding,
-                            onOpenTopic = onOpenTopic,
-                            onOpenUserProfile = onOpenUserProfile,
+                            onOpenTopic = { topicId, initialFloor, titleHint ->
+                                dismissSearchKeyboard()
+                                onOpenTopic(topicId, initialFloor, titleHint)
+                            },
+                            onOpenUserProfile = { uid, usernameHint ->
+                                dismissSearchKeyboard()
+                                onOpenUserProfile(uid, usernameHint)
+                            },
                             onBookmarkToggle = viewModel::toggleBookmark,
                             onRefresh = viewModel::refreshInlineBoard,
                             onLoadMore = viewModel::loadNextInlineBoardPage,
@@ -398,25 +451,39 @@ fun BoardsScreen(
                     BoardsDisplayMode.SEARCH -> {
                         UnifiedSearchContent(
                             uiState = uiState,
+                            listState = searchListState,
                             bottomContentPadding = bottomContentPadding,
                             onSelectRecentQuery = { q ->
-                                keyboardController?.hide()
+                                dismissSearchKeyboard()
                                 viewModel.submitSearch(q)
+                                coroutineScope.launch {
+                                    searchListState.scrollToItem(0)
+                                }
                             },
                             onRemoveRecentQuery = viewModel::removeRecentQuery,
                             onClearRecentQueries = viewModel::clearRecentQueries,
-                            onSelectScope = viewModel::selectSearchScope,
-                            onSelectCategoryFilter = viewModel::selectSearchCategoryFilter,
-                            onSelectSort = viewModel::selectSearchSort,
+                            onSelectScope = { scope ->
+                                dismissSearchKeyboard()
+                                viewModel.selectSearchScope(scope)
+                            },
+                            onSelectCategoryFilter = { slug ->
+                                dismissSearchKeyboard()
+                                viewModel.selectSearchCategoryFilter(slug)
+                            },
+                            onSelectSort = { sort ->
+                                dismissSearchKeyboard()
+                                viewModel.selectSearchSort(sort)
+                            },
                             onSubmitCurrentQuery = {
-                                keyboardController?.hide()
+                                dismissSearchKeyboard()
                                 viewModel.submitSearch()
                             },
                             onOpenGoogleSearch = {
+                                dismissSearchKeyboard()
                                 runCatching { uriHandler.openUri(uiState.googleSiteSearchUrl) }
                             },
                             onJumpToBoard = { slug ->
-                                focusManager.clearFocus()
+                                dismissSearchKeyboard()
                                 viewModel.setSearchModeActive(false)
                                 if (onSelectBoard != null) {
                                     onSelectBoard(slug)
@@ -424,8 +491,14 @@ fun BoardsScreen(
                                     viewModel.openInlineBoard(slug)
                                 }
                             },
-                            onOpenTopic = onOpenTopic,
-                            onOpenUserProfile = onOpenUserProfile,
+                            onOpenTopic = { topicId, initialFloor, titleHint ->
+                                dismissSearchKeyboard()
+                                onOpenTopic(topicId, initialFloor, titleHint)
+                            },
+                            onOpenUserProfile = { uid, usernameHint ->
+                                dismissSearchKeyboard()
+                                onOpenUserProfile(uid, usernameHint)
+                            },
                             onBookmarkToggle = viewModel::toggleBookmark,
                             onLoadNextPage = viewModel::loadNextSearchPage,
                             onVerifyWebView = triggerWebViewAuth,
@@ -483,8 +556,9 @@ private fun BoardsDirectorySearchHeader(
     val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
     val isDark = NodePulseThemeTokens.isDark
+    val keyboardController = LocalSoftwareKeyboardController.current
     var isFieldFocused by remember { mutableStateOf(false) }
-    val searchHighlighted = isSearchActive || isFieldFocused
+    val searchHighlighted = isFieldFocused
 
     val searchBorderWidth by animateDpAsState(
         targetValue = if (searchHighlighted) 1.4.dp else 1.dp,
@@ -647,6 +721,7 @@ private fun BoardsDirectorySearchHeader(
                         indication = null,
                     ) {
                         runCatching { focusRequester.requestFocus() }
+                        keyboardController?.show()
                     }
                     .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1787,10 +1862,10 @@ private fun UnifiedSearchContent(
     onBookmarkToggle: (TopicSummary) -> Unit,
     onLoadNextPage: () -> Unit,
     onVerifyWebView: () -> Unit,
+    listState: LazyListState = rememberLazyListState(),
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
-    val listState = rememberLazyListState()
     val shouldLoadMore by remember {
         derivedStateOf {
             val info = listState.layoutInfo
