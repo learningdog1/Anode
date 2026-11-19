@@ -1,0 +1,622 @@
+package com.nodeseek.app.ui.netbench
+
+import android.content.Context
+import androidx.compose.runtime.Immutable
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import com.nodeseek.app.data.netbench.HttpLatencyRunner
+import com.nodeseek.app.data.netbench.IpIntelligenceClient
+import com.nodeseek.app.data.netbench.Iperf3ClientRunner
+import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.netbench.NetBenchTargetResolver
+import com.nodeseek.app.data.netbench.TcpPingRunner
+import com.nodeseek.app.domain.netbench.ClientNetworkInfo
+import com.nodeseek.app.domain.netbench.HttpLatencyResult
+import com.nodeseek.app.domain.netbench.IpClassificationEngine
+import com.nodeseek.app.domain.netbench.IpIntelligenceReport
+import com.nodeseek.app.domain.netbench.Iperf3Config
+import com.nodeseek.app.domain.netbench.Iperf3Direction
+import com.nodeseek.app.domain.netbench.Iperf3Progress
+import com.nodeseek.app.domain.netbench.Iperf3TestMode
+import com.nodeseek.app.domain.netbench.NetBenchHistoryEntry
+import com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter
+import com.nodeseek.app.domain.netbench.NetBenchMarkdownOptions
+import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
+import com.nodeseek.app.domain.netbench.NetBenchReport
+import com.nodeseek.app.domain.netbench.NetBenchTargetParser
+import com.nodeseek.app.domain.netbench.PreferredIpFamily
+import com.nodeseek.app.domain.netbench.ResolvedTarget
+import com.nodeseek.app.domain.netbench.TcpPingConfig
+import com.nodeseek.app.domain.netbench.TcpPingProgress
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+/**
+ * Current execution phase of the Mobile Network Tester pipeline.
+ */
+enum class NetBenchPhase(val label: String) {
+    IDLE("待命"),
+    RESOLVING("正在解析目标地址…"),
+    TCPING("正在进行 TCPing 延迟探测…"),
+    HTTP_PROBE("正在探测 HTTP 延迟…"),
+    IP_INTELLIGENCE("正在查询 IP 归属与原生/广播属性…"),
+    IPERF_DOWNLOAD("正在进行 iperf3 下载测速 (-R)…"),
+    IPERF_UPLOAD("正在进行 iperf3 上传测速…"),
+    COMPLETED("测机完成"),
+    CANCELLED("已停止测机"),
+    ERROR("测机出错"),
+}
+
+@Immutable
+data class MobileNetBenchUiState(
+    val targetInput: String = "",
+    val tcpPortText: String = TcpPingConfig.DEFAULT_PORT.toString(),
+    val probeCount: Int = TcpPingConfig.DEFAULT_PROBE_COUNT,
+    val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+    val enableTcpPing: Boolean = true,
+    val enableHttpProbe: Boolean = false,
+    val enableIpCheck: Boolean = true,
+    val enableIperf3: Boolean = false,
+    val iperfPortText: String = Iperf3Config.DEFAULT_PORT.toString(),
+    val iperfDurationSec: Int = Iperf3Config.DEFAULT_DURATION_SEC,
+    val iperfTestMode: Iperf3TestMode = Iperf3TestMode.DOWNLOAD,
+    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    val maskTargetIpInReport: Boolean = false,
+    val isRunning: Boolean = false,
+    val activePhase: NetBenchPhase = NetBenchPhase.IDLE,
+    val resolvedTarget: ResolvedTarget? = null,
+    val clientNetwork: ClientNetworkInfo? = null,
+    val tcpPingProgress: TcpPingProgress? = null,
+    val httpLatencyResult: HttpLatencyResult? = null,
+    val ipIntelligence: IpIntelligenceReport? = null,
+    val iperfDownloadProgress: Iperf3Progress? = null,
+    val iperfUploadProgress: Iperf3Progress? = null,
+    val errorMessage: String? = null,
+    val recentTargets: List<NetBenchHistoryEntry> = emptyList(),
+    val generatedMarkdown: String = "",
+) {
+    val effectiveTcpPort: Int
+        get() = tcpPortText.trim().toIntOrNull()?.coerceIn(1, 65535) ?: TcpPingConfig.DEFAULT_PORT
+
+    val effectiveIperfPort: Int
+        get() = iperfPortText.trim().toIntOrNull()?.coerceIn(1, 65535) ?: Iperf3Config.DEFAULT_PORT
+
+    val hasAnyResult: Boolean
+        get() = tcpPingProgress != null ||
+            httpLatencyResult != null ||
+            ipIntelligence != null ||
+            iperfDownloadProgress != null ||
+            iperfUploadProgress != null
+
+    val hasAnyModuleEnabled: Boolean
+        get() = enableTcpPing || enableHttpProbe || enableIpCheck || enableIperf3
+
+    val canStart: Boolean
+        get() = targetInput.isNotBlank() && hasAnyModuleEnabled && !isRunning
+}
+
+/**
+ * Reusable coroutine controller backing both [MobileNetBenchViewModel] and [NetBenchQuickBottomSheet].
+ */
+class NetBenchSessionController(
+    private val scope: CoroutineScope,
+    private val historyStore: NetBenchHistoryStore,
+    private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(),
+    private val tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver),
+    private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(),
+    private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver),
+    private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(),
+    initialTarget: String = "",
+    initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+) {
+    private val _uiState = MutableStateFlow(
+        MobileNetBenchUiState(
+            targetInput = initialTarget.trim(),
+            markdownStyle = initialMarkdownStyle,
+            recentTargets = historyStore.entries.value,
+        ),
+    )
+    val uiState: StateFlow<MobileNetBenchUiState> = _uiState.asStateFlow()
+
+    private val _snackbarChannel = Channel<String>(Channel.BUFFERED)
+    val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
+
+    private var activeJob: Job? = null
+    private var cachedClientNetwork: ClientNetworkInfo? = null
+    private var lastAppliedInitialTarget: String = initialTarget.trim()
+
+    init {
+        scope.launch {
+            historyStore.entries.collect { entries ->
+                _uiState.update { it.copy(recentTargets = entries) }
+            }
+        }
+        // Pre-warm local egress carrier detection lazily in background
+        scope.launch {
+            runCatching { ipIntelligenceClient.lookupLocalClientNetwork() }
+                .onSuccess { info ->
+                    if (info.source != null) {
+                        cachedClientNetwork = info
+                        _uiState.update { state ->
+                            val updated = state.copy(clientNetwork = info)
+                            updated.withRegeneratedMarkdown()
+                        }
+                    }
+                }
+        }
+    }
+
+    fun prefillTarget(rawTarget: String) {
+        val cleaned = rawTarget.trim()
+        if (cleaned.isEmpty() || cleaned == lastAppliedInitialTarget) return
+        lastAppliedInitialTarget = cleaned
+        val parsed = NetBenchTargetParser.parse(cleaned)
+        _uiState.update { state ->
+            state.copy(
+                targetInput = cleaned,
+                tcpPortText = parsed?.explicitPort?.toString() ?: state.tcpPortText,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun updateTargetInput(value: String) {
+        _uiState.update { it.copy(targetInput = value, errorMessage = null) }
+    }
+
+    fun updateTcpPortText(value: String) {
+        val digits = value.filter { it.isDigit() }.take(5)
+        _uiState.update { it.copy(tcpPortText = digits) }
+    }
+
+    fun selectPresetPort(port: Int) {
+        _uiState.update { state ->
+            val updatedIperfPort = if (port == Iperf3Config.DEFAULT_PORT) {
+                port.toString()
+            } else {
+                state.iperfPortText
+            }
+            state.copy(
+                tcpPortText = port.coerceIn(1, 65535).toString(),
+                iperfPortText = updatedIperfPort,
+            )
+        }
+    }
+
+    fun updateProbeCount(count: Int) {
+        _uiState.update {
+            it.copy(
+                probeCount = count.coerceIn(
+                    TcpPingConfig.MIN_PROBE_COUNT,
+                    TcpPingConfig.MAX_PROBE_COUNT,
+                ),
+            )
+        }
+    }
+
+    fun updatePreferredFamily(family: PreferredIpFamily) {
+        _uiState.update { it.copy(preferredFamily = family) }
+    }
+
+    fun toggleTcpPing(enabled: Boolean) {
+        _uiState.update { it.copy(enableTcpPing = enabled) }
+    }
+
+    fun toggleHttpProbe(enabled: Boolean) {
+        _uiState.update { it.copy(enableHttpProbe = enabled) }
+    }
+
+    fun toggleIpCheck(enabled: Boolean) {
+        _uiState.update { it.copy(enableIpCheck = enabled) }
+    }
+
+    fun toggleIperf3(enabled: Boolean) {
+        _uiState.update { it.copy(enableIperf3 = enabled) }
+    }
+
+    fun updateIperfPortText(value: String) {
+        val digits = value.filter { it.isDigit() }.take(5)
+        _uiState.update { it.copy(iperfPortText = digits) }
+    }
+
+    fun updateIperfDurationSec(seconds: Int) {
+        _uiState.update { it.copy(iperfDurationSec = seconds.coerceIn(1, 30)) }
+    }
+
+    fun updateIperfTestMode(mode: Iperf3TestMode) {
+        _uiState.update { it.copy(iperfTestMode = mode) }
+    }
+
+    fun selectMarkdownStyle(style: NetBenchMarkdownStyle) {
+        _uiState.update { state ->
+            state.copy(markdownStyle = style).withRegeneratedMarkdown()
+        }
+    }
+
+    fun toggleMaskTargetIp(mask: Boolean) {
+        _uiState.update { state ->
+            state.copy(maskTargetIpInReport = mask).withRegeneratedMarkdown()
+        }
+    }
+
+    fun applyHistoryEntry(entry: NetBenchHistoryEntry) {
+        _uiState.update { state ->
+            state.copy(
+                targetInput = entry.host,
+                tcpPortText = entry.port.toString(),
+                iperfPortText = entry.iperfPort.toString(),
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun removeHistoryEntry(entry: NetBenchHistoryEntry) {
+        scope.launch {
+            historyStore.remove(entry.host, entry.port)
+        }
+    }
+
+    fun clearHistory() {
+        scope.launch {
+            historyStore.clear()
+            _snackbarChannel.trySend("已清空历史测机记录")
+        }
+    }
+
+    fun clearResults() {
+        stopBenchmark(silent = true)
+        _uiState.update { state ->
+            state.copy(
+                activePhase = NetBenchPhase.IDLE,
+                resolvedTarget = null,
+                tcpPingProgress = null,
+                httpLatencyResult = null,
+                ipIntelligence = null,
+                iperfDownloadProgress = null,
+                iperfUploadProgress = null,
+                errorMessage = null,
+                generatedMarkdown = "",
+            )
+        }
+    }
+
+    fun startBenchmark() {
+        val snapshot = _uiState.value
+        val rawInput = snapshot.targetInput.trim()
+        val parsed = NetBenchTargetParser.parse(rawInput)
+        if (parsed == null) {
+            val msg = "请输入有效的 IPv4、IPv6 或域名（支持 host:port）"
+            _uiState.update { it.copy(errorMessage = msg) }
+            _snackbarChannel.trySend(msg)
+            return
+        }
+        if (!snapshot.hasAnyModuleEnabled) {
+            val msg = "请至少开启一项测机模块（TCPing / IP 鉴定 / iperf3）"
+            _uiState.update { it.copy(errorMessage = msg) }
+            _snackbarChannel.trySend(msg)
+            return
+        }
+
+        activeJob?.cancel()
+        val effectiveTcpPort = parsed.effectivePort(snapshot.effectiveTcpPort)
+        val effectiveIperfPort = snapshot.effectiveIperfPort
+
+        _uiState.update { state ->
+            state.copy(
+                isRunning = true,
+                activePhase = NetBenchPhase.RESOLVING,
+                tcpPortText = effectiveTcpPort.toString(),
+                resolvedTarget = null,
+                tcpPingProgress = null,
+                httpLatencyResult = null,
+                ipIntelligence = null,
+                iperfDownloadProgress = null,
+                iperfUploadProgress = null,
+                errorMessage = null,
+                generatedMarkdown = "",
+            )
+        }
+
+        activeJob = scope.launch {
+            try {
+                // Ensure local client egress ISP detection runs concurrently if not cached yet
+                val clientNetDeferred = if (cachedClientNetwork != null) {
+                    null
+                } else {
+                    async {
+                        runCatching { ipIntelligenceClient.lookupLocalClientNetwork() }.getOrNull()
+                    }
+                }
+
+                // Step 0: Resolve target DNS
+                val resolvedResult = targetResolver.resolve(
+                    rawTarget = rawInput,
+                    defaultPort = effectiveTcpPort,
+                    preferredFamily = snapshot.preferredFamily,
+                )
+                val endpoint = resolvedResult.getOrElse { err ->
+                    val errMsg = err.message ?: "无法解析目标主机"
+                    _uiState.update {
+                        it.copy(
+                            isRunning = false,
+                            activePhase = NetBenchPhase.ERROR,
+                            errorMessage = errMsg,
+                        )
+                    }
+                    _snackbarChannel.trySend(errMsg)
+                    return@launch
+                }
+
+                _uiState.update { state ->
+                    state.copy(resolvedTarget = endpoint.resolvedTarget)
+                }
+
+                // Step 1: TCPing (runs before iperf3 so link saturation cannot skew RTT)
+                if (snapshot.enableTcpPing) {
+                    _uiState.update { it.copy(activePhase = NetBenchPhase.TCPING) }
+                    val tcpConfig = TcpPingConfig(
+                        target = endpoint.resolvedTarget.resolvedIp,
+                        port = effectiveTcpPort,
+                        probeCount = snapshot.probeCount,
+                        timeoutMs = TcpPingConfig.DEFAULT_TIMEOUT_MS,
+                        intervalMs = TcpPingConfig.DEFAULT_INTERVAL_MS,
+                        preferredFamily = snapshot.preferredFamily,
+                    )
+                    tcpPingRunner.run(tcpConfig).collect { progress ->
+                        val corrected = progress.copy(
+                            resolvedTarget = endpoint.resolvedTarget,
+                            summary = progress.summary.copy(resolvedTarget = endpoint.resolvedTarget),
+                        )
+                        _uiState.update { state ->
+                            state.copy(tcpPingProgress = corrected).withRegeneratedMarkdown()
+                        }
+                    }
+                }
+
+                // Step 2: Optional HTTP/HTTPS Latency Probe
+                if (snapshot.enableHttpProbe) {
+                    _uiState.update { it.copy(activePhase = NetBenchPhase.HTTP_PROBE) }
+                    val httpRes = httpLatencyRunner.probe(
+                        rawTarget = rawInput,
+                        port = effectiveTcpPort,
+                    )
+                    _uiState.update { state ->
+                        state.copy(httpLatencyResult = httpRes).withRegeneratedMarkdown()
+                    }
+                }
+
+                // Step 3: IP Intelligence & Native vs Broadcast Check
+                if (snapshot.enableIpCheck) {
+                    _uiState.update { it.copy(activePhase = NetBenchPhase.IP_INTELLIGENCE) }
+                    val intel = ipIntelligenceClient.lookupTargetIp(endpoint.resolvedTarget.resolvedIp)
+                    _uiState.update { state ->
+                        state.copy(ipIntelligence = intel).withRegeneratedMarkdown()
+                    }
+                }
+
+                // Collect local egress carrier info if ready
+                clientNetDeferred?.await()?.let { detected ->
+                    cachedClientNetwork = detected
+                    _uiState.update { state ->
+                        state.copy(clientNetwork = detected).withRegeneratedMarkdown()
+                    }
+                }
+
+                // Step 4: Native Pure-Kotlin iperf3 Speed Test
+                if (snapshot.enableIperf3) {
+                    val runDownload = snapshot.iperfTestMode == Iperf3TestMode.DOWNLOAD ||
+                        snapshot.iperfTestMode == Iperf3TestMode.BOTH
+                    val runUpload = snapshot.iperfTestMode == Iperf3TestMode.UPLOAD ||
+                        snapshot.iperfTestMode == Iperf3TestMode.BOTH
+
+                    if (runDownload) {
+                        _uiState.update { it.copy(activePhase = NetBenchPhase.IPERF_DOWNLOAD) }
+                        val dlConfig = Iperf3Config(
+                            target = endpoint.resolvedTarget.resolvedIp,
+                            port = effectiveIperfPort,
+                            durationSec = snapshot.iperfDurationSec,
+                            direction = Iperf3Direction.DOWNLOAD,
+                            preferredFamily = snapshot.preferredFamily,
+                        )
+                        iperf3ClientRunner.run(dlConfig).collect { progress ->
+                            _uiState.update { state ->
+                                state.copy(iperfDownloadProgress = progress).withRegeneratedMarkdown()
+                            }
+                        }
+                    }
+
+                    if (runDownload && runUpload) {
+                        // Give real iperf3 -s a short breather to release previous session lock
+                        delay(400L)
+                    }
+
+                    if (runUpload) {
+                        _uiState.update { it.copy(activePhase = NetBenchPhase.IPERF_UPLOAD) }
+                        val ulConfig = Iperf3Config(
+                            target = endpoint.resolvedTarget.resolvedIp,
+                            port = effectiveIperfPort,
+                            durationSec = snapshot.iperfDurationSec,
+                            direction = Iperf3Direction.UPLOAD,
+                            preferredFamily = snapshot.preferredFamily,
+                        )
+                        iperf3ClientRunner.run(ulConfig).collect { progress ->
+                            _uiState.update { state ->
+                                state.copy(iperfUploadProgress = progress).withRegeneratedMarkdown()
+                            }
+                        }
+                    }
+                }
+
+                // Persist to recent history
+                val finalState = _uiState.value
+                val intel = finalState.ipIntelligence
+                val regionSummary = intel?.takeIf { it.hasCoreInfo }?.let {
+                    IpClassificationEngine.formatLocationSummary(
+                        countryCode = it.countryCode,
+                        countryName = it.countryName,
+                        regionName = it.regionName,
+                        cityName = it.cityName,
+                    )
+                }
+                historyStore.record(
+                    NetBenchHistoryEntry(
+                        host = parsed.host,
+                        port = effectiveTcpPort,
+                        iperfPort = effectiveIperfPort,
+                        resolvedIp = endpoint.resolvedTarget.resolvedIp,
+                        ipFamily = endpoint.resolvedTarget.ipFamily,
+                        lastAvgMs = finalState.tcpPingProgress?.summary?.avgMs,
+                        lastOriginType = intel?.originType,
+                        lastRegionSummary = regionSummary,
+                        testedAtEpochMillis = System.currentTimeMillis(),
+                    ),
+                )
+
+                _uiState.update { state ->
+                    state.copy(
+                        isRunning = false,
+                        activePhase = NetBenchPhase.COMPLETED,
+                    ).withRegeneratedMarkdown()
+                }
+            } catch (ce: CancellationException) {
+                _uiState.update { state ->
+                    state.copy(
+                        isRunning = false,
+                        activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
+                    ).withRegeneratedMarkdown()
+                }
+                throw ce
+            } catch (t: Throwable) {
+                val msg = t.message ?: "测机过程出现异常"
+                _uiState.update { state ->
+                    state.copy(
+                        isRunning = false,
+                        activePhase = NetBenchPhase.ERROR,
+                        errorMessage = msg,
+                    ).withRegeneratedMarkdown()
+                }
+                _snackbarChannel.trySend(msg)
+            }
+        }
+    }
+
+    fun stopBenchmark(silent: Boolean = false) {
+        val wasRunning = activeJob?.isActive == true
+        activeJob?.cancel()
+        activeJob = null
+        _uiState.update { state ->
+            state.copy(
+                isRunning = false,
+                activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
+            ).withRegeneratedMarkdown()
+        }
+        if (wasRunning && !silent) {
+            _snackbarChannel.trySend("已停止测机，已保留当前测得的数据")
+        }
+    }
+
+    private fun MobileNetBenchUiState.withRegeneratedMarkdown(): MobileNetBenchUiState {
+        if (!hasAnyResult) return copy(generatedMarkdown = "")
+        val report = NetBenchReport(
+            targetInput = targetInput,
+            resolvedTarget = resolvedTarget,
+            tcpPort = effectiveTcpPort,
+            clientNetwork = clientNetwork,
+            tcpPingSummary = tcpPingProgress?.summary,
+            httpLatencyResult = httpLatencyResult,
+            ipIntelligence = ipIntelligence,
+            iperfDownloadResult = iperfDownloadProgress?.finalResult,
+            iperfUploadResult = iperfUploadProgress?.finalResult,
+        )
+        val md = NetBenchMarkdownFormatter.format(
+            report = report,
+            options = NetBenchMarkdownOptions(
+                style = markdownStyle,
+                maskTargetIp = maskTargetIpInReport,
+            ),
+        )
+        return copy(generatedMarkdown = md)
+    }
+}
+
+/**
+ * ViewModel for [MobileNetBenchScreen].
+ */
+class MobileNetBenchViewModel(
+    historyStore: NetBenchHistoryStore,
+    targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(),
+    tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver),
+    httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(),
+    iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver),
+    ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(),
+    initialTarget: String = "",
+) : ViewModel() {
+
+    private val controller = NetBenchSessionController(
+        scope = viewModelScope,
+        historyStore = historyStore,
+        targetResolver = targetResolver,
+        tcpPingRunner = tcpPingRunner,
+        httpLatencyRunner = httpLatencyRunner,
+        iperf3ClientRunner = iperf3ClientRunner,
+        ipIntelligenceClient = ipIntelligenceClient,
+        initialTarget = initialTarget,
+    )
+
+    val uiState: StateFlow<MobileNetBenchUiState> = controller.uiState
+    val snackbarMessages: Flow<String> = controller.snackbarMessages
+
+    fun prefillTarget(rawTarget: String) = controller.prefillTarget(rawTarget)
+    fun updateTargetInput(value: String) = controller.updateTargetInput(value)
+    fun updateTcpPortText(value: String) = controller.updateTcpPortText(value)
+    fun selectPresetPort(port: Int) = controller.selectPresetPort(port)
+    fun updateProbeCount(count: Int) = controller.updateProbeCount(count)
+    fun updatePreferredFamily(family: PreferredIpFamily) = controller.updatePreferredFamily(family)
+    fun toggleTcpPing(enabled: Boolean) = controller.toggleTcpPing(enabled)
+    fun toggleHttpProbe(enabled: Boolean) = controller.toggleHttpProbe(enabled)
+    fun toggleIpCheck(enabled: Boolean) = controller.toggleIpCheck(enabled)
+    fun toggleIperf3(enabled: Boolean) = controller.toggleIperf3(enabled)
+    fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
+    fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
+    fun updateIperfTestMode(mode: Iperf3TestMode) = controller.updateIperfTestMode(mode)
+    fun selectMarkdownStyle(style: NetBenchMarkdownStyle) = controller.selectMarkdownStyle(style)
+    fun toggleMaskTargetIp(mask: Boolean) = controller.toggleMaskTargetIp(mask)
+    fun applyHistoryEntry(entry: NetBenchHistoryEntry) = controller.applyHistoryEntry(entry)
+    fun removeHistoryEntry(entry: NetBenchHistoryEntry) = controller.removeHistoryEntry(entry)
+    fun clearHistory() = controller.clearHistory()
+    fun clearResults() = controller.clearResults()
+    fun startBenchmark() = controller.startBenchmark()
+    fun stopBenchmark() = controller.stopBenchmark()
+
+    override fun onCleared() {
+        controller.stopBenchmark(silent = true)
+        super.onCleared()
+    }
+
+    companion object {
+        fun factory(
+            context: Context,
+            initialTarget: String = "",
+        ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return MobileNetBenchViewModel(
+                    historyStore = NetBenchHistoryStore.forContext(context),
+                    initialTarget = initialTarget,
+                ) as T
+            }
+        }
+    }
+}
