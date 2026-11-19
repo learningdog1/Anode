@@ -109,15 +109,17 @@ class WebViewCookieBridge(
     fun hasClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
         loadForRequest(url).any { it.name.equals("cf_clearance", ignoreCase = true) && it.value.isNotBlank() }
 
-    fun hasSessionOrClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
+    fun hasSessionCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
         loadForRequest(url).any { cookie ->
             cookie.value.isNotBlank() && (
-                cookie.name.equals("cf_clearance", ignoreCase = true) ||
-                    cookie.name.equals("session", ignoreCase = true) ||
+                cookie.name.equals("session", ignoreCase = true) ||
                     cookie.name.equals("smac", ignoreCase = true) ||
                     cookie.name.equals("sid", ignoreCase = true)
                 )
         }
+
+    fun hasSessionOrClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
+        hasClearanceCookie(url) || hasSessionCookie(url)
 
     /**
      * Computes a stable fingerprint of meaningful auth & `cf_clearance` cookies across NodeSeek origins,

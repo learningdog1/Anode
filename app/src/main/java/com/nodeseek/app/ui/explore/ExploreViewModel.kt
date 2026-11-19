@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -50,6 +51,7 @@ data class ExploreBoardSliceUiState(
     val currentPage: Int = 1,
     val hasNextPage: Boolean = false,
     val isFromRssFallback: Boolean = false,
+    val isPreviewFromAllFeed: Boolean = false,
     val errorMessage: String? = null,
     val isChallengeOrAuthRequired: Boolean = false,
     val nextPageError: String? = null,
@@ -72,6 +74,7 @@ data class ExploreUiState(
     val currentPage: Int = 1,
     val hasNextPage: Boolean = false,
     val isFromRssFallback: Boolean = false,
+    val preferRssFallback: Boolean = false,
     val errorMessage: String? = null,
     val isChallengeOrAuthRequired: Boolean = false,
     val nextPageError: String? = null,
@@ -108,6 +111,7 @@ private data class BoardPageSlice(
     val currentPage: Int = 1,
     val hasNextPage: Boolean = false,
     val isFromRssFallback: Boolean = false,
+    val isPreviewFromAllFeed: Boolean = false,
     val errorMessage: String? = null,
     val isChallengeOrAuthRequired: Boolean = false,
     val nextPageError: String? = null,
@@ -236,6 +240,7 @@ class ExploreViewModel(
                         currentPage = slice.currentPage,
                         hasNextPage = slice.hasNextPage,
                         isFromRssFallback = slice.isFromRssFallback,
+                        isPreviewFromAllFeed = slice.isPreviewFromAllFeed,
                         errorMessage = slice.errorMessage,
                         isChallengeOrAuthRequired = slice.isChallengeOrAuthRequired || challengeActive,
                         nextPageError = slice.nextPageError,
@@ -265,6 +270,7 @@ class ExploreViewModel(
             currentPage = activeSlice.currentPage,
             hasNextPage = activeSlice.hasNextPage,
             isFromRssFallback = activeSlice.isFromRssFallback,
+            preferRssFallback = settings.preferRssFallback,
             errorMessage = activeSlice.errorMessage,
             isChallengeOrAuthRequired = activeSlice.isChallengeOrAuthRequired,
             nextPageError = activeSlice.nextPageError,
@@ -318,22 +324,62 @@ class ExploreViewModel(
             }
         }
 
-        // Reload active feed when WebView security verification or login succeeds
+        // Reload active feed & purge stale RSS/challenge slices when WebView verification or login succeeds
         viewModelScope.launch {
+            var handledInitial = false
             sessionRepository.authVerifiedEpoch.collect { epoch ->
-                if (epoch > 0L) {
-                    val activeKey = _streamState.value.activeKey
-                    val slice = _streamState.value.slices[activeKey]
-                    if (slice == null ||
-                        slice.isChallengeOrAuthRequired ||
-                        slice.isFromRssFallback ||
-                        slice.errorMessage != null ||
-                        slice.rawTopics.isEmpty()
-                    ) {
-                        loadFeed(key = activeKey, reset = true, isPullRefresh = false)
+                if (!handledInitial) {
+                    handledInitial = true
+                    if (epoch <= 0L) return@collect
+                    val hasStaleRssOrChallenge = _streamState.value.slices.values.any {
+                        it.isFromRssFallback || it.isChallengeOrAuthRequired
                     }
+                    if (!hasStaleRssOrChallenge) return@collect
+                }
+                if (epoch > 0L) {
+                    clearRssSlicesAndReloadActive(forceNetwork = true)
                 }
             }
+        }
+
+        // Purge cached slices when signed-in account UID changes (sign-in / sign-out / account switch)
+        viewModelScope.launch {
+            var previousUid: Long? = sessionRepository.sessionState.value?.uid
+            sessionRepository.sessionState
+                .map { it?.uid }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { newUid ->
+                    val prev = previousUid
+                    previousUid = newUid
+                    forumRepository.clearRssFallbackCache()
+                    val activeKey = _streamState.value.activeKey
+                    val curActiveSlice = _streamState.value.slices[activeKey]
+                    val hydratedDuringActiveHtmlLoad = prev == null && newUid != null && (
+                        activeFeedJobs[activeKey]?.isActive == true ||
+                            (curActiveSlice != null &&
+                                !curActiveSlice.isFromRssFallback &&
+                                !curActiveSlice.isPreviewFromAllFeed &&
+                                curActiveSlice.rawTopics.isNotEmpty() &&
+                                (System.currentTimeMillis() - curActiveSlice.updatedAtMs) in 0L..1_500L)
+                        )
+                    if (hydratedDuringActiveHtmlLoad) {
+                        activeFeedJobs.keys
+                            .filter { it != activeKey }
+                            .forEach { key -> activeFeedJobs.remove(key)?.cancel() }
+                        _streamState.update { it.copy(slices = it.slices.filterKeys { key -> key == activeKey }) }
+                    } else {
+                        activeFeedJobs.values.forEach { it.cancel() }
+                        activeFeedJobs.clear()
+                        _streamState.update { it.copy(slices = emptyMap()) }
+                        loadFeed(
+                            key = activeKey,
+                            reset = true,
+                            isPullRefresh = false,
+                            forceNetwork = true,
+                        )
+                    }
+                }
         }
 
         // Reload active feed when user toggles blocked-topics or RSS-fallback preferences
@@ -346,8 +392,16 @@ class ExploreViewModel(
                 if ((prevBlocked != null && prevBlocked != settings.includeBlockedTopics) ||
                     (prevRss != null && prevRss != settings.preferRssFallback)
                 ) {
+                    forumRepository.clearRssFallbackCache()
+                    activeFeedJobs.values.forEach { it.cancel() }
+                    activeFeedJobs.clear()
                     _streamState.update { it.copy(slices = emptyMap()) }
-                    loadFeed(key = _streamState.value.activeKey, reset = true, isPullRefresh = false)
+                    loadFeed(
+                        key = _streamState.value.activeKey,
+                        reset = true,
+                        isPullRefresh = false,
+                        forceNetwork = true,
+                    )
                 }
             }
         }
@@ -393,11 +447,59 @@ class ExploreViewModel(
         if (slice.isInitialLoading ||
             slice.isRefreshing ||
             slice.isLoadingNextPage ||
+            slice.isPreviewFromAllFeed ||
+            slice.isFromRssFallback ||
             !slice.hasNextPage
         ) {
             return
         }
         loadFeed(key = key, reset = false, isPullRefresh = false)
+    }
+
+    fun disablePreferRssAndRefresh() {
+        viewModelScope.launch {
+            forumRepository.clearRssFallbackCache()
+            if (settingsRepository.settings.value.preferRssFallback) {
+                settingsRepository.setPreferRssFallback(false)
+            } else {
+                clearRssSlicesAndReloadActive(forceNetwork = true)
+            }
+        }
+    }
+
+    private fun clearRssSlicesAndReloadActive(forceNetwork: Boolean) {
+        forumRepository.clearRssFallbackCache()
+        val activeKey = _streamState.value.activeKey
+        val staleKeys = _streamState.value.slices.entries
+            .filter { (_, slice) ->
+                slice.isFromRssFallback || slice.isChallengeOrAuthRequired || slice.isPreviewFromAllFeed
+            }
+            .map { it.key }
+        staleKeys.forEach { key ->
+            if (key != activeKey) {
+                activeFeedJobs.remove(key)?.cancel()
+            }
+        }
+        if (staleKeys.isNotEmpty()) {
+            _streamState.update { state ->
+                state.copy(slices = state.slices.filterKeys { it !in staleKeys })
+            }
+        }
+        val activeSlice = _streamState.value.slices[activeKey]
+        if (activeSlice == null ||
+            activeSlice.isFromRssFallback ||
+            activeSlice.isChallengeOrAuthRequired ||
+            activeSlice.isPreviewFromAllFeed ||
+            activeSlice.errorMessage != null ||
+            activeSlice.rawTopics.isEmpty()
+        ) {
+            loadFeed(
+                key = activeKey,
+                reset = true,
+                isPullRefresh = false,
+                forceNetwork = forceNetwork,
+            )
+        }
     }
 
     fun toggleBookmark(topic: TopicSummary) {
@@ -501,8 +603,14 @@ class ExploreViewModel(
         val key = FeedSliceKey(normalized, nextSort)
         val existing = _streamState.value.slices[key]
         val now = System.currentTimeMillis()
+        val rssExpected = (settingsRepository.settings.value.preferRssFallback &&
+            sessionRepository.sessionState.value == null &&
+            normalized != "inside") ||
+            sessionRepository.challengeRequired.value
         val isMemoryFresh = existing != null &&
+            !existing.isPreviewFromAllFeed &&
             existing.rawTopics.isNotEmpty() &&
+            (!existing.isFromRssFallback || rssExpected) &&
             forumRepository.isFeedFresh(normalized, nextSort, BOARD_CACHE_TTL_MS) &&
             (now - existing.updatedAtMs) in 0L until BOARD_CACHE_TTL_MS
 
@@ -512,7 +620,7 @@ class ExploreViewModel(
         }
 
         val repoCached = forumRepository.getCachedFeed(normalized, nextSort)
-        if (repoCached != null) {
+        if (repoCached != null && (!repoCached.isFromRssFallback || rssExpected)) {
             val isRepoFresh = forumRepository.isFeedFresh(normalized, nextSort, BOARD_CACHE_TTL_MS)
             val cachedSlice = BoardPageSlice(
                 rawPinnedTopics = repoCached.pinnedTopics,
@@ -537,11 +645,17 @@ class ExploreViewModel(
         }
 
         if (normalized.isNotBlank() && nextSort != FeedSort.CURATED) {
-            val allFeedTopics = _streamState.value.slices[FeedSliceKey("", nextSort)]?.rawTopics
-                ?: forumRepository.getCachedFeed("", nextSort)?.topics
-            val previewMatches = allFeedTopics
-                ?.filter { it.categorySlug.equals(normalized, ignoreCase = true) }
-                .orEmpty()
+            val allMemorySlice = _streamState.value.slices[FeedSliceKey("", nextSort)]
+            val allRepoCached = if (allMemorySlice == null) forumRepository.getCachedFeed("", nextSort) else null
+            val sourceIsRss = allMemorySlice?.isFromRssFallback ?: allRepoCached?.isFromRssFallback ?: false
+            val allFeedTopics = allMemorySlice?.rawTopics ?: allRepoCached?.topics
+            val previewMatches = if (!sourceIsRss) {
+                allFeedTopics
+                    ?.filter { it.categorySlug.equals(normalized, ignoreCase = true) }
+                    .orEmpty()
+            } else {
+                emptyList()
+            }
             if (previewMatches.isNotEmpty()) {
                 val previewSlice = BoardPageSlice(
                     rawTopics = previewMatches,
@@ -549,7 +663,8 @@ class ExploreViewModel(
                     isRefreshing = true,
                     isManualRefreshing = false,
                     currentPage = 1,
-                    hasNextPage = true,
+                    hasNextPage = false,
+                    isPreviewFromAllFeed = true,
                     updatedAtMs = 0L,
                 )
                 _streamState.update { state ->
@@ -657,6 +772,7 @@ class ExploreViewModel(
         reset: Boolean,
         isPullRefresh: Boolean,
         silentRevalidate: Boolean = false,
+        forceNetwork: Boolean = isPullRefresh,
     ) {
         if (reset) {
             activeFeedJobs[key]?.cancel()
@@ -697,7 +813,7 @@ class ExploreViewModel(
             val result = if (key.sort == FeedSort.CURATED) {
                 forumRepository.getCuratedFeed(
                     page = targetPage,
-                    forceRefresh = isPullRefresh,
+                    forceRefresh = forceNetwork,
                 )
             } else {
                 forumRepository.getFeed(
@@ -705,7 +821,7 @@ class ExploreViewModel(
                     sort = key.sort,
                     page = targetPage,
                     includeBlocked = includeBlocked,
-                    forceRefresh = isPullRefresh,
+                    forceRefresh = forceNetwork,
                 )
             }
 
@@ -739,6 +855,7 @@ class ExploreViewModel(
                             currentPage = targetPage,
                             hasNextPage = pageResult.hasNextPage,
                             isFromRssFallback = pageResult.isFromRssFallback,
+                            isPreviewFromAllFeed = false,
                             isInitialLoading = false,
                             isRefreshing = false,
                             isManualRefreshing = false,
@@ -759,14 +876,17 @@ class ExploreViewModel(
                     val msg = error.message?.takeIf { it.isNotBlank() } ?: "无法读取帖子列表，请检查网络后重试"
                     _streamState.update { state ->
                         val curSlice = state.slices[key] ?: BoardPageSlice()
-                        val hasExistingTopics = curSlice.rawTopics.isNotEmpty()
+                        val hasRealTopics = curSlice.rawTopics.isNotEmpty() && !curSlice.isPreviewFromAllFeed
                         val failedSlice = if (reset) {
                             curSlice.copy(
+                                rawTopics = if (curSlice.isPreviewFromAllFeed) emptyList() else curSlice.rawTopics,
+                                hasNextPage = if (curSlice.isPreviewFromAllFeed) false else curSlice.hasNextPage,
+                                isPreviewFromAllFeed = false,
                                 isInitialLoading = false,
                                 isRefreshing = false,
                                 isManualRefreshing = false,
                                 isLoadingNextPage = false,
-                                errorMessage = if (hasExistingTopics) null else msg,
+                                errorMessage = if (hasRealTopics) null else msg,
                                 isChallengeOrAuthRequired = needsWeb,
                             )
                         } else {
@@ -778,7 +898,7 @@ class ExploreViewModel(
                         }
                         state.copy(
                             slices = state.slices + (key to failedSlice),
-                            snackbarMessage = if ((isPullRefresh || silentRevalidate) && hasExistingTopics) msg else state.snackbarMessage,
+                            snackbarMessage = if ((isPullRefresh || silentRevalidate) && hasRealTopics) msg else state.snackbarMessage,
                         )
                     }
                 },

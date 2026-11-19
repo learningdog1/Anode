@@ -89,6 +89,32 @@ class FeedDiskCache(
         persistToDisk(key = key, snapshot = snapshot)
     }
 
+    fun removeWhere(predicate: (CachedFeedSnapshot) -> Boolean) {
+        val iterator = memoryMap.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (predicate(entry.value)) {
+                iterator.remove()
+            }
+        }
+        ioScope.launch {
+            diskMutex.withLock {
+                val files = cacheDir.listFiles { file ->
+                    file.isFile && file.name.endsWith(".json")
+                } ?: return@withLock
+                for (file in files) {
+                    val decoded = runCatching {
+                        json.decodeFromString(CachedFeedSnapshot.serializer(), file.readText(Charsets.UTF_8))
+                    }.getOrNull()
+                    if (decoded == null || predicate(decoded)) {
+                        runCatching { file.delete() }
+                        memoryMap.remove(file.name.removeSuffix(".json"))
+                    }
+                }
+            }
+        }
+    }
+
     fun clear() {
         memoryMap.clear()
         ioScope.launch {

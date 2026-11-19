@@ -35,11 +35,22 @@ class SessionRepositoryImpl(
     var unreadCountListener: ((Int) -> Unit)? = null
     var embeddedCategoriesListener: ((List<CategoryDto>, Long) -> Unit)? = null
     var onVerifiedCallback: (() -> Unit)? = null
+    var onChallengeClearedOrAuthenticated: (() -> Unit)? = null
+
+    internal fun hasStoredSessionCookie(): Boolean = cookieBridge.hasSessionCookie()
+
+    private fun bumpAuthVerifiedEpoch() {
+        _authVerifiedEpoch.update { prev -> maxOf(prev + 1L, System.currentTimeMillis()) }
+    }
 
     fun onConfigPayloadObserved(config: ConfigPayloadDto) {
+        val wasChallengeActive = _challengeRequired.value
         _challengeRequired.value = false
         val session = config.user?.toDomainSession(config.enableCustomedStyle)
         _sessionState.value = session
+        if (wasChallengeActive || session != null) {
+            onChallengeClearedOrAuthenticated?.invoke()
+        }
         unreadCountListener?.invoke(session?.unreadNotificationCount ?: 0)
         val categories = config.allCategory
         if (!categories.isNullOrEmpty()) {
@@ -94,6 +105,7 @@ class SessionRepositoryImpl(
             if (config.user == null) {
                 throw NodeSeekApiException("登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
             }
+            bumpAuthVerifiedEpoch()
             SignInStepResult.Authenticated
         }
 
@@ -123,14 +135,16 @@ class SessionRepositoryImpl(
             if (config.user == null) {
                 throw NodeSeekApiException("两步验证通过但登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
             }
+            bumpAuthVerifiedEpoch()
         }
 
     override suspend fun onWebViewAuthCompleted(): Result<AccountSession?> {
         cookieBridge.flush()
         onVerifiedCallback?.invoke()
         _challengeRequired.value = false
+        onChallengeClearedOrAuthenticated?.invoke()
         val refreshed = refreshSession()
-        _authVerifiedEpoch.value = System.currentTimeMillis()
+        bumpAuthVerifiedEpoch()
         return refreshed
     }
 
@@ -143,8 +157,9 @@ class SessionRepositoryImpl(
         val refreshed = refreshSession()
         if (refreshed.isSuccess) {
             _challengeRequired.value = false
+            onChallengeClearedOrAuthenticated?.invoke()
             if (wasChallenged || _sessionState.value != null) {
-                _authVerifiedEpoch.value = System.currentTimeMillis()
+                bumpAuthVerifiedEpoch()
             }
         }
         return refreshed

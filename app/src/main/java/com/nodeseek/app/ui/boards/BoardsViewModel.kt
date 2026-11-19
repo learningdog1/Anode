@@ -75,6 +75,8 @@ data class BoardsUiState(
     val isInlineBoardLoadingMore: Boolean = false,
     val inlineBoardPage: Int = 1,
     val inlineBoardHasNextPage: Boolean = false,
+    val inlineBoardIsRssFallback: Boolean = false,
+    val preferRssFallback: Boolean = false,
     val inlineBoardError: String? = null,
     val inlineBoardChallengeRequired: Boolean = false,
     val snackbarMessage: String? = null,
@@ -246,6 +248,8 @@ class BoardsViewModel(
             isInlineBoardLoadingMore = s.isInlineBoardLoadingMore,
             inlineBoardPage = s.inlineBoardPage,
             inlineBoardHasNextPage = s.inlineBoardHasNextPage,
+            inlineBoardIsRssFallback = s.inlineBoardIsRssFallback,
+            preferRssFallback = settings.preferRssFallback,
             inlineBoardError = s.inlineBoardError,
             inlineBoardChallengeRequired = s.inlineBoardChallengeRequired,
             snackbarMessage = s.snackbarMessage,
@@ -262,6 +266,7 @@ class BoardsViewModel(
         viewModelScope.launch {
             sessionRepository.authVerifiedEpoch.collect { epoch ->
                 if (epoch > 0L) {
+                    forumRepository.clearRssFallbackCache()
                     val cur = _state.value
                     if (cur.isSearchChallengeRequired && cur.submittedQuery.isNotBlank()) {
                         executeSearch(reset = true)
@@ -385,7 +390,12 @@ class BoardsViewModel(
 
     fun openInlineBoard(slug: String) {
         val sort = _state.value.inlineBoardSort
+        val rssExpected = (settingsRepository.settings.value.preferRssFallback &&
+            sessionRepository.sessionState.value == null &&
+            slug != "inside") ||
+            sessionRepository.challengeRequired.value
         val cached = forumRepository.getCachedFeed(slug, sort)
+            ?.takeUnless { it.isFromRssFallback && !rssExpected }
         val fresh = cached != null && forumRepository.isFeedFresh(slug, sort, 90_000L)
         _state.update {
             it.copy(
@@ -421,7 +431,12 @@ class BoardsViewModel(
     fun selectInlineBoardSort(sort: FeedSort) {
         val slug = _state.value.activeInlineBoardSlug ?: return
         if (_state.value.inlineBoardSort == sort) return
+        val rssExpected = (settingsRepository.settings.value.preferRssFallback &&
+            sessionRepository.sessionState.value == null &&
+            slug != "inside") ||
+            sessionRepository.challengeRequired.value
         val cached = forumRepository.getCachedFeed(slug, sort)
+            ?.takeUnless { it.isFromRssFallback && !rssExpected }
         val fresh = cached != null && forumRepository.isFeedFresh(slug, sort, 90_000L)
         _state.update {
             it.copy(
@@ -451,11 +466,24 @@ class BoardsViewModel(
             s.isInlineBoardLoading ||
             s.isInlineBoardRefreshing ||
             s.isInlineBoardLoadingMore ||
+            s.inlineBoardIsRssFallback ||
             !s.inlineBoardHasNextPage
         ) {
             return
         }
         loadInlineBoard(reset = false, isRefresh = false)
+    }
+
+    fun disablePreferRssAndRefreshInlineBoard() {
+        viewModelScope.launch {
+            forumRepository.clearRssFallbackCache()
+            if (settingsRepository.settings.value.preferRssFallback) {
+                settingsRepository.setPreferRssFallback(false)
+            }
+            if (!_state.value.activeInlineBoardSlug.isNullOrBlank()) {
+                loadInlineBoard(reset = true, isRefresh = false)
+            }
+        }
     }
 
     fun toggleBookmark(topic: TopicSummary) {
@@ -591,7 +619,7 @@ class BoardsViewModel(
                         isInlineBoardLoading = it.rawInlineBoardTopics.isEmpty(),
                         inlineBoardError = null,
                     )
-                    else -> it.copy(isInlineBoardLoadingMore = true)
+                    else -> it.copy(isInlineBoardLoadingMore = true, inlineBoardError = null)
                 }
             }
 

@@ -149,6 +149,10 @@ class DefaultAppContainer(
             }
             sessionRepo.onVerifiedCallback = {
                 sameOriginActionRunner.markVerifiedByUser()
+                forumRepositoryImpl.clearRssFallbackCache()
+            }
+            sessionRepo.onChallengeClearedOrAuthenticated = {
+                forumRepositoryImpl.clearRssFallbackCache()
             }
         }
     }

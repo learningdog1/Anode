@@ -81,6 +81,7 @@ import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -446,6 +447,7 @@ fun BoardsScreen(
                             onRefresh = viewModel::refreshInlineBoard,
                             onLoadMore = viewModel::loadNextInlineBoardPage,
                             onVerifyWebView = triggerWebViewAuth,
+                            onSwitchToFullWebFeed = viewModel::disablePreferRssAndRefreshInlineBoard,
                         )
                     }
 
@@ -2553,6 +2555,7 @@ private fun InlineBoardFeedContent(
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onVerifyWebView: () -> Unit,
+    onSwitchToFullWebFeed: () -> Unit,
 ) {
     val listState = rememberLazyListState()
     val shouldLoadMore by remember {
@@ -2563,14 +2566,36 @@ private fun InlineBoardFeedContent(
             total > 0 && last >= total - 4
         }
     }
-    LaunchedEffect(shouldLoadMore, uiState.inlineBoardHasNextPage, uiState.isInlineBoardLoadingMore) {
-        snapshotFlow { shouldLoadMore }
-            .distinctUntilChanged()
-            .collect { nearEnd ->
-                if (nearEnd && uiState.inlineBoardHasNextPage && !uiState.isInlineBoardLoadingMore) {
-                    onLoadMore()
-                }
-            }
+    val filteredPageAutoAdvance = uiState.inlineBoardTopics.isEmpty() &&
+        uiState.inlineBoardHasNextPage &&
+        !uiState.isInlineBoardLoading &&
+        !uiState.isInlineBoardRefreshing &&
+        !uiState.inlineBoardIsRssFallback &&
+        uiState.inlineBoardError == null &&
+        uiState.inlineBoardPage < 3
+
+    LaunchedEffect(
+        shouldLoadMore,
+        filteredPageAutoAdvance,
+        uiState.inlineBoardHasNextPage,
+        uiState.isInlineBoardLoading,
+        uiState.isInlineBoardRefreshing,
+        uiState.isInlineBoardLoadingMore,
+        uiState.inlineBoardIsRssFallback,
+        uiState.inlineBoardError,
+        uiState.inlineBoardPage,
+        uiState.inlineBoardTopics.size,
+    ) {
+        if ((shouldLoadMore || filteredPageAutoAdvance) &&
+            uiState.inlineBoardHasNextPage &&
+            !uiState.isInlineBoardLoading &&
+            !uiState.isInlineBoardRefreshing &&
+            !uiState.isInlineBoardLoadingMore &&
+            !uiState.inlineBoardIsRssFallback &&
+            uiState.inlineBoardError == null
+        ) {
+            onLoadMore()
+        }
     }
 
     PullToRefreshBox(
@@ -2648,25 +2673,49 @@ private fun InlineBoardFeedContent(
                     uiState.inlineBoardTopics.isEmpty() &&
                     uiState.inlineBoardPinnedTopics.isEmpty() &&
                     uiState.activeInlineBoardSlug != null -> {
-                    item(key = "inline_empty") {
-                        ExpressiveStateCard(
-                            icon = Icons.Rounded.Forum,
-                            title = "该版块暂无主题",
-                            description = "当前排序下暂未获取到主题内容，点击刷新重新拉取最新动态",
-                            accentColor = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            actions = {
-                                OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(text = "刷新版块")
-                                }
-                            },
-                        )
+                    when {
+                        uiState.inlineBoardIsRssFallback -> {
+                            item(key = "inline_rss_empty") {
+                                InlineBoardRssFallbackCard(
+                                    isEmptyBoard = true,
+                                    isChallengeRequired = uiState.inlineBoardChallengeRequired,
+                                    preferRssFallback = uiState.preferRssFallback,
+                                    onVerifyWebView = onVerifyWebView,
+                                    onSwitchToFullWebFeed = onSwitchToFullWebFeed,
+                                    onRefresh = onRefresh,
+                                )
+                            }
+                        }
+
+                        uiState.inlineBoardHasNextPage &&
+                            (uiState.isInlineBoardLoadingMore || filteredPageAutoAdvance) -> {
+                            item(key = "inline_filtered_loading") {
+                                LoadingMoreFooter(label = "正在加载更多匹配主题…")
+                            }
+                        }
+
+                        else -> {
+                            item(key = "inline_empty") {
+                                ExpressiveStateCard(
+                                    icon = Icons.Rounded.Forum,
+                                    title = "该版块暂无主题",
+                                    description = "当前排序下暂未获取到主题内容，点击刷新重新拉取最新动态",
+                                    accentColor = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                    actions = {
+                                        OutlinedButton(onClick = onRefresh, shape = CircleShape) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Refresh,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(text = "刷新版块")
+                                        }
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -2687,9 +2736,87 @@ private fun InlineBoardFeedContent(
                         )
                     }
 
-                    if (uiState.isInlineBoardLoadingMore) {
-                        item(key = "inline_more_spinner") {
-                            LoadingMoreFooter(label = "正在加载更多主题…")
+                    when {
+                        uiState.isInlineBoardLoadingMore -> {
+                            item(key = "inline_more_spinner") {
+                                LoadingMoreFooter(label = "正在加载更多主题…")
+                            }
+                        }
+
+                        uiState.inlineBoardError != null -> {
+                            item(key = "inline_more_error") {
+                                ExpressiveStateCard(
+                                    icon = if (uiState.inlineBoardChallengeRequired) {
+                                        Icons.Rounded.Shield
+                                    } else {
+                                        Icons.Rounded.Refresh
+                                    },
+                                    title = "加载下一页未成功",
+                                    description = uiState.inlineBoardError,
+                                    accentColor = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                    actions = {
+                                        if (uiState.inlineBoardChallengeRequired) {
+                                            Button(onClick = onVerifyWebView, shape = CircleShape) {
+                                                Text(text = "完成网页验证")
+                                            }
+                                        }
+                                        OutlinedButton(onClick = onLoadMore, shape = CircleShape) {
+                                            Text(text = "点按重试")
+                                        }
+                                    },
+                                )
+                            }
+                        }
+
+                        uiState.inlineBoardIsRssFallback -> {
+                            item(key = "inline_rss_footer") {
+                                InlineBoardRssFallbackCard(
+                                    isEmptyBoard = false,
+                                    isChallengeRequired = uiState.inlineBoardChallengeRequired,
+                                    preferRssFallback = uiState.preferRssFallback,
+                                    onVerifyWebView = onVerifyWebView,
+                                    onSwitchToFullWebFeed = onSwitchToFullWebFeed,
+                                    onRefresh = onRefresh,
+                                )
+                            }
+                        }
+
+                        uiState.inlineBoardHasNextPage -> {
+                            item(key = "inline_load_more") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                                        .clip(CircleShape)
+                                        .clickable(onClick = onLoadMore)
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "点按加载更多",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+
+                        !uiState.isInlineBoardRefreshing -> {
+                            item(key = "inline_end") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "已加载全部内容",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -2810,6 +2937,55 @@ private fun ExpressiveStateCard(
             }
         }
     }
+}
+
+@Composable
+private fun InlineBoardRssFallbackCard(
+    isEmptyBoard: Boolean,
+    isChallengeRequired: Boolean,
+    preferRssFallback: Boolean,
+    onVerifyWebView: () -> Unit,
+    onSwitchToFullWebFeed: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    ExpressiveStateCard(
+        icon = if (isChallengeRequired) Icons.Rounded.Shield else Icons.Rounded.Bolt,
+        title = if (isChallengeRequired) {
+            "当前为 RSS 精简模式（需要网页验证）"
+        } else {
+            "当前处于 RSS 精简模式"
+        },
+        description = if (isEmptyBoard) {
+            "RSS 仅包含全站最新约 20 条公开帖子，当前版块暂无匹配条目且不支持翻页。"
+        } else {
+            "RSS 仅包含全站最新约 20 条公开帖子（当前版块为本地筛选，且不支持下拉翻页）。"
+        },
+        accentColor = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        actions = {
+            if (preferRssFallback && !isChallengeRequired) {
+                Button(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
+                    Text(text = "切换为完整网页流")
+                }
+                OutlinedButton(onClick = onVerifyWebView, shape = CircleShape) {
+                    Text(text = "网页验证 / 登录")
+                }
+            } else {
+                Button(onClick = onVerifyWebView, shape = CircleShape) {
+                    Text(text = "完成网页验证，加载完整内容")
+                }
+                if (preferRssFallback) {
+                    FilledTonalButton(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
+                        Text(text = "关闭 RSS 优先")
+                    }
+                } else {
+                    OutlinedButton(onClick = onRefresh, shape = CircleShape) {
+                        Text(text = "重试")
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable

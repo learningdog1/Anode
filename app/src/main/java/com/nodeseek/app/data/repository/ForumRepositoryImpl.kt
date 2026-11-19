@@ -184,25 +184,61 @@ class ForumRepositoryImpl(
         }
     }
 
+    private fun isGuestWithoutStoredSession(): Boolean =
+        sessionRepository.sessionState.value == null && !sessionRepository.hasStoredSessionCookie()
+
+    private fun shouldPreferRssForPage1(trimmedSlug: String): Boolean =
+        settingsRepository.settings.value.preferRssFallback &&
+            isGuestWithoutStoredSession() &&
+            trimmedSlug != "inside"
+
+    override fun clearRssFallbackCache() {
+        val iterator = memoryFeedSnapshots.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value.result.isFromRssFallback) {
+                iterator.remove()
+            }
+        }
+        feedDiskCache?.removeWhere { it.result.isFromRssFallback }
+    }
+
     override fun getCachedFeed(
         categorySlug: String,
         sort: FeedSort,
-    ): FeedPageResult? = getSnapshot(
-        uid = currentUid,
-        categorySlug = categorySlug.trim(),
-        sort = sort,
-    )?.result
+    ): FeedPageResult? {
+        val trimmed = categorySlug.trim()
+        val snap = getSnapshot(
+            uid = currentUid,
+            categorySlug = trimmed,
+            sort = sort,
+        ) ?: return null
+        if (snap.result.isFromRssFallback &&
+            !shouldPreferRssForPage1(trimmed) &&
+            !sessionRepository.challengeRequired.value
+        ) {
+            return null
+        }
+        return snap.result
+    }
 
     override fun isFeedFresh(
         categorySlug: String,
         sort: FeedSort,
         maxAgeMillis: Long,
     ): Boolean {
+        val trimmed = categorySlug.trim()
         val snap = getSnapshot(
             uid = currentUid,
-            categorySlug = categorySlug.trim(),
+            categorySlug = trimmed,
             sort = sort,
         ) ?: return false
+        if (snap.result.isFromRssFallback) {
+            val rssStillExpected = shouldPreferRssForPage1(trimmed) ||
+                sessionRepository.challengeRequired.value
+            if (!rssStillExpected) {
+                return false
+            }
+        }
         val age = clockMillis() - snap.fetchedAtEpochMillis
         return age in 0L until maxAgeMillis
     }
@@ -224,12 +260,13 @@ class ForumRepositoryImpl(
         val trimmedSlug = categorySlug.trim()
         val uid = currentUid
         val now = clockMillis()
+        val usePreferredRss = safePage == 1 && shouldPreferRssForPage1(trimmedSlug)
 
         if (safePage == 1) {
             val cached = getSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort)
             val cacheFreshEnoughForForceCooldown = cached != null &&
                 (now - cached.fetchedAtEpochMillis) in 0L until MIN_FORCE_REFRESH_INTERVAL_MS &&
-                (settings.preferRssFallback || !cached.result.isFromRssFallback || sessionRepository.challengeRequired.value)
+                (!cached.result.isFromRssFallback || usePreferredRss)
 
             if (forceRefresh && cacheFreshEnoughForForceCooldown) {
                 return Result.success(reEnrichFeedResult(cached!!.result))
@@ -256,7 +293,7 @@ class ForumRepositoryImpl(
             sort = sort,
             page = safePage,
             includeBlocked = effectiveIncludeBlocked,
-            preferRssFallback = settings.preferRssFallback && safePage == 1 && trimmedSlug != "inside",
+            preferRssFallback = usePreferredRss,
         )
 
         return singleFlightFeed(requestKey) {
@@ -267,7 +304,13 @@ class ForumRepositoryImpl(
                         sort = sort,
                         forceRefresh = forceRefresh,
                     )
-                    saveSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort, result = result)
+                    saveSnapshot(
+                        uid = uid,
+                        categorySlug = trimmedSlug,
+                        sort = sort,
+                        result = result,
+                        persistToDisk = false,
+                    )
                     result
                 }
             }
@@ -287,7 +330,7 @@ class ForumRepositoryImpl(
                 )
                 val result = parsed.toEnrichedFeedResult(sort = sort)
                 if (safePage == 1) {
-                    saveSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort, result = result)
+                    saveSnapshot(uid = currentUid, categorySlug = trimmedSlug, sort = sort, result = result)
                 }
                 Result.success(result)
             } catch (c: CancellationException) {
@@ -304,7 +347,13 @@ class ForumRepositoryImpl(
                         )
                     }.getOrNull()
                     if (rssFallback != null) {
-                        saveSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort, result = rssFallback)
+                        saveSnapshot(
+                            uid = uid,
+                            categorySlug = trimmedSlug,
+                            sort = sort,
+                            result = rssFallback,
+                            persistToDisk = false,
+                        )
                         return@singleFlightFeed Result.success(rssFallback)
                     }
                 }
@@ -363,7 +412,7 @@ class ForumRepositoryImpl(
                 )
                 val result = parsed.toEnrichedFeedResult(sort = FeedSort.CURATED)
                 if (safePage == 1) {
-                    saveSnapshot(uid = uid, categorySlug = "", sort = FeedSort.CURATED, result = result)
+                    saveSnapshot(uid = currentUid, categorySlug = "", sort = FeedSort.CURATED, result = result)
                 }
                 Result.success(result)
             } catch (c: CancellationException) {
@@ -617,6 +666,7 @@ class ForumRepositoryImpl(
         categorySlug: String,
         sort: FeedSort,
         result: FeedPageResult,
+        persistToDisk: Boolean = !result.isFromRssFallback,
     ) {
         val snapshot = CachedFeedSnapshot(
             fetchedAtEpochMillis = clockMillis(),
@@ -624,7 +674,9 @@ class ForumRepositoryImpl(
         )
         val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort)
         memoryFeedSnapshots[key] = snapshot
-        feedDiskCache?.put(uid, categorySlug, sort, snapshot)
+        if (persistToDisk) {
+            feedDiskCache?.put(uid, categorySlug, sort, snapshot)
+        }
     }
 
     private fun recordRateLimitIfNeeded(t: Throwable) {

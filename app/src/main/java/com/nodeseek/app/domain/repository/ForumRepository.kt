@@ -23,6 +23,8 @@ interface ForumRepository {
         maxAgeMillis: Long = 90_000L,
     ): Boolean = false
 
+    fun clearRssFallbackCache() {}
+
     suspend fun getFeed(
         categorySlug: String = "",
         sort: FeedSort = FeedSort.LATEST_REPLY,

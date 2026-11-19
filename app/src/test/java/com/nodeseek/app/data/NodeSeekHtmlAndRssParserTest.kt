@@ -380,4 +380,63 @@ class NodeSeekHtmlAndRssParserTest {
         assertTrue(replySig.contains("## 我的签名标题"))
         assertTrue(replySig.contains("**长期收鸡** [TG联系](https://t.me/example)"))
     }
+
+    @Test
+    fun `parseFeedPage detects nsk-pager, rel=next, and ignores disabled or hash-only pager-next anchors`() {
+        val configB64 = encodeConfig("""{ "allCategory": [{ "key": "review", "cn_text": "测评" }] }""")
+
+        fun wrapHtml(pagerHtml: String): String = """
+            <!doctype html>
+            <html><body>
+              <div id="nsk-body">
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-301-1">测评贴</a></div>
+                  <a class="post-category" href="/categories/review">测评</a>
+                </div>
+                $pagerHtml
+              </div>
+              <script id="temp-script" type="application/json">$configB64</script>
+            </body></html>
+        """.trimIndent()
+
+        // 1. .nsk-pager numbered link to page 2
+        val nskPagerResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<div class="nsk-pager"><a href="/categories/review/page-1">1</a><a href="/categories/review/page-2">2</a></div>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertTrue(nskPagerResult.hasNextPage)
+
+        // 2. Enabled a.pager-next with href
+        val pagerNextResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<div class="nsk-pager"><a class="pager-next" href="/categories/review/page-2">下一页</a></div>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertTrue(pagerNextResult.hasNextPage)
+
+        // 3. Disabled or hash-only a.pager-next should NOT count as having a next page
+        val disabledNextResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<div class="nsk-pager"><a class="pager-next disabled" href="/categories/review/page-2">下一页</a></div>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertFalse(disabledNextResult.hasNextPage)
+
+        val hashNextResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<div class="nsk-pager"><a class="pager-next" href="#">下一页</a></div>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertFalse(hashNextResult.hasNextPage)
+
+        val noHrefNextResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<div class="nsk-pager"><a class="pager-next">下一页</a></div>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertFalse(noHrefNextResult.hasNextPage)
+
+        // 4. rel="next" anchor
+        val relNextResult = NodeSeekHtmlParser.parseFeedPage(
+            html = wrapHtml("""<nav><a rel="next" href="/categories/review/page-2">Next</a></nav>"""),
+            pageUrl = "https://www.nodeseek.com/categories/review",
+        )
+        assertTrue(relNextResult.hasNextPage)
+    }
 }

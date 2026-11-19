@@ -12,6 +12,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -430,6 +432,7 @@ fun ExploreScreen(
             ExploreBoardFeedPage(
                 board = board,
                 slice = slice,
+                preferRssFallback = uiState.preferRssFallback,
                 isActivePage = isActivePage,
                 listState = pageListState,
                 scrollToTopTrigger = scrollToTopTrigger,
@@ -443,6 +446,7 @@ fun ExploreScreen(
                 onOpenTopic = onOpenTopic,
                 onOpenAuthorProfile = onOpenAuthorProfile,
                 onTriggerWebViewAuth = triggerWebViewAuth,
+                onSwitchToFullWebFeed = viewModel::disablePreferRssAndRefresh,
             )
         }
     }
@@ -647,6 +651,7 @@ private fun ExploreCategoryTab(
 private fun ExploreBoardFeedPage(
     board: Category,
     slice: ExploreBoardSliceUiState,
+    preferRssFallback: Boolean,
     isActivePage: Boolean,
     listState: LazyListState,
     scrollToTopTrigger: Int,
@@ -660,6 +665,7 @@ private fun ExploreBoardFeedPage(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit,
     onTriggerWebViewAuth: () -> Unit,
+    onSwitchToFullWebFeed: () -> Unit,
 ) {
     LaunchedEffect(scrollToTopTrigger, isActivePage) {
         if (scrollToTopTrigger > 0 && isActivePage) {
@@ -700,8 +706,40 @@ private fun ExploreBoardFeedPage(
             totalItems > 0 && lastVisible >= totalItems - 4
         }
     }
-    LaunchedEffect(isActivePage, shouldLoadMore, slice.hasNextPage, slice.isLoadingNextPage) {
-        if (isActivePage && shouldLoadMore && slice.hasNextPage && !slice.isLoadingNextPage) {
+    val filteredPageAutoAdvance = slice.topics.isEmpty() &&
+        slice.hasNextPage &&
+        !slice.isInitialLoading &&
+        !slice.isRefreshing &&
+        !slice.isFromRssFallback &&
+        !slice.isPreviewFromAllFeed &&
+        slice.errorMessage == null &&
+        slice.nextPageError == null &&
+        slice.currentPage < 3
+
+    LaunchedEffect(
+        isActivePage,
+        shouldLoadMore,
+        filteredPageAutoAdvance,
+        slice.hasNextPage,
+        slice.isInitialLoading,
+        slice.isRefreshing,
+        slice.isLoadingNextPage,
+        slice.isFromRssFallback,
+        slice.isPreviewFromAllFeed,
+        slice.nextPageError,
+        slice.currentPage,
+        slice.topics.size,
+    ) {
+        if (isActivePage &&
+            (shouldLoadMore || filteredPageAutoAdvance) &&
+            slice.hasNextPage &&
+            !slice.isInitialLoading &&
+            !slice.isRefreshing &&
+            !slice.isLoadingNextPage &&
+            !slice.isFromRssFallback &&
+            !slice.isPreviewFromAllFeed &&
+            slice.nextPageError == null
+        ) {
             onLoadNextPage()
         }
     }
@@ -770,15 +808,61 @@ private fun ExploreBoardFeedPage(
                     }
                 }
 
-                // 3. Empty Feed State
+                // 3. Empty Feed / RSS Fallback Empty State / Filtered Auto-Advance Loading
                 slice.topics.isEmpty() -> {
-                    item(key = "feed_empty_card_${board.slug}") {
-                        Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                            ExploreEmptyCard(
-                                selectedCategorySlug = board.slug,
-                                onResetCategory = { onSelectCategory("") },
-                                onRefresh = onRefresh,
-                            )
+                    when {
+                        slice.isFromRssFallback -> {
+                            item(key = "feed_rss_empty_card_${board.slug}") {
+                                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                    ExploreRssFallbackCard(
+                                        boardName = board.name,
+                                        isEmptyBoard = true,
+                                        isChallengeRequired = slice.isChallengeOrAuthRequired,
+                                        preferRssFallback = preferRssFallback,
+                                        onVerifyWebView = onTriggerWebViewAuth,
+                                        onSwitchToFullWebFeed = onSwitchToFullWebFeed,
+                                        onRefresh = onRefresh,
+                                    )
+                                }
+                            }
+                        }
+
+                        slice.hasNextPage && (slice.isLoadingNextPage || filteredPageAutoAdvance) -> {
+                            item(key = "feed_filtered_loading_${board.slug}") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 32.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                        )
+                                        Text(
+                                            text = "正在加载更多匹配主题...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        else -> {
+                            item(key = "feed_empty_card_${board.slug}") {
+                                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                    ExploreEmptyCard(
+                                        selectedCategorySlug = board.slug,
+                                        onResetCategory = { onSelectCategory("") },
+                                        onRefresh = onRefresh,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -811,66 +895,143 @@ private fun ExploreBoardFeedPage(
                         )
                     }
 
-                    // Next-page loading or pagination retry footer
-                    if (slice.isLoadingNextPage) {
-                        item(key = "pagination_loading_${board.slug}") {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 14.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                PulseGlassSurface(
-                                    shape = CircleShape,
+                    // Next-page loading, retry, RSS fallback recovery, or end-of-feed footer
+                    when {
+                        slice.isLoadingNextPage -> {
+                            item(key = "pagination_loading_${board.slug}") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center,
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    PulseGlassSurface(
+                                        shape = CircleShape,
                                     ) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(14.dp),
-                                            strokeWidth = 2.dp,
-                                            color = MaterialTheme.colorScheme.primary,
-                                        )
-                                        Text(
-                                            text = "正在加载更多...",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                            Text(
+                                                text = "正在加载更多...",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else if (slice.nextPageError != null) {
-                        item(key = "pagination_error_${board.slug}") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 8.dp)
-                                    .pulseCard(
-                                        shape = RoundedCornerShape(14.dp),
-                                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.58f),
-                                        borderColor = MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
-                                        elevation = PulseElevation.Subtle,
+
+                        slice.nextPageError != null -> {
+                            item(key = "pagination_error_${board.slug}") {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                                        .pulseCard(
+                                            shape = RoundedCornerShape(14.dp),
+                                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.58f),
+                                            borderColor = MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
+                                            elevation = PulseElevation.Subtle,
+                                        )
+                                        .clickable { onLoadNextPage() }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center,
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Refresh,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = slice.nextPageError,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        if (slice.isChallengeOrAuthRequired) {
+                                            Button(onClick = onTriggerWebViewAuth, shape = CircleShape) {
+                                                Text(text = "完成网页验证")
+                                            }
+                                        }
+                                        OutlinedButton(onClick = onLoadNextPage, shape = CircleShape) {
+                                            Text(text = "点按重试")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        slice.isFromRssFallback -> {
+                            item(key = "pagination_rss_fallback_${board.slug}") {
+                                Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    ExploreRssFallbackCard(
+                                        boardName = board.name,
+                                        isEmptyBoard = false,
+                                        isChallengeRequired = slice.isChallengeOrAuthRequired,
+                                        preferRssFallback = preferRssFallback,
+                                        onVerifyWebView = onTriggerWebViewAuth,
+                                        onSwitchToFullWebFeed = onSwitchToFullWebFeed,
+                                        onRefresh = onRefresh,
                                     )
-                                    .clickable { onLoadNextPage() }
-                                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "加载下一页未成功，点按重试",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                )
+                                }
+                            }
+                        }
+
+                        slice.hasNextPage && !slice.isPreviewFromAllFeed -> {
+                            item(key = "pagination_load_more_${board.slug}") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                        .clip(CircleShape)
+                                        .clickable(onClick = onLoadNextPage)
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "点按加载更多",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+
+                        !slice.hasNextPage && !slice.isRefreshing && !slice.isPreviewFromAllFeed -> {
+                            item(key = "pagination_end_${board.slug}") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "已加载全部内容",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    )
+                                }
                             }
                         }
                     }
@@ -988,6 +1149,102 @@ private fun ExploreErrorRecoveryCard(
                 }
                 FilledTonalButton(onClick = onVerifyWebView, shape = CircleShape) {
                     Text(text = "网页会话")
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ExploreRssFallbackCard(
+    boardName: String,
+    isEmptyBoard: Boolean,
+    isChallengeRequired: Boolean,
+    preferRssFallback: Boolean,
+    onVerifyWebView: () -> Unit,
+    onSwitchToFullWebFeed: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseHeroCard(
+                accentColor = accent,
+                shape = PulseArchitecturalShapes.HeroBento,
+                elevation = PulseElevation.Card,
+            )
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.12f))
+                .border(
+                    width = 1.dp,
+                    color = accent.copy(alpha = 0.25f),
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (isChallengeRequired) Icons.Rounded.Shield else Icons.Rounded.Bolt,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+
+        Text(
+            text = if (isChallengeRequired) {
+                "当前为 RSS 精简模式（需要网页验证）"
+            } else {
+                "当前处于 RSS 精简模式"
+            },
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
+
+        Text(
+            text = if (isEmptyBoard) {
+                "RSS 仅包含全站最新约 20 条公开帖子，当前「$boardName」暂无匹配条目且不支持翻页。"
+            } else {
+                "RSS 仅包含全站最新约 20 条公开帖子（各分区为本地筛选，且不支持下拉翻页加载更多）。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (preferRssFallback && !isChallengeRequired) {
+                Button(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
+                    Text(text = "切换为完整网页流")
+                }
+                OutlinedButton(onClick = onVerifyWebView, shape = CircleShape) {
+                    Text(text = "网页验证 / 登录")
+                }
+            } else {
+                Button(onClick = onVerifyWebView, shape = CircleShape) {
+                    Text(text = "完成网页验证，加载完整内容")
+                }
+                if (preferRssFallback) {
+                    FilledTonalButton(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
+                        Text(text = "关闭 RSS 优先")
+                    }
+                } else {
+                    OutlinedButton(onClick = onRefresh, shape = CircleShape) {
+                        Text(text = "重试")
+                    }
                 }
             }
         }

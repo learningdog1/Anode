@@ -251,7 +251,8 @@ object NodeSeekHtmlParser {
         val mergedPinned = (carouselPosts + listPosts.filter { it.pinned }).filter { pinnedIds.add(it.id) }
         val normalTopics = listPosts.filter { !pinnedIds.contains(it.id) }
 
-        val hasNextByLinks = document.select("[aria-label=pagination] a[href]").any { anchor ->
+        val hasNextByLinks = document.select("[aria-label=pagination] a[href], .nsk-pager a[href]").any { anchor ->
+            if (!anchor.isEnabledPaginationAnchor()) return@any false
             val rawHref = anchor.attr("href").trim()
             val resolved = parsedUrl?.resolve(rawHref)
                 ?: NodeSeekUrlNormalizer.normalizeNodeSeekUrl(rawHref).toHttpUrlOrNull()
@@ -261,7 +262,10 @@ object NodeSeekHtmlParser {
             )
             targetPage > currentPage
         }
-        val hasNextPage = hasNextByLinks || document.selectFirst("a.pager-next") != null
+        val hasEnabledNextAnchor = document
+            .select("a.pager-next[href], a[rel=next][href]")
+            .any { it.isEnabledPaginationAnchor() }
+        val hasNextPage = hasNextByLinks || hasEnabledNextAnchor
 
         return ParsedFeedPageDto(
             pinnedTopics = mergedPinned,
@@ -798,6 +802,16 @@ object NodeSeekHtmlParser {
             throw IOException("官网暂未返回页面内容")
         }
         return paragraphs.joinToString("\n\n")
+    }
+
+    private fun Element.isEnabledPaginationAnchor(): Boolean {
+        if (hasClass("disabled") || hasAttr("disabled") || attr("aria-disabled").equals("true", ignoreCase = true)) {
+            return false
+        }
+        val rawHref = attr("href").trim()
+        return rawHref.isNotEmpty() &&
+            !rawHref.startsWith("#") &&
+            !rawHref.startsWith("javascript:", ignoreCase = true)
     }
 
     private fun extractPageNumber(path: String, queryPage: String?): Int {

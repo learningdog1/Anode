@@ -3,6 +3,7 @@ package com.nodeseek.app.data.repository
 import com.nodeseek.app.data.local.CachedFeedSnapshot
 import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.network.NodeSeekApiClient
+import com.nodeseek.app.data.network.NodeSeekUrlNormalizer
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.domain.model.FeedPageResult
@@ -12,10 +13,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import okhttp3.Cookie
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -31,6 +35,9 @@ class FeedCacheAndRateLimitTest {
     private lateinit var server: MockWebServer
     private lateinit var cacheDir: File
     private var fakeClockMillis: Long = 10_000L
+    private lateinit var cookieBridge: WebViewCookieBridge
+    private lateinit var settingsRepository: FakeSettingsRepository
+    private lateinit var feedDiskCache: FeedDiskCache
     private lateinit var apiClient: NodeSeekApiClient
     private lateinit var sessionRepository: SessionRepositoryImpl
     private lateinit var forumRepository: ForumRepositoryImpl
@@ -43,17 +50,18 @@ class FeedCacheAndRateLimitTest {
         fakeClockMillis = 10_000L
 
         val baseUrl = server.url("/")
-        val cookieBridge = WebViewCookieBridge(forceInMemory = true)
+        cookieBridge = WebViewCookieBridge(forceInMemory = true)
         val okHttp = NodeSeekApiClient.createDefaultHttpClient(
             cookieBridge = cookieBridge,
             userAgentProvider = UserAgentProvider("NodeSeekRepoTest/1.0"),
             additionalTargetHost = baseUrl.host,
         )
 
-        val settingsRepository = FakeSettingsRepository()
+        settingsRepository = FakeSettingsRepository()
         val categoryDao = FakeCategoryDao()
         val readHistoryDao = FakeReadHistoryDao()
         val bookmarkDao = FakeBookmarkDao()
+        feedDiskCache = FeedDiskCache(cacheDir = cacheDir)
 
         sessionRepository = SessionRepositoryImpl(
             apiClientProvider = { apiClient },
@@ -74,7 +82,7 @@ class FeedCacheAndRateLimitTest {
             readHistoryDao = readHistoryDao,
             bookmarkDao = bookmarkDao,
             bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
-            feedDiskCache = FeedDiskCache(cacheDir = cacheDir),
+            feedDiskCache = feedDiskCache,
             clockMillis = { fakeClockMillis },
         )
 
@@ -279,5 +287,113 @@ class FeedCacheAndRateLimitTest {
         assertTrue(afterBackoff.isSuccess)
         assertEquals(801L, afterBackoff.getOrThrow().topics.single().id)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `preferRssFallback only applies to guests without stored session cookies`() = runBlocking {
+        settingsRepository.setPreferRssFallback(true)
+
+        val rssXml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <channel>
+                <item>
+                  <title>RSS 访客帖子</title>
+                  <link>https://www.nodeseek.com/post-901-1</link>
+                  <dc:creator>GuestUser</dc:creator>
+                  <category>技术</category>
+                </item>
+              </channel>
+            </rss>
+        """.trimIndent()
+
+        // 1. Guest without stored session cookie uses RSS
+        server.enqueue(MockResponse().setResponseCode(200).setBody(rssXml))
+        val guestRes = forumRepository.getFeed(categorySlug = "tech", page = 1).getOrThrow()
+        assertTrue(guestRes.isFromRssFallback)
+        assertEquals(901L, guestRes.topics.single().id)
+
+        // 2. Once a session/smac cookie exists, preferRssFallback is ignored and HTML feed is fetched
+        val originUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()
+        cookieBridge.saveFromResponse(
+            originUrl,
+            listOf(
+                Cookie.Builder()
+                    .name("session")
+                    .value("valid_session_token")
+                    .domain("www.nodeseek.com")
+                    .path("/")
+                    .build(),
+            ),
+        )
+        assertTrue(cookieBridge.hasSessionCookie())
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(sampleFeedHtml(categorySlug = "tech", topicId = 902L, title = "完整网页技术帖")),
+        )
+
+        val authedRes = forumRepository.getFeed(categorySlug = "tech", page = 1).getOrThrow()
+        assertFalse(authedRes.isFromRssFallback)
+        assertEquals(902L, authedRes.topics.single().id)
+    }
+
+    @Test
+    fun `RSS fallback is not persisted to disk cache, expires on challenge clear, and clearRssFallbackCache spares HTML`() = runBlocking {
+        // Seed an HTML snapshot for "daily"
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(sampleFeedHtml(categorySlug = "daily", topicId = 950L, title = "正常 HTML 日常帖")),
+        )
+        val htmlRes = forumRepository.getFeed(categorySlug = "daily", page = 1).getOrThrow()
+        assertFalse(htmlRes.isFromRssFallback)
+
+        // Trigger Cloudflare challenge on "tech" -> falls back to RSS in memory only
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><title>Just a moment...</title></html>"),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+                      <channel>
+                        <item>
+                          <title>RSS 降级技术帖</title>
+                          <link>https://www.nodeseek.com/post-951-1</link>
+                          <dc:creator>Guest</dc:creator>
+                          <category>技术</category>
+                        </item>
+                      </channel>
+                    </rss>
+                    """.trimIndent(),
+                ),
+        )
+        val rssRes = forumRepository.getFeed(categorySlug = "tech", page = 1).getOrThrow()
+        assertTrue(rssRes.isFromRssFallback)
+        assertTrue(sessionRepository.challengeRequired.value)
+        assertTrue(forumRepository.isFeedFresh("tech", FeedSort.LATEST_REPLY))
+        assertNotNull(forumRepository.getCachedFeed("tech", FeedSort.LATEST_REPLY))
+
+        // Cold restart disk cache must NOT contain the RSS fallback snapshot for "tech", while "daily" HTML remains
+        val coldRestartCache = FeedDiskCache(cacheDir = cacheDir)
+        assertNull(coldRestartCache.get(0L, "tech", FeedSort.LATEST_REPLY))
+        assertNotNull(coldRestartCache.get(0L, "daily", FeedSort.LATEST_REPLY))
+
+        // Clearing challenge makes RSS fallback no longer fresh or cached
+        sessionRepository.clearChallengeRequired()
+        assertFalse(forumRepository.isFeedFresh("tech", FeedSort.LATEST_REPLY))
+        assertNull(forumRepository.getCachedFeed("tech", FeedSort.LATEST_REPLY))
+
+        // clearRssFallbackCache preserves HTML snapshot for "daily"
+        forumRepository.clearRssFallbackCache()
+        assertNotNull(forumRepository.getCachedFeed("daily", FeedSort.LATEST_REPLY))
+        assertEquals(950L, forumRepository.getCachedFeed("daily", FeedSort.LATEST_REPLY)?.topics?.single()?.id)
     }
 }
