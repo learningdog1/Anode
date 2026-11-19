@@ -36,7 +36,6 @@ import androidx.compose.ui.unit.sp
 import com.nodeseek.app.domain.deals.BlackFridayCountdownCalculator
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.withTabularNumbers
@@ -99,6 +98,12 @@ fun BlackFridayPromoBanner(
         }.joinToString(" · ")
     }
 
+    val flamePillBrush = remember {
+        Brush.horizontalGradient(
+            colors = listOf(Color(0xFFC2410C), Color(0xFFB91C1C)),
+        )
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -118,7 +123,7 @@ fun BlackFridayPromoBanner(
             modifier = Modifier
                 .size(34.dp)
                 .clip(PulseArchitecturalShapes.MediumBadge)
-                .background(PulseBrushes.heatFlameGradient()),
+                .background(flamePillBrush),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -155,7 +160,7 @@ fun BlackFridayPromoBanner(
         Row(
             modifier = Modifier
                 .clip(CircleShape)
-                .background(PulseBrushes.heatFlameGradient())
+                .background(flamePillBrush)
                 .padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),

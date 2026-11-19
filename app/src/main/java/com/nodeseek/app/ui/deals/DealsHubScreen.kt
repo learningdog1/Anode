@@ -111,7 +111,6 @@ import com.nodeseek.app.domain.deals.PromoDealCardModel
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseShimmerBox
 import com.nodeseek.app.ui.theme.blendColor
@@ -218,53 +217,70 @@ fun DealsHubScreen(
             )
         },
     ) { innerPadding ->
-        PullToRefreshBox(
-            isRefreshing = uiState.isRefreshing,
-            onRefresh = { viewModel.refresh(force = true) },
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
+        val customOverseasSlot = if (uiState.filterState.sourceTab == DealSourceTab.OVERSEAS &&
+            uiState.summaryStats.overseasCount == 0
         ) {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(
-                    top = 12.dp,
-                    bottom = bottomContentPadding + 20.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            overseasTabContent
+        } else {
+            null
+        }
+
+        if (customOverseasSlot != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
             ) {
-                // 1. Hero Black Friday / Cyber Week Live Countdown Card
-                item(key = "bf_hero_countdown") {
-                    BlackFridayHeroCountdownCard(
-                        countdown = countdown,
-                        stats = uiState.summaryStats,
-                        fxUsdToCnyRate = uiState.fxUsdToCnyRate,
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                    )
-                }
-
-                // 2. Source Tabs (全部大促 / 站内优惠 / 海外情报 LET·LEB)
-                item(key = "source_tabs") {
-                    DealsSourceTabBar(
-                        selectedTab = uiState.filterState.sourceTab,
-                        stats = uiState.summaryStats,
-                        onSelectTab = viewModel::selectSourceTab,
-                        modifier = Modifier.padding(horizontal = 14.dp),
-                    )
-                }
-
-                val customOverseasSlot = if (uiState.filterState.sourceTab == DealSourceTab.OVERSEAS &&
-                    uiState.summaryStats.overseasCount == 0
+                DealsSourceTabBar(
+                    selectedTab = uiState.filterState.sourceTab,
+                    stats = uiState.summaryStats,
+                    onSelectTab = viewModel::selectSourceTab,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                 ) {
-                    overseasTabContent
-                } else {
-                    null
+                    customOverseasSlot()
                 }
-                if (customOverseasSlot != null) {
-                    item(key = "custom_overseas_slot") {
-                        customOverseasSlot()
+            }
+        } else {
+            PullToRefreshBox(
+                isRefreshing = uiState.isRefreshing,
+                onRefresh = { viewModel.refresh(force = true) },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+            ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        top = 12.dp,
+                        bottom = bottomContentPadding + 20.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    // 1. Hero Black Friday / Cyber Week Live Countdown Card
+                    item(key = "bf_hero_countdown") {
+                        BlackFridayHeroCountdownCard(
+                            countdown = countdown,
+                            stats = uiState.summaryStats,
+                            fxUsdToCnyRate = uiState.fxUsdToCnyRate,
+                            modifier = Modifier.padding(horizontal = 14.dp),
+                        )
                     }
-                } else {
+
+                    // 2. Source Tabs (全部大促 / 站内优惠 / 海外情报 LET·LEB)
+                    item(key = "source_tabs") {
+                        DealsSourceTabBar(
+                            selectedTab = uiState.filterState.sourceTab,
+                            stats = uiState.summaryStats,
+                            onSelectTab = viewModel::selectSourceTab,
+                            modifier = Modifier.padding(horizontal = 14.dp),
+                        )
+                    }
+
                     // 3. Inline Search + Sort Row
                     item(key = "search_sort_row") {
                         DealsSearchAndSortRow(
@@ -427,7 +443,7 @@ private fun DealsHubTopBar(
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
-                        .background(PulseBrushes.heatFlameGradient())
+                        .background(dealHighContrastFlameBrush())
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) {
                     Text(
@@ -470,10 +486,10 @@ private fun BlackFridayHeroCountdownCard(
     fxUsdToCnyRate: BigDecimal,
     modifier: Modifier = Modifier,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
+    val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
-    val emberAccent = if (isDark) Color(0xFFFB923C) else Color(0xFFEA580C)
-    val goldAccent = NodePulseThemeTokens.extendedColors.drumstickGoldStart
+    val emberAccent = ext.onHeatContainer
+    val goldAccent = ext.onDrumstickContainer
 
     val lowestPriceText = remember(stats.lowestAnnualDeal) {
         val lowest = stats.lowestAnnualDeal?.annualizedUsd
@@ -516,7 +532,7 @@ private fun BlackFridayHeroCountdownCard(
                 Row(
                     modifier = Modifier
                         .clip(CircleShape)
-                        .background(PulseBrushes.heatFlameGradient())
+                        .background(dealHighContrastFlameBrush())
                         .padding(horizontal = 9.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -927,9 +943,9 @@ private fun DealsQuickFilterBars(
     onToggleRegionPreset: (DealRegionPreset) -> Unit,
     onToggleRoutePreset: (DealRoutePreset) -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val emberAccent = if (isDark) Color(0xFFFB923C) else Color(0xFFEA580C)
-    val routeAccent = NodePulseThemeTokens.extendedColors.stardustAccent
+    val ext = NodePulseThemeTokens.extendedColors
+    val emberAccent = ext.onHeatContainer
+    val routeAccent = ext.stardustAccent
 
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         // Row 1: Price ceilings & deal attribute filters
@@ -1184,7 +1200,9 @@ fun PromoDealCard(
     val isDark = NodePulseThemeTokens.isDark
     val extraType = NodePulseThemeTokens.extraTypography
 
-    val emberAccent = if (isDark) Color(0xFFFB923C) else Color(0xFFEA580C)
+    val emberAccent = ext.onHeatContainer
+    val emberCtaContainer = if (isDark) Color(0xFFFB923C) else Color(0xFFC2410C)
+    val emberCtaContent = if (isDark) Color(0xFF2B1100) else Color.White
     val routeAccent = ext.stardustAccent
     val sourceAccent = when (deal.source) {
         DealSource.NODESEEK -> MaterialTheme.colorScheme.primary
@@ -1352,8 +1370,8 @@ fun PromoDealCard(
                     if (deal.isUltraValueDeal && !deal.isOutOfStockHint) {
                         DealMicroBadge(
                             text = "超值",
-                            containerColor = emberAccent,
-                            contentColor = Color.White,
+                            containerColor = emberCtaContainer,
+                            contentColor = emberCtaContent,
                             icon = Icons.Rounded.Bolt,
                         )
                     }
@@ -1545,8 +1563,8 @@ fun PromoDealCard(
                     shape = RoundedCornerShape(10.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = emberAccent,
-                        contentColor = Color.White,
+                        containerColor = emberCtaContainer,
+                        contentColor = emberCtaContent,
                     ),
                     modifier = Modifier
                         .weight(1f)
@@ -1724,6 +1742,10 @@ private fun DealsEmptyStateCard(
         }
     }
 }
+
+private fun dealHighContrastFlameBrush(): Brush = Brush.horizontalGradient(
+    colors = listOf(Color(0xFFC2410C), Color(0xFFB91C1C)),
+)
 
 private fun formatCompactRelativeAge(publishedAtMillis: Long, nowMillis: Long): String {
     val diffSec = abs(nowMillis - publishedAtMillis) / 1000L
