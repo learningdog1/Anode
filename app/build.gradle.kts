@@ -96,6 +96,7 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -154,6 +155,9 @@ dependencies {
 
     // WebView Control
     implementation(libs.androidx.webkit)
+
+    // Lightweight SSH Client
+    implementation(libs.jsch)
 
     // Background Scheduling (WorkManager)
     implementation(libs.androidx.work.runtime.ktx)
