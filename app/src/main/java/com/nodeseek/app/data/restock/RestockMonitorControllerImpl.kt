@@ -12,6 +12,7 @@ import com.nodeseek.app.domain.restock.RestockWatchItem
 import com.nodeseek.app.domain.restock.StockAnalysisResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -233,14 +234,15 @@ class RestockMonitorControllerImpl(
     private fun launchForegroundLoopLocked() {
         if (monitorJob?.isActive == true) return
         wakeSignal.tryReceive()
-        lateinit var launched: Job
-        launched = scope.launch {
-            runForegroundPollingLoop(selfJob = launched)
+        val launched = scope.launch(start = CoroutineStart.LAZY) {
+            runForegroundPollingLoop()
         }
         monitorJob = launched
+        launched.start()
     }
 
-    private suspend fun runForegroundPollingLoop(selfJob: Job) {
+    private suspend fun runForegroundPollingLoop() {
+        val selfJob = currentCoroutineContext()[Job]
         while (currentCoroutineContext().isActive) {
             val shouldExit = synchronized(lifecycleLock) {
                 if (!_runtimeStatus.value.isRunningInForeground || !isStarted) {

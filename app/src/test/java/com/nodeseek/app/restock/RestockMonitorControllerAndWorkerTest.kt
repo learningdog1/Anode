@@ -30,6 +30,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
@@ -410,7 +411,7 @@ class RestockMonitorControllerAndWorkerTest {
         assertEquals("$12.00/年", probed.detectedPriceHint)
         assertTrue(repository.getWatchItemsSnapshot().isEmpty())
 
-        // Foreground lifecycle transitions
+        // Foreground lifecycle transitions (StandardTestDispatcher)
         controller.start()
         assertTrue(controller.isForegroundLoopActive())
         controller.onForegroundChanged(false)
@@ -420,6 +421,24 @@ class RestockMonitorControllerAndWorkerTest {
         assertTrue(controller.isForegroundLoopActive())
         controller.stop()
         assertFalse(controller.isForegroundLoopActive())
+
+        // Eager dispatcher (UnconfinedTestDispatcher) must never race on monitorJob assignment
+        val eagerController = RestockMonitorControllerImpl(
+            repository = repository,
+            analyzer = analyzer,
+            notificationHelper = notificationSpy,
+            scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { true },
+        )
+        eagerController.start()
+        assertTrue(eagerController.isForegroundLoopActive())
+        eagerController.onForegroundChanged(false)
+        assertFalse(eagerController.isForegroundLoopActive())
+        eagerController.onForegroundChanged(true)
+        assertTrue(eagerController.isForegroundLoopActive())
+        eagerController.stop()
+        assertFalse(eagerController.isForegroundLoopActive())
     }
 
     @Test

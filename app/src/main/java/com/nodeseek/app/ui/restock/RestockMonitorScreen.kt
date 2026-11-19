@@ -76,6 +76,7 @@ import androidx.compose.material.icons.rounded.ShoppingCartCheckout
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -191,6 +192,8 @@ fun RestockMonitorScreen(
 
     var showAddSheet by rememberSaveable { mutableStateOf(false) }
     var consumedInitialPrefill by rememberSaveable(initialUrl, initialTitle) { mutableStateOf(false) }
+    var pendingPrefillUrl by rememberSaveable { mutableStateOf("") }
+    var pendingPrefillTitle by rememberSaveable { mutableStateOf("") }
     var editingWatchId by rememberSaveable { mutableStateOf<String?>(null) }
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var pendingDeleteWatchId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -200,8 +203,9 @@ fun RestockMonitorScreen(
     LaunchedEffect(initialUrl, initialTitle) {
         if (initialUrl.isNotBlank() && !consumedInitialPrefill) {
             consumedInitialPrefill = true
-            viewModel.onQuickUrlChange(initialUrl)
             editingWatchId = null
+            pendingPrefillUrl = initialUrl
+            pendingPrefillTitle = initialTitle
             showAddSheet = true
         }
     }
@@ -292,6 +296,8 @@ fun RestockMonitorScreen(
             FloatingActionButton(
                 onClick = {
                     editingWatchId = null
+                    pendingPrefillUrl = ""
+                    pendingPrefillTitle = ""
                     showAddSheet = true
                 },
                 shape = PulseArchitecturalShapes.SquircleFab,
@@ -354,6 +360,14 @@ fun RestockMonitorScreen(
                         onQuickAdd = viewModel::quickAddCurrentUrl,
                         onOpenAdvancedAdd = {
                             editingWatchId = null
+                            pendingPrefillUrl = uiState.quickUrlInput
+                            pendingPrefillTitle = ""
+                            showAddSheet = true
+                        },
+                        onOpenFreshAdd = {
+                            editingWatchId = null
+                            pendingPrefillUrl = ""
+                            pendingPrefillTitle = ""
                             showAddSheet = true
                         },
                         onCheckAllNow = viewModel::checkAllNow,
@@ -364,6 +378,8 @@ fun RestockMonitorScreen(
                         onOpenIntervalPicker = { intervalPickerWatchId = it },
                         onEditWatch = { id ->
                             editingWatchId = id
+                            pendingPrefillUrl = ""
+                            pendingPrefillTitle = ""
                             showAddSheet = true
                         },
                         onDeleteWatch = { pendingDeleteWatchId = it },
@@ -393,18 +409,18 @@ fun RestockMonitorScreen(
             onDismiss = {
                 showAddSheet = false
                 editingWatchId = null
+                pendingPrefillUrl = ""
+                pendingPrefillTitle = ""
             },
             onSave = { draft ->
                 viewModel.saveWatchDraft(draft)
                 showAddSheet = false
                 editingWatchId = null
+                pendingPrefillUrl = ""
+                pendingPrefillTitle = ""
             },
-            initialUrl = if (editingItem == null) {
-                uiState.quickUrlInput.ifBlank { initialUrl }
-            } else {
-                editingItem.rawUrl
-            },
-            initialTitle = editingItem?.title ?: initialTitle,
+            initialUrl = editingItem?.rawUrl ?: pendingPrefillUrl,
+            initialTitle = editingItem?.title ?: pendingPrefillTitle,
             initialPriceHint = editingItem?.priceHint.orEmpty(),
             sourceTopicId = editingItem?.sourceTopicId,
             editingItem = editingItem,
@@ -674,6 +690,7 @@ private fun RestockWatchesTabContent(
     onProbeQuickUrl: () -> Unit,
     onQuickAdd: () -> Unit,
     onOpenAdvancedAdd: () -> Unit,
+    onOpenFreshAdd: () -> Unit,
     onCheckAllNow: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
@@ -740,7 +757,7 @@ private fun RestockWatchesTabContent(
 
         if (uiState.watchItems.isEmpty()) {
             item(key = "empty_watches") {
-                EmptyWatchesPlaceholder(onAddClick = onOpenAdvancedAdd)
+                EmptyWatchesPlaceholder(onAddClick = onOpenFreshAdd)
             }
         } else {
             itemsIndexed(
@@ -1205,10 +1222,7 @@ private fun RestockWatchCard(
                 onClick = onOpenOrderUrl,
                 shape = PulseArchitecturalShapes.SmallChip,
                 colors = if (isInStock) {
-                    ButtonDefaults.buttonColors(
-                        containerColor = restockStatusAccentColor(RestockStockStatus.IN_STOCK),
-                        contentColor = Color.White,
-                    )
+                    restockCheckoutButtonColors()
                 } else {
                     ButtonDefaults.filledTonalButtonColors()
                 },
@@ -1511,10 +1525,7 @@ private fun RestockEventHistoryCard(
             Button(
                 onClick = onOpenOrderUrl,
                 shape = PulseArchitecturalShapes.SmallChip,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = inStockColor,
-                    contentColor = Color.White,
-                ),
+                colors = restockCheckoutButtonColors(),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
             ) {
                 Icon(
@@ -1736,6 +1747,22 @@ private fun WatchIntervalPickerDialog(
             }
         },
     )
+}
+
+@Composable
+private fun restockCheckoutButtonColors(): ButtonColors {
+    val isDark = NodePulseThemeTokens.isDark
+    return if (isDark) {
+        ButtonDefaults.buttonColors(
+            containerColor = Color(0xFF4ADE80),
+            contentColor = Color(0xFF052E16),
+        )
+    } else {
+        ButtonDefaults.buttonColors(
+            containerColor = Color(0xFF15803D),
+            contentColor = Color.White,
+        )
+    }
 }
 
 private fun readClipboardText(context: Context): String? {
