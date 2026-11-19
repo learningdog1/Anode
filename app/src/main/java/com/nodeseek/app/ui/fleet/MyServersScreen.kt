@@ -125,7 +125,6 @@ import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import java.util.Locale
 
@@ -143,6 +142,7 @@ fun MyServersScreen(
     initialTab: MyServersTab = MyServersTab.PROBES,
     pendingRestockPrefill: RestockAssetPrefill? = null,
     onConsumeRestockPrefill: (() -> Unit)? = null,
+    previewUiState: MyServersUiState? = null,
     viewModel: MyServersViewModel? = null,
 ) {
     val context = LocalContext.current
@@ -158,7 +158,8 @@ fun MyServersScreen(
         viewModel(factory = factory)
     }
 
-    val uiState by resolvedViewModel.uiState.collectAsStateWithLifecycle()
+    val observedUiState by resolvedViewModel.uiState.collectAsStateWithLifecycle()
+    val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
@@ -414,64 +415,60 @@ private fun FleetPortfolioHeroCard(
     onRefreshFx: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val onlineAccent = if (summary.offlineProbeCount > 0) {
-        FleetSemanticColors.offlineAccent(isDark)
+    val ext = NodePulseThemeTokens.extendedColors
+    val onlineValueColor = if (summary.offlineProbeCount > 0) {
+        MaterialTheme.colorScheme.error
     } else {
-        FleetSemanticColors.onlineAccent(isDark)
+        MaterialTheme.colorScheme.onSurface
     }
-    val renewalAccent = if (summary.dueSoonRenewalCount > 0) {
-        FleetSemanticColors.warningAccent(isDark)
+    val renewalValueColor = if (summary.dueSoonRenewalCount > 0) {
+        ext.onDrumstickContainer
     } else {
-        MaterialTheme.colorScheme.secondary
+        MaterialTheme.colorScheme.onSurface
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseHeroCard(accentColor = MaterialTheme.colorScheme.primary)
+            .pulseCard(
+                shape = PulseArchitecturalShapes.HeroBento,
+                containerColor = ext.cardSurface,
+                elevation = PulseElevation.Card,
+            )
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // 2x2 KPI Telemetry Grid
+        // Clean 4-column borderless KPI telemetry strip
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            HeroKpiTile(
-                icon = Icons.Rounded.CloudDone,
+            HeroKpiColumn(
                 label = "探针在线",
-                value = "在线 ${summary.onlineProbeCount}/${summary.totalProbeNodeCount} 台",
-                accent = onlineAccent,
-                modifier = Modifier.weight(1f),
+                value = "${summary.onlineProbeCount}/${summary.totalProbeNodeCount} 台",
+                valueColor = onlineValueColor,
+                modifier = Modifier.weight(0.95f),
             )
-            HeroKpiTile(
-                icon = Icons.Rounded.AccountBalanceWallet,
+            HeroKpiColumn(
                 label = "月均支出",
                 value = "¥${summary.totalMonthlyCostCny.toPlainString()}",
-                accent = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f),
+                valueColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1.1f),
             )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            HeroKpiTile(
-                icon = Icons.Rounded.CurrencyExchange,
+            HeroKpiColumn(
                 label = "年化支出",
                 value = "¥${summary.totalAnnualizedCostCny.toPlainString()}",
-                accent = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1.15f),
             )
-            HeroKpiTile(
-                icon = Icons.Rounded.CalendarMonth,
+            HeroKpiColumn(
                 label = "近期续费",
                 value = "${summary.dueSoonRenewalCount} 台",
-                accent = renewalAccent,
-                modifier = Modifier.weight(1f),
+                valueColor = renewalValueColor,
+                modifier = Modifier.weight(0.8f),
             )
         }
+
+        PulseGradientDivider(color = ext.cardBorder.copy(alpha = 0.55f))
 
         // Compact Footer Strip
         Row(
@@ -489,66 +486,66 @@ private fun FleetPortfolioHeroCard(
                     .clickable(onClick = onRefreshFx)
                     .padding(horizontal = 4.dp, vertical = 2.dp),
             )
-            PulseAccentPill(
-                text = if (backgroundMonitorEnabled) "后台巡检中" else "巡检已停",
-                icon = Icons.Rounded.NotificationsActive,
-                containerColor = if (backgroundMonitorEnabled) {
-                    FleetSemanticColors.onlineContainer(isDark)
-                } else {
-                    MaterialTheme.colorScheme.surfaceContainerHigh
-                },
-                contentColor = if (backgroundMonitorEnabled) {
-                    FleetSemanticColors.onlineAccent(isDark)
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                modifier = Modifier.clickable(onClick = onOpenSettings),
-            )
+            Row(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.75.dp, ext.cardBorder, CircleShape)
+                    .clickable(onClick = onOpenSettings)
+                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (backgroundMonitorEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outline
+                            },
+                        ),
+                )
+                Text(
+                    text = if (backgroundMonitorEnabled) "后台巡检中" else "巡检已停",
+                    style = NodePulseThemeTokens.extraTypography.microLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun HeroKpiTile(
-    icon: ImageVector,
+private fun HeroKpiColumn(
     label: String,
     value: String,
-    accent: Color,
     modifier: Modifier = Modifier,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val shape = PulseArchitecturalShapes.MediumBadge
-    Row(
-        modifier = modifier
-            .clip(shape)
-            .background(accent.copy(alpha = if (isDark) 0.14f else 0.08f))
-            .border(0.8.dp, accent.copy(alpha = if (isDark) 0.30f else 0.18f), shape)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(17.dp),
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(
-                text = value,
-                style = MaterialTheme.typography.titleSmall.withTabularNumbers(),
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelLarge.copy(
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = label,
-                style = NodePulseThemeTokens.extraTypography.microLabel,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-        }
+            ).withTabularNumbers(),
+            color = valueColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = label,
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -728,17 +725,26 @@ private fun ProbeServerCard(
     linkedAsset: VpsAssetRecord?,
     onAddAssetFromProbe: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
-    val statusAccent = if (snapshot.isOnline) {
-        FleetSemanticColors.onlineAccent(isDark)
+    val dotColor = if (snapshot.isOnline) {
+        MaterialTheme.colorScheme.primary
     } else {
-        FleetSemanticColors.offlineAccent(isDark)
+        MaterialTheme.colorScheme.error
     }
     val statusBg = if (snapshot.isOnline) {
-        FleetSemanticColors.onlineContainer(isDark)
+        MaterialTheme.colorScheme.primaryContainer
     } else {
-        FleetSemanticColors.offlineContainer(isDark)
+        MaterialTheme.colorScheme.errorContainer
+    }
+    val statusFg = if (snapshot.isOnline) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onErrorContainer
+    }
+    val cardBorderColor = if (snapshot.isOnline) {
+        ext.cardBorder
+    } else {
+        MaterialTheme.colorScheme.error.copy(alpha = 0.42f)
     }
 
     val effectiveTrafficLimit = snapshot.trafficLimitBytes
@@ -755,22 +761,34 @@ private fun ProbeServerCard(
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
                 containerColor = ext.cardSurface,
+                borderColor = cardBorderColor,
                 elevation = PulseElevation.Card,
-                accentColor = if (snapshot.isOnline) null else statusAccent,
             )
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // Header Row: Flag + Name + Online Pill
+        // Header Row: Region Code Badge + Name + Online Pill
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (snapshot.resolvedFlagEmoji.isNotBlank()) {
+            val codeBadge = snapshot.countryCode.trim().uppercase(Locale.US).ifBlank { "VPS" }
+            Box(
+                modifier = Modifier
+                    .clip(PulseArchitecturalShapes.SmallChip)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.75.dp, ext.cardBorder, PulseArchitecturalShapes.SmallChip)
+                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = snapshot.resolvedFlagEmoji,
-                    style = MaterialTheme.typography.titleMedium,
+                    text = codeBadge,
+                    style = NodePulseThemeTokens.extraTypography.codeLabel.copy(
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
@@ -806,14 +824,14 @@ private fun ProbeServerCard(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(7.dp)
+                        .size(6.dp)
                         .clip(CircleShape)
-                        .background(statusAccent),
+                        .background(dotColor),
                 )
                 Text(
                     text = if (snapshot.isOnline) "在线" else "离线",
                     style = NodePulseThemeTokens.extraTypography.microLabel,
-                    color = statusAccent,
+                    color = statusFg,
                 )
             }
         }
@@ -897,7 +915,7 @@ private fun ProbeServerCard(
                     Icon(
                         Icons.Rounded.ArrowUpward,
                         contentDescription = "上行",
-                        tint = MaterialTheme.colorScheme.tertiary,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
@@ -951,16 +969,15 @@ private fun ResourceMetricBar(
     progress: Float,
     showTrack: Boolean = true,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
     val animatedProgress by animateFloatAsState(
         targetValue = progress.coerceIn(0f, 1f),
         animationSpec = tween(durationMillis = 380, easing = FastOutSlowInEasing),
         label = "fleetMetricProgress",
     )
-    val barColor = when {
-        progress >= 0.85f -> FleetSemanticColors.offlineAccent(isDark)
-        progress >= 0.65f -> FleetSemanticColors.warningAccent(isDark)
-        else -> MaterialTheme.colorScheme.primary
+    val barColor = if (progress >= 0.90f) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -987,20 +1004,16 @@ private fun ResourceMetricBar(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
+                    .height(5.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surfaceContainerHighest),
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(animatedProgress.coerceAtLeast(0.01f))
-                        .height(6.dp)
+                        .height(5.dp)
                         .clip(CircleShape)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(barColor.copy(alpha = 0.78f), barColor),
-                            ),
-                        ),
+                        .background(barColor),
                 )
             }
         }
@@ -1107,27 +1120,34 @@ private fun VpsAssetCard(
     onOpenSalePost: () -> Unit,
     onOpenUrl: (String) -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
 
-    val (badgeText, badgeFg, badgeBg) = remember(renewalItem, isDark) {
-        when (renewalItem?.urgency) {
-            AssetExpiryUrgency.EXPIRED -> {
-                val overdue = (-renewalItem.daysRemaining).coerceAtLeast(1L)
-                Triple("已过期 ${overdue}天", FleetSemanticColors.offlineAccent(isDark), FleetSemanticColors.offlineContainer(isDark))
-            }
-            AssetExpiryUrgency.CRITICAL -> {
-                val label = if (renewalItem.daysRemaining == 0L) "今日到期" else "剩 ${renewalItem.daysRemaining} 天"
-                Triple(label, FleetSemanticColors.offlineAccent(isDark), FleetSemanticColors.offlineContainer(isDark))
-            }
-            AssetExpiryUrgency.WARNING -> {
-                Triple("剩 ${renewalItem.daysRemaining} 天", FleetSemanticColors.warningAccent(isDark), FleetSemanticColors.warningContainer(isDark))
-            }
-            AssetExpiryUrgency.NORMAL -> {
-                Triple("剩 ${renewalItem.daysRemaining} 天", FleetSemanticColors.onlineAccent(isDark), FleetSemanticColors.onlineContainer(isDark))
-            }
-            else -> Triple("日期待补", Color.Gray, Color.Gray.copy(alpha = 0.14f))
+    val badgeText = when (renewalItem?.urgency) {
+        AssetExpiryUrgency.EXPIRED -> {
+            val overdue = (-renewalItem.daysRemaining).coerceAtLeast(1L)
+            "已过期 ${overdue}天"
         }
+        AssetExpiryUrgency.CRITICAL -> {
+            if (renewalItem.daysRemaining == 0L) "今日到期" else "剩 ${renewalItem.daysRemaining} 天"
+        }
+        AssetExpiryUrgency.WARNING,
+        AssetExpiryUrgency.NORMAL,
+        -> "剩 ${renewalItem.daysRemaining} 天"
+        else -> "日期待补"
+    }
+    val badgeFg = when (renewalItem?.urgency) {
+        AssetExpiryUrgency.EXPIRED,
+        AssetExpiryUrgency.CRITICAL,
+        -> MaterialTheme.colorScheme.onErrorContainer
+        AssetExpiryUrgency.WARNING -> ext.onDrumstickContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val badgeBg = when (renewalItem?.urgency) {
+        AssetExpiryUrgency.EXPIRED,
+        AssetExpiryUrgency.CRITICAL,
+        -> MaterialTheme.colorScheme.errorContainer
+        AssetExpiryUrgency.WARNING -> ext.drumstickContainer
+        else -> MaterialTheme.colorScheme.surfaceContainerLow
     }
 
     Column(
@@ -1136,12 +1156,8 @@ private fun VpsAssetCard(
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
                 containerColor = ext.cardSurface,
+                borderColor = ext.cardBorder,
                 elevation = PulseElevation.Card,
-                accentColor = if (renewalItem?.urgency == AssetExpiryUrgency.EXPIRED || renewalItem?.urgency == AssetExpiryUrgency.CRITICAL) {
-                    badgeFg
-                } else {
-                    null
-                },
             )
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp),
@@ -1240,16 +1256,17 @@ private fun VpsAssetCard(
 
         // Linked Probe Telemetry Strip (if bound)
         if (linkedProbe != null) {
-            val probeAccent = if (linkedProbe.isOnline) {
-                FleetSemanticColors.onlineAccent(isDark)
+            val probeDot = if (linkedProbe.isOnline) {
+                MaterialTheme.colorScheme.primary
             } else {
-                FleetSemanticColors.offlineAccent(isDark)
+                MaterialTheme.colorScheme.error
             }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(probeAccent.copy(alpha = if (isDark) 0.14f else 0.08f))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.75.dp, ext.cardBorder, PulseArchitecturalShapes.SmallChip)
                     .clickable(onClick = onBindProbe)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1261,12 +1278,12 @@ private fun VpsAssetCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
-                            .background(probeAccent),
+                            .background(probeDot),
                     )
                     Text(
-                        text = "${linkedProbe.resolvedFlagEmoji} ${linkedProbe.name}".trim(),
+                        text = linkedProbe.name,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -1334,7 +1351,7 @@ private fun VpsAssetCard(
             Row(
                 modifier = Modifier
                     .clip(CircleShape)
-                    .background(PulseBrushes.brandGradient())
+                    .background(MaterialTheme.colorScheme.primary)
                     .pulseBouncyClickable(
                         pressedScale = NodePulseMotion.chipPressScale,
                         role = Role.Button,
@@ -1425,8 +1442,12 @@ private fun ProbeBindBottomSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            val codePrefix = snap.countryCode.trim().uppercase(Locale.US)
+                                .takeIf { it.isNotBlank() }
+                                ?.let { "[$it] " }
+                                .orEmpty()
                             Text(
-                                text = "${snap.resolvedFlagEmoji} ${snap.name}".trim(),
+                                text = "$codePrefix${snap.name}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                             )

@@ -42,7 +42,6 @@ import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
-import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulsePressScale
 
 @Immutable
@@ -63,169 +62,103 @@ internal object TrustPalette {
     @Composable
     fun forTag(tag: TrustTag): TrustVisualTone {
         val isDark = NodePulseThemeTokens.isDark
+        val ext = NodePulseThemeTokens.extendedColors
         val primary = MaterialTheme.colorScheme.primary
         return when (tag) {
-            TrustTag.TRUSTED -> if (isDark) {
-                TrustVisualTone(
-                    accent = Color(0xFF34D399),
-                    container = Color(0xFF0E2A22),
-                    containerEnd = Color(0xFF13362B),
-                    content = Color(0xFF6EE7B7),
-                    border = Color(0xFF34D399).copy(alpha = 0.42f),
-                    icon = Icons.Rounded.VerifiedUser,
-                )
-            } else {
-                TrustVisualTone(
-                    accent = Color(0xFF059669),
-                    container = Color(0xFFE6F9F1),
-                    containerEnd = Color(0xFFD6F5E8),
-                    content = Color(0xFF065F46),
-                    border = Color(0xFF059669).copy(alpha = 0.28f),
-                    icon = Icons.Rounded.VerifiedUser,
-                )
-            }
+            TrustTag.TRUSTED -> TrustVisualTone(
+                accent = primary,
+                container = MaterialTheme.colorScheme.primaryContainer,
+                containerEnd = MaterialTheme.colorScheme.primaryContainer,
+                content = MaterialTheme.colorScheme.onPrimaryContainer,
+                border = primary.copy(alpha = 0.30f),
+                icon = Icons.Rounded.VerifiedUser,
+            )
 
-            TrustTag.NEUTRAL -> if (isDark) {
-                TrustVisualTone(
-                    accent = Color(0xFF60A5FA),
-                    container = Color(0xFF13243B),
-                    containerEnd = Color(0xFF192E4A),
-                    content = Color(0xFF93C5FD),
-                    border = Color(0xFF60A5FA).copy(alpha = 0.38f),
-                    icon = Icons.Rounded.Visibility,
-                )
-            } else {
-                TrustVisualTone(
-                    accent = Color(0xFF2563EB),
-                    container = Color(0xFFE8F1FE),
-                    containerEnd = Color(0xFFDBEAFE),
-                    content = Color(0xFF1E40AF),
-                    border = Color(0xFF2563EB).copy(alpha = 0.24f),
-                    icon = Icons.Rounded.Visibility,
-                )
-            }
+            TrustTag.NEUTRAL -> TrustVisualTone(
+                accent = MaterialTheme.colorScheme.onSurfaceVariant,
+                container = MaterialTheme.colorScheme.surfaceContainerLow,
+                containerEnd = MaterialTheme.colorScheme.surfaceContainerLow,
+                content = MaterialTheme.colorScheme.onSurface,
+                border = ext.cardBorder,
+                icon = Icons.Rounded.Visibility,
+            )
 
-            TrustTag.CAUTION -> if (isDark) {
+            TrustTag.CAUTION -> {
+                val cautionBg = ext.drumstickContainer.copy(alpha = if (isDark) 0.50f else 0.72f)
                 TrustVisualTone(
-                    accent = Color(0xFFFBBF24),
-                    container = Color(0xFF31240C),
-                    containerEnd = Color(0xFF3D2D0F),
-                    content = Color(0xFFFDE68A),
-                    border = Color(0xFFF59E0B).copy(alpha = 0.48f),
-                    icon = Icons.Rounded.GppMaybe,
-                )
-            } else {
-                TrustVisualTone(
-                    accent = Color(0xFFD97706),
-                    container = Color(0xFFFFF5DC),
-                    containerEnd = Color(0xFFFEF0C7),
-                    content = Color(0xFF92400E),
-                    border = Color(0xFFD97706).copy(alpha = 0.32f),
+                    accent = ext.onDrumstickContainer,
+                    container = cautionBg,
+                    containerEnd = cautionBg,
+                    content = ext.onDrumstickContainer,
+                    border = ext.onDrumstickContainer.copy(alpha = 0.28f),
                     icon = Icons.Rounded.GppMaybe,
                 )
             }
 
-            TrustTag.RISK_BLACKLIST -> if (isDark) {
-                TrustVisualTone(
-                    accent = Color(0xFFF87171),
-                    container = Color(0xFF3A1216),
-                    containerEnd = Color(0xFF4C161B),
-                    content = Color(0xFFFCA5A5),
-                    border = Color(0xFFEF4444).copy(alpha = 0.56f),
-                    icon = Icons.Rounded.GppBad,
+            TrustTag.RISK_BLACKLIST -> {
+                val errorBg = MaterialTheme.colorScheme.errorContainer.copy(
+                    alpha = if (isDark) 0.42f else 0.55f,
                 )
-            } else {
                 TrustVisualTone(
-                    accent = Color(0xFFDC2626),
-                    container = Color(0xFFFEE8E8),
-                    containerEnd = Color(0xFFFED7D7),
-                    content = Color(0xFF991B1B),
-                    border = Color(0xFFDC2626).copy(alpha = 0.38f),
+                    accent = MaterialTheme.colorScheme.error,
+                    container = errorBg,
+                    containerEnd = errorBg,
+                    content = MaterialTheme.colorScheme.onErrorContainer,
+                    border = MaterialTheme.colorScheme.error.copy(alpha = 0.38f),
                     icon = Icons.Rounded.GppBad,
                 )
             }
 
-            TrustTag.NONE -> {
-                val baseContainer = if (isDark) {
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.56f)
-                } else {
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
-                }
-                TrustVisualTone(
-                    accent = primary,
-                    container = baseContainer,
-                    containerEnd = blendColor(baseContainer, primary, if (isDark) 0.14f else 0.08f),
-                    content = if (isDark) MaterialTheme.colorScheme.onPrimaryContainer else primary,
-                    border = primary.copy(alpha = if (isDark) 0.38f else 0.24f),
-                    icon = Icons.Rounded.Shield,
-                )
-            }
+            TrustTag.NONE -> TrustVisualTone(
+                accent = MaterialTheme.colorScheme.onSurfaceVariant,
+                container = MaterialTheme.colorScheme.surfaceContainerLow,
+                containerEnd = MaterialTheme.colorScheme.surfaceContainerLow,
+                content = MaterialTheme.colorScheme.onSurface,
+                border = ext.cardBorder,
+                icon = Icons.Rounded.Shield,
+            )
         }
     }
 
     @Composable
     fun forRiskLevel(level: TrustRiskLevel): TrustVisualTone {
         val isDark = NodePulseThemeTokens.isDark
+        val ext = NodePulseThemeTokens.extendedColors
         return when (level) {
-            TrustRiskLevel.HIGH_RISK_RED -> if (isDark) {
-                TrustVisualTone(
-                    accent = Color(0xFFEF4444),
-                    container = Color(0xFF3B1115),
-                    containerEnd = Color(0xFF280D11),
-                    content = Color(0xFFFECACA),
-                    border = Color(0xFFEF4444).copy(alpha = 0.65f),
-                    icon = Icons.Rounded.GppBad,
+            TrustRiskLevel.HIGH_RISK_RED -> {
+                val errorBg = MaterialTheme.colorScheme.errorContainer.copy(
+                    alpha = if (isDark) 0.42f else 0.55f,
                 )
-            } else {
                 TrustVisualTone(
-                    accent = Color(0xFFDC2626),
-                    container = Color(0xFFFEF2F2),
-                    containerEnd = Color(0xFFFEE2E2),
-                    content = Color(0xFF991B1B),
-                    border = Color(0xFFDC2626).copy(alpha = 0.42f),
+                    accent = MaterialTheme.colorScheme.error,
+                    container = errorBg,
+                    containerEnd = errorBg,
+                    content = MaterialTheme.colorScheme.onErrorContainer,
+                    border = MaterialTheme.colorScheme.error.copy(alpha = 0.38f),
                     icon = Icons.Rounded.GppBad,
                 )
             }
 
-            TrustRiskLevel.CAUTION_AMBER -> if (isDark) {
+            TrustRiskLevel.CAUTION_AMBER -> {
+                val cautionBg = ext.drumstickContainer.copy(alpha = if (isDark) 0.50f else 0.72f)
                 TrustVisualTone(
-                    accent = Color(0xFFF59E0B),
-                    container = Color(0xFF33240B),
-                    containerEnd = Color(0xFF241A09),
-                    content = Color(0xFFFDE68A),
-                    border = Color(0xFFF59E0B).copy(alpha = 0.54f),
-                    icon = Icons.Rounded.GppMaybe,
-                )
-            } else {
-                TrustVisualTone(
-                    accent = Color(0xFFD97706),
-                    container = Color(0xFFFFFBEB),
-                    containerEnd = Color(0xFFFEF3C7),
-                    content = Color(0xFF92400E),
-                    border = Color(0xFFD97706).copy(alpha = 0.36f),
+                    accent = ext.onDrumstickContainer,
+                    container = cautionBg,
+                    containerEnd = cautionBg,
+                    content = ext.onDrumstickContainer,
+                    border = ext.onDrumstickContainer.copy(alpha = 0.28f),
                     icon = Icons.Rounded.GppMaybe,
                 )
             }
 
-            TrustRiskLevel.NORMAL_CLEAR -> if (isDark) {
-                TrustVisualTone(
-                    accent = Color(0xFF10B981),
-                    container = Color(0xFF0E2720),
-                    containerEnd = Color(0xFF122327),
-                    content = Color(0xFFA7F3D0),
-                    border = Color(0xFF10B981).copy(alpha = 0.36f),
-                    icon = Icons.Rounded.VerifiedUser,
-                )
-            } else {
-                TrustVisualTone(
-                    accent = Color(0xFF059669),
-                    container = Color(0xFFECFDF5),
-                    containerEnd = Color(0xFFE6F4F1),
-                    content = Color(0xFF065F46),
-                    border = Color(0xFF059669).copy(alpha = 0.24f),
-                    icon = Icons.Rounded.VerifiedUser,
-                )
-            }
+            TrustRiskLevel.NORMAL_CLEAR -> TrustVisualTone(
+                accent = MaterialTheme.colorScheme.primary,
+                container = MaterialTheme.colorScheme.primaryContainer,
+                containerEnd = MaterialTheme.colorScheme.primaryContainer,
+                content = MaterialTheme.colorScheme.onPrimaryContainer,
+                border = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                icon = Icons.Rounded.VerifiedUser,
+            )
         }
     }
 }

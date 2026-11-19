@@ -40,7 +40,6 @@ import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Language
-import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -69,7 +68,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -83,17 +81,17 @@ import com.nodeseek.app.domain.overseas.OverseasSource
 import com.nodeseek.app.domain.overseas.OverseasSourceFilter
 import com.nodeseek.app.domain.overseas.TranslationTier
 import com.nodeseek.app.domain.valuation.ValuationCurrency
+import com.nodeseek.app.ui.components.SortSegmentItem
+import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseShimmerBox
 import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 
 /**
@@ -243,7 +241,7 @@ private fun OverseasHeroStatusStrip(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseHeroCard(accentColor = MaterialTheme.colorScheme.primary)
+            .pulseCard()
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -257,7 +255,8 @@ private fun OverseasHeroStatusStrip(
                 modifier = Modifier
                     .weight(1f)
                     .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.6.dp, ext.cardBorder, PulseArchitecturalShapes.SmallChip)
                     .clickable(onClick = onRefreshFxRates)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -266,13 +265,13 @@ private fun OverseasHeroStatusStrip(
                 Icon(
                     imageVector = Icons.Rounded.CurrencyExchange,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(15.dp),
                 )
                 Text(
                     text = "实时汇率 1 USD = ¥${uiState.usdRateFormatted} · 1 EUR = ¥${uiState.eurRateFormatted}",
                     style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -280,47 +279,27 @@ private fun OverseasHeroStatusStrip(
 
             PulseAccentPill(
                 text = if (uiState.fxRatesState.isRefreshing) "同步中…" else usdSourceLabel,
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
-        // Row 2: Display mode quick toggle (译 / 双语 / EN) + Translator settings trigger
+        // Row 2: Display mode quick toggle (译 / 双语 / 原文) + Translator settings trigger
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OverseasDisplayMode.entries.forEach { mode ->
-                    val selected = uiState.displayMode == mode
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(
-                                if (selected) MaterialTheme.colorScheme.primary
-                                else ext.cardSurface,
-                            )
-                            .border(
-                                width = 0.8.dp,
-                                color = if (selected) MaterialTheme.colorScheme.primary else ext.cardBorder,
-                                shape = CircleShape,
-                            )
-                            .clickable { onSelectDisplayMode(mode) }
-                            .padding(horizontal = 11.dp, vertical = 5.dp),
-                    ) {
-                        Text(
-                            text = mode.shortLabel,
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = if (selected) MaterialTheme.colorScheme.onPrimary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+            SortSegmentedSwitcher(
+                options = remember {
+                    OverseasDisplayMode.entries.map { mode ->
+                        SortSegmentItem(value = mode, label = mode.shortLabel)
                     }
-                }
-            }
+                },
+                selectedValue = uiState.displayMode,
+                onSelect = onSelectDisplayMode,
+                modifier = Modifier.width(196.dp),
+            )
 
             Row(
                 modifier = Modifier
@@ -361,6 +340,7 @@ private fun OverseasSourceFilterRow(
     counts: Map<OverseasSourceFilter, Int>,
     onSelect: (OverseasSourceFilter) -> Unit,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -371,17 +351,6 @@ private fun OverseasSourceFilterRow(
             FilterChip(
                 selected = isSelected,
                 onClick = { onSelect(filter) },
-                leadingIcon = if (filter == OverseasSourceFilter.BLACK_FRIDAY_FLASH) {
-                    {
-                        Icon(
-                            imageVector = Icons.Rounded.LocalFireDepartment,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
-                } else {
-                    null
-                },
                 label = {
                     Text(
                         text = if (count > 0) "${filter.label} ($count)" else filter.label,
@@ -389,9 +358,16 @@ private fun OverseasSourceFilterRow(
                     )
                 },
                 colors = FilterChipDefaults.filterChipColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = true,
+                    selected = isSelected,
+                    borderColor = ext.cardBorder,
+                    selectedBorderColor = Color.Transparent,
                 ),
             )
         }
@@ -502,13 +478,7 @@ fun OverseasOfferCard(
     onShareDealToForum: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
     var summaryExpanded by rememberSaveable(offer.id) { mutableStateOf(false) }
-
-    val sourceAccent = when (offer.source) {
-        OverseasSource.LET -> MaterialTheme.colorScheme.primary
-        OverseasSource.LEB -> MaterialTheme.colorScheme.tertiary
-    }
 
     val headlineTitle = offer.resolveHeadlineTitle(displayMode)
     val secondaryTitle = offer.resolveSecondaryOriginalTitle(displayMode)
@@ -518,10 +488,7 @@ fun OverseasOfferCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                accentColor = if (offer.isFlashOrBlackFriday) ext.drumstickGoldEnd else sourceAccent,
-            )
+            .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -534,15 +501,14 @@ fun OverseasOfferCard(
             PulseAccentPill(
                 text = offer.source.shortLabel,
                 icon = Icons.Rounded.Language,
-                containerColor = sourceAccent.copy(alpha = if (isDark) 0.22f else 0.14f),
-                contentColor = sourceAccent,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = MaterialTheme.colorScheme.onSurface,
             )
             if (offer.isFlashOrBlackFriday) {
                 PulseAccentPill(
                     text = "黑五/闪购",
-                    icon = Icons.Rounded.LocalFireDepartment,
-                    containerBrush = PulseBrushes.heatFlameGradient(),
-                    contentColor = Color.White,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             }
             if (offer.isOutOfStockHint) {
@@ -628,10 +594,10 @@ fun OverseasOfferCard(
                     Row(
                         modifier = Modifier
                             .clip(PulseArchitecturalShapes.SmallChip)
-                            .background(ext.drumstickContainer)
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
                             .border(
                                 width = 0.8.dp,
-                                color = ext.drumstickGoldEnd.copy(alpha = 0.45f),
+                                color = ext.cardBorder,
                                 shape = PulseArchitecturalShapes.SmallChip,
                             )
                             .pulseBouncyClickable { onCopyCoupon(code) }
@@ -642,18 +608,18 @@ fun OverseasOfferCard(
                         Icon(
                             imageVector = Icons.Rounded.ConfirmationNumber,
                             contentDescription = null,
-                            tint = ext.onDrumstickContainer,
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(14.dp),
                         )
                         Text(
                             text = "优惠码 $code",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = ext.onDrumstickContainer,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
                         )
                         Icon(
                             imageVector = Icons.Rounded.ContentCopy,
                             contentDescription = "复制优惠码",
-                            tint = ext.onDrumstickContainer,
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(13.dp),
                         )
                     }
@@ -753,7 +719,7 @@ fun OverseasOfferCard(
 
         PulseGradientDivider()
 
-        // Action row: 打开原帖 / 直达购买 / 加入补货监控 / 一键搬运发帖
+        // Action row: 打开原帖 / 加入补货监控 / 一键搬运发帖 / 直达购买
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -762,27 +728,19 @@ fun OverseasOfferCard(
             OfferActionChip(
                 label = "打开原帖",
                 icon = Icons.AutoMirrored.Rounded.OpenInNew,
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                containerColor = ext.cardSurface,
                 contentColor = MaterialTheme.colorScheme.onSurface,
+                borderColor = ext.cardBorder,
                 onClick = onOpenSourceLink,
             )
-
-            if (offer.orderLinks.isNotEmpty()) {
-                OfferActionChip(
-                    label = "直达购买",
-                    icon = Icons.Rounded.ShoppingCart,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    onClick = onOpenOrderLink,
-                )
-            }
 
             if (onAddRestockWatch != null) {
                 OfferActionChip(
                     label = "加入补货监控",
                     icon = Icons.Rounded.NotificationsActive,
-                    containerColor = ext.heatContainer,
-                    contentColor = ext.onHeatContainer,
+                    containerColor = ext.cardSurface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    borderColor = ext.cardBorder,
                     onClick = onAddRestockWatch,
                 )
             }
@@ -791,9 +749,19 @@ fun OverseasOfferCard(
                 OfferActionChip(
                     label = "一键搬运发帖",
                     icon = Icons.AutoMirrored.Rounded.Send,
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     onClick = onShareDealToForum,
+                )
+            }
+
+            if (offer.orderLinks.isNotEmpty()) {
+                OfferActionChip(
+                    label = "直达购买",
+                    icon = Icons.Rounded.ShoppingCart,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    onClick = onOpenOrderLink,
                 )
             }
         }
@@ -804,7 +772,6 @@ fun OverseasOfferCard(
 @Composable
 private fun OverseasPriceHighlightRow(priceMatches: List<ConvertedPriceTag>) {
     val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
     val primary = priceMatches.first()
     val secondaryPrices = priceMatches.drop(1).take(2)
 
@@ -813,43 +780,27 @@ private fun OverseasPriceHighlightRow(priceMatches: List<ConvertedPriceTag>) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        // Primary prominent converted price badge
+        // Inline steel-blue price display + neutral CNY conversion
         Row(
-            modifier = Modifier
-                .clip(PulseArchitecturalShapes.MediumBadge)
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            ext.drumstickContainer,
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.55f else 0.72f),
-                        ),
-                    ),
-                )
-                .border(
-                    width = 0.9.dp,
-                    color = ext.drumstickGoldEnd.copy(alpha = if (isDark) 0.55f else 0.35f),
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                )
-                .padding(horizontal = 11.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
                 text = primary.rawText,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold)
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                     .withTabularNumbers(),
-                color = MaterialTheme.colorScheme.onSurface,
+                color = MaterialTheme.colorScheme.primary,
             )
             Text(
                 text = "·",
-                style = MaterialTheme.typography.titleSmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
                 text = "${primary.formattedCny} 人民币",
-                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold)
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
                     .withTabularNumbers(),
-                color = ext.onDrumstickContainer,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -858,13 +809,14 @@ private fun OverseasPriceHighlightRow(priceMatches: List<ConvertedPriceTag>) {
             Box(
                 modifier = Modifier
                     .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f))
-                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.6.dp, ext.cardBorder, PulseArchitecturalShapes.SmallChip)
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
             ) {
                 Text(
                     text = tag.badgeText,
                     style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -877,12 +829,20 @@ private fun OfferActionChip(
     icon: ImageVector,
     containerColor: Color,
     contentColor: Color,
+    borderColor: Color? = null,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .clip(CircleShape)
             .background(containerColor)
+            .then(
+                if (borderColor != null) {
+                    Modifier.border(0.8.dp, borderColor, CircleShape)
+                } else {
+                    Modifier
+                },
+            )
             .pulseBouncyClickable(onClick = onClick)
             .padding(horizontal = 11.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,

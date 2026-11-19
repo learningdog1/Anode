@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -77,7 +78,6 @@ import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
@@ -102,6 +102,8 @@ fun MobileNetBenchScreen(
     initialTarget: String = "",
     onInsertMarkdown: ((String) -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
+    initialListItemIndex: Int = 0,
+    previewUiState: MobileNetBenchUiState? = null,
     viewModel: MobileNetBenchViewModel = viewModel(
         factory = MobileNetBenchViewModel.factory(
             context = LocalContext.current,
@@ -110,7 +112,8 @@ fun MobileNetBenchScreen(
     ),
 ) {
     val context = LocalContext.current
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -182,7 +185,9 @@ fun MobileNetBenchScreen(
             }
         },
     ) { innerPadding ->
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialListItemIndex)
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
@@ -656,7 +661,7 @@ internal fun RunBenchmarkActionButton(
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val stopColor = NetBenchTelemetryColors.poor()
+    val stopColor = MaterialTheme.colorScheme.error
     val containerModifier = if (isRunning) {
         Modifier
             .fillMaxWidth()
@@ -668,7 +673,7 @@ internal fun RunBenchmarkActionButton(
         Modifier
             .fillMaxWidth()
             .clip(PulseArchitecturalShapes.ElevatedTile)
-            .background(PulseBrushes.brandGradient())
+            .background(MaterialTheme.colorScheme.primary)
             .pulseBouncyClickable(onClick = onStart)
             .padding(vertical = 14.dp, horizontal = 16.dp)
     } else {
@@ -688,14 +693,14 @@ internal fun RunBenchmarkActionButton(
             CircularProgressIndicator(
                 modifier = Modifier.size(18.dp),
                 strokeWidth = 2.2.dp,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onError,
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
                 text = "${activePhase.label}  (点击停止)",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onError,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -703,11 +708,11 @@ internal fun RunBenchmarkActionButton(
             Icon(
                 imageVector = Icons.Rounded.Stop,
                 contentDescription = "停止测机",
-                tint = Color.White,
+                tint = MaterialTheme.colorScheme.onError,
                 modifier = Modifier.size(18.dp),
             )
         } else {
-            val fg = if (canStart) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+            val fg = if (canStart) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
             Icon(
                 imageVector = Icons.Rounded.PlayArrow,
                 contentDescription = null,
@@ -729,11 +734,11 @@ internal fun RunBenchmarkActionButton(
 private fun StandaloneHttpLatencyCard(
     result: com.nodeseek.app.domain.netbench.HttpLatencyResult,
 ) {
-    val accent = if (result.success) NetBenchTelemetryColors.excellent() else NetBenchTelemetryColors.poor()
+    val accent = if (result.success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = accent)
+            .pulseCard()
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {

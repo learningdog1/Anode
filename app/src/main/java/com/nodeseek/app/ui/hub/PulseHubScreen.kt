@@ -377,41 +377,40 @@ fun PulseHubScreen(
                         }
                     }
 
-                    // ── Group 3: VPS 玩家工具箱 ──
+                    // ── Group 3: 工具箱 ──
                     item(key = "hub_vps_toolbox_group") {
                         PulseStaggeredEntrance(index = 4) {
                             HubGroupedSection(
-                                title = "VPS 玩家工具箱",
+                                title = "工具箱",
                                 rows = listOf(
                                     HubMenuRowItem(
-                                        label = "🔥 黑五大促专题",
-                                        plainCount = "专题",
+                                        label = "黑五大促专题",
                                         onClick = onOpenDealsHub,
                                     ),
                                     HubMenuRowItem(
-                                        label = "🌐 海外情报聚合 (LET/LEB)",
-                                        plainCount = "译 · 折算",
+                                        label = "海外情报聚合",
+                                        plainCount = "LET · LEB",
                                         onClick = onOpenOverseasIntel,
                                     ),
                                     HubMenuRowItem(
-                                        label = "⚡ VPS 补货抢购监控",
+                                        label = "VPS 补货监控",
                                         badgeCount = restockUnreadCount,
                                         plainCount = restockWatches.count { it.isEnabled }
                                             .takeIf { it > 0 }
-                                            ?.let { "盯盘 $it" },
+                                            ?.let { "$it 项" },
                                         onClick = onOpenRestockMonitor,
                                     ),
                                     HubMenuRowItem(
-                                        label = "🖥️ 我的服务器 (探针+账本)",
+                                        label = "我的服务器",
                                         plainCount = fleetSummaryCount,
                                         onClick = onOpenMyServers,
                                     ),
                                     HubMenuRowItem(
-                                        label = "📡 手机端测机 (TCPing/iperf3)",
+                                        label = "手机端测机",
                                         onClick = onOpenNetBench,
                                     ),
                                     HubMenuRowItem(
-                                        label = "💻 轻量 SSH 一键跑分",
+                                        label = "轻量 SSH",
                                         onClick = onOpenLiteSsh,
                                     ),
                                 ),

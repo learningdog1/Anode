@@ -7,6 +7,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -108,7 +109,6 @@ import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.PulseShimmerBox
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 
@@ -349,16 +349,14 @@ private fun SellerIdentityHeaderCard(
     val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
     val rankLevel = report?.rankLevel
-    val rankSpec = rankLevel?.let { NodePulseThemeTokens.rankSpec(it) }
     val activeTag = uiState.draftTag
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseHeroCard(
-                accentColor = rankSpec?.glowColor ?: MaterialTheme.colorScheme.primary,
+            .pulseCard(
                 shape = PulseArchitecturalShapes.ElevatedTile,
-                elevation = PulseElevation.CardElevated,
+                elevation = PulseElevation.Subtle,
             )
             .padding(14.dp),
     ) {
@@ -615,20 +613,7 @@ private fun RiskAssessmentBanner(
 private fun SellerMetricsGrid(
     report: SellerTrustReport,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val rankSpec = NodePulseThemeTokens.rankSpec(report.rankLevel)
     val exposureCount = report.exposureSearchHits.size
-
-    val tenureAccent = if (report.isNewAccount) {
-        TrustPalette.forTag(TrustTag.CAUTION).accent
-    } else {
-        MaterialTheme.colorScheme.primary
-    }
-    val exposureAccent = when {
-        exposureCount > 0 -> TrustPalette.forRiskLevel(TrustRiskLevel.HIGH_RISK_RED).accent
-        !report.searchSucceeded -> TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER).accent
-        else -> TrustPalette.forRiskLevel(TrustRiskLevel.NORMAL_CLEAR).accent
-    }
 
     val coinsText = report.coins?.let { formatCompactCount(it) } ?: "--"
     val rankSubtext = buildString {
@@ -677,7 +662,6 @@ private fun SellerMetricsGrid(
                 value = report.registrationDurationLabel,
                 subtitle = tenureSubtext,
                 icon = Icons.Rounded.Schedule,
-                accentColor = tenureAccent,
                 modifier = Modifier.weight(1f),
             )
             SellerMetricTile(
@@ -685,7 +669,6 @@ private fun SellerMetricsGrid(
                 value = "${report.rankLabel} · $coinsText",
                 subtitle = rankSubtext,
                 icon = Icons.Rounded.Restaurant,
-                accentColor = if (report.rankLevel >= 2) rankSpec.glowColor else ext.drumstickGoldEnd,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -698,7 +681,6 @@ private fun SellerMetricsGrid(
                 value = if (report.topicsSucceeded) "${report.historicalTradeTopicCount} 篇" else "--",
                 subtitle = tradeSubtext,
                 icon = Icons.Rounded.Storefront,
-                accentColor = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.weight(1f),
             )
             SellerMetricTile(
@@ -706,7 +688,6 @@ private fun SellerMetricsGrid(
                 value = exposureValue,
                 subtitle = exposureSubtext,
                 icon = if (exposureCount > 0) Icons.Rounded.GppBad else Icons.Rounded.WarningAmber,
-                accentColor = exposureAccent,
                 highlightDanger = exposureCount > 0,
                 modifier = Modifier.weight(1f),
             )
@@ -720,21 +701,23 @@ private fun SellerMetricTile(
     value: String,
     subtitle: String,
     icon: ImageVector,
-    accentColor: Color,
     modifier: Modifier = Modifier,
     highlightDanger: Boolean = false,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val dangerTone = if (highlightDanger) TrustPalette.forRiskLevel(TrustRiskLevel.HIGH_RISK_RED) else null
+    val ext = NodePulseThemeTokens.extendedColors
+    val iconTint = if (highlightDanger) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Column(
         modifier = modifier
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
-                containerColor = dangerTone?.container ?: NodePulseThemeTokens.extendedColors.cardSurface,
-                borderColor = dangerTone?.border,
+                containerColor = ext.cardSurface,
+                borderColor = ext.cardBorder,
                 elevation = PulseElevation.Subtle,
-                accentColor = if (highlightDanger) null else accentColor,
             )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -747,13 +730,13 @@ private fun SellerMetricTile(
                 modifier = Modifier
                     .size(20.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(accentColor.copy(alpha = if (isDark) 0.22f else 0.13f)),
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = accentColor,
+                    tint = iconTint,
                     modifier = Modifier.size(12.5.dp),
                 )
             }
@@ -770,7 +753,7 @@ private fun SellerMetricTile(
             text = value,
             style = MaterialTheme.typography.titleSmall.withTabularNumbers(),
             fontWeight = FontWeight.Bold,
-            color = dangerTone?.content ?: MaterialTheme.colorScheme.onSurface,
+            color = if (highlightDanger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -778,7 +761,7 @@ private fun SellerMetricTile(
         Text(
             text = subtitle,
             style = MaterialTheme.typography.labelSmall,
-            color = (dangerTone?.content ?: MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = 0.85f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -841,8 +824,7 @@ private fun ExposureHitCard(
     hit: ExposureHitTopic,
     onClick: () -> Unit,
 ) {
-    val tone = TrustPalette.forRiskLevel(TrustRiskLevel.HIGH_RISK_RED)
-    val isDark = NodePulseThemeTokens.isDark
+    val ext = NodePulseThemeTokens.extendedColors
     val shape = PulseArchitecturalShapes.EditorialCard
 
     Row(
@@ -850,8 +832,8 @@ private fun ExposureHitCard(
             .fillMaxWidth()
             .pulseBouncyClickable(role = Role.Button, onClick = onClick)
             .clip(shape)
-            .background(tone.backgroundBrush)
-            .border(width = 1.dp, color = tone.border, shape = shape)
+            .background(ext.cardSurface)
+            .border(width = 0.8.dp, color = ext.cardBorder, shape = shape)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -867,13 +849,13 @@ private fun ExposureHitCard(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(tone.accent)
+                        .background(MaterialTheme.colorScheme.errorContainer)
                         .padding(horizontal = 6.dp, vertical = 1.5.dp),
                 ) {
                     Text(
                         text = hit.matchedTerm,
                         style = NodePulseThemeTokens.extraTypography.microLabel,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
                     )
                 }
 
@@ -881,7 +863,7 @@ private fun ExposureHitCard(
                     Text(
                         text = hit.categoryName,
                         style = MaterialTheme.typography.labelSmall,
-                        color = tone.content.copy(alpha = 0.80f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                     )
                 }
@@ -890,12 +872,12 @@ private fun ExposureHitCard(
                     Text(
                         text = "·",
                         style = MaterialTheme.typography.labelSmall,
-                        color = tone.content.copy(alpha = 0.55f),
+                        color = MaterialTheme.colorScheme.outline,
                     )
                     RelativeTimeText(
                         isoTimestamp = hit.publishedAtText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = tone.content.copy(alpha = 0.80f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -904,7 +886,7 @@ private fun ExposureHitCard(
                 text = hit.title,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = tone.content,
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -913,7 +895,7 @@ private fun ExposureHitCard(
                 Text(
                     text = "发帖人：${hit.authorName}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = tone.content.copy(alpha = if (isDark) 0.72f else 0.78f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -923,7 +905,7 @@ private fun ExposureHitCard(
         Icon(
             imageVector = Icons.Rounded.ChevronRight,
             contentDescription = "查看原帖",
-            tint = tone.accent,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(18.dp),
         )
     }
@@ -1312,6 +1294,10 @@ private fun SellerTrustBottomActions(
             enabled = resolvedUid > 0L || resolvedUsername.isNotBlank(),
             modifier = Modifier.weight(1f),
             shape = PulseArchitecturalShapes.MediumBadge,
+            border = BorderStroke(0.8.dp, NodePulseThemeTokens.extendedColors.cardBorder),
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ),
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
         ) {
             Icon(

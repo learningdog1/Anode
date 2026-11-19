@@ -41,7 +41,7 @@ object SshPresetCatalog {
         SshScriptPreset(
             id = PRESET_QUICK_CHECK,
             name = "系统与线路快检",
-            tabTitle = "⚡ 系统快检",
+            tabTitle = "系统快检",
             category = SshPresetCategory.DIAGNOSTIC,
             description = "3 秒极速采集 CPU / 内存 / 磁盘 / 内核 / BBR / 虚拟化 / IPv4 & IPv6 概览，适合首次连通测试",
             estimatedDurationLabel = "~3 秒",
@@ -50,7 +50,7 @@ object SshPresetCatalog {
         SshScriptPreset(
             id = PRESET_YABS,
             name = "YABS 综合跑分",
-            tabTitle = "💻 YABS 综合跑分",
+            tabTitle = "YABS 跑分",
             category = SshPresetCategory.BENCHMARK,
             description = "Yet-Another-Bench-Script 经典硬盘 fio、iperf3 网络与 Geekbench CPU 综合测试",
             estimatedDurationLabel = "~2-5 分钟",
@@ -91,7 +91,7 @@ object SshPresetCatalog {
         SshScriptPreset(
             id = PRESET_NODE_QUALITY,
             name = "NodeQuality (NQ) 质量体检",
-            tabTitle = "🔬 NodeQuality 体检",
+            tabTitle = "NodeQuality",
             category = SshPresetCategory.BENCHMARK,
             description = "NodeSeek 社区主流 VPS 体检脚本，一键检测基础硬件、IP 质量、流媒体与三网回程",
             estimatedDurationLabel = "~3-6 分钟",
@@ -109,7 +109,7 @@ object SshPresetCatalog {
         SshScriptPreset(
             id = PRESET_NEXT_TRACE,
             name = "NextTrace 三网回程路由",
-            tabTitle = "📍 NextTrace 三网回程",
+            tabTitle = "NextTrace 回程",
             category = SshPresetCategory.NETWORK,
             description = "自动检测或安装 NextTrace，快速追踪电信 / 联通 / 移动三网回程路由与节点 ASN",
             estimatedDurationLabel = "~20-45 秒",
@@ -143,7 +143,7 @@ object SshPresetCatalog {
         SshScriptPreset(
             id = PRESET_MEDIA_UNLOCK,
             name = "流媒体 & AI 解锁检测",
-            tabTitle = "🎬 流媒体 & AI 解锁",
+            tabTitle = "流媒体解锁",
             category = SshPresetCategory.UNLOCK,
             description = "非交互快速检测 Netflix / Disney+ / YouTube / ChatGPT / Claude / TikTok 等地区解锁状态",
             estimatedDurationLabel = "~30-60 秒",

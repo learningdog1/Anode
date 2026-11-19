@@ -80,13 +80,11 @@ import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.delay
 import java.math.BigDecimal
@@ -243,15 +241,10 @@ internal fun FleetSalePostSheet(
             if (successResult != null) {
                 val valuation = successResult.valuationResult
                 val deal = valuation.transferBreakdown
-                val spreadTint = when (deal?.spreadStatus) {
-                    DealSpreadStatus.DISCOUNT -> FleetSemanticColors.onlineAccent(isDark)
-                    DealSpreadStatus.PREMIUM -> FleetSemanticColors.warningAccent(isDark)
-                    else -> MaterialTheme.colorScheme.primary
-                }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .pulseHeroCard(accentColor = spreadTint)
+                        .pulseCard(shape = PulseArchitecturalShapes.HeroBento)
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -277,10 +270,16 @@ internal fun FleetSalePostSheet(
                                 DealSpreadStatus.PAR -> "平出 ¥0.00"
                                 else -> "${deal.spreadStatus.label} ${VpsValuationEngine.formatSignedCny(deal.buyerPremiumCny)}"
                             }
+                            val ext = NodePulseThemeTokens.extendedColors
+                            val (pillBg, pillFg) = when (deal.spreadStatus) {
+                                DealSpreadStatus.DISCOUNT -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                                DealSpreadStatus.PAR -> MaterialTheme.colorScheme.surfaceContainerHigh to MaterialTheme.colorScheme.onSurfaceVariant
+                                DealSpreadStatus.PREMIUM -> ext.drumstickContainer to ext.onDrumstickContainer
+                            }
                             PulseAccentPill(
                                 text = badgeText,
-                                containerColor = spreadTint.copy(alpha = if (isDark) 0.22f else 0.14f),
-                                contentColor = spreadTint,
+                                containerColor = pillBg,
+                                contentColor = pillFg,
                             )
                         }
                     }
@@ -588,7 +587,7 @@ internal fun FleetSalePostSheet(
                         .height(44.dp)
                         .clip(CircleShape)
                         .then(
-                            if (isValid) Modifier.background(PulseBrushes.brandGradient())
+                            if (isValid) Modifier.background(MaterialTheme.colorScheme.primary)
                             else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh),
                         )
                         .pulseBouncyClickable(

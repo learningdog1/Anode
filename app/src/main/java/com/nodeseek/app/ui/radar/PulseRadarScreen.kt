@@ -416,13 +416,11 @@ private fun RadarRestockShortcutBanner(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val accent = MaterialTheme.colorScheme.secondary
     Row(
         modifier = modifier
             .fillMaxWidth()
             .pulseCard(
                 shape = PulseArchitecturalShapes.MediumBadge,
-                accentColor = accent,
             )
             .pulseBouncyClickable(
                 role = Role.Button,
@@ -435,16 +433,16 @@ private fun RadarRestockShortcutBanner(
     ) {
         Box(
             modifier = Modifier
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(accent.copy(alpha = 0.14f)),
+                .size(32.dp)
+                .clip(PulseArchitecturalShapes.SmallChip)
+                .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = Icons.Rounded.Bolt,
                 contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(17.dp),
             )
         }
         Column(
@@ -452,7 +450,7 @@ private fun RadarRestockShortcutBanner(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
-                text = "⚡ VPS 补货抢购监控",
+                text = "VPS 补货抢购监控",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -461,7 +459,7 @@ private fun RadarRestockShortcutBanner(
             )
             Text(
                 text = if (activeWatchCount > 0) {
-                    "正在盯盘 $activeWatchCount 个商家商品页 · 补货秒发高优直达抢购提醒"
+                    "正在监控 $activeWatchCount 个商家商品页 · 补货即时跳转下单"
                 } else {
                     "监控 WHMCS / SolusVM / HostBill 库存 · 补货一键直达下单页"
                 },

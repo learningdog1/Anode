@@ -202,7 +202,7 @@ fun SshQuickInsertSheet(
                     Icon(
                         imageVector = Icons.Rounded.Shield,
                         contentDescription = null,
-                        tint = if (maskServerIp) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (maskServerIp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
                     )
                     Column {

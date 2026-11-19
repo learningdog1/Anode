@@ -153,8 +153,8 @@ class LiteSshViewModelTest {
         assertEquals(2, formatted.runCount)
         assertEquals("review", formatted.categorySlug)
         assertTrue(formatted.markdownContent.contains(":::: tabs"))
-        assertTrue(formatted.markdownContent.contains("::: tab-item 💻 YABS 综合跑分"))
-        assertTrue(formatted.markdownContent.contains("::: tab-item 📍 NextTrace 三网回程"))
+        assertTrue(formatted.markdownContent.contains("::: tab-item YABS 跑分"))
+        assertTrue(formatted.markdownContent.contains("::: tab-item NextTrace 回程"))
         assertTrue(formatted.markdownContent.contains("203.0.*.*"))
         assertTrue(formatted.markdownContent.contains("59.43.*.*"))
     }

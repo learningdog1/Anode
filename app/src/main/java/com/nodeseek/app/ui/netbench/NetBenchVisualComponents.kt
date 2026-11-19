@@ -99,31 +99,28 @@ import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
-import com.nodeseek.app.ui.theme.PulseMetricPill
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import java.util.Locale
 
 internal object NetBenchTelemetryColors {
     @Composable
-    fun excellent(): Color = if (NodePulseThemeTokens.isDark) Color(0xFF34D399) else Color(0xFF059669)
+    fun excellent(): Color = MaterialTheme.colorScheme.primary
 
     @Composable
-    fun good(): Color = if (NodePulseThemeTokens.isDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
+    fun good(): Color = MaterialTheme.colorScheme.secondary
 
     @Composable
-    fun moderate(): Color = if (NodePulseThemeTokens.isDark) Color(0xFFFBBF24) else Color(0xFFD97706)
+    fun moderate(): Color = NodePulseThemeTokens.extendedColors.onDrumstickContainer
 
     @Composable
-    fun poor(): Color = if (NodePulseThemeTokens.isDark) Color(0xFFFB7185) else Color(0xFFDC2626)
+    fun poor(): Color = MaterialTheme.colorScheme.error
 
     @Composable
-    fun violet(): Color = if (NodePulseThemeTokens.isDark) Color(0xFFA78BFA) else Color(0xFF6D28D9)
+    fun violet(): Color = MaterialTheme.colorScheme.tertiary
 
     @Composable
     fun forLatencyMs(ms: Double?): Color = when {
@@ -222,19 +219,15 @@ internal fun ResolvedTargetBanner(
     port: Int,
     modifier: Modifier = Modifier,
 ) {
-    val familyColor = if (resolved.ipFamily == IpFamily.IPV6) {
-        NetBenchTelemetryColors.violet()
-    } else {
-        NetBenchTelemetryColors.good()
-    }
+    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(PulseArchitecturalShapes.MediumBadge)
-            .background(familyColor.copy(alpha = if (NodePulseThemeTokens.isDark) 0.14f else 0.09f))
+            .background(ext.cardSurface)
             .border(
                 width = 0.8.dp,
-                color = familyColor.copy(alpha = 0.30f),
+                color = ext.cardBorder,
                 shape = PulseArchitecturalShapes.MediumBadge,
             )
             .padding(horizontal = 11.dp, vertical = 7.dp),
@@ -244,7 +237,7 @@ internal fun ResolvedTargetBanner(
         Icon(
             imageVector = Icons.Rounded.Router,
             contentDescription = null,
-            tint = familyColor,
+            tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(16.dp),
         )
         Column(modifier = Modifier.weight(1f)) {
@@ -272,8 +265,8 @@ internal fun ResolvedTargetBanner(
         }
         PulseAccentPill(
             text = resolved.ipFamily.label,
-            containerColor = familyColor.copy(alpha = 0.18f),
-            contentColor = familyColor,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -403,13 +396,10 @@ internal fun TcpPingLatencyChart(
     modifier: Modifier = Modifier,
     chartHeight: Dp = 112.dp,
 ) {
-    val excellentColor = NetBenchTelemetryColors.excellent()
-    val goodColor = NetBenchTelemetryColors.good()
-    val moderateColor = NetBenchTelemetryColors.moderate()
     val poorColor = NetBenchTelemetryColors.poor()
     val gridColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
     val lineColor = MaterialTheme.colorScheme.primary
-    val avgLineColor = MaterialTheme.colorScheme.tertiary
+    val avgLineColor = MaterialTheme.colorScheme.outlineVariant
 
     val maxRtt = remember(samples) {
         val rawMax = samples.mapNotNull { if (it.success) it.rttMs else null }.maxOrNull() ?: 100.0
@@ -441,11 +431,7 @@ internal fun TcpPingLatencyChart(
                 .fillMaxWidth()
                 .height(chartHeight)
                 .clip(PulseArchitecturalShapes.SmallChip)
-                .background(
-                    MaterialTheme.colorScheme.surfaceContainerLowest.copy(
-                        alpha = if (NodePulseThemeTokens.isDark) 0.55f else 0.75f,
-                    ),
-                )
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .padding(horizontal = 8.dp, vertical = 10.dp),
         ) {
             val w = size.width
@@ -471,7 +457,7 @@ internal fun TcpPingLatencyChart(
                     color = avgLineColor.copy(alpha = 0.85f),
                     start = Offset(0f, avgY),
                     end = Offset(w, avgY),
-                    strokeWidth = 1.4.dp.toPx(),
+                    strokeWidth = 1.2.dp.toPx(),
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f),
                 )
             }
@@ -491,16 +477,11 @@ internal fun TcpPingLatencyChart(
                     val norm = (sample.rttMs / maxRtt).toFloat().coerceIn(0.04f, 1f)
                     val barHeight = h * norm
                     val topY = h - barHeight
-                    val barColor = when {
-                        sample.rttMs < 60.0 -> excellentColor
-                        sample.rttMs < 150.0 -> goodColor
-                        sample.rttMs < 250.0 -> moderateColor
-                        else -> poorColor
-                    }
+                    val barColor = lineColor
 
                     drawRoundRect(
                         brush = Brush.verticalGradient(
-                            colors = listOf(barColor.copy(alpha = 0.85f), barColor.copy(alpha = 0.25f)),
+                            colors = listOf(barColor.copy(alpha = 0.78f), barColor.copy(alpha = 0.22f)),
                             startY = topY,
                             endY = h,
                         ),
@@ -559,12 +540,12 @@ internal fun NetBenchTcpPingCard(
     modifier: Modifier = Modifier,
 ) {
     val summary = progress.summary
-    val accent = NetBenchTelemetryColors.forLatencyMs(summary.avgMs)
+    val hasLoss = summary.lossPercent > 0.0
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseHeroCard(accentColor = accent)
+            .pulseCard()
             .padding(if (compact) 12.dp else 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -572,22 +553,24 @@ internal fun NetBenchTcpPingCard(
             title = "TCPing 延迟探测",
             subtitle = "端口 ${progress.port} · ${summary.received}/${summary.sent} 成功",
             icon = Icons.Rounded.NetworkCheck,
-            accentColor = accent,
             trailing = {
                 val statusText = when {
                     !progress.isFinished -> "${(progress.completedFraction * 100).toInt()}%"
                     summary.lossPercent <= 0.0 -> "0% 丢包"
                     else -> "丢包 ${NetBenchMarkdownFormatter.formatPercent(summary.lossPercent)}"
                 }
-                val pillColor = if (summary.lossPercent > 0.0) {
-                    NetBenchTelemetryColors.poor()
-                } else {
-                    NetBenchTelemetryColors.excellent()
-                }
                 PulseAccentPill(
                     text = statusText,
-                    containerColor = pillColor.copy(alpha = 0.16f),
-                    contentColor = pillColor,
+                    containerColor = if (hasLoss) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.primaryContainer
+                    },
+                    contentColor = if (hasLoss) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    },
                 )
             },
         )
@@ -599,52 +582,46 @@ internal fun NetBenchTcpPingCard(
                     .fillMaxWidth()
                     .height(4.dp)
                     .clip(CircleShape),
-                color = accent,
+                color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
             )
         }
 
-        // KPI Metric Grid
+        // Single 4-column neutral telemetry strip
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(vertical = 10.dp, horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            PulseMetricPill(
+            NetBenchTelemetryStatColumn(
                 label = "平均延迟",
                 value = summary.avgMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "超时",
-                accentColor = accent,
+                valueColor = if (summary.avgMs == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-            PulseMetricPill(
-                label = "最小 / 最大",
+            NetBenchTelemetryStatColumn(
+                label = "最小/最大",
                 value = if (summary.minMs != null && summary.maxMs != null) {
-                    "${String.format(Locale.US, "%.0f", summary.minMs)} / ${String.format(Locale.US, "%.0f", summary.maxMs)} ms"
+                    "${String.format(Locale.US, "%.0f", summary.minMs)}/${String.format(Locale.US, "%.0f", summary.maxMs)} ms"
                 } else {
                     "—"
                 },
-                accentColor = NetBenchTelemetryColors.good(),
+                valueColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            PulseMetricPill(
-                label = "抖动 (mdev)",
+            NetBenchTelemetryStatColumn(
+                label = "抖动",
                 value = summary.jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—",
-                accentColor = NetBenchTelemetryColors.violet(),
+                valueColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-            PulseMetricPill(
+            NetBenchTelemetryStatColumn(
                 label = "丢包率",
                 value = NetBenchMarkdownFormatter.formatPercent(summary.lossPercent),
-                accentColor = if (summary.lossPercent == 0.0) {
-                    NetBenchTelemetryColors.excellent()
-                } else {
-                    NetBenchTelemetryColors.poor()
-                },
+                valueColor = if (hasLoss) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -696,19 +673,50 @@ internal fun NetBenchTcpPingCard(
                     Text(
                         text = info,
                         style = NodePulseThemeTokens.extraTypography.codeLabel,
-                        color = NetBenchTelemetryColors.excellent(),
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 } else {
                     Text(
                         text = httpResult.errorMessage ?: "探测失败",
                         style = MaterialTheme.typography.labelSmall,
-                        color = NetBenchTelemetryColors.poor(),
+                        color = MaterialTheme.colorScheme.error,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NetBenchTelemetryStatColumn(
+    label: String,
+    value: String,
+    valueColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleSmall.copy(
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Bold,
+            ).withTabularNumbers(),
+            color = valueColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
     }
 }
 
@@ -740,7 +748,7 @@ internal fun MbpsArcGauge(
         label = "mbpsGaugeFraction",
     )
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-    val secondaryAccent = NodePulseThemeTokens.extendedColors.brandGradientEnd
+    val secondaryAccent = MaterialTheme.colorScheme.secondary
 
     Box(
         modifier = modifier.size(width = sizeDp, height = sizeDp * 0.78f),
@@ -800,7 +808,7 @@ internal fun MbpsArcGauge(
             Text(
                 text = "$unitStr · $label",
                 style = NodePulseThemeTokens.extraTypography.microLabel,
-                color = accentColor,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
         }
@@ -819,12 +827,11 @@ internal fun NetBenchIperf3Card(
     modifier: Modifier = Modifier,
 ) {
     if (downloadProgress == null && uploadProgress == null) return
-    val accent = NetBenchTelemetryColors.good()
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = accent)
+            .pulseCard()
             .padding(if (compact) 12.dp else 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -832,7 +839,7 @@ internal fun NetBenchIperf3Card(
             title = "原生 iperf3 吞吐测速",
             subtitle = "纯 Kotlin TCP 协议 · 端口 $iperfPort",
             icon = Icons.Rounded.Speed,
-            accentColor = accent,
+            accentColor = MaterialTheme.colorScheme.primary,
         )
 
         val items = listOfNotNull(downloadProgress, uploadProgress)
@@ -872,7 +879,7 @@ private fun Iperf3SingleDirectionBlock(
     modifier: Modifier = Modifier,
 ) {
     val isDownload = progress.direction == Iperf3Direction.DOWNLOAD
-    val dirColor = if (isDownload) NetBenchTelemetryColors.excellent() else NetBenchTelemetryColors.good()
+    val dirColor = MaterialTheme.colorScheme.primary
     val displayMbps = when (progress.stage) {
         Iperf3Stage.COMPLETED -> progress.finalResult?.effectiveMbps ?: progress.averageMbps
         Iperf3Stage.TEST_RUNNING -> if (progress.instantMbps > 0.0) progress.instantMbps else progress.averageMbps
@@ -908,14 +915,14 @@ private fun Iperf3SingleDirectionBlock(
             PulseAccentPill(
                 text = progress.stage.label,
                 containerColor = if (progress.stage == Iperf3Stage.FAILED) {
-                    NetBenchTelemetryColors.poor().copy(alpha = 0.16f)
+                    MaterialTheme.colorScheme.errorContainer
                 } else {
-                    dirColor.copy(alpha = 0.15f)
+                    MaterialTheme.colorScheme.primaryContainer
                 },
                 contentColor = if (progress.stage == Iperf3Stage.FAILED) {
-                    NetBenchTelemetryColors.poor()
+                    MaterialTheme.colorScheme.onErrorContainer
                 } else {
-                    dirColor
+                    MaterialTheme.colorScheme.onPrimaryContainer
                 },
             )
         }
@@ -974,19 +981,24 @@ internal fun NetBenchIpIntelligenceCard(
     compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val originColor = NetBenchTelemetryColors.forOrigin(report.originType)
-    val flag = IpClassificationEngine.countryFlagEmoji(report.countryCode)
+    val ext = NodePulseThemeTokens.extendedColors
     val locationText = IpClassificationEngine.formatLocationSummary(
         countryCode = report.countryCode,
         countryName = report.countryName,
         regionName = report.regionName,
         cityName = report.cityName,
     )
+    val (originBg, originFg) = when (report.originType) {
+        IpOriginType.NATIVE -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+        IpOriginType.BROADCAST -> ext.drumstickContainer to ext.onDrumstickContainer
+        IpOriginType.ANYCAST -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+        IpOriginType.UNKNOWN -> MaterialTheme.colorScheme.surfaceContainerHigh to MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = originColor)
+            .pulseCard()
             .padding(if (compact) 12.dp else 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -994,7 +1006,7 @@ internal fun NetBenchIpIntelligenceCard(
             title = "IP 归属与原生/广播鉴定",
             subtitle = "${report.ip} · ${report.ipFamily.label}",
             icon = Icons.Rounded.Public,
-            accentColor = originColor,
+            accentColor = MaterialTheme.colorScheme.primary,
             trailing = {
                 PulseAccentPill(
                     text = report.originType.label,
@@ -1004,8 +1016,8 @@ internal fun NetBenchIpIntelligenceCard(
                         IpOriginType.ANYCAST -> Icons.Rounded.Bolt
                         IpOriginType.UNKNOWN -> Icons.Rounded.Public
                     },
-                    containerColor = originColor.copy(alpha = 0.18f),
-                    contentColor = originColor,
+                    containerColor = originBg,
+                    contentColor = originFg,
                 )
             },
         )
@@ -1015,10 +1027,10 @@ internal fun NetBenchIpIntelligenceCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(PulseArchitecturalShapes.MediumBadge)
-                .background(originColor.copy(alpha = if (NodePulseThemeTokens.isDark) 0.14f else 0.08f))
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .border(
                     width = 0.8.dp,
-                    color = originColor.copy(alpha = 0.30f),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
                     shape = PulseArchitecturalShapes.MediumBadge,
                 )
                 .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1028,7 +1040,7 @@ internal fun NetBenchIpIntelligenceCard(
             Icon(
                 imageVector = Icons.Rounded.CheckCircle,
                 contentDescription = null,
-                tint = originColor,
+                tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(16.dp),
             )
             Text(
@@ -1048,28 +1060,22 @@ internal fun NetBenchIpIntelligenceCard(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 PulseAccentPill(
-                    text = "$flag $locationText",
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    text = locationText,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                 )
                 report.asn?.let { asn ->
                     PulseAccentPill(
                         text = asn,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (report.usageType != IpUsageType.UNKNOWN) {
-                    val usageColor = when (report.usageType) {
-                        IpUsageType.ISP_RESIDENTIAL_OR_BUSINESS -> NetBenchTelemetryColors.excellent()
-                        IpUsageType.HOSTING_DATACENTER -> NetBenchTelemetryColors.good()
-                        IpUsageType.ANYCAST -> NetBenchTelemetryColors.violet()
-                        IpUsageType.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
-                    }
                     PulseAccentPill(
                         text = report.usageType.label,
-                        containerColor = usageColor.copy(alpha = 0.15f),
-                        contentColor = usageColor,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -1110,7 +1116,7 @@ internal fun NetBenchIpIntelligenceCard(
                 Icon(
                     imageVector = Icons.Rounded.Security,
                     contentDescription = null,
-                    tint = NetBenchTelemetryColors.excellent(),
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(14.dp),
                 )
                 val clientText = buildString {
@@ -1153,7 +1159,7 @@ internal fun NetBenchMarkdownReportCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = MaterialTheme.colorScheme.primary)
+            .pulseCard()
             .padding(if (compact) 12.dp else 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -1274,7 +1280,7 @@ internal fun NetBenchMarkdownReportCard(
                     modifier = Modifier
                         .weight(1.15f)
                         .clip(PulseArchitecturalShapes.MediumBadge)
-                        .background(PulseBrushes.brandGradient())
+                        .background(MaterialTheme.colorScheme.primary)
                         .pulseBouncyClickable(onClick = { onInsertMarkdown(markdown) })
                         .padding(vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1283,14 +1289,14 @@ internal fun NetBenchMarkdownReportCard(
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.Send,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = insertActionLabel,
                         style = MaterialTheme.typography.labelLarge,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onPrimary,
                     )
                 }
             }
@@ -1306,13 +1312,16 @@ internal fun NetBenchErrorCallout(
     message: String,
     modifier: Modifier = Modifier,
 ) {
-    val errColor = NetBenchTelemetryColors.poor()
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(PulseArchitecturalShapes.SmallChip)
-            .background(errColor.copy(alpha = if (NodePulseThemeTokens.isDark) 0.16f else 0.10f))
-            .border(0.8.dp, errColor.copy(alpha = 0.35f), PulseArchitecturalShapes.SmallChip)
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .border(
+                width = 0.8.dp,
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
+                shape = PulseArchitecturalShapes.SmallChip,
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1320,13 +1329,13 @@ internal fun NetBenchErrorCallout(
         Icon(
             imageVector = Icons.Rounded.ErrorOutline,
             contentDescription = null,
-            tint = errColor,
+            tint = MaterialTheme.colorScheme.onErrorContainer,
             modifier = Modifier.size(16.dp),
         )
         Text(
             text = message,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = MaterialTheme.colorScheme.onErrorContainer,
         )
     }
 }

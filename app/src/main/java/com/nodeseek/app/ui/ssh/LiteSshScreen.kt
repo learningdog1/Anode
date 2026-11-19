@@ -124,14 +124,18 @@ import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
+import com.nodeseek.app.ui.theme.ObsidianErrorContainer
+import com.nodeseek.app.ui.theme.ObsidianOnErrorContainer
+import com.nodeseek.app.ui.theme.ObsidianOnPrimaryContainer
+import com.nodeseek.app.ui.theme.ObsidianPrimary
+import com.nodeseek.app.ui.theme.ObsidianPrimaryContainer
+import com.nodeseek.app.ui.theme.ObsidianSecondary
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -153,9 +157,11 @@ fun LiteSshScreen(
     onPublishToComposer: (suggestedTitle: String, markdownContent: String) -> Unit,
     onInsertToReply: ((markdownContent: String) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    previewUiState: LiteSshUiState? = null,
     viewModel: LiteSshViewModel = viewModel(factory = LiteSshViewModel.factory(LocalContext.current)),
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val uiState = previewUiState ?: observedUiState
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -488,7 +494,7 @@ private fun ServerVaultSection(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .pulseHeroCard()
+                    .pulseCard()
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -500,13 +506,13 @@ private fun ServerVaultSection(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(PulseBrushes.brandGradient()),
+                            .background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Terminal,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.size(22.dp),
                         )
                     }
@@ -562,7 +568,6 @@ private fun ServerVaultCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    val accent = if (selected) MaterialTheme.colorScheme.primary else null
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else null
 
     Column(
@@ -570,9 +575,8 @@ private fun ServerVaultCard(
             .widthIn(min = 216.dp, max = 256.dp)
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
-                accentColor = accent,
                 borderColor = borderColor,
-                borderWidth = if (selected) 1.5.dp else 1.dp,
+                borderWidth = if (selected) 1.2.dp else 0.8.dp,
             )
             .pulseBouncyClickable(enabled = enabled, role = Role.Button, onClick = onSelect)
             .padding(12.dp),
@@ -593,7 +597,7 @@ private fun ServerVaultCard(
                         .size(8.dp)
                         .clip(CircleShape)
                         .background(
-                            if (selected) Color(0xFF10B981) else MaterialTheme.colorScheme.outlineVariant,
+                            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
                         ),
                 )
                 Text(
@@ -647,22 +651,22 @@ private fun ServerVaultCard(
             PulseAccentPill(
                 text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
                 icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (server.hasTrustedHostKey) {
                 PulseAccentPill(
                     text = "TOFU 已校验",
                     icon = Icons.Rounded.VerifiedUser,
-                    containerColor = Color(0xFF10B981).copy(alpha = 0.14f),
-                    contentColor = Color(0xFF10B981),
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             } else {
                 PulseAccentPill(
                     text = "首次校验",
                     icon = Icons.Rounded.Lock,
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f),
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -1083,19 +1087,19 @@ private fun AnsiTerminalConsoleCard(
 
     val statusColor = when (connectionPhase) {
         SshConnectionPhase.IDLE -> ext.onCodeMuted
-        SshConnectionPhase.CONNECTING -> Color(0xFFFBBF24)
-        SshConnectionPhase.RUNNING -> Color(0xFF34D399)
-        SshConnectionPhase.COMPLETED -> if (exitCode == 0 || exitCode == null) Color(0xFF34D399) else Color(0xFFFBBF24)
-        SshConnectionPhase.FAILED -> Color(0xFFFF7B72)
-        SshConnectionPhase.CANCELLED -> Color(0xFFFBBF24)
+        SshConnectionPhase.CONNECTING -> ObsidianSecondary
+        SshConnectionPhase.RUNNING -> ObsidianPrimary
+        SshConnectionPhase.COMPLETED -> if (exitCode == 0 || exitCode == null) ObsidianPrimary else ObsidianSecondary
+        SshConnectionPhase.FAILED -> MaterialTheme.colorScheme.error
+        SshConnectionPhase.CANCELLED -> ObsidianSecondary
     }
 
     val maskBg by animateColorAsState(
-        targetValue = if (maskServerIp) Color(0xFF10B981).copy(alpha = 0.20f) else Color.White.copy(alpha = 0.07f),
+        targetValue = if (maskServerIp) ObsidianPrimaryContainer.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.06f),
         label = "maskBg",
     )
     val maskFg by animateColorAsState(
-        targetValue = if (maskServerIp) Color(0xFF6EE7B7) else ext.onCodeMuted,
+        targetValue = if (maskServerIp) ObsidianOnPrimaryContainer else ext.onCodeMuted,
         label = "maskFg",
     )
 
@@ -1124,11 +1128,12 @@ private fun AnsiTerminalConsoleCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color(0xFFFF5F56).copy(alpha = 0.85f)))
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color(0xFFFFBD2E).copy(alpha = 0.85f)))
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color(0xFF27C93F).copy(alpha = 0.85f)))
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Terminal,
+                    contentDescription = null,
+                    tint = ext.onCodeMuted,
+                    modifier = Modifier.size(15.dp),
+                )
                 Box(
                     modifier = Modifier
                         .size(7.dp)
@@ -1257,7 +1262,7 @@ private fun AnsiTerminalConsoleCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(
-                        if (autoScrollConsole) Color(0xFF38BDF8).copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f),
+                        if (autoScrollConsole) ObsidianPrimaryContainer.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.06f),
                     )
                     .clickable { onToggleAutoScroll(!autoScrollConsole) }
                     .padding(horizontal = 7.dp, vertical = 4.dp),
@@ -1267,13 +1272,13 @@ private fun AnsiTerminalConsoleCard(
                 Icon(
                     imageVector = Icons.Rounded.VerticalAlignBottom,
                     contentDescription = null,
-                    tint = if (autoScrollConsole) Color(0xFF7DD3FC) else ext.onCodeMuted,
+                    tint = if (autoScrollConsole) ObsidianOnPrimaryContainer else ext.onCodeMuted,
                     modifier = Modifier.size(13.dp),
                 )
                 Text(
                     text = "跟随滚动",
                     style = codeTypography.microLabel,
-                    color = if (autoScrollConsole) Color(0xFF7DD3FC) else ext.onCodeMuted,
+                    color = if (autoScrollConsole) ObsidianOnPrimaryContainer else ext.onCodeMuted,
                 )
             }
 
@@ -1306,7 +1311,7 @@ private fun AnsiTerminalConsoleCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF7F1D1D).copy(alpha = 0.45f))
+                    .background(ObsidianErrorContainer.copy(alpha = 0.65f))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1314,13 +1319,13 @@ private fun AnsiTerminalConsoleCard(
                 Icon(
                     imageVector = Icons.Rounded.ErrorOutline,
                     contentDescription = null,
-                    tint = Color(0xFFFFA198),
+                    tint = ObsidianOnErrorContainer,
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
                     text = errorMessage,
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFFFD8D5),
+                    color = ObsidianOnErrorContainer,
                 )
             }
         }
@@ -1413,11 +1418,15 @@ private fun LiteSshExportDock(
                 text = if (maskServerIp) "IP 已打码" else "原始 IP",
                 icon = Icons.Rounded.Shield,
                 containerColor = if (maskServerIp) {
-                    Color(0xFF10B981).copy(alpha = 0.15f)
+                    MaterialTheme.colorScheme.primaryContainer
                 } else {
                     MaterialTheme.colorScheme.errorContainer
                 },
-                contentColor = if (maskServerIp) Color(0xFF10B981) else MaterialTheme.colorScheme.onErrorContainer,
+                contentColor = if (maskServerIp) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onErrorContainer
+                },
             )
         }
 

@@ -22,6 +22,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -131,17 +132,17 @@ import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.SortSegmentItem
+import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
-import com.nodeseek.app.ui.theme.PulseMetricPill
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
-import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
-import com.nodeseek.app.ui.theme.pulseHeroCard
+import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.launch
 import java.net.URI
 
@@ -533,19 +534,19 @@ private fun RestockMonitorTopBar(
             ) {
                 Text(
                     text = "VPS 补货抢购监控",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Box(
                     modifier = Modifier
-                        .size(8.dp)
+                        .size(6.dp)
                         .clip(CircleShape)
                         .background(
                             if (settings.isMonitorEnabled) {
-                                restockStatusAccentColor(RestockStockStatus.IN_STOCK)
+                                MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.outline
                             },
@@ -599,86 +600,23 @@ private fun RestockTabSwitcher(
     onSelectTab: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    Row(
-        modifier = modifier
-            .clip(PulseArchitecturalShapes.MediumBadge)
-            .background(ext.cardSurface)
-            .border(1.dp, ext.cardBorder, PulseArchitecturalShapes.MediumBadge)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        TabSegmentButton(
-            label = "蹲守列表 ($watchCount)",
-            icon = Icons.Rounded.Radar,
-            selected = selectedTab == 0,
-            badgeCount = 0,
-            onClick = { onSelectTab(0) },
-            modifier = Modifier.weight(1f),
-        )
-        TabSegmentButton(
-            label = "补货记录 ($historyCount)",
-            icon = Icons.Rounded.History,
-            selected = selectedTab == 1,
-            badgeCount = unreadHistoryCount,
-            onClick = { onSelectTab(1) },
-            modifier = Modifier.weight(1f),
+    val historyLabel = when {
+        unreadHistoryCount > 0 -> "补货记录 · ${unreadHistoryCount} 未读"
+        historyCount > 0 -> "补货记录 ($historyCount)"
+        else -> "补货记录"
+    }
+    val options = remember(watchCount, historyLabel) {
+        listOf(
+            SortSegmentItem(0, "蹲守列表 ($watchCount)"),
+            SortSegmentItem(1, historyLabel),
         )
     }
-}
-
-@Composable
-private fun TabSegmentButton(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    selected: Boolean,
-    badgeCount: Int,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val bg = if (selected) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        Color.Transparent
-    }
-    val fg = if (selected) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Row(
-        modifier = modifier
-            .clip(PulseArchitecturalShapes.SmallChip)
-            .background(bg)
-            .pulseBouncyClickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = fg,
-            modifier = Modifier.size(16.dp),
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = fg,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (badgeCount > 0) {
-            Spacer(modifier = Modifier.width(6.dp))
-            CompactCountBadge(
-                count = badgeCount,
-                containerColor = MaterialTheme.colorScheme.error,
-                contentColor = MaterialTheme.colorScheme.onError,
-            )
-        }
-    }
+    SortSegmentedSwitcher(
+        options = options,
+        selectedValue = selectedTab,
+        onSelect = onSelectTab,
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -795,7 +733,7 @@ private fun NotificationPermissionBanner(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = errorAccent)
+            .pulseCard()
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -833,15 +771,13 @@ private fun RestockHeroSummaryCard(
     uiState: RestockMonitorUiState,
     onCheckAllNow: () -> Unit,
 ) {
-    val inStockAccent = restockStatusAccentColor(RestockStockStatus.IN_STOCK)
-    val oosAccent = restockStatusAccentColor(RestockStockStatus.OUT_OF_STOCK)
-    val heroAccent = if (uiState.inStockCount > 0) inStockAccent else MaterialTheme.colorScheme.primary
+    val ext = NodePulseThemeTokens.extendedColors
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseHeroCard(accentColor = heroAccent)
-            .padding(16.dp),
+            .pulseCard(shape = PulseArchitecturalShapes.HeroBento)
+            .padding(15.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
@@ -870,6 +806,10 @@ private fun RestockHeroSummaryCard(
                 onClick = onCheckAllNow,
                 enabled = !uiState.runtimeStatus.isCheckingNow && uiState.watchItems.any { it.isEnabled },
                 shape = PulseArchitecturalShapes.MediumBadge,
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 if (uiState.runtimeStatus.isCheckingNow) {
@@ -886,37 +826,66 @@ private fun RestockHeroSummaryCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("立即巡检全部")
+                    Text("立即巡检")
                 }
             }
         }
+
+        PulseGradientDivider(color = ext.cardBorder.copy(alpha = 0.55f))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PulseMetricPill(
+            RestockHeroStatColumn(
                 label = "有货可抢",
                 value = uiState.inStockCount.toString(),
-                icon = Icons.Rounded.CheckCircle,
-                accentColor = inStockAccent,
+                valueColor = if (uiState.inStockCount > 0) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
                 modifier = Modifier.weight(1f),
             )
-            PulseMetricPill(
+            RestockHeroStatColumn(
                 label = "缺货蹲守",
                 value = uiState.outOfStockCount.toString(),
-                icon = Icons.Rounded.HourglassBottom,
-                accentColor = oosAccent,
                 modifier = Modifier.weight(1f),
             )
-            PulseMetricPill(
+            RestockHeroStatColumn(
                 label = "补货提醒",
                 value = uiState.eventHistory.size.toString(),
-                icon = Icons.Rounded.NotificationsActive,
-                accentColor = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f),
             )
         }
+    }
+}
+
+@Composable
+private fun RestockHeroStatColumn(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.Bold,
+            ).withTabularNumbers(),
+            color = valueColor,
+            maxLines = 1,
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
     }
 }
 
@@ -1069,11 +1038,14 @@ private fun RestockWatchCard(
     onOpenTopic: (() -> Unit)?,
     onImportToServerLedger: (() -> Unit)?,
 ) {
-    val accentColor = when (item.stockStatus) {
-        RestockStockStatus.IN_STOCK -> restockStatusAccentColor(RestockStockStatus.IN_STOCK)
-        RestockStockStatus.CHECK_ERROR -> MaterialTheme.colorScheme.error
-        else -> null
+    val ext = NodePulseThemeTokens.extendedColors
+    val cardShape = PulseArchitecturalShapes.EditorialCard
+    val cardBorderColor = when (item.stockStatus) {
+        RestockStockStatus.IN_STOCK -> MaterialTheme.colorScheme.primary.copy(alpha = 0.48f)
+        RestockStockStatus.CHECK_ERROR -> MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
+        else -> ext.cardBorder
     }
+    val cardBorderWidth = if (item.stockStatus == RestockStockStatus.IN_STOCK) 1.dp else 0.8.dp
     val hostText = remember(item.resolvedOrderUrl) {
         runCatching { URI(item.resolvedOrderUrl).host }.getOrNull()
             ?.removePrefix("www.")
@@ -1083,7 +1055,9 @@ private fun RestockWatchCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = accentColor)
+            .clip(cardShape)
+            .background(ext.cardSurface)
+            .border(width = cardBorderWidth, color = cardBorderColor, shape = cardShape)
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -1188,7 +1162,12 @@ private fun RestockWatchCard(
                 Row(
                     modifier = Modifier
                         .clip(PulseArchitecturalShapes.SmallChip)
-                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .border(
+                            width = 0.8.dp,
+                            color = ext.cardBorder,
+                            shape = PulseArchitecturalShapes.SmallChip,
+                        )
                         .clickable(onClick = onOpenTopic)
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1197,13 +1176,13 @@ private fun RestockWatchCard(
                     Icon(
                         imageVector = Icons.Rounded.Forum,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(12.dp),
                     )
                     Text(
                         text = "原帖 #${item.sourceTopicId}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -1249,6 +1228,10 @@ private fun RestockWatchCard(
                 onClick = onCheckNow,
                 enabled = !isChecking,
                 shape = PulseArchitecturalShapes.SmallChip,
+                border = BorderStroke(0.8.dp, ext.cardBorder),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 if (isChecking) {
@@ -1466,11 +1449,19 @@ private fun RestockEventHistoryCard(
     onDelete: () -> Unit,
     onOpenTopic: (() -> Unit)?,
 ) {
-    val inStockColor = restockStatusAccentColor(RestockStockStatus.IN_STOCK)
+    val ext = NodePulseThemeTokens.extendedColors
+    val cardShape = PulseArchitecturalShapes.EditorialCard
+    val borderColor = if (!event.isRead) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+    } else {
+        ext.cardBorder
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(accentColor = if (!event.isRead) inStockColor else null)
+            .clip(cardShape)
+            .background(ext.cardSurface)
+            .border(width = if (!event.isRead) 1.dp else 0.8.dp, color = borderColor, shape = cardShape)
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -1482,9 +1473,9 @@ private fun RestockEventHistoryCard(
             if (!event.isRead) {
                 Box(
                     modifier = Modifier
-                        .size(8.dp)
+                        .size(7.dp)
                         .clip(CircleShape)
-                        .background(inStockColor),
+                        .background(MaterialTheme.colorScheme.primary),
                 )
             }
             RestockStatusPill(status = RestockStockStatus.IN_STOCK)
@@ -1750,20 +1741,11 @@ private fun WatchIntervalPickerDialog(
 }
 
 @Composable
-private fun restockCheckoutButtonColors(): ButtonColors {
-    val isDark = NodePulseThemeTokens.isDark
-    return if (isDark) {
-        ButtonDefaults.buttonColors(
-            containerColor = Color(0xFF4ADE80),
-            contentColor = Color(0xFF052E16),
-        )
-    } else {
-        ButtonDefaults.buttonColors(
-            containerColor = Color(0xFF15803D),
-            contentColor = Color.White,
-        )
-    }
-}
+private fun restockCheckoutButtonColors(): ButtonColors =
+    ButtonDefaults.buttonColors(
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+    )
 
 private fun readClipboardText(context: Context): String? {
     val cm = context.getSystemService(ClipboardManager::class.java) ?: return null

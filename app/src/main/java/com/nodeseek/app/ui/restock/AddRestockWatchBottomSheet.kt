@@ -622,14 +622,10 @@ internal fun StockProbePreviewCard(
     result: StockAnalysisResult,
     modifier: Modifier = Modifier,
 ) {
-    val accent = restockStatusAccentColor(result.stockStatus)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.MediumBadge,
-                accentColor = accent,
-            )
+            .pulseCard(shape = PulseArchitecturalShapes.MediumBadge)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -676,45 +672,39 @@ internal data class RestockStatusColors(
 )
 
 @Composable
-internal fun restockStatusAccentColor(status: RestockStockStatus): Color {
-    val isDark = NodePulseThemeTokens.isDark
-    return when (status) {
-        RestockStockStatus.IN_STOCK -> if (isDark) Color(0xFF4ADE80) else Color(0xFF16A34A)
-        RestockStockStatus.OUT_OF_STOCK -> if (isDark) Color(0xFFFBBF24) else Color(0xFFD97706)
-        RestockStockStatus.CHECK_ERROR -> MaterialTheme.colorScheme.error
-        RestockStockStatus.UNKNOWN -> MaterialTheme.colorScheme.outline
-    }
+internal fun restockStatusAccentColor(status: RestockStockStatus): Color = when (status) {
+    RestockStockStatus.IN_STOCK -> MaterialTheme.colorScheme.primary
+    RestockStockStatus.OUT_OF_STOCK -> MaterialTheme.colorScheme.onSurfaceVariant
+    RestockStockStatus.CHECK_ERROR -> MaterialTheme.colorScheme.error
+    RestockStockStatus.UNKNOWN -> MaterialTheme.colorScheme.outline
 }
 
 @Composable
-internal fun rememberRestockStatusColors(status: RestockStockStatus): RestockStatusColors {
-    val isDark = NodePulseThemeTokens.isDark
-    return when (status) {
-        RestockStockStatus.IN_STOCK -> RestockStatusColors(
-            container = if (isDark) Color(0xFF0F2E1D) else Color(0xFFDCFCE7),
-            content = if (isDark) Color(0xFF4ADE80) else Color(0xFF15803D),
-            border = if (isDark) Color(0xFF4ADE80).copy(alpha = 0.40f) else Color(0xFF16A34A).copy(alpha = 0.30f),
-            icon = Icons.Rounded.CheckCircle,
-        )
-        RestockStockStatus.OUT_OF_STOCK -> RestockStatusColors(
-            container = if (isDark) Color(0xFF2E210A) else Color(0xFFFEF3C7),
-            content = if (isDark) Color(0xFFFBBF24) else Color(0xFFB45309),
-            border = if (isDark) Color(0xFFFBBF24).copy(alpha = 0.40f) else Color(0xFFD97706).copy(alpha = 0.32f),
-            icon = Icons.Rounded.HourglassBottom,
-        )
-        RestockStockStatus.CHECK_ERROR -> RestockStatusColors(
-            container = MaterialTheme.colorScheme.errorContainer,
-            content = MaterialTheme.colorScheme.onErrorContainer,
-            border = MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
-            icon = Icons.Rounded.ErrorOutline,
-        )
-        RestockStockStatus.UNKNOWN -> RestockStatusColors(
-            container = MaterialTheme.colorScheme.surfaceContainerHigh,
-            content = MaterialTheme.colorScheme.onSurfaceVariant,
-            border = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-            icon = Icons.Rounded.Schedule,
-        )
-    }
+internal fun rememberRestockStatusColors(status: RestockStockStatus): RestockStatusColors = when (status) {
+    RestockStockStatus.IN_STOCK -> RestockStatusColors(
+        container = MaterialTheme.colorScheme.primaryContainer,
+        content = MaterialTheme.colorScheme.onPrimaryContainer,
+        border = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+        icon = Icons.Rounded.CheckCircle,
+    )
+    RestockStockStatus.OUT_OF_STOCK -> RestockStatusColors(
+        container = MaterialTheme.colorScheme.surfaceContainerHigh,
+        content = MaterialTheme.colorScheme.onSurfaceVariant,
+        border = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+        icon = Icons.Rounded.HourglassBottom,
+    )
+    RestockStockStatus.CHECK_ERROR -> RestockStatusColors(
+        container = MaterialTheme.colorScheme.errorContainer,
+        content = MaterialTheme.colorScheme.onErrorContainer,
+        border = MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
+        icon = Icons.Rounded.ErrorOutline,
+    )
+    RestockStockStatus.UNKNOWN -> RestockStatusColors(
+        container = MaterialTheme.colorScheme.surfaceContainerHigh,
+        content = MaterialTheme.colorScheme.onSurfaceVariant,
+        border = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+        icon = Icons.Rounded.Schedule,
+    )
 }
 
 @Composable
@@ -752,15 +742,14 @@ internal fun PanelTypeBadge(
     panelType: MerchantPanelType,
     modifier: Modifier = Modifier,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val accent = MaterialTheme.colorScheme.primary
+    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = modifier
             .clip(PulseArchitecturalShapes.SmallChip)
-            .background(accent.copy(alpha = if (isDark) 0.16f else 0.10f))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .border(
                 width = 0.75.dp,
-                color = accent.copy(alpha = if (isDark) 0.32f else 0.22f),
+                color = ext.cardBorder,
                 shape = PulseArchitecturalShapes.SmallChip,
             )
             .padding(horizontal = 7.dp, vertical = 3.dp),
@@ -769,7 +758,7 @@ internal fun PanelTypeBadge(
         Text(
             text = panelType.displayName,
             style = NodePulseThemeTokens.extraTypography.microLabel,
-            color = accent,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
     }
@@ -784,14 +773,19 @@ internal fun PriceHintBadge(
     Row(
         modifier = modifier
             .clip(PulseArchitecturalShapes.SmallChip)
-            .background(ext.drumstickContainer)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .border(
+                width = 0.75.dp,
+                color = ext.cardBorder,
+                shape = PulseArchitecturalShapes.SmallChip,
+            )
             .padding(horizontal = 7.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = priceHint,
-            style = NodePulseThemeTokens.extraTypography.microLabel,
-            color = ext.onDrumstickContainer,
+            style = NodePulseThemeTokens.extraTypography.microLabel.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

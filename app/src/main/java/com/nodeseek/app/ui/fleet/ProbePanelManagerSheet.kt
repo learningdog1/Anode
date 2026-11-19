@@ -415,14 +415,14 @@ internal fun ProbePanelManagerSheet(
                             is PanelTestUiState.Completed -> {
                                 val res = testState.result
                                 val bg = if (res.success) {
-                                    FleetSemanticColors.onlineContainer(NodePulseThemeTokens.isDark)
+                                    FleetSemanticColors.onlineContainer()
                                 } else {
-                                    MaterialTheme.colorScheme.errorContainer
+                                    FleetSemanticColors.offlineContainer()
                                 }
                                 val fg = if (res.success) {
-                                    FleetSemanticColors.onlineAccent(NodePulseThemeTokens.isDark)
+                                    FleetSemanticColors.onlineOnContainer()
                                 } else {
-                                    MaterialTheme.colorScheme.onErrorContainer
+                                    FleetSemanticColors.offlineOnContainer()
                                 }
                                 Row(
                                     modifier = Modifier
@@ -729,21 +729,27 @@ internal fun fleetTextFieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 internal object FleetSemanticColors {
-    fun onlineAccent(isDark: Boolean): Color =
-        if (isDark) Color(0xFF4ADE80) else Color(0xFF15803D)
+    @Composable
+    fun onlineAccent(): Color = MaterialTheme.colorScheme.primary
 
-    fun onlineContainer(isDark: Boolean): Color =
-        if (isDark) Color(0xFF102A1B) else Color(0xFFDCFCE7)
+    @Composable
+    fun onlineContainer(): Color = MaterialTheme.colorScheme.primaryContainer
 
-    fun warningAccent(isDark: Boolean): Color =
-        if (isDark) Color(0xFFFBBF24) else Color(0xFFB45309)
+    @Composable
+    fun onlineOnContainer(): Color = MaterialTheme.colorScheme.onPrimaryContainer
 
-    fun warningContainer(isDark: Boolean): Color =
-        if (isDark) Color(0xFF2E220D) else Color(0xFFFEF3C7)
+    @Composable
+    fun warningAccent(): Color = NodePulseThemeTokens.extendedColors.onDrumstickContainer
 
-    fun offlineAccent(isDark: Boolean): Color =
-        if (isDark) Color(0xFFF87171) else Color(0xFFDC2626)
+    @Composable
+    fun warningContainer(): Color = NodePulseThemeTokens.extendedColors.drumstickContainer
 
-    fun offlineContainer(isDark: Boolean): Color =
-        if (isDark) Color(0xFF331517) else Color(0xFFFEE2E2)
+    @Composable
+    fun offlineAccent(): Color = MaterialTheme.colorScheme.error
+
+    @Composable
+    fun offlineContainer(): Color = MaterialTheme.colorScheme.errorContainer
+
+    @Composable
+    fun offlineOnContainer(): Color = MaterialTheme.colorScheme.onErrorContainer
 }

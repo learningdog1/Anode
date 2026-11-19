@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -108,16 +109,18 @@ import com.nodeseek.app.domain.deals.DealSourceTab
 import com.nodeseek.app.domain.deals.DealsHubSummaryStats
 import com.nodeseek.app.domain.deals.DealsRepository
 import com.nodeseek.app.domain.deals.PromoDealCardModel
+import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.SortSegmentItem
+import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseElevation
+import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseShimmerBox
-import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
-import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -145,6 +148,7 @@ fun DealsHubScreen(
     overseasTabContent: (@Composable () -> Unit)? = null,
     bottomContentPadding: Dp = 24.dp,
     nowMillisProvider: () -> Long = { System.currentTimeMillis() },
+    previewUiState: DealsHubUiState? = null,
     viewModel: DealsHubViewModel = viewModel(
         key = "DealsHubViewModel_$initialTabIndex",
         factory = DealsHubViewModel.factory(
@@ -153,7 +157,8 @@ fun DealsHubScreen(
         ),
     ),
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val uiState = previewUiState ?: observedUiState
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -398,20 +403,20 @@ private fun DealsHubTopBar(
     onBack: (() -> Unit)?,
     onRefresh: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
+    val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
-    val accent = if (isDark) Color(0xFFFB923C) else Color(0xFFEA580C)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .pulseGlassSurface(
                 showBottomBorder = true,
-                tonalAccent = accent,
+                tonalAccent = MaterialTheme.colorScheme.primary,
             )
             .statusBarsPadding()
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(start = 6.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (onBack != null) {
             IconButton(onClick = onBack) {
@@ -427,15 +432,15 @@ private fun DealsHubTopBar(
 
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(1.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
                     text = "黑五大促专题",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -443,28 +448,36 @@ private fun DealsHubTopBar(
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
-                        .background(dealHighContrastFlameBrush())
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .padding(horizontal = 8.dp, vertical = 2.5.dp),
                 ) {
                     Text(
-                        text = "LIVE",
-                        style = extraType.microLabel.copy(fontSize = 9.5.sp),
-                        color = Color.White,
+                        text = "11.27",
+                        style = extraType.microLabel.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ).withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                 }
             }
             Text(
                 text = "VPS 价格解析 · 实时汇率 $fxRateLabel",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
 
-        IconButton(
-            onClick = onRefresh,
-            enabled = !isRefreshing,
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .border(0.8.dp, ext.cardBorder, CircleShape)
+                .clickable(enabled = !isRefreshing, role = Role.Button, onClick = onRefresh),
+            contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = Icons.Rounded.Refresh,
@@ -474,6 +487,7 @@ private fun DealsHubTopBar(
                 } else {
                     MaterialTheme.colorScheme.onSurface
                 },
+                modifier = Modifier.size(18.dp),
             )
         }
     }
@@ -488,8 +502,6 @@ private fun BlackFridayHeroCountdownCard(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
-    val emberAccent = ext.onHeatContainer
-    val goldAccent = ext.onDrumstickContainer
 
     val lowestPriceText = remember(stats.lowestAnnualDeal) {
         val lowest = stats.lowestAnnualDeal?.annualizedUsd
@@ -511,44 +523,38 @@ private fun BlackFridayHeroCountdownCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseHeroCard(
-                accentColor = emberAccent,
+            .pulseCard(
                 shape = PulseArchitecturalShapes.HeroBento,
-                elevation = PulseElevation.Hero,
+                elevation = PulseElevation.Card,
             )
             .padding(15.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Header row: Event badge + Date schedule pill
+        // Header row: Phase micro-pill + Schedule hint
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(
+                modifier = Modifier
+                    .clip(PulseArchitecturalShapes.SmallChip)
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 8.dp, vertical = 3.5.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(dealHighContrastFlameBrush())
-                        .padding(horizontal = 9.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.LocalFireDepartment,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(13.dp),
-                    )
-                    Text(
-                        text = "${countdown.phase.badgeTitle} ${countdown.eventYear}",
-                        style = extraType.microLabel,
-                        color = Color.White,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(12.dp),
+                )
+                Text(
+                    text = "黑五 · 11/27",
+                    style = extraType.microLabel.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
             }
 
             Text(
@@ -559,7 +565,7 @@ private fun BlackFridayHeroCountdownCard(
             )
         }
 
-        // Phase title + 4-segment live digital countdown
+        // Phase title + 4-segment neutral countdown tiles
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = countdown.phase.headlineLabel,
@@ -574,51 +580,47 @@ private fun BlackFridayHeroCountdownCard(
                 CountdownDigitTile(
                     value = countdown.days.toString().padStart(2, '0'),
                     unit = "天",
-                    accentColor = emberAccent,
                     modifier = Modifier.weight(1f),
                 )
                 CountdownDigitTile(
                     value = countdown.hours.toString().padStart(2, '0'),
                     unit = "时",
-                    accentColor = emberAccent,
                     modifier = Modifier.weight(1f),
                 )
                 CountdownDigitTile(
                     value = countdown.minutes.toString().padStart(2, '0'),
                     unit = "分",
-                    accentColor = goldAccent,
                     modifier = Modifier.weight(1f),
                 )
                 CountdownDigitTile(
                     value = countdown.seconds.toString().padStart(2, '0'),
                     unit = "秒",
-                    accentColor = goldAccent,
                     modifier = Modifier.weight(1f),
                 )
             }
         }
 
-        // Bottom live KPI strip
+        PulseGradientDivider(color = ext.cardBorder.copy(alpha = 0.55f))
+
+        // Borderless 3-column summary telemetry row matching StickyValuationTelemetryCard
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            HeroKpiChip(
+            HeroKpiColumn(
                 label = "实时大促",
                 value = "${stats.totalCount} 条",
-                accentColor = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f),
             )
-            HeroKpiChip(
-                label = "年付最低 · $lowestCnyHint",
+            HeroKpiColumn(
+                label = "年付最低 ($lowestCnyHint)",
                 value = lowestPriceText,
-                accentColor = emberAccent,
-                modifier = Modifier.weight(1.25f),
+                valueColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1.3f),
             )
-            HeroKpiChip(
+            HeroKpiColumn(
                 label = "含优惠码",
                 value = "${stats.couponDealCount} 条",
-                accentColor = NodePulseThemeTokens.extendedColors.stardustAccent,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -629,27 +631,17 @@ private fun BlackFridayHeroCountdownCard(
 private fun CountdownDigitTile(
     value: String,
     unit: String,
-    accentColor: Color,
     modifier: Modifier = Modifier,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val ext = NodePulseThemeTokens.extendedColors
-    val tileShape = RoundedCornerShape(12.dp)
+    val tileShape = RoundedCornerShape(10.dp)
 
     Column(
         modifier = modifier
             .clip(tileShape)
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        blendColor(ext.cardSurfaceElevated, accentColor, if (isDark) 0.22f else 0.10f),
-                        ext.cardSurface,
-                    ),
-                ),
-            )
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .border(
-                width = 0.9.dp,
-                color = accentColor.copy(alpha = if (isDark) 0.40f else 0.26f),
+                width = 0.8.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
                 shape = tileShape,
             )
             .padding(vertical = 8.dp, horizontal = 4.dp),
@@ -668,50 +660,36 @@ private fun CountdownDigitTile(
         Text(
             text = unit,
             style = NodePulseThemeTokens.extraTypography.microLabel,
-            color = accentColor,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
     }
 }
 
 @Composable
-private fun HeroKpiChip(
+private fun HeroKpiColumn(
     label: String,
     value: String,
-    accentColor: Color,
     modifier: Modifier = Modifier,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val shape = RoundedCornerShape(11.dp)
     Column(
-        modifier = modifier
-            .clip(shape)
-            .background(accentColor.copy(alpha = if (isDark) 0.14f else 0.08f))
-            .border(
-                width = 0.75.dp,
-                color = accentColor.copy(alpha = if (isDark) 0.28f else 0.18f),
-                shape = shape,
-            )
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp),
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Text(
-            text = value,
-            style = MaterialTheme.typography.labelLarge.copy(
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-            ).withTabularNumbers(),
-            color = MaterialTheme.colorScheme.onSurface,
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            text = label,
-            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                fontSize = 9.5.sp,
-                fontWeight = FontWeight.Medium,
-            ),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = value,
+            style = MaterialTheme.typography.titleSmall.copy(
+                fontWeight = FontWeight.Bold,
+            ).withTabularNumbers(),
+            color = valueColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -725,72 +703,23 @@ private fun DealsSourceTabBar(
     onSelectTab: (DealSourceTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val containerShape = RoundedCornerShape(14.dp)
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(containerShape)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(width = 0.8.dp, color = ext.cardBorder, shape = containerShape)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        DealSourceTab.entries.forEach { tab ->
-            val selected = tab == selectedTab
+    val options = remember(stats) {
+        DealSourceTab.entries.map { tab ->
             val count = when (tab) {
                 DealSourceTab.ALL -> stats.totalCount
                 DealSourceTab.NODESEEK -> stats.nodeseekCount
                 DealSourceTab.OVERSEAS -> stats.overseasCount
             }
-            val pillShape = RoundedCornerShape(10.dp)
-            Row(
-                modifier = Modifier
-                    .weight(if (tab == DealSourceTab.OVERSEAS) 1.25f else 1f)
-                    .clip(pillShape)
-                    .background(
-                        if (selected) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.85f else 1f)
-                        } else {
-                            Color.Transparent
-                        },
-                    )
-                    .clickable(role = Role.Tab) { onSelectTab(tab) }
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = tab.label,
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        fontSize = 12.sp,
-                    ),
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (count > 0) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = count.toString(),
-                        style = NodePulseThemeTokens.extraTypography.microLabel.copy(fontSize = 10.sp),
-                        color = if (selected) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                        },
-                    )
-                }
-            }
+            val label = if (count > 0) "${tab.label} ($count)" else tab.label
+            SortSegmentItem(value = tab, label = label)
         }
     }
+    SortSegmentedSwitcher(
+        options = options,
+        selectedValue = selectedTab,
+        onSelect = onSelectTab,
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -943,10 +872,6 @@ private fun DealsQuickFilterBars(
     onToggleRegionPreset: (DealRegionPreset) -> Unit,
     onToggleRoutePreset: (DealRoutePreset) -> Unit,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val emberAccent = ext.onHeatContainer
-    val routeAccent = ext.stardustAccent
-
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         // Row 1: Price ceilings & deal attribute filters
         LazyRow(
@@ -957,7 +882,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = DealPriceCeiling.UNDER_20.label,
                     selected = filterState.priceCeiling == DealPriceCeiling.UNDER_20,
-                    accentColor = emberAccent,
                     onClick = { onSelectPriceCeiling(DealPriceCeiling.UNDER_20) },
                 )
             }
@@ -965,7 +889,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = DealPriceCeiling.UNDER_15.label,
                     selected = filterState.priceCeiling == DealPriceCeiling.UNDER_15,
-                    accentColor = emberAccent,
                     onClick = { onSelectPriceCeiling(DealPriceCeiling.UNDER_15) },
                 )
             }
@@ -973,7 +896,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = DealPriceCeiling.UNDER_35.label,
                     selected = filterState.priceCeiling == DealPriceCeiling.UNDER_35,
-                    accentColor = emberAccent,
                     onClick = { onSelectPriceCeiling(DealPriceCeiling.UNDER_35) },
                 )
             }
@@ -981,7 +903,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = "年付特惠",
                     selected = filterState.annualOnly,
-                    accentColor = MaterialTheme.colorScheme.primary,
                     onClick = onToggleAnnualOnly,
                 )
             }
@@ -989,7 +910,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = "含优惠码",
                     selected = filterState.requirePromoCode,
-                    accentColor = routeAccent,
                     onClick = onToggleRequirePromoCode,
                 )
             }
@@ -997,7 +917,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = "可直达抢购",
                     selected = filterState.requireOrderUrl,
-                    accentColor = MaterialTheme.colorScheme.primary,
                     onClick = onToggleRequireOrderUrl,
                 )
             }
@@ -1005,7 +924,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = "隐藏疑似售罄",
                     selected = filterState.hideOutOfStock,
-                    accentColor = MaterialTheme.colorScheme.primary,
                     onClick = onToggleHideOutOfStock,
                 )
             }
@@ -1023,7 +941,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = preset.label,
                     selected = preset in filterState.selectedRegions,
-                    accentColor = MaterialTheme.colorScheme.primary,
                     onClick = { onToggleRegionPreset(preset) },
                 )
             }
@@ -1034,7 +951,6 @@ private fun DealsQuickFilterBars(
                 DealFilterToggleChip(
                     label = preset.label,
                     selected = preset in filterState.selectedRoutes,
-                    accentColor = routeAccent,
                     onClick = { onToggleRoutePreset(preset) },
                 )
             }
@@ -1046,29 +962,31 @@ private fun DealsQuickFilterBars(
 private fun DealFilterToggleChip(
     label: String,
     selected: Boolean,
-    accentColor: Color,
     onClick: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
     val shape = CircleShape
     val bgColor = if (selected) {
-        accentColor.copy(alpha = if (isDark) 0.26f else 0.14f)
+        MaterialTheme.colorScheme.primaryContainer
     } else {
-        ext.cardSurface
+        MaterialTheme.colorScheme.surfaceContainerLow
     }
     val borderColor = if (selected) {
-        accentColor.copy(alpha = if (isDark) 0.68f else 0.48f)
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.34f)
     } else {
         ext.cardBorder
     }
-    val textColor = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant
+    val textColor = if (selected) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Row(
         modifier = Modifier
             .clip(shape)
             .background(bgColor)
-            .border(width = if (selected) 1.dp else 0.8.dp, color = borderColor, shape = shape)
+            .border(width = if (selected) 0.9.dp else 0.8.dp, color = borderColor, shape = shape)
             .clickable(role = Role.Checkbox, onClick = onClick)
             .padding(horizontal = 11.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1078,14 +996,14 @@ private fun DealFilterToggleChip(
             Icon(
                 imageVector = Icons.Rounded.Check,
                 contentDescription = null,
-                tint = accentColor,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.size(13.dp),
             )
         }
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium.copy(
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 fontSize = 12.sp,
             ).withTabularNumbers(),
             color = textColor,
@@ -1197,18 +1115,7 @@ fun PromoDealCard(
     modifier: Modifier = Modifier,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
     val extraType = NodePulseThemeTokens.extraTypography
-
-    val emberAccent = ext.onHeatContainer
-    val emberCtaContainer = if (isDark) Color(0xFFFB923C) else Color(0xFFC2410C)
-    val emberCtaContent = if (isDark) Color(0xFF2B1100) else Color.White
-    val routeAccent = ext.stardustAccent
-    val sourceAccent = when (deal.source) {
-        DealSource.NODESEEK -> MaterialTheme.colorScheme.primary
-        DealSource.OVERSEAS_LET -> if (isDark) Color(0xFF818CF8) else Color(0xFF4F46E5)
-        DealSource.OVERSEAS_LEB -> if (isDark) Color(0xFF34D399) else Color(0xFF059669)
-    }
 
     val expiryCountdown: DealExpiryCountdown? = remember(deal.expiresAtEpochMillis, nowEpochMillis / 30_000L) {
         BlackFridayCountdownCalculator.formatDealExpiry(
@@ -1216,14 +1123,15 @@ fun PromoDealCard(
             nowEpochMillis = nowEpochMillis,
         )
     }
+    val isUrgentExpiry = remember(deal.expiresAtEpochMillis, nowEpochMillis / 30_000L) {
+        val exp = deal.expiresAtEpochMillis
+        exp != null && exp > nowEpochMillis && (exp - nowEpochMillis) <= 24L * 3_600_000L
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                accentColor = if (deal.isUltraValueDeal && !deal.isOutOfStockHint) emberAccent else null,
-            )
+            .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
             .clickable(onClick = onOpenSource)
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1234,18 +1142,27 @@ fun PromoDealCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            DealMicroBadge(
-                text = deal.source.badgeLabel,
-                containerColor = sourceAccent.copy(alpha = if (isDark) 0.22f else 0.12f),
-                contentColor = sourceAccent,
-                icon = if (deal.source.isOverseas) Icons.Rounded.Public else Icons.Rounded.Forum,
-            )
+            if (deal.source == DealSource.NODESEEK) {
+                CategoryMicroTag(
+                    slug = deal.categorySlug.ifBlank { "info" },
+                    labelOverride = deal.source.badgeLabel,
+                    showIcon = false,
+                    compact = true,
+                )
+            } else {
+                DealMicroBadge(
+                    text = deal.source.badgeLabel,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    icon = Icons.Rounded.Public,
+                )
+            }
 
             if (deal.merchantName.isNotBlank()) {
                 DealMicroBadge(
                     text = deal.merchantName,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                 )
             }
 
@@ -1254,19 +1171,19 @@ fun PromoDealCard(
             if (deal.isOutOfStockHint) {
                 DealMicroBadge(
                     text = "疑似售罄",
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else if (expiryCountdown != null) {
                 val badgeBg = when {
-                    expiryCountdown.isExpired -> MaterialTheme.colorScheme.surfaceContainerHighest
-                    expiryCountdown.isUrgent -> MaterialTheme.colorScheme.errorContainer
-                    else -> ext.heatContainer
+                    expiryCountdown.isExpired -> MaterialTheme.colorScheme.surfaceContainerHigh
+                    isUrgentExpiry || expiryCountdown.isUrgent -> ext.drumstickContainer
+                    else -> MaterialTheme.colorScheme.surfaceContainerLow
                 }
                 val badgeFg = when {
                     expiryCountdown.isExpired -> MaterialTheme.colorScheme.onSurfaceVariant
-                    expiryCountdown.isUrgent -> MaterialTheme.colorScheme.onErrorContainer
-                    else -> ext.onHeatContainer
+                    isUrgentExpiry || expiryCountdown.isUrgent -> ext.onDrumstickContainer
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
                 DealMicroBadge(
                     text = expiryCountdown.label,
@@ -1304,77 +1221,49 @@ fun PromoDealCard(
             }
         }
 
-        // Row 3: Highlighted Price Banner
+        // Row 3: Clean Inline Price & Cycle Strip (modeled after 09-vps-valuation.png)
         val priceHeadline = deal.primaryPriceLabel
         if (!priceHeadline.isNullOrBlank()) {
-            val priceShape = RoundedCornerShape(12.dp)
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(priceShape)
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                emberAccent.copy(alpha = if (isDark) 0.20f else 0.10f),
-                                ext.drumstickGoldStart.copy(alpha = if (isDark) 0.12f else 0.06f),
-                            ),
-                        ),
-                    )
-                    .border(
-                        width = 0.8.dp,
-                        color = emberAccent.copy(alpha = if (isDark) 0.35f else 0.22f),
-                        shape = priceShape,
-                    )
-                    .padding(horizontal = 11.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(
+                val parts = priceHeadline.split("·", limit = 2)
+                val primaryPrice = parts.first().trim()
+                val cnyPart = parts.getOrNull(1)?.trim()
+
+                Row(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        text = priceHeadline,
-                        style = MaterialTheme.typography.titleMedium.copy(
+                        text = primaryPrice,
+                        style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 16.sp,
+                            fontSize = 18.sp,
                         ).withTabularNumbers(),
-                        color = emberAccent,
+                        color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
-                    val secondaryRaw = deal.rawPriceText?.takeIf {
-                        it.isNotBlank() && !priceHeadline.contains(it, ignoreCase = true)
-                    }
-                    if (secondaryRaw != null) {
+                    if (!cnyPart.isNullOrBlank()) {
                         Text(
-                            text = "原帖标价 $secondaryRaw",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = cnyPart,
+                            style = MaterialTheme.typography.bodyMedium.withTabularNumbers(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    if (deal.billingCycleLabel.isNotBlank()) {
-                        DealMicroBadge(
-                            text = deal.billingCycleLabel,
-                            containerColor = ext.cardSurface.copy(alpha = 0.85f),
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                    if (deal.isUltraValueDeal && !deal.isOutOfStockHint) {
-                        DealMicroBadge(
-                            text = "超值",
-                            containerColor = emberCtaContainer,
-                            contentColor = emberCtaContent,
-                            icon = Icons.Rounded.Bolt,
-                        )
-                    }
+                if (deal.billingCycleLabel.isNotBlank()) {
+                    DealMicroBadge(
+                        text = deal.billingCycleLabel,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -1391,7 +1280,7 @@ fun PromoDealCard(
                     Row(
                         modifier = Modifier
                             .clip(PulseArchitecturalShapes.SmallChip)
-                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
                             .border(
                                 width = 0.7.dp,
                                 color = ext.cardBorder,
@@ -1416,22 +1305,22 @@ fun PromoDealCard(
                 deal.regionTags.forEach { region ->
                     DealMicroBadge(
                         text = region,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.50f else 0.72f),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
                 deal.routeTags.forEach { route ->
                     DealMicroBadge(
                         text = route,
-                        containerColor = routeAccent.copy(alpha = if (isDark) 0.22f else 0.12f),
-                        contentColor = routeAccent,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                 }
             }
         }
 
-        // Row 5: 1-Tap Copyable Promo Code Chip
+        // Row 5: 1-Tap Copyable Promo Code Strip
         val coupon = deal.promoCode?.takeIf { it.isNotBlank() }
         if (coupon != null) {
             val couponShape = RoundedCornerShape(10.dp)
@@ -1439,10 +1328,10 @@ fun PromoDealCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(couponShape)
-                    .background(ext.drumstickContainer.copy(alpha = if (isDark) 0.75f else 0.85f))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
                     .border(
-                        width = 0.9.dp,
-                        color = ext.drumstickGoldStart.copy(alpha = if (isDark) 0.55f else 0.45f),
+                        width = 0.8.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                         shape = couponShape,
                     )
                     .pulseBouncyClickable(
@@ -1457,13 +1346,13 @@ fun PromoDealCard(
                 Icon(
                     imageVector = Icons.Rounded.ConfirmationNumber,
                     contentDescription = null,
-                    tint = ext.onDrumstickContainer,
-                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(15.dp),
                 )
                 Text(
                     text = "优惠码",
                     style = MaterialTheme.typography.labelSmall,
-                    color = ext.onDrumstickContainer,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
                     text = coupon,
@@ -1483,19 +1372,19 @@ fun PromoDealCard(
                     Icon(
                         imageVector = Icons.Rounded.ContentCopy,
                         contentDescription = null,
-                        tint = ext.onDrumstickContainer,
+                        tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        text = "点按复制",
+                        text = "复制优惠码",
                         style = extraType.microLabel,
-                        color = ext.onDrumstickContainer,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
         }
 
-        // Row 6: Community Telemetry + Action Bar (`查看原帖` / `直达抢购` / `加入补货监控`)
+        // Row 6: Community Telemetry + Uniform Action Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1538,6 +1427,10 @@ fun PromoDealCard(
             OutlinedButton(
                 onClick = onOpenSource,
                 shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(0.8.dp, ext.cardBorder),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                 modifier = Modifier
                     .weight(1f)
@@ -1556,6 +1449,32 @@ fun PromoDealCard(
                 )
             }
 
+            FilledTonalButton(
+                onClick = onAddRestockWatch,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                ),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier
+                    .weight(1.05f)
+                    .defaultMinSize(minHeight = 36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.NotificationsActive,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "加入监控",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
             val directOrderUrl = deal.orderUrl?.takeIf { it.isNotBlank() }
             if (directOrderUrl != null) {
                 Button(
@@ -1563,8 +1482,8 @@ fun PromoDealCard(
                     shape = RoundedCornerShape(10.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = emberCtaContainer,
-                        contentColor = emberCtaContent,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
                     ),
                     modifier = Modifier
                         .weight(1f)
@@ -1582,28 +1501,6 @@ fun PromoDealCard(
                         maxLines = 1,
                     )
                 }
-            }
-
-            FilledTonalButton(
-                onClick = onAddRestockWatch,
-                shape = RoundedCornerShape(10.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                modifier = Modifier
-                    .weight(1.15f)
-                    .defaultMinSize(minHeight = 36.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.NotificationsActive,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "加入补货监控",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
         }
     }
@@ -1742,10 +1639,6 @@ private fun DealsEmptyStateCard(
         }
     }
 }
-
-private fun dealHighContrastFlameBrush(): Brush = Brush.horizontalGradient(
-    colors = listOf(Color(0xFFC2410C), Color(0xFFB91C1C)),
-)
 
 private fun formatCompactRelativeAge(publishedAtMillis: Long, nowMillis: Long): String {
     val diffSec = abs(nowMillis - publishedAtMillis) / 1000L

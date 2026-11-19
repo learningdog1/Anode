@@ -503,7 +503,7 @@ internal fun HostKeyMismatchWarningDialog(
                 Text(
                     text = "已记录指纹 (TOFU)",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFFBBF24),
+                    color = ext.onCodeSurface,
                 )
                 Text(
                     text = prompt.expectedFingerprint,
@@ -515,12 +515,12 @@ internal fun HostKeyMismatchWarningDialog(
                 Text(
                     text = "当前服务器指纹",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFFF7B72),
+                    color = MaterialTheme.colorScheme.error,
                 )
                 Text(
                     text = prompt.actualHostKey.fingerprintSha256,
                     style = NodePulseThemeTokens.extraTypography.codeLabel.copy(fontSize = 11.sp),
-                    color = Color(0xFFFFA198),
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
         }
@@ -604,7 +604,7 @@ internal fun SshExportPreviewBottomSheet(
                     Icon(
                         imageVector = Icons.Rounded.Shield,
                         contentDescription = null,
-                        tint = if (maskServerIp) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (maskServerIp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
                     )
                     Column {
