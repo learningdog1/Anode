@@ -1,0 +1,763 @@
+@file:OptIn(ExperimentalLayoutApi::class)
+
+package com.nodeseek.app.ui.netbench
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Clear
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.NetworkCheck
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.domain.netbench.Iperf3TestMode
+import com.nodeseek.app.domain.netbench.PreferredIpFamily
+import com.nodeseek.app.domain.netbench.TcpPingConfig
+import com.nodeseek.app.domain.netbench.TcpPortPreset
+import com.nodeseek.app.ui.components.SortSegmentItem
+import com.nodeseek.app.ui.components.SortSegmentedSwitcher
+import com.nodeseek.app.ui.theme.NodePulseThemeTokens
+import com.nodeseek.app.ui.theme.PulseAccentPill
+import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
+import com.nodeseek.app.ui.theme.PulseBrushes
+import com.nodeseek.app.ui.theme.PulseGradientDivider
+import com.nodeseek.app.ui.theme.PulseSectionHeader
+import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
+import com.nodeseek.app.ui.theme.pulseBouncyClickable
+import com.nodeseek.app.ui.theme.pulseCard
+import com.nodeseek.app.ui.theme.pulseGlassSurface
+import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/**
+ * Full-screen Mobile Network Tester (`手机端测机`):
+ * - Real-time TCPing latency + jitter + packet loss sparkline/bars
+ * - Native pure-Kotlin iperf3 v3.x TCP speed test (Download `-R` / Upload / Both)
+ * - Multi-source IP Geo/ASN + RIR WHOIS Native-vs-Broadcast classifier
+ * - Privacy-safe 1-click NodeSeek Markdown report (`回帖精简卡` & `完整测机表格`)
+ */
+@Composable
+fun MobileNetBenchScreen(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    initialTarget: String = "",
+    onInsertMarkdown: ((String) -> Unit)? = null,
+    insertActionLabel: String = "插入回帖/发帖",
+    viewModel: MobileNetBenchViewModel = viewModel(
+        factory = MobileNetBenchViewModel.factory(
+            context = LocalContext.current,
+            initialTarget = initialTarget,
+        ),
+    ),
+) {
+    val context = LocalContext.current
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(initialTarget) {
+        if (initialTarget.isNotBlank()) {
+            viewModel.prefillTarget(initialTarget)
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.snackbarMessages.collect { message ->
+            snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.navigationBarsPadding(),
+            )
+        },
+        topBar = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pulseGlassSurface(showBottomBorder = true, tonalAccent = MaterialTheme.colorScheme.primary)
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "返回",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "手机端测机",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                    )
+                    Text(
+                        text = "TCPing · 原生 iperf3 · IP 原生/广播鉴定",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (uiState.hasAnyResult && !uiState.isRunning) {
+                    IconButton(onClick = viewModel::clearResults) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteSweep,
+                            contentDescription = "清空本次结果",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .imePadding(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 36.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            // 1. Target & Port Configuration Card
+            item(key = "target_config") {
+                PulseStaggeredEntrance(index = 0) {
+                    TargetAndPortConfigCard(
+                        uiState = uiState,
+                        onTargetChange = viewModel::updateTargetInput,
+                        onTcpPortChange = viewModel::updateTcpPortText,
+                        onSelectPresetPort = viewModel::selectPresetPort,
+                        onProbeCountChange = viewModel::updateProbeCount,
+                        onPreferredFamilyChange = viewModel::updatePreferredFamily,
+                        onApplyHistory = viewModel::applyHistoryEntry,
+                        onRemoveHistory = viewModel::removeHistoryEntry,
+                        onClearHistory = viewModel::clearHistory,
+                        onSubmit = {
+                            keyboardController?.hide()
+                            viewModel.startBenchmark()
+                        },
+                    )
+                }
+            }
+
+            // 2. Modules & iperf3 Configuration Card
+            item(key = "modules_config") {
+                PulseStaggeredEntrance(index = 1) {
+                    TestModulesConfigCard(
+                        uiState = uiState,
+                        onToggleTcpPing = viewModel::toggleTcpPing,
+                        onToggleIpCheck = viewModel::toggleIpCheck,
+                        onToggleIperf3 = viewModel::toggleIperf3,
+                        onToggleHttpProbe = viewModel::toggleHttpProbe,
+                        onIperfPortChange = viewModel::updateIperfPortText,
+                        onIperfDurationChange = viewModel::updateIperfDurationSec,
+                        onIperfModeChange = viewModel::updateIperfTestMode,
+                    )
+                }
+            }
+
+            // 3. Primary Run / Stop CTA Button
+            item(key = "run_action") {
+                RunBenchmarkActionButton(
+                    isRunning = uiState.isRunning,
+                    canStart = uiState.canStart,
+                    activePhase = uiState.activePhase,
+                    onStart = {
+                        keyboardController?.hide()
+                        viewModel.startBenchmark()
+                    },
+                    onStop = { viewModel.stopBenchmark() },
+                )
+            }
+
+            // 4. Error Banner (if top-level DNS/input error)
+            if (!uiState.errorMessage.isNullOrBlank()) {
+                item(key = "top_error") {
+                    NetBenchErrorCallout(message = uiState.errorMessage!!)
+                }
+            }
+
+            // 5. Resolved Target Banner
+            uiState.resolvedTarget?.let { resolved ->
+                item(key = "resolved_target") {
+                    ResolvedTargetBanner(
+                        resolved = resolved,
+                        port = uiState.effectiveTcpPort,
+                    )
+                }
+            }
+
+            // 6. Live TCPing Telemetry Card
+            uiState.tcpPingProgress?.let { tcpProgress ->
+                item(key = "tcping_card") {
+                    NetBenchTcpPingCard(
+                        progress = tcpProgress,
+                        httpResult = uiState.httpLatencyResult,
+                    )
+                }
+            }
+
+            // Standalone HTTP latency card if TCPing was toggled off
+            if (uiState.tcpPingProgress == null && uiState.httpLatencyResult != null) {
+                item(key = "http_only_card") {
+                    StandaloneHttpLatencyCard(result = uiState.httpLatencyResult!!)
+                }
+            }
+
+            // 7. Live Native iperf3 Card
+            if (uiState.iperfDownloadProgress != null || uiState.iperfUploadProgress != null) {
+                item(key = "iperf3_card") {
+                    NetBenchIperf3Card(
+                        downloadProgress = uiState.iperfDownloadProgress,
+                        uploadProgress = uiState.iperfUploadProgress,
+                        iperfPort = uiState.effectiveIperfPort,
+                    )
+                }
+            }
+
+            // 8. IP Intelligence & Native vs Broadcast Card
+            uiState.ipIntelligence?.let { intel ->
+                item(key = "ip_intel_card") {
+                    NetBenchIpIntelligenceCard(
+                        report = intel,
+                        clientNetwork = uiState.clientNetwork,
+                    )
+                }
+            }
+
+            // 9. Unified NodeSeek Markdown Report Card
+            if (uiState.generatedMarkdown.isNotBlank()) {
+                item(key = "markdown_report_card") {
+                    NetBenchMarkdownReportCard(
+                        markdown = uiState.generatedMarkdown,
+                        selectedStyle = uiState.markdownStyle,
+                        maskTargetIp = uiState.maskTargetIpInReport,
+                        onSelectStyle = viewModel::selectMarkdownStyle,
+                        onToggleMaskTargetIp = viewModel::toggleMaskTargetIp,
+                        onCopyMarkdown = {
+                            val ok = copyTextToClipboard(
+                                context = context,
+                                label = "NodeSeek 测机报告",
+                                text = uiState.generatedMarkdown,
+                            )
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar(
+                                    if (ok) "已复制测机 Markdown 到剪贴板" else "复制失败，请长按源码复制",
+                                )
+                            }
+                        },
+                        onInsertMarkdown = onInsertMarkdown,
+                        insertActionLabel = insertActionLabel,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TargetAndPortConfigCard(
+    uiState: MobileNetBenchUiState,
+    onTargetChange: (String) -> Unit,
+    onTcpPortChange: (String) -> Unit,
+    onSelectPresetPort: (Int) -> Unit,
+    onProbeCountChange: (Int) -> Unit,
+    onPreferredFamilyChange: (PreferredIpFamily) -> Unit,
+    onApplyHistory: (com.nodeseek.app.domain.netbench.NetBenchHistoryEntry) -> Unit,
+    onRemoveHistory: (com.nodeseek.app.domain.netbench.NetBenchHistoryEntry) -> Unit,
+    onClearHistory: () -> Unit,
+    onSubmit: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard()
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        PulseSectionHeader(
+            title = "测试目标与端口",
+            subtitle = "支持 IPv4、IPv6 ([::1])、域名及 URL",
+            icon = Icons.Rounded.NetworkCheck,
+            trailing = {
+                uiState.clientNetwork?.let { net ->
+                    PulseAccentPill(
+                        text = "${net.carrier.shortLabel} · ${net.ipFamily.label}",
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+            },
+        )
+
+        OutlinedTextField(
+            value = uiState.targetInput,
+            onValueChange = onTargetChange,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !uiState.isRunning,
+            singleLine = true,
+            label = { Text("IP / IPv6 / 域名") },
+            placeholder = { Text("例如 1.1.1.1 或 [2606:4700::1111] 或 lg.example.com") },
+            trailingIcon = {
+                if (uiState.targetInput.isNotEmpty() && !uiState.isRunning) {
+                    IconButton(onClick = { onTargetChange("") }) {
+                        Icon(
+                            imageVector = Icons.Rounded.Clear,
+                            contentDescription = "清空目标",
+                        )
+                    }
+                }
+            },
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Uri,
+                imeAction = ImeAction.Go,
+            ),
+            keyboardActions = KeyboardActions(onGo = { onSubmit() }),
+            shape = PulseArchitecturalShapes.MediumBadge,
+        )
+
+        // Recent targets strip
+        NetBenchRecentTargetsStrip(
+            entries = uiState.recentTargets,
+            onSelect = onApplyHistory,
+            onRemove = onRemoveHistory,
+            onClearAll = onClearHistory,
+        )
+
+        PulseGradientDivider()
+
+        // Port Presets + Custom Port Input
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = "TCPing 端口预设",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            OutlinedTextField(
+                value = uiState.tcpPortText,
+                onValueChange = onTcpPortChange,
+                modifier = Modifier.width(108.dp),
+                enabled = !uiState.isRunning,
+                singleLine = true,
+                label = { Text("自定义") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                shape = PulseArchitecturalShapes.SmallChip,
+            )
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TcpPortPreset.entries.forEach { preset ->
+                NetBenchSelectableChip(
+                    label = preset.label,
+                    selected = uiState.effectiveTcpPort == preset.port,
+                    enabled = !uiState.isRunning,
+                    onClick = { onSelectPresetPort(preset.port) },
+                )
+            }
+        }
+
+        // Probe count slider (4..50)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "TCPing 探测次数",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "${uiState.probeCount} 次",
+                    style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Slider(
+                value = uiState.probeCount.toFloat(),
+                onValueChange = { onProbeCountChange(it.roundToInt()) },
+                valueRange = TcpPingConfig.MIN_PROBE_COUNT.toFloat()..TcpPingConfig.MAX_PROBE_COUNT.toFloat(),
+                enabled = !uiState.isRunning,
+            )
+        }
+
+        // Preferred IP Family selector
+        SortSegmentedSwitcher(
+            options = remember {
+                PreferredIpFamily.entries.map { SortSegmentItem(it, it.label) }
+            },
+            selectedValue = uiState.preferredFamily,
+            onSelect = { if (!uiState.isRunning) onPreferredFamilyChange(it) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun TestModulesConfigCard(
+    uiState: MobileNetBenchUiState,
+    onToggleTcpPing: (Boolean) -> Unit,
+    onToggleIpCheck: (Boolean) -> Unit,
+    onToggleIperf3: (Boolean) -> Unit,
+    onToggleHttpProbe: (Boolean) -> Unit,
+    onIperfPortChange: (String) -> Unit,
+    onIperfDurationChange: (Int) -> Unit,
+    onIperfModeChange: (Iperf3TestMode) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard()
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PulseSectionHeader(
+            title = "测机项目开关",
+            subtitle = "按需组合延迟、IP 鉴定与带宽测速",
+            icon = Icons.Rounded.Tune,
+        )
+
+        ModuleToggleRow(
+            title = "TCPing 延迟与抖动",
+            subtitle = "实时统计平均/最小/最大延迟、mdev 抖动与丢包",
+            icon = Icons.Rounded.NetworkCheck,
+            checked = uiState.enableTcpPing,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleTcpPing,
+        )
+        ModuleToggleRow(
+            title = "IP 归属与原生/广播鉴定",
+            subtitle = "多源 GeoIP + RIR WHOIS/RDAP 比对原生与广播 IP",
+            icon = Icons.Rounded.Public,
+            checked = uiState.enableIpCheck,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleIpCheck,
+        )
+        ModuleToggleRow(
+            title = "原生 iperf3 吞吐测速",
+            subtitle = "纯 Kotlin TCP 协议直连服务端，无需 Root/二进制",
+            icon = Icons.Rounded.Speed,
+            checked = uiState.enableIperf3,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleIperf3,
+        )
+
+        AnimatedVisibility(
+            visible = uiState.enableIperf3,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PulseArchitecturalShapes.MediumBadge)
+                    .background(
+                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(
+                            alpha = if (NodePulseThemeTokens.isDark) 0.55f else 0.45f,
+                        ),
+                    )
+                    .border(
+                        width = 0.8.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        shape = PulseArchitecturalShapes.MediumBadge,
+                    )
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SortSegmentedSwitcher(
+                    options = remember {
+                        Iperf3TestMode.entries.map { SortSegmentItem(it, it.label) }
+                    },
+                    selectedValue = uiState.iperfTestMode,
+                    onSelect = { if (!uiState.isRunning) onIperfModeChange(it) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedTextField(
+                        value = uiState.iperfPortText,
+                        onValueChange = onIperfPortChange,
+                        modifier = Modifier.width(120.dp),
+                        enabled = !uiState.isRunning,
+                        singleLine = true,
+                        label = { Text("iperf3 端口") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = PulseArchitecturalShapes.SmallChip,
+                    )
+
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = "单向测速时长",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(3, 5, 10).forEach { sec ->
+                                NetBenchSelectableChip(
+                                    label = "${sec}s",
+                                    selected = uiState.iperfDurationSec == sec,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { onIperfDurationChange(sec) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ModuleToggleRow(
+            title = "HTTP/HTTPS 响应探测",
+            subtitle = "额外测量 TLS 握手与首字节 TTFB 耗时",
+            icon = Icons.Rounded.Language,
+            checked = uiState.enableHttpProbe,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleHttpProbe,
+        )
+    }
+}
+
+@Composable
+private fun ModuleToggleRow(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+        )
+    }
+}
+
+@Composable
+internal fun RunBenchmarkActionButton(
+    isRunning: Boolean,
+    canStart: Boolean,
+    activePhase: NetBenchPhase,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val stopColor = NetBenchTelemetryColors.poor()
+    val containerModifier = if (isRunning) {
+        Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.ElevatedTile)
+            .background(stopColor)
+            .pulseBouncyClickable(onClick = onStop)
+            .padding(vertical = 14.dp, horizontal = 16.dp)
+    } else if (canStart) {
+        Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.ElevatedTile)
+            .background(PulseBrushes.brandGradient())
+            .pulseBouncyClickable(onClick = onStart)
+            .padding(vertical = 14.dp, horizontal = 16.dp)
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.ElevatedTile)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .padding(vertical = 14.dp, horizontal = 16.dp)
+    }
+
+    Row(
+        modifier = modifier.then(containerModifier),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        if (isRunning) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.2.dp,
+                color = Color.White,
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "${activePhase.label}  (点击停止)",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+                imageVector = Icons.Rounded.Stop,
+                contentDescription = "停止测机",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+        } else {
+            val fg = if (canStart) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+            Icon(
+                imageVector = Icons.Rounded.PlayArrow,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "开始测机",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = fg,
+            )
+        }
+    }
+}
+
+@Composable
+private fun StandaloneHttpLatencyCard(
+    result: com.nodeseek.app.domain.netbench.HttpLatencyResult,
+) {
+    val accent = if (result.success) NetBenchTelemetryColors.excellent() else NetBenchTelemetryColors.poor()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(accentColor = accent)
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PulseSectionHeader(
+            title = "HTTP/HTTPS 响应探测",
+            subtitle = result.url,
+            icon = Icons.Rounded.Language,
+            accentColor = accent,
+        )
+        if (result.success && result.totalMs != null) {
+            val detail = buildList {
+                result.statusCode?.let { add("HTTP $it") }
+                add("总耗时 ${com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter.formatMs(result.totalMs)}")
+                result.ttfbMs?.let { add("TTFB ${com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter.formatMs(it)}") }
+                result.tlsHandshakeMs?.let { add("TLS ${com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter.formatMs(it)}") }
+                result.protocol?.let { add(it) }
+            }.joinToString(" · ")
+            Text(
+                text = detail,
+                style = NodePulseThemeTokens.extraTypography.codeLabel,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        } else {
+            NetBenchErrorCallout(message = result.errorMessage ?: "HTTP 探测失败")
+        }
+    }
+}
