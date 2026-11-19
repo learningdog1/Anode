@@ -24,6 +24,8 @@ data class TopicDetailRoute(
 data class ComposerRoute(
     val editTopicId: Long? = null,
     val initialCategorySlug: String = "daily",
+    val initialTitle: String = "",
+    val initialMarkdown: String = "",
 ) : AppDestination
 
 @Serializable
@@ -67,3 +69,34 @@ data object SearchRoute : AppDestination
 data class HubCollectionRoute(
     val initialTab: Int = 0,
 ) : AppDestination
+
+@Serializable
+data class RestockMonitorRoute(
+    val initialUrl: String = "",
+    val initialTitle: String = "",
+    val initialTab: Int = 0,
+) : AppDestination
+
+@Serializable
+data class DealsHubRoute(
+    val initialTab: Int = 0,
+) : AppDestination
+
+@Serializable
+data object OverseasIntelRoute : AppDestination
+
+@Serializable
+data class MyServersRoute(
+    val initialTab: Int = 0,
+    val importName: String = "",
+    val importPrice: String = "",
+    val importUrl: String = "",
+) : AppDestination
+
+@Serializable
+data class MobileNetBenchRoute(
+    val initialTarget: String = "",
+) : AppDestination
+
+@Serializable
+data object LiteSshRoute : AppDestination

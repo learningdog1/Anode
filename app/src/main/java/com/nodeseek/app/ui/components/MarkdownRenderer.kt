@@ -29,6 +29,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -62,6 +64,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
@@ -111,6 +114,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -170,6 +174,7 @@ import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.ceil
@@ -205,6 +210,7 @@ private data class CachedMarkdownImageMeta(
 
 private val LocalInsideTabsContainer = compositionLocalOf { false }
 private val LocalMarkdownSelectionEnabled = compositionLocalOf { false }
+private val LocalMarkdownUrlLongClick = compositionLocalOf<((String) -> Unit)?> { null }
 private val LocalMarkdownImageTargetWidthPx = compositionLocalOf<Int?> { null }
 private val LocalMarkdownImageMetaCache = compositionLocalOf<MutableMap<String, CachedMarkdownImageMeta>?> { null }
 private val LocalMarkdownPrefetchJobs = compositionLocalOf<MutableMap<String, Deferred<ImageResult>>?> { null }
@@ -264,6 +270,7 @@ fun MarkdownRenderer(
     onMentionClick: ((String) -> Unit)? = null,
     onFloorClick: ((Int) -> Unit)? = null,
     onUrlClick: ((String) -> Unit)? = null,
+    onUrlLongClick: ((String) -> Unit)? = null,
 ) {
     val parsedDoc = remember(markdown) { parseNodeSeekMarkdownDocument(markdown) }
     var lightboxImageState by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -280,6 +287,15 @@ fun MarkdownRenderer(
                 onUrlClick(unwrapped)
             } else {
                 runCatching { uriHandler.openUri(unwrapped) }
+            }
+        }
+    }
+
+    val effectiveUrlLongClick: ((String) -> Unit)? = remember(onUrlLongClick, haptics) {
+        onUrlLongClick?.let { handler ->
+            { rawUrl ->
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                handler(unwrapNodeSeekJumpUrl(rawUrl))
             }
         }
     }
@@ -323,7 +339,10 @@ fun MarkdownRenderer(
         }
     }
 
-    CompositionLocalProvider(LocalMarkdownSelectionEnabled provides enableTextSelection) {
+    CompositionLocalProvider(
+        LocalMarkdownSelectionEnabled provides enableTextSelection,
+        LocalMarkdownUrlLongClick provides effectiveUrlLongClick,
+    ) {
         if (enableTextSelection) {
             SelectionContainer(modifier = modifier.fillMaxWidth()) {
                 contentColumn()
@@ -345,6 +364,7 @@ fun MarkdownRenderer(
     }
 
     actionSheetImage?.let { target ->
+        val linkedTargetUrl = target.linkUrl?.takeIf { it.isNotBlank() }
         MarkdownImageActionBottomSheet(
             target = target,
             onDismiss = { actionSheetImage = null },
@@ -363,10 +383,18 @@ fun MarkdownRenderer(
                 actionSheetImage = null
             },
             onOpenExternal = {
-                val destination = target.linkUrl?.takeIf { it.isNotBlank() }
+                val destination = linkedTargetUrl
                     ?: normalizeMarkdownImageUrl(target.imageUrl).ifBlank { target.imageUrl }
                 actionSheetImage = null
                 effectiveUrlClick(destination)
+            },
+            onInspectLinkUrl = if (linkedTargetUrl != null && effectiveUrlLongClick != null) {
+                {
+                    actionSheetImage = null
+                    effectiveUrlLongClick(linkedTargetUrl)
+                }
+            } else {
+                null
             },
         )
     }
@@ -3439,6 +3467,7 @@ private fun MarkdownImageActionBottomSheet(
     onViewFullscreen: () -> Unit,
     onCopyUrl: () -> Unit,
     onOpenExternal: () -> Unit,
+    onInspectLinkUrl: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -3533,6 +3562,19 @@ private fun MarkdownImageActionBottomSheet(
                     title = "在浏览器打开",
                     onClick = onOpenExternal,
                 )
+                if (onInspectLinkUrl != null) {
+                    PulseGradientDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(horizontal = 14.dp),
+                    )
+                    MarkdownImageActionSheetRow(
+                        icon = Icons.Rounded.Bolt,
+                        title = "链接操作 / 加入补货监控",
+                        subtitle = target.linkUrl?.let { unwrapNodeSeekJumpUrl(it) },
+                        highlightPrimary = true,
+                        onClick = onInspectLinkUrl,
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -3765,11 +3807,60 @@ private fun RichInlineTextTokens(
         }
     }
 
+    val urlLongClick = LocalMarkdownUrlLongClick.current
+    val selectionEnabled = LocalMarkdownSelectionEnabled.current
+    val currentOnUrlLongClick by rememberUpdatedState(urlLongClick)
+    var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val hasUrlLinks = remember(parsed.annotatedString) {
+        parsed.annotatedString.getLinkAnnotations(0, parsed.annotatedString.length)
+            .any { (it.item as? LinkAnnotation.Clickable)?.tag?.startsWith("url:") == true }
+    }
+
+    val linkLongPressModifier = if (urlLongClick != null && !selectionEnabled && hasUrlLinks) {
+        Modifier.pointerInput(parsed.annotatedString) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val layout = textLayoutResult ?: return@awaitEachGesture
+                val charOffset = layout.getOffsetForPosition(down.position)
+                val matchedUrl = parsed.annotatedString
+                    .getLinkAnnotations(charOffset, charOffset)
+                    .mapNotNull { (it.item as? LinkAnnotation.Clickable)?.tag }
+                    .firstOrNull { it.startsWith("url:") }
+                    ?.removePrefix("url:")
+                    ?: return@awaitEachGesture
+
+                val triggerTimeout = (viewConfiguration.longPressTimeoutMillis - 50L).coerceAtLeast(300L)
+                val touchSlop = viewConfiguration.touchSlop
+                val cancelledOrTapped = withTimeoutOrNull(triggerTimeout) {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Main)
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: return@withTimeoutOrNull true
+                        if (!change.pressed) return@withTimeoutOrNull true
+                        if ((change.position - down.position).getDistance() > touchSlop) {
+                            return@withTimeoutOrNull true
+                        }
+                    }
+                }
+                if (cancelledOrTapped == null) {
+                    currentOnUrlLongClick?.invoke(matchedUrl)
+                    do {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        event.changes.forEach { if (it.id == down.id) it.consume() }
+                    } while (event.changes.any { it.id == down.id && it.pressed })
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
+
     Text(
         text = parsed.annotatedString,
         style = style.copy(color = color),
         inlineContent = inlineContentMap,
-        modifier = modifier,
+        onTextLayout = { textLayoutResult = it },
+        modifier = modifier.then(linkLongPressModifier),
     )
 }
 

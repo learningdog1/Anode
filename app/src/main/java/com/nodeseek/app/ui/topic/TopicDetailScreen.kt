@@ -65,6 +65,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
@@ -78,6 +79,7 @@ import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreHoriz
@@ -91,6 +93,7 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.ThumbDown
@@ -124,6 +127,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -163,11 +167,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.data.restock.MerchantLinkDetector
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.AuthorBadge
 import com.nodeseek.app.domain.model.FloorComment
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
+import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
+import com.nodeseek.app.ui.trust.SellerTrustCardSheet
+import com.nodeseek.app.ui.trust.SellerTrustQuickBadge
 import com.nodeseek.app.ui.components.AccessLockChip
 import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.FloorNumberPill
@@ -208,6 +216,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
+private data class TopicTrustInspectTarget(
+    val uid: Long,
+    val username: String,
+    val avatarUrl: String,
+)
+
 /**
  * NodePulse Magazine-Grade Topic Reader Screen (`TopicDetailScreen`).
  *
@@ -231,6 +245,9 @@ fun TopicDetailScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit = { _, _, _ -> },
     onEditTopic: (topicId: Long, categorySlug: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: ((url: String) -> Unit)? = null,
+    onStartDirectMessage: ((peerUid: Long, peerName: String) -> Unit)? = null,
+    onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
+    onOpenFullLiteSsh: (() -> Unit)? = null,
     isEmbeddedInDualPane: Boolean = false,
     isDetailPaneMaximized: Boolean = false,
     onCloseDetailPane: (() -> Unit)? = null,
@@ -246,6 +263,7 @@ fun TopicDetailScreen(
         ),
     ),
 ) {
+    val appContainer = LocalAppContainer.current
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
@@ -258,7 +276,29 @@ fun TopicDetailScreen(
     var fallbackWebViewUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var actionSheetComment by remember { mutableStateOf<FloorComment?>(null) }
     var selectableSheetComment by remember { mutableStateOf<FloorComment?>(null) }
+    var linkActionUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var restockWatchPrefillUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastLinkLongPressMs by remember { mutableLongStateOf(0L) }
+    var trustSheetTarget by remember { mutableStateOf<TopicTrustInspectTarget?>(null) }
     val uploadedMarkdownChannel = remember { Channel<String>(Channel.BUFFERED) }
+
+    val openFloorMoreActions: (FloorComment) -> Unit = { comment ->
+        if (System.currentTimeMillis() - lastLinkLongPressMs > 350L && linkActionUrl == null) {
+            actionSheetComment = comment
+        }
+    }
+
+    val openSellerTrust: (Long, String, String) -> Unit = { uid, username, avatarUrl ->
+        if (uid > 0L) {
+            trustSheetTarget = TopicTrustInspectTarget(
+                uid = uid,
+                username = username,
+                avatarUrl = avatarUrl,
+            )
+        } else {
+            onNavigateToUser(uid, username)
+        }
+    }
 
     val copyMarkdownSource: (FloorComment) -> Unit = { comment ->
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -425,6 +465,18 @@ fun TopicDetailScreen(
         }
     }
 
+    val handleMarkdownUrlLongClick: (String) -> Unit = remember {
+        { rawUrl ->
+            val unwrapped = MerchantLinkDetector.resolveOrderUrl(rawUrl).ifBlank { rawUrl.trim() }
+            if (unwrapped.startsWith("http://", ignoreCase = true) ||
+                unwrapped.startsWith("https://", ignoreCase = true)
+            ) {
+                lastLinkLongPressMs = System.currentTimeMillis()
+                linkActionUrl = unwrapped
+            }
+        }
+    }
+
     val shareTopic: () -> Unit = {
         val shareTitle = uiState.pageData?.title?.ifBlank { titleHint } ?: titleHint
         val shareUrl = "https://www.nodeseek.com/post-$topicId-${uiState.currentPage}"
@@ -554,6 +606,7 @@ fun TopicDetailScreen(
 
                 uiState.pageData != null -> {
                     val pageData = uiState.pageData!!
+                    val isTradeTopic = pageData.categorySlug.equals("trade", ignoreCase = true)
                     PullToRefreshBox(
                         isRefreshing = uiState.isRefreshing,
                         onRefresh = viewModel::refreshCurrentPage,
@@ -573,6 +626,7 @@ fun TopicDetailScreen(
 
                             // 1. Magazine Article Header
                             item(key = "article_header") {
+                                val headerAuthor = uiState.openingFloor?.author ?: pageData.author
                                 MagazineArticleHeader(
                                     pageData = pageData,
                                     openingFloor = uiState.openingFloor,
@@ -581,9 +635,24 @@ fun TopicDetailScreen(
                                     isTrackingReplies = uiState.isTrackingReplies,
                                     trackedBaselineFloor = uiState.trackedBaselineFloor,
                                     totalPages = uiState.totalPages,
+                                    showTrustQuickBadge = isTradeTopic,
                                     onCategoryClick = { onNavigateToCategory(pageData.categorySlug) },
                                     onAuthorClick = {
-                                        onNavigateToUser(pageData.author.uid, pageData.author.username)
+                                        onNavigateToUser(headerAuthor.uid, headerAuthor.username)
+                                    },
+                                    onAvatarClick = {
+                                        openSellerTrust(
+                                            headerAuthor.uid,
+                                            headerAuthor.username,
+                                            headerAuthor.avatarUrl,
+                                        )
+                                    },
+                                    onInspectTrust = {
+                                        openSellerTrust(
+                                            headerAuthor.uid,
+                                            headerAuthor.username,
+                                            headerAuthor.avatarUrl,
+                                        )
                                     },
                                     onEditTopic = { onEditTopic(topicId, pageData.categorySlug) },
                                     onJumpToFloor = viewModel::jumpToFloor,
@@ -607,12 +676,13 @@ fun TopicDetailScreen(
                                                 onMentionClick = viewModel::resolveAndNavigateToUser,
                                                 onFloorClick = viewModel::jumpToFloor,
                                                 onUrlClick = handleMarkdownUrlClick,
+                                                onUrlLongClick = handleMarkdownUrlLongClick,
                                                 onUpvote = { viewModel.onUpvoteClicked(opening) },
                                                 onDrumstick = { viewModel.onDrumstickClicked(opening) },
                                                 onDislike = { viewModel.onDislikeClicked(opening) },
                                                 onReplyToOp = { viewModel.openReplySheet(quoteComment = null) },
                                                 onEditTopic = { onEditTopic(topicId, pageData.categorySlug) },
-                                                onOpenMoreActions = { actionSheetComment = opening },
+                                                onOpenMoreActions = { openFloorMoreActions(opening) },
                                             )
                                         }
                                     } else {
@@ -679,19 +749,28 @@ fun TopicDetailScreen(
                                         isViewerTopicAuthor = uiState.isViewerTopicAuthor,
                                         isHighlighted = uiState.highlightedFloor == reply.floorNumber,
                                         isBusy = uiState.busyCommentIds.contains(reply.commentId),
+                                        showTrustQuickBadge = isTradeTopic,
                                         onAuthorClick = {
                                             onNavigateToUser(reply.author.uid, reply.author.username)
+                                        },
+                                        onAvatarClick = {
+                                            openSellerTrust(
+                                                reply.author.uid,
+                                                reply.author.username,
+                                                reply.author.avatarUrl,
+                                            )
                                         },
                                         onMentionClick = viewModel::resolveAndNavigateToUser,
                                         onFloorClick = viewModel::jumpToFloor,
                                         onUrlClick = handleMarkdownUrlClick,
+                                        onUrlLongClick = handleMarkdownUrlLongClick,
                                         onUpvote = { viewModel.onUpvoteClicked(reply) },
                                         onDrumstick = { viewModel.onDrumstickClicked(reply) },
                                         onDislike = { viewModel.onDislikeClicked(reply) },
                                         onQuoteReply = { viewModel.openReplySheet(quoteComment = reply) },
                                         onEditReply = { viewModel.openEditReplySheet(reply) },
                                         onTogglePin = { viewModel.onTogglePinReplyClicked(reply) },
-                                        onOpenMoreActions = { actionSheetComment = reply },
+                                        onOpenMoreActions = { openFloorMoreActions(reply) },
                                     )
                                 }
                             }
@@ -734,11 +813,28 @@ fun TopicDetailScreen(
         val isTargetOp = targetComment.floorNumber <= 0
         val isOwnComment = uiState.session?.uid == targetComment.author.uid
         val canEditTarget = if (isTargetOp) uiState.canEditTopic else isOwnComment
+        val detectedMerchantLinks = remember(targetComment.markdownBody) {
+            MerchantLinkDetector.extractMerchantLinks(targetComment.markdownBody)
+        }
         FloorActionBottomSheet(
             comment = targetComment,
             isViewerTopicAuthor = uiState.isViewerTopicAuthor,
             canEdit = canEditTarget,
+            firstMerchantLinkUrl = detectedMerchantLinks.firstOrNull()?.resolvedUrl,
+            merchantLinkCount = detectedMerchantLinks.size,
             onDismiss = { actionSheetComment = null },
+            onInspectSellerTrust = {
+                actionSheetComment = null
+                openSellerTrust(
+                    targetComment.author.uid,
+                    targetComment.author.username,
+                    targetComment.author.avatarUrl,
+                )
+            },
+            onAddMerchantLinkToRestock = { merchantUrl ->
+                actionSheetComment = null
+                restockWatchPrefillUrl = merchantUrl
+            },
             onReplyOrQuote = {
                 actionSheetComment = null
                 viewModel.openReplySheet(quoteComment = if (isTargetOp) null else targetComment)
@@ -826,6 +922,72 @@ fun TopicDetailScreen(
             onMentionClickInPreview = viewModel::resolveAndNavigateToUser,
             onFloorClickInPreview = viewModel::jumpToFloor,
             onUrlClickInPreview = handleMarkdownUrlClick,
+            onOpenFullNetBench = onOpenFullNetBench,
+            onOpenFullLiteSsh = onOpenFullLiteSsh,
+        )
+    }
+
+    linkActionUrl?.let { targetUrl ->
+        ExternalLinkActionBottomSheet(
+            url = targetUrl,
+            onDismiss = { linkActionUrl = null },
+            onAddToRestockMonitor = {
+                linkActionUrl = null
+                restockWatchPrefillUrl = targetUrl
+            },
+            onCopyLink = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(ClipData.newPlainText("Anode Link", targetUrl))
+                linkActionUrl = null
+                coroutineScope.launch { snackbarHostState.showSnackbar("链接已复制") }
+            },
+            onOpenInBrowser = {
+                linkActionUrl = null
+                runCatching { uriHandler.openUri(targetUrl) }.onFailure {
+                    handleMarkdownUrlClick(targetUrl)
+                }
+            },
+        )
+    }
+
+    restockWatchPrefillUrl?.let { prefillUrl ->
+        val topicTitle = uiState.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        AddRestockWatchBottomSheet(
+            repository = appContainer.restockRepository,
+            controller = appContainer.restockMonitorController,
+            onDismiss = { restockWatchPrefillUrl = null },
+            initialUrl = prefillUrl,
+            initialTitle = topicTitle,
+            sourceTopicId = topicId,
+            onWatchSaved = { saved ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("已加入补货监控：${saved.title}")
+                }
+            },
+        )
+    }
+
+    trustSheetTarget?.let { target ->
+        SellerTrustCardSheet(
+            uid = target.uid,
+            usernameHint = target.username,
+            avatarUrlHint = target.avatarUrl,
+            onOpenTopic = { targetTopicId ->
+                trustSheetTarget = null
+                onOpenTopic(targetTopicId, 0, "")
+            },
+            onOpenUserProfile = { targetUid, targetUsername ->
+                trustSheetTarget = null
+                onNavigateToUser(targetUid, targetUsername)
+            },
+            onStartDm = onStartDirectMessage?.let { startDm ->
+                { targetUid, targetUsername ->
+                    trustSheetTarget = null
+                    startDm(targetUid, targetUsername)
+                }
+            },
+            onDismiss = { trustSheetTarget = null },
+            repository = appContainer.sellerTrustRepository,
         )
     }
 
@@ -1250,8 +1412,11 @@ private fun MagazineArticleHeader(
     isTrackingReplies: Boolean,
     trackedBaselineFloor: Int,
     totalPages: Int,
+    showTrustQuickBadge: Boolean,
     onCategoryClick: () -> Unit,
     onAuthorClick: () -> Unit,
+    onAvatarClick: () -> Unit,
+    onInspectTrust: () -> Unit,
     onEditTopic: () -> Unit,
     onJumpToFloor: (Int) -> Unit,
     onJumpToLastPage: () -> Unit,
@@ -1375,7 +1540,7 @@ private fun MagazineArticleHeader(
                 size = 46.dp,
                 rankLevel = author.level,
                 ringWidth = 2.2.dp,
-                onClick = onAuthorClick,
+                onClick = onAvatarClick,
             )
 
             Column(
@@ -1449,6 +1614,13 @@ private fun MagazineArticleHeader(
                         )
                     }
                 }
+            }
+
+            if (showTrustQuickBadge && author.uid > 0L) {
+                SellerTrustQuickBadge(
+                    uid = author.uid,
+                    onClick = onInspectTrust,
+                )
             }
 
             if (canEditTopic) {
@@ -1552,6 +1724,7 @@ private fun OpeningFloorArticleBody(
     onMentionClick: (String) -> Unit,
     onFloorClick: (Int) -> Unit,
     onUrlClick: (String) -> Unit,
+    onUrlLongClick: (String) -> Unit,
     onUpvote: () -> Unit,
     onDrumstick: () -> Unit,
     onDislike: () -> Unit,
@@ -1605,6 +1778,7 @@ private fun OpeningFloorArticleBody(
                 onMentionClick = onMentionClick,
                 onFloorClick = onFloorClick,
                 onUrlClick = onUrlClick,
+                onUrlLongClick = onUrlLongClick,
             )
 
             // Optional Author Signature Footnote
@@ -1616,6 +1790,7 @@ private fun OpeningFloorArticleBody(
                     onMentionClick = onMentionClick,
                     onFloorClick = onFloorClick,
                     onUrlClick = onUrlClick,
+                    onUrlLongClick = onUrlLongClick,
                 )
             }
         }
@@ -1828,10 +2003,13 @@ private fun ThreadedFloorReplyRow(
     isViewerTopicAuthor: Boolean,
     isHighlighted: Boolean,
     isBusy: Boolean,
+    showTrustQuickBadge: Boolean,
     onAuthorClick: () -> Unit,
+    onAvatarClick: () -> Unit,
     onMentionClick: (String) -> Unit,
     onFloorClick: (Int) -> Unit,
     onUrlClick: (String) -> Unit,
+    onUrlLongClick: (String) -> Unit,
     onUpvote: () -> Unit,
     onDrumstick: () -> Unit,
     onDislike: () -> Unit,
@@ -1894,7 +2072,7 @@ private fun ThreadedFloorReplyRow(
                 size = 36.dp,
                 rankLevel = reply.author.level,
                 ringWidth = 1.6.dp,
-                onClick = onAuthorClick,
+                onClick = onAvatarClick,
             )
 
             Column(
@@ -1956,6 +2134,15 @@ private fun ThreadedFloorReplyRow(
                             containerColor = ext.heatContainer,
                             contentColor = ext.onHeatContainer,
                             borderColor = ext.onHeatContainer.copy(alpha = 0.28f),
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        )
+                    }
+
+                    if (showTrustQuickBadge && reply.author.uid > 0L) {
+                        SellerTrustQuickBadge(
+                            uid = reply.author.uid,
+                            compact = true,
+                            onClick = onAvatarClick,
                             modifier = Modifier.align(Alignment.CenterVertically),
                         )
                     }
@@ -2029,6 +2216,7 @@ private fun ThreadedFloorReplyRow(
                 onMentionClick = onMentionClick,
                 onFloorClick = onFloorClick,
                 onUrlClick = onUrlClick,
+                onUrlLongClick = onUrlLongClick,
             )
 
             // Author Signature (if non-blank)
@@ -2040,6 +2228,7 @@ private fun ThreadedFloorReplyRow(
                     onMentionClick = onMentionClick,
                     onFloorClick = onFloorClick,
                     onUrlClick = onUrlClick,
+                    onUrlLongClick = onUrlLongClick,
                 )
             }
         }
@@ -2069,6 +2258,7 @@ private fun AuthorSignatureBlock(
     onMentionClick: (String) -> Unit,
     onFloorClick: (Int) -> Unit,
     onUrlClick: (String) -> Unit,
+    onUrlLongClick: ((String) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val density = LocalDensity.current
@@ -2144,6 +2334,7 @@ private fun AuthorSignatureBlock(
                     onMentionClick = onMentionClick,
                     onFloorClick = onFloorClick,
                     onUrlClick = onUrlClick,
+                    onUrlLongClick = onUrlLongClick,
                 )
             },
         ) { measurables, constraints ->
@@ -2949,7 +3140,11 @@ private fun FloorActionBottomSheet(
     comment: FloorComment,
     isViewerTopicAuthor: Boolean,
     canEdit: Boolean,
+    firstMerchantLinkUrl: String? = null,
+    merchantLinkCount: Int = 0,
     onDismiss: () -> Unit,
+    onInspectSellerTrust: () -> Unit,
+    onAddMerchantLinkToRestock: (String) -> Unit,
     onReplyOrQuote: () -> Unit,
     onDrumstick: () -> Unit,
     onFreeTextSelect: () -> Unit,
@@ -3060,6 +3255,39 @@ private fun FloorActionBottomSheet(
                     label = "复制 Markdown 源码",
                     onClick = onCopyMarkdown,
                 )
+                if (comment.author.uid > 0L) {
+                    PulseGradientDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(horizontal = 14.dp),
+                    )
+                    FloorSheetActionRow(
+                        icon = Icons.Rounded.Shield,
+                        label = "查卖家信誉",
+                        subtitle = "检索注册时长、历史交易帖与曝光/骗子关联",
+                        badgeContainer = MaterialTheme.colorScheme.secondaryContainer,
+                        iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        onClick = onInspectSellerTrust,
+                    )
+                }
+                if (!firstMerchantLinkUrl.isNullOrBlank()) {
+                    PulseGradientDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(horizontal = 14.dp),
+                    )
+                    FloorSheetActionRow(
+                        icon = Icons.Rounded.Bolt,
+                        label = "加入补货监控",
+                        subtitle = if (merchantLinkCount > 1) {
+                            "检测到 $merchantLinkCount 个商家链接 · 优先监控主下单页"
+                        } else {
+                            firstMerchantLinkUrl
+                        },
+                        badgeText = "盯盘",
+                        badgeContainer = MaterialTheme.colorScheme.primaryContainer,
+                        iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        onClick = { onAddMerchantLinkToRestock(firstMerchantLinkUrl) },
+                    )
+                }
                 if (canEdit) {
                     PulseGradientDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
@@ -3087,6 +3315,112 @@ private fun FloorActionBottomSheet(
                     )
                 }
             }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
+}
+
+@Composable
+private fun ExternalLinkActionBottomSheet(
+    url: String,
+    onDismiss: () -> Unit,
+    onAddToRestockMonitor: () -> Unit,
+    onCopyLink: () -> Unit,
+    onOpenInBrowser: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val isMerchantLink = remember(url) { MerchantLinkDetector.isLikelyMerchantLink(url) }
+    val detectedPanel = remember(url) { MerchantLinkDetector.inferPanelTypeFromUrl(url) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        shape = PulseArchitecturalShapes.BottomSheetTop,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.5.dp)
+                        .height(16.dp)
+                        .clip(CircleShape)
+                        .background(PulseBrushes.brandGradient(horizontal = false)),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isMerchantLink) "商家购买链接操作" else "外部链接操作",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = url,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (isMerchantLink) {
+                    PulseAccentPill(
+                        text = detectedPanel.displayName,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pulseCard(
+                        shape = PulseArchitecturalShapes.EditorialCard,
+                        elevation = PulseElevation.Subtle,
+                    )
+                    .padding(vertical = 4.dp),
+            ) {
+                FloorSheetActionRow(
+                    icon = Icons.Rounded.Bolt,
+                    label = "加入补货监控",
+                    subtitle = "自动解包跳转链接并周期检测库存，补货即发高优弹窗直达下单",
+                    badgeText = if (isMerchantLink) "推荐" else null,
+                    badgeContainer = MaterialTheme.colorScheme.primaryContainer,
+                    iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = onAddToRestockMonitor,
+                )
+                PulseGradientDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                )
+                FloorSheetActionRow(
+                    icon = Icons.Rounded.ContentCopy,
+                    label = "复制链接",
+                    subtitle = "复制解包后的直达地址",
+                    onClick = onCopyLink,
+                )
+                PulseGradientDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                )
+                FloorSheetActionRow(
+                    icon = Icons.AutoMirrored.Rounded.OpenInNew,
+                    label = "浏览器打开",
+                    onClick = onOpenInBrowser,
+                )
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
         }
     }

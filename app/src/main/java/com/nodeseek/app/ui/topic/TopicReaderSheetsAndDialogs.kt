@@ -48,6 +48,7 @@ import androidx.compose.material.icons.rounded.Calculate
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EmojiEmotions
 import androidx.compose.material.icons.rounded.FormatBold
@@ -63,6 +64,7 @@ import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material.icons.rounded.Terminal
@@ -115,6 +117,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.ui.components.MarkdownRenderer
@@ -126,6 +129,9 @@ import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
+import com.nodeseek.app.ui.netbench.NetBenchQuickBottomSheet
+import com.nodeseek.app.ui.netbench.insertNetBenchMarkdownAtCursor
+import com.nodeseek.app.ui.ssh.SshQuickInsertSheet
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
@@ -337,7 +343,10 @@ internal fun ReplyComposerBottomSheet(
     onFloorClickInPreview: (Int) -> Unit,
     onUrlClickInPreview: ((String) -> Unit)? = null,
     onPhotoReadError: (String) -> Unit = {},
+    onOpenFullNetBench: ((String) -> Unit)? = null,
+    onOpenFullLiteSsh: (() -> Unit)? = null,
 ) {
+    val appContainer = LocalAppContainer.current
     val ext = NodePulseThemeTokens.extendedColors
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
@@ -346,6 +355,8 @@ internal fun ReplyComposerBottomSheet(
     val maxSheetHeight = (screenHeightDp * 0.88f).dp.coerceAtLeast(360.dp)
     val previewMaxHeight = (screenHeightDp * 0.46f).dp.coerceIn(220.dp, 460.dp)
     var showValuationSheet by remember { mutableStateOf(false) }
+    var showNetBenchSheet by remember { mutableStateOf(false) }
+    var showSshSheet by remember { mutableStateOf(false) }
 
     val latestOnDraftChanged by rememberUpdatedState(onDraftChanged)
     val latestOnPhotoBytesPicked by rememberUpdatedState(onPhotoBytesPicked)
@@ -660,6 +671,8 @@ internal fun ReplyComposerBottomSheet(
                         }
                     },
                     onOpenValuationCalculator = { showValuationSheet = true },
+                    onOpenNetBench = { showNetBenchSheet = true },
+                    onOpenSshInsert = { showSshSheet = true },
                 )
 
                 // Inline NodeSeek Sticker Catalog Picker
@@ -798,6 +811,40 @@ internal fun ReplyComposerBottomSheet(
             onDismiss = { showValuationSheet = false },
         )
     }
+
+    if (showNetBenchSheet) {
+        NetBenchQuickBottomSheet(
+            primaryActionLabel = "插入回复内容",
+            onInsertMarkdown = { markdown ->
+                showNetBenchSheet = false
+                applyTransform { insertNetBenchMarkdownAtCursor(it, markdown) }
+            },
+            onDismiss = { showNetBenchSheet = false },
+            onOpenFullScreen = onOpenFullNetBench?.let { openFull ->
+                { target ->
+                    showNetBenchSheet = false
+                    openFull(target)
+                }
+            },
+        )
+    }
+
+    if (showSshSheet) {
+        SshQuickInsertSheet(
+            onDismiss = { showSshSheet = false },
+            onInsertMarkdown = { markdown ->
+                showSshSheet = false
+                applyTransform { insertMarkdownBlockAtCursor(it, markdown) }
+            },
+            onOpenFullLiteSsh = onOpenFullLiteSsh?.let { openFull ->
+                {
+                    showSshSheet = false
+                    openFull()
+                }
+            },
+            vaultRepository = appContainer.sshVaultRepository,
+        )
+    }
 }
 
 @Composable
@@ -810,6 +857,8 @@ internal fun MarkdownQuickToolbar(
     modifier: Modifier = Modifier,
     onPickFileImage: (() -> Unit)? = null,
     onOpenValuationCalculator: () -> Unit = {},
+    onOpenNetBench: () -> Unit = {},
+    onOpenSshInsert: () -> Unit = {},
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     Row(
@@ -831,6 +880,16 @@ internal fun MarkdownQuickToolbar(
             icon = Icons.Rounded.Calculate,
             label = "剩余价值",
             onClick = onOpenValuationCalculator,
+        )
+        ToolbarCompactChipAction(
+            icon = Icons.Rounded.Speed,
+            label = "测机",
+            onClick = onOpenNetBench,
+        )
+        ToolbarCompactChipAction(
+            icon = Icons.Rounded.Computer,
+            label = "SSH 跑分",
+            onClick = onOpenSshInsert,
         )
         ToolbarIconAction(
             icon = Icons.Rounded.EmojiEmotions,
@@ -937,6 +996,49 @@ internal fun MarkdownQuickToolbar(
             onClick = {
                 onApplyTransform { insertOrWrapMarkdown(it, prefix = BENCHMARK_TABS_SNIPPET) }
             },
+        )
+    }
+}
+
+@Composable
+private fun ToolbarCompactChipAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        modifier = Modifier
+            .height(32.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))
+            .border(
+                width = 0.8.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f),
+                shape = shape,
+            )
+            .pulseBouncyClickable(
+                pressedScale = NodePulseMotion.chipPressScale,
+                role = Role.Button,
+                onClickLabel = label,
+                onClick = onClick,
+            )
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
         )
     }
 }

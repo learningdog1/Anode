@@ -135,6 +135,12 @@ fun PulseHubScreen(
     onOpenSeekMail: () -> Unit = {},
     onOpenBookmarks: () -> Unit = {},
     onOpenReadHistory: () -> Unit = {},
+    onOpenDealsHub: () -> Unit = {},
+    onOpenOverseasIntel: () -> Unit = {},
+    onOpenRestockMonitor: () -> Unit = {},
+    onOpenMyServers: () -> Unit = {},
+    onOpenNetBench: () -> Unit = {},
+    onOpenLiteSsh: () -> Unit = {},
     onRequestWebViewAuth: (() -> Unit)? = null,
     contentBottomPadding: Dp = 104.dp,
     previewUiState: PulseHubUiState? = null,
@@ -153,6 +159,14 @@ fun PulseHubScreen(
         initialValue = 0,
     )
     val radarUnreadCount = previewRadarUnreadCount ?: observedRadarUnreadCount
+    val restockWatches by appContainer.restockRepository.watchItemsFlow.collectAsStateWithLifecycle()
+    val restockEvents by appContainer.restockRepository.eventHistoryFlow.collectAsStateWithLifecycle()
+    val restockUnreadCount = remember(restockEvents) { restockEvents.count { !it.isRead } }
+    val fleetAssets by appContainer.fleetRepository.assetsFlow.collectAsStateWithLifecycle()
+    val fleetSnapshots by appContainer.fleetRepository.snapshotsFlow.collectAsStateWithLifecycle()
+    val fleetSummaryCount = remember(fleetAssets, fleetSnapshots) {
+        maxOf(fleetAssets.size, fleetSnapshots.size).takeIf { it > 0 }?.let { "$it 台" }
+    }
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -357,6 +371,48 @@ fun PulseHubScreen(
                                                 triggerWebViewLogin()
                                             }
                                         },
+                                    ),
+                                ),
+                            )
+                        }
+                    }
+
+                    // ── Group 3: VPS 玩家工具箱 ──
+                    item(key = "hub_vps_toolbox_group") {
+                        PulseStaggeredEntrance(index = 4) {
+                            HubGroupedSection(
+                                title = "VPS 玩家工具箱",
+                                rows = listOf(
+                                    HubMenuRowItem(
+                                        label = "🔥 黑五大促专题",
+                                        plainCount = "专题",
+                                        onClick = onOpenDealsHub,
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "🌐 海外情报聚合 (LET/LEB)",
+                                        plainCount = "译 · 折算",
+                                        onClick = onOpenOverseasIntel,
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "⚡ VPS 补货抢购监控",
+                                        badgeCount = restockUnreadCount,
+                                        plainCount = restockWatches.count { it.isEnabled }
+                                            .takeIf { it > 0 }
+                                            ?.let { "盯盘 $it" },
+                                        onClick = onOpenRestockMonitor,
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "🖥️ 我的服务器 (探针+账本)",
+                                        plainCount = fleetSummaryCount,
+                                        onClick = onOpenMyServers,
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "📡 手机端测机 (TCPing/iperf3)",
+                                        onClick = onOpenNetBench,
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "💻 轻量 SSH 一键跑分",
+                                        onClick = onOpenLiteSsh,
                                     ),
                                 ),
                             )

@@ -54,7 +54,10 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -94,6 +97,8 @@ import com.nodeseek.app.ui.theme.PulseShimmerBox
 import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseGlassSurface
+import com.nodeseek.app.ui.trust.SellerTrustCardSheet
+import com.nodeseek.app.ui.trust.SellerTrustQuickBadge
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -313,6 +318,7 @@ fun DirectMessageScreen(
         factory = DirectMessageViewModel.factory(LocalAppContainer.current, peerUid, peerName),
     ),
 ) {
+    val appContainer = LocalAppContainer.current
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
@@ -325,6 +331,7 @@ fun DirectMessageScreen(
     val displayPeerName = uiState.peerName.ifBlank {
         if (isSystemThread) "系统通知" else "用户 #$peerUid"
     }
+    var showSellerTrustSheet by rememberSaveable { mutableStateOf(false) }
 
     val handleMarkdownMentionClick: (String) -> Unit = remember(onOpenUserProfile) {
         { username ->
@@ -466,6 +473,13 @@ fun DirectMessageScreen(
                 },
                 actions = {
                     if (!isSystemThread && peerUid > 0L) {
+                        SellerTrustQuickBadge(
+                            uid = peerUid,
+                            compact = true,
+                            onClick = { showSellerTrustSheet = true },
+                            repository = appContainer.sellerTrustRepository,
+                            modifier = Modifier.padding(end = 2.dp),
+                        )
                         IconButton(onClick = { onOpenUserProfile(peerUid, displayPeerName) }) {
                             Icon(
                                 imageVector = Icons.Rounded.Person,
@@ -633,6 +647,24 @@ fun DirectMessageScreen(
                 }
             }
         }
+    }
+
+    if (showSellerTrustSheet && !isSystemThread && peerUid > 0L) {
+        SellerTrustCardSheet(
+            uid = peerUid,
+            usernameHint = displayPeerName,
+            onOpenTopic = { targetTopicId ->
+                showSellerTrustSheet = false
+                onOpenTopic?.invoke(targetTopicId, 0, "")
+            },
+            onOpenUserProfile = { targetUid, targetName ->
+                showSellerTrustSheet = false
+                onOpenUserProfile(targetUid, targetName)
+            },
+            onStartDm = null,
+            onDismiss = { showSellerTrustSheet = false },
+            repository = appContainer.sellerTrustRepository,
+        )
     }
 }
 

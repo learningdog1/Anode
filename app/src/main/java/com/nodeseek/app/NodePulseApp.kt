@@ -16,12 +16,17 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import coil3.svg.SvgDecoder
 import com.nodeseek.app.data.radar.AppContainerHost
+import com.nodeseek.app.data.restock.RestockMonitorHost
 import com.nodeseek.app.di.DefaultAppContainer
+import com.nodeseek.app.domain.restock.RestockMonitorController
 
-class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHost {
+class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHost, RestockMonitorHost {
 
     override lateinit var container: DefaultAppContainer
         private set
+
+    override val restockMonitorController: RestockMonitorController
+        get() = container.restockMonitorController
 
     private var startedActivityCount: Int = 0
     private var isActivityChangingConfigurations: Boolean = false
@@ -31,6 +36,7 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHo
         container = DefaultAppContainer(this)
         container.notificationDispatcher.ensureChannels()
         container.startBackgroundRadarScheduling()
+        container.startBackgroundFeatureSchedulers()
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
@@ -41,6 +47,7 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHo
                     startedActivityCount += 1
                     if (startedActivityCount > 0 && !transitioningFromConfigChange) {
                         container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
+                        container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
                     }
                 }
 
@@ -53,6 +60,7 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHo
                     startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
                     if (startedActivityCount == 0 && !isActivityChangingConfigurations) {
                         container.radarMonitorController.onForegroundChanged(false)
+                        container.restockMonitorController.onForegroundChanged(false)
                     }
                 }
 
@@ -63,6 +71,8 @@ class NodePulseApp : Application(), SingletonImageLoader.Factory, AppContainerHo
         )
         container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
         container.radarMonitorController.start()
+        container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
+        container.restockMonitorController.start()
     }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader {

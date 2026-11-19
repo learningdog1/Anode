@@ -48,15 +48,31 @@ import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.R
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
+import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.local.InMemoryBlockedUsersCache
+import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
+import com.nodeseek.app.data.restock.RestockNotificationHelper
+import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.data.valuation.FxRatesState
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.backup.BackupManager
+import com.nodeseek.app.domain.deals.DealsFeedSnapshot
+import com.nodeseek.app.domain.deals.DealsRepository
 import com.nodeseek.app.domain.filter.ContentBlockRule
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.filter.ContentFilterRepository
+import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
+import com.nodeseek.app.domain.fleet.FleetMonitorSettings
+import com.nodeseek.app.domain.fleet.FleetRefreshSummary
+import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.fleet.ProbeConnectivityResult
+import com.nodeseek.app.domain.fleet.ProbePanelConfig
+import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
+import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -67,6 +83,30 @@ import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.restock.RestockBackgroundPollOutcome
+import com.nodeseek.app.domain.restock.RestockEventRecord
+import com.nodeseek.app.domain.restock.RestockMonitorController
+import com.nodeseek.app.domain.restock.RestockMonitorSettings
+import com.nodeseek.app.domain.restock.RestockRepository
+import com.nodeseek.app.domain.restock.RestockRuntimeStatus
+import com.nodeseek.app.domain.restock.RestockStockStatus
+import com.nodeseek.app.domain.restock.RestockWatchItem
+import com.nodeseek.app.domain.restock.StockAnalysisResult
+import com.nodeseek.app.domain.ssh.CustomSshPreset
+import com.nodeseek.app.domain.ssh.DecryptedSshCredentials
+import com.nodeseek.app.domain.ssh.SshExecutionRecord
+import com.nodeseek.app.domain.ssh.SshServerDraft
+import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.trust.LocalSellerNote
+import com.nodeseek.app.domain.trust.SellerTrustReport
+import com.nodeseek.app.domain.trust.SellerTrustRepository
+import com.nodeseek.app.domain.trust.TrustRiskAssessment
+import com.nodeseek.app.domain.trust.TrustRiskLevel
+import com.nodeseek.app.domain.trust.TrustTag
+import java.io.File
+import java.time.LocalDate
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.BookmarkedTopic
@@ -118,6 +158,7 @@ import com.nodeseek.app.ui.components.PulseBottomDockOverlay
 import com.nodeseek.app.ui.components.PulseNavTab
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.PulseThemeMode
+import com.nodeseek.app.ui.trust.LocalSellerTrustRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -523,6 +564,168 @@ internal class PreviewAppContainer(
         blockedUsersCache = InMemoryBlockedUsersCache(),
         contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(contentFilterRepository),
     )
+
+    override val exchangeRateRepository: ExchangeRateRepository = ExchangeRateRepository(
+        cacheFile = File(context.cacheDir, "preview_valuation_fx_cache.json"),
+    )
+
+    override val restockNotificationHelper: RestockNotificationHelper =
+        object : RestockNotificationHelper(context) {
+            override fun ensureChannel() = Unit
+            override fun hasPostNotificationsPermission(): Boolean = true
+        }
+
+    override val restockRepository: RestockRepository = object : RestockRepository {
+        private val watches = MutableStateFlow<List<RestockWatchItem>>(emptyList())
+        private val events = MutableStateFlow<List<RestockEventRecord>>(emptyList())
+        private val monitorSettings = MutableStateFlow(RestockMonitorSettings())
+        override val watchItemsFlow: StateFlow<List<RestockWatchItem>> = watches.asStateFlow()
+        override val eventHistoryFlow: StateFlow<List<RestockEventRecord>> = events.asStateFlow()
+        override val settingsFlow: StateFlow<RestockMonitorSettings> = monitorSettings.asStateFlow()
+        override suspend fun getWatchItemsSnapshot(): List<RestockWatchItem> = watches.value
+        override suspend fun getEventHistorySnapshot(): List<RestockEventRecord> = events.value
+        override suspend fun getSettingsSnapshot(): RestockMonitorSettings = monitorSettings.value
+        override suspend fun addOrUpdateWatch(item: RestockWatchItem): RestockWatchItem {
+            watches.update { list -> list.filterNot { it.id == item.id } + item }
+            return item
+        }
+        override suspend fun removeWatch(id: String) {
+            watches.update { list -> list.filterNot { it.id == id } }
+        }
+        override suspend fun setWatchEnabled(id: String, enabled: Boolean) = Unit
+        override suspend fun updateWatchPollInterval(id: String, intervalMinutes: Int) = Unit
+        override suspend fun recordCheckResult(watchId: String, analysis: StockAnalysisResult): RestockEventRecord? = null
+        override suspend fun markEventRead(eventId: String) = Unit
+        override suspend fun markAllEventsRead() = Unit
+        override suspend fun deleteEvent(eventId: String) = Unit
+        override suspend fun clearEventHistory() = Unit
+        override suspend fun updateSettings(transform: (RestockMonitorSettings) -> RestockMonitorSettings): RestockMonitorSettings {
+            val next = transform(monitorSettings.value)
+            monitorSettings.value = next
+            return next
+        }
+    }
+
+    override val restockMonitorController: RestockMonitorController = object : RestockMonitorController {
+        override val runtimeStatus: StateFlow<RestockRuntimeStatus> =
+            MutableStateFlow(RestockRuntimeStatus()).asStateFlow()
+        override fun start() = Unit
+        override fun stop() = Unit
+        override fun onForegroundChanged(inForeground: Boolean) = Unit
+        override fun triggerImmediateCheckAll() = Unit
+        override fun triggerCheckSingle(watchId: String) = Unit
+        override suspend fun probeUrl(
+            rawUrl: String,
+            customInStockKeyword: String,
+            customOutOfStockKeyword: String,
+        ): StockAnalysisResult = StockAnalysisResult(
+            rawUrl = rawUrl,
+            resolvedOrderUrl = rawUrl,
+            finalUrl = rawUrl,
+            stockStatus = RestockStockStatus.OUT_OF_STOCK,
+        )
+        override suspend fun checkWatchNow(watchId: String): StockAnalysisResult? = null
+        override suspend fun checkAllNow(onlyEnabled: Boolean): List<StockAnalysisResult> = emptyList()
+        override suspend fun runBackgroundPollPass(): RestockBackgroundPollOutcome =
+            RestockBackgroundPollOutcome.Completed()
+    }
+
+    override val dealsRepository: DealsRepository = object : DealsRepository {
+        private val state = MutableStateFlow(DealsFeedSnapshot())
+        override val dealsState: StateFlow<DealsFeedSnapshot> = state.asStateFlow()
+        override suspend fun loadCachedDeals(): DealsFeedSnapshot = state.value
+        override suspend fun refreshDeals(force: Boolean): Result<DealsFeedSnapshot> = Result.success(state.value)
+    }
+
+    override val sellerTrustRepository: SellerTrustRepository = object : SellerTrustRepository {
+        private val notes = MutableStateFlow<Map<Long, LocalSellerNote>>(emptyMap())
+        override suspend fun inspectSeller(uid: Long, usernameHint: String, forceRefresh: Boolean): SellerTrustReport =
+            SellerTrustReport(
+                uid = uid,
+                username = usernameHint.ifBlank { "用户 #$uid" },
+                rankLevel = 4,
+                localNote = notes.value[uid],
+                riskAssessment = TrustRiskAssessment(
+                    level = TrustRiskLevel.NORMAL_CLEAR,
+                    headline = "未见明显风险记录",
+                ),
+            )
+        override fun observeLocalNote(uid: Long): Flow<LocalSellerNote?> = flowOf(notes.value[uid])
+        override suspend fun saveLocalNote(uid: Long, username: String, tag: TrustTag, noteText: String) {
+            notes.update { map ->
+                map + (uid to LocalSellerNote(uid = uid, username = username, tag = tag, noteText = noteText))
+            }
+        }
+        override suspend fun getAllNotes(): List<LocalSellerNote> = notes.value.values.toList()
+    }
+
+    override val fleetRepository: FleetRepository = object : FleetRepository {
+        override val panelsFlow: StateFlow<List<ProbePanelConfig>> = MutableStateFlow(emptyList<ProbePanelConfig>()).asStateFlow()
+        override val snapshotsFlow: StateFlow<List<ProbeServerSnapshot>> = MutableStateFlow(emptyList<ProbeServerSnapshot>()).asStateFlow()
+        override val assetsFlow: StateFlow<List<VpsAssetRecord>> = MutableStateFlow(emptyList<VpsAssetRecord>()).asStateFlow()
+        override val monitorSettingsFlow: StateFlow<FleetMonitorSettings> = MutableStateFlow(FleetMonitorSettings()).asStateFlow()
+        override val lastSyncEpochMillisFlow: StateFlow<Long> = MutableStateFlow(0L).asStateFlow()
+        override val isRefreshingFlow: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
+        override val panelErrorsFlow: StateFlow<Map<String, String>> = MutableStateFlow(emptyMap<String, String>()).asStateFlow()
+        override suspend fun loadPersistedState() = Unit
+        override suspend fun upsertPanel(config: ProbePanelConfig): ProbePanelConfig = config
+        override suspend fun deletePanel(panelId: String) = Unit
+        override suspend fun testPanelConnection(config: ProbePanelConfig): ProbeConnectivityResult =
+            ProbeConnectivityResult(success = true)
+        override suspend fun refreshAllPanels(): FleetRefreshSummary = FleetRefreshSummary(
+            refreshedPanelCount = 0,
+            succeededPanelCount = 0,
+            failedPanelErrors = emptyMap(),
+            snapshots = emptyList(),
+            syncedAtEpochMillis = 0L,
+        )
+        override suspend fun refreshPanel(panelId: String): Result<List<ProbeServerSnapshot>> = Result.success(emptyList())
+        override suspend fun upsertAsset(asset: VpsAssetRecord): VpsAssetRecord = asset
+        override suspend fun deleteAsset(assetId: String) = Unit
+        override suspend fun linkAssetToProbe(assetId: String, probeKey: String?) = Unit
+        override suspend fun updateMonitorSettings(settings: FleetMonitorSettings) = Unit
+        override suspend fun evaluateAlerts(
+            today: LocalDate,
+            nowEpochMillis: Long,
+            fxRatesState: FxRatesState?,
+            checkedPanels: Int?,
+            failedPanels: Int,
+        ): FleetMonitorCheckReport = FleetMonitorCheckReport()
+    }
+
+    override val fleetWorkScheduler: FleetWorkScheduler = FleetWorkScheduler(context)
+
+    override val netBenchHistoryStore: NetBenchHistoryStore = NetBenchHistoryStore(
+        historyFile = File(context.cacheDir, "preview_netbench_history.json"),
+    )
+
+    override val sshVaultRepository: SshVaultRepository = object : SshVaultRepository {
+        override val serversFlow: StateFlow<List<SshServerProfile>> = MutableStateFlow(emptyList<SshServerProfile>()).asStateFlow()
+        override val customPresetsFlow: StateFlow<List<CustomSshPreset>> = MutableStateFlow(emptyList<CustomSshPreset>()).asStateFlow()
+        override val recentRunsFlow: StateFlow<List<SshExecutionRecord>> = MutableStateFlow(emptyList<SshExecutionRecord>()).asStateFlow()
+        override suspend fun saveServer(draft: SshServerDraft): SshServerProfile =
+            SshServerProfile(
+                id = draft.id ?: "preview",
+                alias = draft.alias,
+                host = draft.host,
+                port = draft.port,
+                username = draft.username,
+                authMethod = draft.authMethod,
+                encryptedSecret = "",
+            )
+        override suspend fun deleteServer(serverId: String) = Unit
+        override suspend fun decryptCredentials(profile: SshServerProfile): DecryptedSshCredentials =
+            DecryptedSshCredentials(secret = "")
+        override suspend fun updateHostKeyFingerprint(serverId: String, fingerprintSha256: String, algorithm: String?) = Unit
+        override suspend fun markServerConnected(serverId: String, timestampMillis: Long) = Unit
+        override suspend fun saveCustomPreset(preset: CustomSshPreset): CustomSshPreset = preset
+        override suspend fun deleteCustomPreset(presetId: String) = Unit
+        override suspend fun saveRunRecord(record: SshExecutionRecord) = Unit
+        override suspend fun deleteRunRecord(runId: String) = Unit
+        override suspend fun clearRunRecords() = Unit
+    }
+
+    override val overseasIntelRepository: OverseasIntelRepository = PreviewOverseasIntelRepository()
 }
 
 private val SHOWCASE_AVATAR_POOL = intArrayOf(
@@ -594,6 +797,7 @@ internal fun PreviewPhoneFrame(
 
     CompositionLocalProvider(
         LocalAppContainer provides container,
+        LocalSellerTrustRepository provides container.sellerTrustRepository,
         LocalViewModelStoreOwner provides vmStoreOwner,
         LocalOnBackPressedDispatcherOwner provides backDispatcherOwner,
         LocalActivityResultRegistryOwner provides activityResultRegistryOwner,

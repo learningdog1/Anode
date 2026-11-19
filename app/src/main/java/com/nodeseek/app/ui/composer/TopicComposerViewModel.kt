@@ -146,6 +146,8 @@ class TopicComposerViewModel(
     private val container: AppContainer,
     val editTopicId: Long? = null,
     private val initialCategorySlug: String = "daily",
+    private val initialTitle: String = "",
+    private val initialMarkdown: String = "",
 ) : ViewModel() {
 
     private val sanitizedInitialCategory = initialCategorySlug
@@ -154,10 +156,15 @@ class TopicComposerViewModel(
         .takeIf { it.isNotEmpty() }
         ?: "daily"
 
+    private val hasExplicitPrefill = editTopicId == null &&
+        (initialTitle.isNotBlank() || initialMarkdown.isNotBlank())
+
     private val internalState = MutableStateFlow(
         InternalComposerState(
             isLoadingInitialTopic = editTopicId != null,
             selectedCategorySlug = sanitizedInitialCategory,
+            title = if (hasExplicitPrefill) initialTitle else "",
+            markdownContent = if (hasExplicitPrefill) initialMarkdown else "",
         )
     )
 
@@ -224,6 +231,8 @@ class TopicComposerViewModel(
             editTopicId = editTopicId,
             isLoadingInitialTopic = editTopicId != null,
             selectedCategorySlug = sanitizedInitialCategory,
+            title = if (hasExplicitPrefill) initialTitle else "",
+            markdownContent = if (hasExplicitPrefill) initialMarkdown else "",
         ),
     )
 
@@ -233,7 +242,7 @@ class TopicComposerViewModel(
         }
         if (editTopicId != null) {
             loadTopicForEditing(editTopicId)
-        } else {
+        } else if (!hasExplicitPrefill) {
             restoreNewTopicDraft()
         }
     }
@@ -681,6 +690,8 @@ class TopicComposerViewModel(
             container: AppContainer,
             editTopicId: Long? = null,
             initialCategorySlug: String = "daily",
+            initialTitle: String = "",
+            initialMarkdown: String = "",
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -688,6 +699,8 @@ class TopicComposerViewModel(
                     container = container,
                     editTopicId = editTopicId,
                     initialCategorySlug = initialCategorySlug,
+                    initialTitle = initialTitle,
+                    initialMarkdown = initialMarkdown,
                 ) as T
             }
         }

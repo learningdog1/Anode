@@ -53,6 +53,7 @@ import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Calculate
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EmojiEmotions
@@ -67,6 +68,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Title
@@ -132,6 +134,9 @@ import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.components.WebViewSessionSheet
+import com.nodeseek.app.ui.netbench.NetBenchQuickBottomSheet
+import com.nodeseek.app.ui.netbench.insertNetBenchMarkdownAtCursor
+import com.nodeseek.app.ui.ssh.SshQuickInsertSheet
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
 import com.nodeseek.app.ui.valuation.insertMarkdownBlockAtCursor
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -180,18 +185,25 @@ fun TopicComposerScreen(
     modifier: Modifier = Modifier,
     editTopicId: Long? = null,
     initialCategorySlug: String = "daily",
+    initialTitle: String = "",
+    initialMarkdown: String = "",
     onTopicPublished: (editedTopicId: Long?) -> Unit = { onBack() },
     onRequestWebViewAuth: ((url: String) -> Unit)? = null,
+    onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
+    onOpenFullLiteSsh: (() -> Unit)? = null,
     previewUiState: TopicComposerUiState? = null,
     viewModel: TopicComposerViewModel = viewModel(
-        key = "topic_composer_${editTopicId ?: "new"}_$initialCategorySlug",
+        key = "topic_composer_${editTopicId ?: "new"}_${initialCategorySlug}_${initialTitle.hashCode()}_${initialMarkdown.hashCode()}",
         factory = TopicComposerViewModel.factory(
             container = LocalAppContainer.current,
             editTopicId = editTopicId,
             initialCategorySlug = initialCategorySlug,
+            initialTitle = initialTitle,
+            initialMarkdown = initialMarkdown,
         ),
     ),
 ) {
+    val appContainer = LocalAppContainer.current
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
@@ -200,6 +212,8 @@ fun TopicComposerScreen(
 
     var fallbackWebViewUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var showValuationSheet by rememberSaveable { mutableStateOf(false) }
+    var showNetBenchSheet by rememberSaveable { mutableStateOf(false) }
+    var showSshSheet by rememberSaveable { mutableStateOf(false) }
 
     var bodyFieldValue by remember(uiState.editorRevision) {
         mutableStateOf(
@@ -303,6 +317,8 @@ fun TopicComposerScreen(
                     categorySlug = uiState.selectedCategorySlug,
                     onApplyTransform = applyEditorTransform,
                     onOpenValuationCalculator = { showValuationSheet = true },
+                    onOpenNetBench = { showNetBenchSheet = true },
+                    onOpenSshInsert = { showSshSheet = true },
                     onOpenStickers = { viewModel.setStickerSheetVisible(true) },
                     onPickPhoto = {
                         try {
@@ -428,6 +444,47 @@ fun TopicComposerScreen(
             onCopiedFeedback = { msg ->
                 coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
             },
+        )
+    }
+
+    if (showNetBenchSheet) {
+        NetBenchQuickBottomSheet(
+            primaryActionLabel = "插入发帖正文",
+            onInsertMarkdown = { generatedMarkdown ->
+                showNetBenchSheet = false
+                applyEditorTransform { current ->
+                    insertNetBenchMarkdownAtCursor(current, generatedMarkdown)
+                }
+            },
+            onDismiss = { showNetBenchSheet = false },
+            onCopiedFeedback = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onOpenFullScreen = onOpenFullNetBench?.let { openFull ->
+                { target ->
+                    showNetBenchSheet = false
+                    openFull(target)
+                }
+            },
+        )
+    }
+
+    if (showSshSheet) {
+        SshQuickInsertSheet(
+            onDismiss = { showSshSheet = false },
+            onInsertMarkdown = { generatedMarkdown ->
+                showSshSheet = false
+                applyEditorTransform { current ->
+                    insertMarkdownBlockAtCursor(current, generatedMarkdown)
+                }
+            },
+            onOpenFullLiteSsh = onOpenFullLiteSsh?.let { openFull ->
+                {
+                    showSshSheet = false
+                    openFull()
+                }
+            },
+            vaultRepository = appContainer.sshVaultRepository,
         )
     }
 
@@ -1240,6 +1297,8 @@ private fun ComposerBottomFormattingBar(
     categorySlug: String,
     onApplyTransform: ((TextFieldValue) -> TextFieldValue) -> Unit,
     onOpenValuationCalculator: () -> Unit,
+    onOpenNetBench: () -> Unit,
+    onOpenSshInsert: () -> Unit,
     onOpenStickers: () -> Unit,
     onPickPhoto: () -> Unit,
 ) {
@@ -1267,6 +1326,16 @@ private fun ComposerBottomFormattingBar(
                 icon = Icons.Rounded.Calculate,
                 label = "剩余价值",
                 onClick = onOpenValuationCalculator,
+            )
+            ComposerToolbarButton(
+                icon = Icons.Rounded.Speed,
+                label = "测机",
+                onClick = onOpenNetBench,
+            )
+            ComposerToolbarButton(
+                icon = Icons.Rounded.Computer,
+                label = "SSH 跑分",
+                onClick = onOpenSshInsert,
             )
             ComposerToolbarButton(
                 icon = Icons.Rounded.EmojiEmotions,

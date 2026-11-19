@@ -138,6 +138,8 @@ import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import com.nodeseek.app.ui.trust.SellerTrustCardSheet
+import com.nodeseek.app.ui.trust.SellerTrustQuickBadge
 
 @Composable
 fun UserProfileScreen(
@@ -156,11 +158,13 @@ fun UserProfileScreen(
         factory = UserProfileViewModel.factory(LocalAppContainer.current, uid, usernameHint),
     ),
 ) {
+    val appContainer = LocalAppContainer.current
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
     val uriHandler = LocalUriHandler.current
     var showBlockConfirm by rememberSaveable { mutableStateOf(false) }
+    var showSellerTrustSheet by rememberSaveable { mutableStateOf(false) }
 
     val handleMarkdownMentionClick: (String) -> Unit = remember(onOpenUserProfile) {
         { username ->
@@ -309,6 +313,7 @@ fun UserProfileScreen(
                                     } else {
                                         null
                                     },
+                                    onInspectTrust = { showSellerTrustSheet = true },
                                     onOpenFollowing = {
                                         if (uiState.isOwnProfile) viewModel.showOwnConnections(following = true)
                                     },
@@ -548,6 +553,33 @@ fun UserProfileScreen(
             },
         )
     }
+
+    if (showSellerTrustSheet && !uiState.isOwnProfile) {
+        val targetUid = profile?.uid ?: uid
+        val targetName = profile?.username?.takeIf { it.isNotBlank() } ?: uiState.usernameHint
+        if (targetUid > 0L) {
+            SellerTrustCardSheet(
+                uid = targetUid,
+                usernameHint = targetName,
+                avatarUrlHint = profile?.avatarUrl.orEmpty(),
+                onOpenTopic = { targetTopicId ->
+                    showSellerTrustSheet = false
+                    onOpenTopic(targetTopicId, 0, "")
+                },
+                onOpenUserProfile = { _, _ ->
+                    showSellerTrustSheet = false
+                },
+                onStartDm = onOpenDirectMessage?.let { openDm ->
+                    { dmUid, dmName ->
+                        showSellerTrustSheet = false
+                        openDm(dmUid, dmName)
+                    }
+                },
+                onDismiss = { showSellerTrustSheet = false },
+                repository = appContainer.sellerTrustRepository,
+            )
+        }
+    }
 }
 
 @Composable
@@ -559,6 +591,7 @@ private fun UserProfileHeroBento(
     onEditProfile: () -> Unit,
     onToggleFollow: () -> Unit,
     onSendMessage: (() -> Unit)?,
+    onInspectTrust: () -> Unit,
     onOpenFollowing: () -> Unit,
     onOpenFollowers: () -> Unit,
     onMentionClick: (String) -> Unit,
@@ -975,6 +1008,24 @@ private fun UserProfileHeroBento(
                             Text("发私信", fontWeight = FontWeight.SemiBold)
                         }
                     }
+
+                    SellerTrustQuickBadge(
+                        uid = profile.uid,
+                        onClick = onInspectTrust,
+                        modifier = Modifier.height(44.dp),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SellerTrustQuickBadge(
+                        uid = profile.uid,
+                        onClick = onInspectTrust,
+                        modifier = Modifier.height(40.dp),
+                    )
                 }
             }
 

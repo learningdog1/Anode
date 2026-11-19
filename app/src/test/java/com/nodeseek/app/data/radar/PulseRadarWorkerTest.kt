@@ -15,10 +15,21 @@ import com.nodeseek.app.data.repository.FakeSettingsRepository
 import com.nodeseek.app.data.repository.InboxRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
+import com.nodeseek.app.data.fleet.FleetWorkScheduler
+import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.restock.RestockNotificationHelper
+import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.domain.backup.BackupManager
+import com.nodeseek.app.domain.deals.DealsRepository
 import com.nodeseek.app.domain.filter.ContentFilterRepository
+import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
+import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.restock.RestockMonitorController
+import com.nodeseek.app.domain.restock.RestockRepository
+import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.KeywordMatchMode
 import com.nodeseek.app.domain.radar.RadarBackgroundPollOutcome
@@ -105,6 +116,17 @@ class PulseRadarWorkerTest {
                 override val notificationDispatcher: PulseNotificationDispatcher get() = error("unused")
                 override val appUpdateManager: AppUpdateManager get() = error("unused")
                 override val backupManager: BackupManager get() = error("unused")
+                override val exchangeRateRepository: ExchangeRateRepository get() = error("unused")
+                override val restockRepository: RestockRepository get() = error("unused")
+                override val restockMonitorController: RestockMonitorController get() = error("unused")
+                override val restockNotificationHelper: RestockNotificationHelper get() = error("unused")
+                override val dealsRepository: DealsRepository get() = error("unused")
+                override val sellerTrustRepository: SellerTrustRepository get() = error("unused")
+                override val fleetRepository: FleetRepository get() = error("unused")
+                override val fleetWorkScheduler: FleetWorkScheduler get() = error("unused")
+                override val netBenchHistoryStore: NetBenchHistoryStore get() = error("unused")
+                override val sshVaultRepository: SshVaultRepository get() = error("unused")
+                override val overseasIntelRepository: OverseasIntelRepository get() = error("unused")
             }
         }
     }

@@ -11,8 +11,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import com.nodeseek.app.data.fleet.FleetAlertNotifier
+import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.domain.radar.NotificationTapTarget
+import com.nodeseek.app.navigation.AppDestination
+import com.nodeseek.app.navigation.MyServersRoute
 import com.nodeseek.app.navigation.NodePulseRootShell
+import com.nodeseek.app.navigation.RestockMonitorRoute
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +28,7 @@ class MainActivity : ComponentActivity() {
 
     private val pendingDeepLinkUri = MutableStateFlow<Uri?>(null)
     private val pendingNotificationTap = Channel<NotificationTapTarget>(Channel.BUFFERED)
+    private val pendingShortcutDestination = Channel<AppDestination>(Channel.BUFFERED)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +57,7 @@ class MainActivity : ComponentActivity() {
                     pendingDeepLinkUri.value = null
                 },
                 notificationTapFlow = pendingNotificationTap.receiveAsFlow(),
+                shortcutDestinationFlow = pendingShortcutDestination.receiveAsFlow(),
                 onDarkThemeResolved = { isDark ->
                     val systemBarStyle = if (isDark) {
                         SystemBarStyle.dark(Color.TRANSPARENT)
@@ -86,6 +93,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dispatchNotificationTapIfPresent(targetIntent: Intent?) {
+        if (targetIntent == null) return
+        if (RestockNotificationHelper.isRestockMonitorIntent(targetIntent)) {
+            targetIntent.action = null
+            pendingShortcutDestination.trySend(RestockMonitorRoute(initialTab = 1))
+            return
+        }
+        if (targetIntent.action == FleetAlertNotifier.ACTION_OPEN_FLEET) {
+            val tab = targetIntent.getStringExtra(FleetAlertNotifier.EXTRA_FLEET_TAB)
+            targetIntent.action = null
+            val initialTab = if (tab == FleetAlertNotifier.EXTRA_TAB_ASSETS) 1 else 0
+            pendingShortcutDestination.trySend(MyServersRoute(initialTab = initialTab))
+            return
+        }
         val target = PulseNotificationDispatcher.parseTapTarget(targetIntent) ?: return
         PulseNotificationDispatcher.clearTapTargetExtras(targetIntent)
         pendingNotificationTap.trySend(target)

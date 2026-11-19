@@ -5,6 +5,11 @@ import android.os.Build
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
+import com.nodeseek.app.data.deals.DealsRepositoryImpl
+import com.nodeseek.app.data.fleet.FleetAlertNotifier
+import com.nodeseek.app.data.fleet.FleetMonitorWorker
+import com.nodeseek.app.data.fleet.FleetRepositoryImpl
+import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.local.BlockedUsersCache
 import com.nodeseek.app.data.local.ContentFilterRepositoryImpl
 import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
@@ -17,12 +22,14 @@ import com.nodeseek.app.data.mail.SeekMailApiClient
 import com.nodeseek.app.data.mail.SeekMailDiskCache
 import com.nodeseek.app.data.mail.SeekMailRepositoryImpl
 import java.io.File
+import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.network.CoilHttpClientFactory
 import com.nodeseek.app.data.network.CsrfTokenStore
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.data.network.WebViewSameOriginActionRunner
+import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
 import com.nodeseek.app.data.radar.PulseRadarMonitor
 import com.nodeseek.app.data.radar.RadarWorkScheduler
 import com.nodeseek.app.data.repository.BookmarkAndHistoryRepositoryImpl
@@ -33,12 +40,32 @@ import com.nodeseek.app.data.repository.NodeImageHostRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.UserRepositoryImpl
+import com.nodeseek.app.data.restock.RestockCheckWorker
+import com.nodeseek.app.data.restock.RestockMonitorControllerImpl
+import com.nodeseek.app.data.restock.RestockNotificationHelper
+import com.nodeseek.app.data.restock.RestockRepositoryImpl
+import com.nodeseek.app.data.restock.RestockWorkScheduler
+import com.nodeseek.app.data.restock.StockPageAnalyzer
+import com.nodeseek.app.data.ssh.SshServerVault
+import com.nodeseek.app.data.trust.SellerTrustRepositoryImpl
 import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
+import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.domain.backup.BackupManager
+import com.nodeseek.app.domain.deals.DealBillingCycle
+import com.nodeseek.app.domain.deals.DealPostExtractor
+import com.nodeseek.app.domain.deals.DealSource
+import com.nodeseek.app.domain.deals.DealsRepository
+import com.nodeseek.app.domain.deals.ExternalDealsBridge
+import com.nodeseek.app.domain.deals.PromoDealCardModel
 import com.nodeseek.app.domain.filter.ContentFilterRepository
+import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
+import com.nodeseek.app.domain.overseas.OverseasDealOffer
+import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.overseas.OverseasPriceCycle
+import com.nodeseek.app.domain.overseas.OverseasSource
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
@@ -50,6 +77,10 @@ import com.nodeseek.app.domain.repository.InboxRepository
 import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.restock.RestockMonitorController
+import com.nodeseek.app.domain.restock.RestockRepository
+import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -332,4 +363,176 @@ class DefaultAppContainer(
             onRadarSettingsRestored = { restored -> radarWorkScheduler.sync(restored) },
         )
     }
+
+    override val exchangeRateRepository: ExchangeRateRepository by lazy {
+        ExchangeRateRepository.forContext(appContext)
+    }
+
+    override val restockNotificationHelper: RestockNotificationHelper by lazy {
+        RestockNotificationHelper(appContext)
+    }
+
+    override val restockRepository: RestockRepository by lazy {
+        RestockRepositoryImpl(appContext)
+    }
+
+    val stockPageAnalyzer: StockPageAnalyzer by lazy {
+        StockPageAnalyzer()
+    }
+
+    override val restockMonitorController: RestockMonitorController by lazy {
+        RestockMonitorControllerImpl(
+            appContext = appContext,
+            repository = restockRepository,
+            analyzer = stockPageAnalyzer,
+            notificationHelper = restockNotificationHelper,
+            scope = applicationScope,
+        )
+    }
+
+    val restockWorkScheduler: RestockWorkScheduler by lazy {
+        RestockWorkScheduler(appContext)
+    }
+
+    override val overseasIntelRepository: OverseasIntelRepository by lazy {
+        OverseasIntelRepositoryImpl(
+            context = appContext,
+            exchangeRateRepository = exchangeRateRepository,
+        )
+    }
+
+    private val overseasExternalDealsBridge: ExternalDealsBridge by lazy {
+        ExternalDealsBridge {
+            val cached = runCatching { overseasIntelRepository.loadFromCache() }.getOrDefault(emptyList())
+            val lastSynced = overseasIntelRepository.snapshot.value.syncStatus.lastSyncedEpochMillis
+            val isStale = cached.isEmpty() ||
+                lastSynced <= 0L ||
+                (System.currentTimeMillis() - lastSynced) > 15L * 60_000L
+            val offers = if (isStale) {
+                overseasIntelRepository.refresh(forceTranslate = false).getOrDefault(cached)
+            } else {
+                cached
+            }
+            val fxRates = exchangeRateRepository.state.value
+            offers.map { offer -> offer.toPromoDealCardModel(fxRates) }
+        }
+    }
+
+    override val dealsRepository: DealsRepository by lazy {
+        DealsRepositoryImpl(
+            context = appContext,
+            forumRepository = forumRepository,
+            exchangeRateRepository = exchangeRateRepository,
+            externalDealsBridge = overseasExternalDealsBridge,
+        )
+    }
+
+    override val sellerTrustRepository: SellerTrustRepository by lazy {
+        SellerTrustRepositoryImpl.forContext(
+            context = appContext,
+            userRepository = userRepository,
+            forumRepository = forumRepository,
+        )
+    }
+
+    override val fleetRepository: FleetRepository by lazy {
+        FleetRepositoryImpl.forContext(appContext)
+    }
+
+    val fleetAlertNotifier: FleetAlertNotifier by lazy {
+        FleetAlertNotifier(appContext)
+    }
+
+    override val fleetWorkScheduler: FleetWorkScheduler by lazy {
+        FleetWorkScheduler(appContext)
+    }
+
+    override val netBenchHistoryStore: NetBenchHistoryStore by lazy {
+        NetBenchHistoryStore.forContext(appContext)
+    }
+
+    override val sshVaultRepository: SshVaultRepository by lazy {
+        SshServerVault.getDefault(appContext)
+    }
+
+    fun startBackgroundFeatureSchedulers() {
+        restockNotificationHelper.ensureChannel()
+        fleetAlertNotifier.ensureChannels()
+        RestockCheckWorker.registerControllerProvider { restockMonitorController }
+        FleetMonitorWorker.externalRepositoryFactory = { fleetRepository }
+        restockWorkScheduler.observe(
+            scope = applicationScope,
+            settingsFlow = restockRepository.settingsFlow,
+            watchItemsFlow = restockRepository.watchItemsFlow,
+        )
+        fleetWorkScheduler.observeRepository(
+            scope = applicationScope,
+            repository = fleetRepository,
+        )
+    }
+}
+
+private fun OverseasDealOffer.toPromoDealCardModel(
+    fxRates: com.nodeseek.app.data.valuation.FxRatesState,
+): PromoDealCardModel {
+    val extracted = DealPostExtractor.extract(
+        title = originalTitle,
+        body = originalSummary,
+        fxRates = fxRates,
+        publishedAtEpochMillis = publishedAtEpochMillis,
+        fallbackUrl = primaryOrderUrl,
+    )
+    val bestPrice = primaryPrice
+    val cycleLabel = bestPrice?.cycle?.toDealBillingCycleLabel()?.takeIf { it.isNotBlank() }
+        ?: extracted.billingCycle.label
+    val displayTitle = translatedTitle?.takeIf { it.isNotBlank() } ?: originalTitle
+    val displaySummary = translatedSummary?.takeIf { it.isNotBlank() }
+        ?: originalSummary.ifBlank { extracted.cleanSummary }
+    val resolvedOrderUrl = orderLinks.firstOrNull()?.takeIf { it.isNotBlank() } ?: extracted.orderUrl
+
+    return PromoDealCardModel(
+        id = "overseas_${source.name.lowercase()}_$id",
+        source = when (source) {
+            OverseasSource.LET -> DealSource.OVERSEAS_LET
+            OverseasSource.LEB -> DealSource.OVERSEAS_LEB
+        },
+        topicId = null,
+        sourceUrl = sourceLink,
+        orderUrl = resolvedOrderUrl,
+        merchantName = extracted.merchantName.ifBlank { authorOrProvider },
+        title = displayTitle,
+        translatedSummary = displaySummary,
+        rawPriceText = bestPrice?.rawText ?: extracted.rawPriceText,
+        priceAmount = bestPrice?.originalAmount ?: extracted.priceAmount,
+        currency = bestPrice?.currency ?: extracted.currency,
+        annualizedUsd = bestPrice?.annualizedUsd ?: extracted.annualizedUsd,
+        annualizedCny = bestPrice?.annualizedCny ?: extracted.annualizedCny,
+        billingCycleLabel = cycleLabel,
+        cpuCores = extracted.cpuCores,
+        ramText = extracted.ramText,
+        storageText = extracted.storageText,
+        trafficText = extracted.trafficText,
+        portSpeedText = extracted.portSpeedText,
+        regionTags = extracted.regionTags,
+        routeTags = extracted.routeTags,
+        promoCode = couponCodes.firstOrNull()?.takeIf { it.isNotBlank() } ?: extracted.promoCode,
+        expiresAtEpochMillis = extracted.expiresAtEpochMillis,
+        publishedAtEpochMillis = publishedAtEpochMillis,
+        replyCount = 0,
+        isOutOfStockHint = isOutOfStockHint || extracted.isOutOfStockHint,
+        authorName = authorOrProvider,
+        categorySlug = "overseas",
+        isDetailEnriched = true,
+    )
+}
+
+private fun OverseasPriceCycle.toDealBillingCycleLabel(): String = when (this) {
+    OverseasPriceCycle.MONTHLY -> DealBillingCycle.MONTHLY.label
+    OverseasPriceCycle.QUARTERLY -> DealBillingCycle.QUARTERLY.label
+    OverseasPriceCycle.SEMI_ANNUAL -> DealBillingCycle.SEMI_ANNUAL.label
+    OverseasPriceCycle.ANNUAL -> DealBillingCycle.ANNUAL.label
+    OverseasPriceCycle.BIENNIAL -> DealBillingCycle.BIENNIAL.label
+    OverseasPriceCycle.TRIENNIAL -> DealBillingCycle.TRIENNIAL.label
+    OverseasPriceCycle.ONE_TIME -> DealBillingCycle.ONE_TIME.label
+    OverseasPriceCycle.UNKNOWN -> ""
 }

@@ -87,6 +87,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -95,15 +96,18 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.DefaultAppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.fleet.RestockAssetPrefill
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InboxTargetResolver
 import com.nodeseek.app.domain.radar.NotificationTapTarget
+import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.ui.adaptive.AdaptivePostureTransition
 import com.nodeseek.app.ui.adaptive.DualPaneDestinationKind
 import com.nodeseek.app.ui.adaptive.LocalPulseAdaptiveLayout
@@ -122,7 +126,10 @@ import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.WebViewSessionSheet
 import com.nodeseek.app.ui.components.rememberInAppMessagePopupState
 import com.nodeseek.app.ui.composer.TopicComposerScreen
+import com.nodeseek.app.ui.deals.DealsHubScreen
 import com.nodeseek.app.ui.explore.ExploreScreen
+import com.nodeseek.app.ui.fleet.MyServersScreen
+import com.nodeseek.app.ui.fleet.MyServersTab
 import com.nodeseek.app.ui.hub.CheckInBoardScreen
 import com.nodeseek.app.ui.hub.DirectMessageScreen
 import com.nodeseek.app.ui.hub.HubCollectionScreen
@@ -131,7 +138,15 @@ import com.nodeseek.app.ui.hub.PulseHubScreen
 import com.nodeseek.app.ui.hub.SettingsScreen
 import com.nodeseek.app.ui.hub.UserProfileScreen
 import com.nodeseek.app.ui.mail.SeekMailScreen
+import com.nodeseek.app.ui.netbench.MobileNetBenchScreen
+import com.nodeseek.app.ui.overseas.EmbeddedOverseasOfferFeed
+import com.nodeseek.app.ui.overseas.OverseasIntelScreen
 import com.nodeseek.app.ui.radar.PulseRadarScreen
+import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
+import com.nodeseek.app.ui.restock.RestockMonitorScreen
+import com.nodeseek.app.ui.ssh.LITE_SSH_REVIEW_CATEGORY_SLUG
+import com.nodeseek.app.ui.ssh.LiteSshScreen
+import com.nodeseek.app.ui.ssh.LiteSshViewModel
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -140,6 +155,7 @@ import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseThemeMode
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.topic.TopicDetailScreen
+import com.nodeseek.app.ui.trust.LocalSellerTrustRepository
 import com.nodeseek.app.ui.update.AppUpdateDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -158,6 +174,13 @@ private data class WebViewAuthRequest(
     val autoDismissWhenVerified: Boolean = true,
 )
 
+private data class RestockWatchPrefillRequest(
+    val url: String,
+    val title: String,
+    val priceHint: String = "",
+    val sourceTopicId: Long? = null,
+)
+
 /**
  * Root application shell providing [LocalAppContainer], reactive [NodePulseTheme] settings
  * (`ThemeMode`, Pure Pitch AMOLED, Material You Dynamic Color, font scale), and the end-to-end
@@ -171,9 +194,13 @@ fun NodePulseRootShell(
     deepLinkUriFlow: StateFlow<Uri?>? = null,
     onDeepLinkConsumed: () -> Unit = {},
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
+    shortcutDestinationFlow: Flow<AppDestination>? = null,
     onDarkThemeResolved: (Boolean) -> Unit = {},
 ) {
-    CompositionLocalProvider(LocalAppContainer provides container) {
+    CompositionLocalProvider(
+        LocalAppContainer provides container,
+        LocalSellerTrustRepository provides container.sellerTrustRepository,
+    ) {
         val settings by container.settingsRepository.settings.collectAsStateWithLifecycle(
             initialValue = AppSettings(),
         )
@@ -219,6 +246,7 @@ fun NodePulseRootShell(
                             deepLinkUriFlow = deepLinkUriFlow,
                             onDeepLinkConsumed = onDeepLinkConsumed,
                             notificationTapFlow = notificationTapFlow,
+                            shortcutDestinationFlow = shortcutDestinationFlow,
                         )
                     }
                 }
@@ -240,6 +268,7 @@ fun NodePulseNavHost(
     deepLinkUriFlow: StateFlow<Uri?>? = null,
     onDeepLinkConsumed: () -> Unit = {},
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
+    shortcutDestinationFlow: Flow<AppDestination>? = null,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -276,6 +305,7 @@ fun NodePulseNavHost(
 
     // Centralized WebView session / challenge sheet state
     var activeWebViewRequest by remember { mutableStateOf<WebViewAuthRequest?>(null) }
+    var pendingRestockWatchRequest by remember { mutableStateOf<RestockWatchPrefillRequest?>(null) }
     var pendingComposerSlugAfterAuth by rememberSaveable { mutableStateOf<String?>(null) }
     var challengeBannerDismissed by rememberSaveable { mutableStateOf(false) }
 
@@ -651,6 +681,115 @@ fun NodePulseNavHost(
         }
     }
 
+    val openDirectMessage: (peerUid: Long, peerName: String) -> Unit = remember(navController) {
+        { peerUid, peerName ->
+            isDetailPaneMaximized = false
+            navController.navigate(
+                DirectMessageRoute(
+                    peerUid = peerUid,
+                    peerName = peerName,
+                ),
+            )
+        }
+    }
+
+    val openRestockMonitor: (initialUrl: String, initialTitle: String, initialTab: Int) -> Unit =
+        remember(navController) {
+            { initialUrl, initialTitle, initialTab ->
+                isDetailPaneMaximized = false
+                navController.navigate(
+                    RestockMonitorRoute(
+                        initialUrl = initialUrl,
+                        initialTitle = initialTitle,
+                        initialTab = initialTab.coerceIn(0, 1),
+                    ),
+                ) {
+                    launchSingleTop = true
+                }
+            }
+        }
+
+    val openDealsHub: (initialTab: Int) -> Unit = remember(navController) {
+        { initialTab ->
+            isDetailPaneMaximized = false
+            navController.navigate(
+                DealsHubRoute(initialTab = initialTab.coerceIn(0, 2)),
+            ) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    val openOverseasIntel: () -> Unit = remember(navController) {
+        {
+            isDetailPaneMaximized = false
+            navController.navigate(OverseasIntelRoute) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    val openMyServers: (initialTab: Int, importName: String, importPrice: String, importUrl: String) -> Unit =
+        remember(navController) {
+            { initialTab, importName, importPrice, importUrl ->
+                isDetailPaneMaximized = false
+                navController.navigate(
+                    MyServersRoute(
+                        initialTab = initialTab.coerceIn(0, 1),
+                        importName = importName,
+                        importPrice = importPrice,
+                        importUrl = importUrl,
+                    ),
+                ) {
+                    launchSingleTop = true
+                }
+            }
+        }
+
+    val openMobileNetBench: (initialTarget: String) -> Unit = remember(navController) {
+        { initialTarget ->
+            isDetailPaneMaximized = false
+            navController.navigate(
+                MobileNetBenchRoute(initialTarget = initialTarget),
+            ) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    val openLiteSsh: () -> Unit = remember(navController) {
+        {
+            isDetailPaneMaximized = false
+            navController.navigate(LiteSshRoute) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    val openComposerWithPrefill: (categorySlug: String, title: String, markdown: String) -> Unit =
+        remember(navController) {
+            { categorySlug, title, markdown ->
+                isDetailPaneMaximized = false
+                navController.navigate(
+                    ComposerRoute(
+                        editTopicId = null,
+                        initialCategorySlug = categorySlug.ifBlank { "daily" },
+                        initialTitle = title,
+                        initialMarkdown = markdown,
+                    ),
+                )
+            }
+        }
+
+    LaunchedEffect(shortcutDestinationFlow, navController) {
+        shortcutDestinationFlow?.collect { destination ->
+            isDetailPaneMaximized = false
+            navController.navigate(destination) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     // Native notification tap deep-link handling
     LaunchedEffect(notificationTapFlow, navController) {
         notificationTapFlow?.collect { target ->
@@ -932,6 +1071,9 @@ fun NodePulseNavHost(
                                             onOpenTopic = openTopic,
                                             onEditTopic = editTopic,
                                             onRequestWebViewAuth = requestTopicWebViewAuth,
+                                            onStartDirectMessage = openDirectMessage,
+                                            onOpenFullNetBench = openMobileNetBench,
+                                            onOpenFullLiteSsh = openLiteSsh,
                                         ) {
                                             ExploreScreen(
                                                 onOpenTopic = openTopic,
@@ -942,6 +1084,7 @@ fun NodePulseNavHost(
                                                 },
                                                 onOpenBoardsTab = {},
                                                 onOpenAuthorProfile = navigateToUser,
+                                                onOpenDealsHub = { openDealsHub(0) },
                                                 onRequestWebViewAuth = {
                                                     openWebViewAuth(SIGN_IN_URL, session == null)
                                                 },
@@ -1003,6 +1146,12 @@ fun NodePulseNavHost(
                                                     launchSingleTop = true
                                                 }
                                             },
+                                            onOpenDealsHub = { openDealsHub(0) },
+                                            onOpenOverseasIntel = openOverseasIntel,
+                                            onOpenRestockMonitor = { openRestockMonitor("", "", 0) },
+                                            onOpenMyServers = { openMyServers(0, "", "", "") },
+                                            onOpenNetBench = { openMobileNetBench("") },
+                                            onOpenLiteSsh = openLiteSsh,
                                             onOpenSettings = {
                                                 navController.navigate(SettingsRoute) {
                                                     launchSingleTop = true
@@ -1105,6 +1254,9 @@ fun NodePulseNavHost(
                     onOpenTopic = openTopic,
                     onEditTopic = editTopic,
                     onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 ) {
                     BoardsScreen(
                         onOpenTopic = openTopic,
@@ -1146,6 +1298,9 @@ fun NodePulseNavHost(
                     onOpenTopic = openTopic,
                     onEditTopic = editTopic,
                     onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 ) {
                     HubCollectionScreen(
                         initialTab = route.initialTab,
@@ -1179,6 +1334,9 @@ fun NodePulseNavHost(
                     onOpenTopic = openTopic,
                     onEditTopic = editTopic,
                     onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 )
             }
 
@@ -1188,6 +1346,8 @@ fun NodePulseNavHost(
                 TopicComposerScreen(
                     editTopicId = route.editTopicId,
                     initialCategorySlug = route.initialCategorySlug,
+                    initialTitle = route.initialTitle,
+                    initialMarkdown = route.initialMarkdown,
                     onBack = safePopBackStack,
                     onTopicPublished = { editedTopicId ->
                         if (editedTopicId != null) {
@@ -1203,6 +1363,8 @@ fun NodePulseNavHost(
                             url.contains("signIn", ignoreCase = true),
                         )
                     },
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 )
             }
 
@@ -1225,6 +1387,9 @@ fun NodePulseNavHost(
                     onOpenTopic = openTopic,
                     onEditTopic = editTopic,
                     onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 ) {
                     InboxScreen(
                         initialTab = route.initialTab,
@@ -1318,11 +1483,15 @@ fun NodePulseNavHost(
                     onOpenTopic = openTopic,
                     onEditTopic = editTopic,
                     onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
                 ) {
                     PulseRadarScreen(
                         initialTab = route.initialTab,
                         onBack = safePopBackStack,
                         onOpenTopic = openTopic,
+                        onOpenRestockMonitor = { openRestockMonitor("", "", 0) },
                         container = container,
                     )
                 }
@@ -1341,6 +1510,156 @@ fun NodePulseNavHost(
                     initialMailboxId = route.initialMailboxId,
                     initialMailId = route.initialMailId,
                     container = container,
+                )
+            }
+
+            // Feature 1: VPS Restock & Flash-Sale Monitor
+            composable<RestockMonitorRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<RestockMonitorRoute>()
+                RestockMonitorScreen(
+                    repository = container.restockRepository,
+                    monitorController = container.restockMonitorController,
+                    notificationHelper = container.restockNotificationHelper,
+                    onBack = safePopBackStack,
+                    initialTab = route.initialTab,
+                    initialUrl = route.initialUrl,
+                    initialTitle = route.initialTitle,
+                    onOpenTopic = { targetTopicId ->
+                        openTopic(targetTopicId, 0, "")
+                    },
+                    onImportToServerLedger = { item ->
+                        openMyServers(
+                            1,
+                            item.title,
+                            item.priceHint,
+                            item.resolvedOrderUrl.ifBlank { item.rawUrl },
+                        )
+                    },
+                )
+            }
+
+            // Feature 2: Black Friday & Major Promo Hub (integrated with Feature 7 Overseas Intel & Feature 1 Restock)
+            composable<DealsHubRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<DealsHubRoute>()
+                DealsHubScreen(
+                    dealsRepository = container.dealsRepository,
+                    onOpenTopic = { targetTopicId, titleHint ->
+                        openTopic(targetTopicId, 0, titleHint)
+                    },
+                    onAddRestockWatch = { orderUrl, title, rawPriceText, topicId ->
+                        pendingRestockWatchRequest = RestockWatchPrefillRequest(
+                            url = orderUrl,
+                            title = title,
+                            priceHint = rawPriceText,
+                            sourceTopicId = topicId,
+                        )
+                    },
+                    initialTabIndex = route.initialTab,
+                    onBack = safePopBackStack,
+                    overseasTabContent = {
+                        EmbeddedOverseasOfferFeed(
+                            repository = container.overseasIntelRepository,
+                            onAddRestockWatch = { orderUrl, title, priceLabel ->
+                                pendingRestockWatchRequest = RestockWatchPrefillRequest(
+                                    url = orderUrl,
+                                    title = title,
+                                    priceHint = priceLabel,
+                                    sourceTopicId = null,
+                                )
+                            },
+                            onShareDealToForum = { suggestedTitle, markdownBody ->
+                                openComposerWithPrefill("info", suggestedTitle, markdownBody)
+                            },
+                            onFeedbackMessage = { msg ->
+                                appScope.launch {
+                                    rootSnackbarHostState.showSnackbar(msg)
+                                }
+                            },
+                        )
+                    },
+                )
+            }
+
+            // Feature 7: Overseas VPS Intelligence Aggregator (LET / LEB + CNY + Chinese Translation)
+            composable<OverseasIntelRoute> {
+                OverseasIntelScreen(
+                    onBack = safePopBackStack,
+                    repository = container.overseasIntelRepository,
+                    onAddRestockWatch = { orderUrl, title, priceLabel ->
+                        pendingRestockWatchRequest = RestockWatchPrefillRequest(
+                            url = orderUrl,
+                            title = title,
+                            priceHint = priceLabel,
+                            sourceTopicId = null,
+                        )
+                    },
+                    onShareDealToForum = { suggestedTitle, markdownBody ->
+                        openComposerWithPrefill("info", suggestedTitle, markdownBody)
+                    },
+                )
+            }
+
+            // Feature 4: My Servers (Nezha/Komari Probe Monitor + Asset Ledger + One-Click Valuation Sale Post)
+            composable<MyServersRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<MyServersRoute>()
+                var pendingImportPrefill by remember(route.importName, route.importPrice, route.importUrl) {
+                    mutableStateOf(
+                        if (route.importName.isNotBlank() || route.importUrl.isNotBlank()) {
+                            RestockAssetPrefill(
+                                name = route.importName,
+                                priceHint = route.importPrice,
+                                purchaseUrl = route.importUrl,
+                            )
+                        } else {
+                            null
+                        },
+                    )
+                }
+                MyServersScreen(
+                    onBack = safePopBackStack,
+                    onCreateSalePost = { suggestedTitle, markdownBody ->
+                        openComposerWithPrefill("trade", suggestedTitle, markdownBody)
+                    },
+                    fleetRepository = container.fleetRepository,
+                    exchangeRateRepository = container.exchangeRateRepository,
+                    fleetWorkScheduler = container.fleetWorkScheduler,
+                    initialTab = if (route.initialTab == 1) MyServersTab.ASSETS else MyServersTab.PROBES,
+                    pendingRestockPrefill = pendingImportPrefill,
+                    onConsumeRestockPrefill = { pendingImportPrefill = null },
+                )
+            }
+
+            // Feature 5: Mobile Network Benchmark (TCPing + Native iperf3 + IP Native/Broadcast Classifier)
+            composable<MobileNetBenchRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<MobileNetBenchRoute>()
+                MobileNetBenchScreen(
+                    onBack = safePopBackStack,
+                    initialTarget = route.initialTarget,
+                    onInsertMarkdown = { markdown ->
+                        openComposerWithPrefill("review", "", markdown)
+                    },
+                    insertActionLabel = "一键发测评帖",
+                )
+            }
+
+            // Feature 6: Lite SSH (Server Vault + Preset Benchmark Scripts + ANSI Viewer + 1-Click Review Post)
+            composable<LiteSshRoute> {
+                val sshViewModel: LiteSshViewModel = viewModel(
+                    factory = LiteSshViewModel.factory(
+                        vaultRepository = container.sshVaultRepository,
+                        executor = LiteSshExecutor(transport = JSchSshTransport()),
+                    ),
+                )
+                LiteSshScreen(
+                    onBack = safePopBackStack,
+                    onPublishToComposer = { suggestedTitle, markdownContent ->
+                        openComposerWithPrefill(
+                            LITE_SSH_REVIEW_CATEGORY_SLUG,
+                            suggestedTitle,
+                            markdownContent,
+                        )
+                    },
+                    viewModel = sshViewModel,
                 )
             }
         }
@@ -1489,6 +1808,24 @@ fun NodePulseNavHost(
             )
         }
 
+        // Shared cross-feature Add-to-Restock-Monitor sheet (invoked from Deals Hub & Overseas Intel)
+        pendingRestockWatchRequest?.let { request ->
+            AddRestockWatchBottomSheet(
+                repository = container.restockRepository,
+                controller = container.restockMonitorController,
+                onDismiss = { pendingRestockWatchRequest = null },
+                initialUrl = request.url,
+                initialTitle = request.title,
+                initialPriceHint = request.priceHint,
+                sourceTopicId = request.sourceTopicId,
+                onWatchSaved = { saved ->
+                    appScope.launch {
+                        rootSnackbarHostState.showSnackbar("已加入补货监控：${saved.title}")
+                    }
+                },
+            )
+        }
+
         // In-app GitHub Release update prompt dialog
         if (activeWebViewRequest == null &&
             updateState.showUpdatePrompt &&
@@ -1626,6 +1963,9 @@ private fun AdaptiveMasterDetailContainer(
     onEditTopic: (topicId: Long, categorySlug: String) -> Unit,
     onRequestWebViewAuth: (url: String) -> Unit,
     modifier: Modifier = Modifier,
+    onStartDirectMessage: ((peerUid: Long, peerName: String) -> Unit)? = null,
+    onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
+    onOpenFullLiteSsh: (() -> Unit)? = null,
     listContent: @Composable () -> Unit,
 ) {
     val movableList = remember {
@@ -1661,6 +2001,9 @@ private fun AdaptiveMasterDetailContainer(
                             onOpenTopic = onOpenTopic,
                             onEditTopic = onEditTopic,
                             onRequestWebViewAuth = onRequestWebViewAuth,
+                            onStartDirectMessage = onStartDirectMessage,
+                            onOpenFullNetBench = onOpenFullNetBench,
+                            onOpenFullLiteSsh = onOpenFullLiteSsh,
                             isEmbeddedInDualPane = true,
                             isDetailPaneMaximized = isDetailPaneMaximized,
                             onCloseDetailPane = onCloseDetailPane,
