@@ -113,9 +113,12 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+
+private const val DEEP_SCROLL_SNAP_THRESHOLD = 15
 
 private val EXPLORE_SORT_OPTIONS: List<Pair<FeedSort, String>> = listOf(
     FeedSort.LATEST_REPLY to "新评论",
@@ -142,6 +145,7 @@ fun ExploreScreen(
     onRequestWebViewAuth: (() -> Unit)? = null,
     externalCategorySlug: String? = null,
     scrollToTopTrigger: Int = 0,
+    onScrollToTopConsumed: () -> Unit = {},
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)? = null,
     bottomContentPadding: Dp = 88.dp,
     selectedTopicId: Long? = null,
@@ -428,14 +432,18 @@ fun ExploreScreen(
             val pageListState = if (page == 0) listState else rememberLazyListState()
             val slice = uiState.sliceFor(board.slug)
             val isActivePage = pagerState.currentPage == page
+            val canConsumeScrollToTop = isActivePage &&
+                (externalCategorySlug == null || board.slug == externalCategorySlug)
 
             ExploreBoardFeedPage(
                 board = board,
                 slice = slice,
                 preferRssFallback = uiState.preferRssFallback,
                 isActivePage = isActivePage,
+                canConsumeScrollToTop = canConsumeScrollToTop,
                 listState = pageListState,
                 scrollToTopTrigger = scrollToTopTrigger,
+                onScrollToTopConsumed = onScrollToTopConsumed,
                 bottomContentPadding = bottomContentPadding,
                 selectedTopicId = selectedTopicId,
                 onScrollDirectionChanged = onScrollDirectionChanged,
@@ -653,8 +661,10 @@ private fun ExploreBoardFeedPage(
     slice: ExploreBoardSliceUiState,
     preferRssFallback: Boolean,
     isActivePage: Boolean,
+    canConsumeScrollToTop: Boolean,
     listState: LazyListState,
     scrollToTopTrigger: Int,
+    onScrollToTopConsumed: () -> Unit,
     bottomContentPadding: Dp,
     selectedTopicId: Long?,
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)?,
@@ -667,9 +677,30 @@ private fun ExploreBoardFeedPage(
     onTriggerWebViewAuth: () -> Unit,
     onSwitchToFullWebFeed: () -> Unit,
 ) {
-    LaunchedEffect(scrollToTopTrigger, isActivePage) {
-        if (scrollToTopTrigger > 0 && isActivePage) {
-            listState.animateScrollToItem(0)
+    val pageScope = rememberCoroutineScope()
+    var scrollToTopJob by remember { mutableStateOf<Job?>(null) }
+    val latestOnScrollToTopConsumed by rememberUpdatedState(onScrollToTopConsumed)
+
+    LaunchedEffect(isActivePage) {
+        if (!isActivePage) {
+            scrollToTopJob?.cancel()
+            scrollToTopJob = null
+        }
+    }
+
+    LaunchedEffect(scrollToTopTrigger, canConsumeScrollToTop) {
+        if (scrollToTopTrigger > 0 && canConsumeScrollToTop) {
+            latestOnScrollToTopConsumed()
+            scrollToTopJob?.cancel()
+            scrollToTopJob = pageScope.launch {
+                if (listState.firstVisibleItemIndex > DEEP_SCROLL_SNAP_THRESHOLD) {
+                    listState.scrollToItem(DEEP_SCROLL_SNAP_THRESHOLD)
+                }
+                listState.animateScrollToItem(0)
+                if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) {
+                    listState.scrollToItem(0)
+                }
+            }
         }
     }
 

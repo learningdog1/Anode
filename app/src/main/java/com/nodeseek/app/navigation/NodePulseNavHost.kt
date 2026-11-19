@@ -414,14 +414,6 @@ fun NodePulseNavHost(
         }
     }
 
-    // Clear one-shot scroll-to-top trigger after ExploreScreen consumes it so tab switches preserve scroll
-    LaunchedEffect(selectedTab, exploreScrollToTopTrigger) {
-        if (selectedTab == PulseNavTab.EXPLORE && exploreScrollToTopTrigger > 0) {
-            delay(150)
-            exploreScrollToTopTrigger = 0
-        }
-    }
-
     // Reset mail detail & detail maximize flags whenever switching tabs
     LaunchedEffect(selectedTab) {
         if (selectedTab != PulseNavTab.SEEK_MAIL) {
@@ -955,6 +947,7 @@ fun NodePulseNavHost(
                                                 },
                                                 externalCategorySlug = pendingExploreCategorySlug,
                                                 scrollToTopTrigger = exploreScrollToTopTrigger,
+                                                onScrollToTopConsumed = { exploreScrollToTopTrigger = 0 },
                                                 onScrollDirectionChanged = { isScrollingUp ->
                                                     fabExpanded = isScrollingUp
                                                 },
