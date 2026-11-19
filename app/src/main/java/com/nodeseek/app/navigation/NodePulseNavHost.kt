@@ -770,12 +770,16 @@ fun NodePulseNavHost(
         remember(navController) {
             { categorySlug, title, markdown ->
                 isDetailPaneMaximized = false
+                val prefillToken = if (title.isNotBlank() || markdown.isNotBlank()) {
+                    ComposerPrefillStore.put(title = title, markdown = markdown)
+                } else {
+                    ""
+                }
                 navController.navigate(
                     ComposerRoute(
                         editTopicId = null,
                         initialCategorySlug = categorySlug.ifBlank { "daily" },
-                        initialTitle = title,
-                        initialMarkdown = markdown,
+                        prefillId = prefillToken,
                     ),
                 )
             }
@@ -1343,13 +1347,22 @@ fun NodePulseNavHost(
             // Markdown Topic Composer (Create & Edit)
             composable<ComposerRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<ComposerRoute>()
+                val prefillPayload = remember(route.prefillId) {
+                    ComposerPrefillStore.get(route.prefillId)
+                }
+                val resolvedTitle = prefillPayload?.title ?: route.initialTitle
+                val resolvedMarkdown = prefillPayload?.markdown ?: route.initialMarkdown
                 TopicComposerScreen(
                     editTopicId = route.editTopicId,
                     initialCategorySlug = route.initialCategorySlug,
-                    initialTitle = route.initialTitle,
-                    initialMarkdown = route.initialMarkdown,
+                    initialTitle = resolvedTitle,
+                    initialMarkdown = resolvedMarkdown,
+                    prefillKey = route.prefillId,
                     onBack = safePopBackStack,
                     onTopicPublished = { editedTopicId ->
+                        if (route.prefillId.isNotBlank()) {
+                            ComposerPrefillStore.remove(route.prefillId)
+                        }
                         if (editedTopicId != null) {
                             navController.previousBackStackEntry
                                 ?.savedStateHandle

@@ -187,13 +187,14 @@ fun TopicComposerScreen(
     initialCategorySlug: String = "daily",
     initialTitle: String = "",
     initialMarkdown: String = "",
+    prefillKey: String = "",
     onTopicPublished: (editedTopicId: Long?) -> Unit = { onBack() },
     onRequestWebViewAuth: ((url: String) -> Unit)? = null,
     onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
     onOpenFullLiteSsh: (() -> Unit)? = null,
     previewUiState: TopicComposerUiState? = null,
     viewModel: TopicComposerViewModel = viewModel(
-        key = "topic_composer_${editTopicId ?: "new"}_${initialCategorySlug}_${initialTitle.hashCode()}_${initialMarkdown.hashCode()}",
+        key = "topic_composer_${editTopicId ?: "new"}_${initialCategorySlug}_${prefillKey.ifBlank { "${initialTitle.hashCode()}_${initialMarkdown.hashCode()}" }}",
         factory = TopicComposerViewModel.factory(
             container = LocalAppContainer.current,
             editTopicId = editTopicId,
