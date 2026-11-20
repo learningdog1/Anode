@@ -61,12 +61,14 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Preview
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
@@ -104,11 +106,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -119,6 +124,7 @@ import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
+import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerProfile
@@ -141,6 +147,7 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
@@ -342,12 +349,22 @@ fun LiteSshScreen(
                     autoRespondCount = if (viewedRun == null) uiState.autoRespondCount else 0,
                     maskServerIp = uiState.maskServerIp,
                     consoleFontScale = uiState.consoleFontScale,
+                    terminalAutoFitEnabled = uiState.terminalAutoFitEnabled,
                     autoScrollConsole = uiState.autoScrollConsole,
                     onToggleMaskIp = viewModel::toggleMaskServerIp,
                     onToggleAutoRespondPrompts = viewModel::toggleAutoRespondPrompts,
-                    onZoomOut = { viewModel.adjustConsoleFontScale(-0.10f) },
-                    onZoomIn = { viewModel.adjustConsoleFontScale(0.10f) },
+                    onToggleAutoFit = viewModel::setTerminalAutoFitEnabled,
+                    onZoomOut = { effectiveScale ->
+                        viewModel.adjustConsoleFontScale(-0.10f, autoFitStartScale = effectiveScale)
+                    },
+                    onZoomIn = { effectiveScale ->
+                        viewModel.adjustConsoleFontScale(0.10f, autoFitStartScale = effectiveScale)
+                    },
+                    onPinchZoom = { zoomFactor, effectiveScale ->
+                        viewModel.pinchConsoleFontScale(zoomFactor, autoFitStartScale = effectiveScale)
+                    },
                     onResetZoom = viewModel::resetConsoleFontScale,
+                    onPtySizeChanged = viewModel::updateTerminalPtySize,
                     onToggleAutoScroll = viewModel::toggleAutoScrollConsole,
                     onCopyOutput = {
                         val currentState = previewUiState ?: viewModel.uiState.value
@@ -1220,17 +1237,22 @@ private fun AnsiTerminalConsoleCard(
     autoRespondCount: Int,
     maskServerIp: Boolean,
     consoleFontScale: Float,
+    terminalAutoFitEnabled: Boolean,
     autoScrollConsole: Boolean,
     onToggleMaskIp: (Boolean) -> Unit,
     onToggleAutoRespondPrompts: (Boolean) -> Unit,
-    onZoomOut: () -> Unit,
-    onZoomIn: () -> Unit,
+    onToggleAutoFit: (Boolean) -> Unit,
+    onZoomOut: (effectiveScale: Float) -> Unit,
+    onZoomIn: (effectiveScale: Float) -> Unit,
+    onPinchZoom: (zoomFactor: Float, effectiveScale: Float) -> Unit,
     onResetZoom: () -> Unit,
+    onPtySizeChanged: (SshPtySize) -> Unit,
     onToggleAutoScroll: (Boolean) -> Unit,
     onCopyOutput: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val codeTypography = NodePulseThemeTokens.extraTypography
+    var layoutSolution by remember { mutableStateOf<TerminalLayoutSolution?>(null) }
 
     val statusColor = when (connectionPhase) {
         SshConnectionPhase.IDLE -> ext.onCodeMuted
@@ -1389,7 +1411,45 @@ private fun AnsiTerminalConsoleCard(
                 )
             }
 
-            // Font zoom controls
+            // Auto-fit / fixed-font toggle + zoom stepper + reset + PTY readout
+            val displayScale = layoutSolution?.effectiveFontScale ?: consoleFontScale
+            val isDefaultZoomState = terminalAutoFitEnabled &&
+                kotlin.math.abs(consoleFontScale - LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE) <= 0.01f
+
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (terminalAutoFitEnabled) ObsidianPrimaryContainer.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.06f),
+                    )
+                    .border(
+                        width = 0.7.dp,
+                        color = if (terminalAutoFitEnabled) {
+                            ObsidianOnPrimaryContainer.copy(alpha = 0.35f)
+                        } else {
+                            Color.White.copy(alpha = 0.10f)
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .clickable { onToggleAutoFit(!terminalAutoFitEnabled) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.FitScreen,
+                    contentDescription = null,
+                    tint = if (terminalAutoFitEnabled) ObsidianOnPrimaryContainer else ext.onCodeMuted,
+                    modifier = Modifier.size(13.dp),
+                )
+                Text(
+                    text = if (terminalAutoFitEnabled) "自动适配" else "固定字号",
+                    style = codeTypography.microLabel,
+                    color = if (terminalAutoFitEnabled) ObsidianOnPrimaryContainer else ext.onCodeMuted,
+                )
+            }
+
+            // Font zoom controls + reset
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
@@ -1405,12 +1465,12 @@ private fun AnsiTerminalConsoleCard(
                     tint = ext.onCodeSurface,
                     modifier = Modifier
                         .clip(CircleShape)
-                        .clickable(onClick = onZoomOut)
+                        .clickable { onZoomOut(displayScale) }
                         .padding(3.dp)
                         .size(14.dp),
                 )
                 Text(
-                    text = "${(consoleFontScale * 100f).roundToInt()}%",
+                    text = "${(displayScale * 100f).roundToInt()}%",
                     style = codeTypography.microLabel.withTabularNumbers(),
                     color = ext.onCodeSurface,
                     modifier = Modifier
@@ -1424,9 +1484,53 @@ private fun AnsiTerminalConsoleCard(
                     tint = ext.onCodeSurface,
                     modifier = Modifier
                         .clip(CircleShape)
-                        .clickable(onClick = onZoomIn)
+                        .clickable { onZoomIn(displayScale) }
                         .padding(3.dp)
                         .size(14.dp),
+                )
+                if (!isDefaultZoomState) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .clickable(onClick = onResetZoom)
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.RestartAlt,
+                            contentDescription = "重置缩放",
+                            tint = ext.onCodeSurface,
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            text = "重置",
+                            style = codeTypography.microLabel,
+                            color = ext.onCodeSurface,
+                        )
+                    }
+                }
+            }
+
+            layoutSolution?.let { solved ->
+                val ptyText = if (solved.requiresHorizontalScroll) {
+                    "${solved.ptySize.cols}×${solved.ptySize.rows} · 横滑"
+                } else {
+                    "${solved.ptySize.cols}×${solved.ptySize.rows}"
+                }
+                Text(
+                    text = ptyText,
+                    style = codeTypography.microLabel.withTabularNumbers(),
+                    color = if (solved.hitMinReadableFloor && solved.requiresHorizontalScroll) {
+                        ObsidianSecondary
+                    } else {
+                        ext.onCodeMuted
+                    },
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.White.copy(alpha = 0.04f))
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                 )
             }
 
@@ -1593,7 +1697,11 @@ private fun AnsiTerminalConsoleCard(
             maskServerIp = maskServerIp,
             isRunning = isRunning,
             consoleFontScale = consoleFontScale,
+            terminalAutoFitEnabled = terminalAutoFitEnabled,
             autoScrollConsole = autoScrollConsole,
+            onPinchZoom = onPinchZoom,
+            onPtySizeChanged = onPtySizeChanged,
+            onLayoutSolved = { layoutSolution = it },
         )
     }
 }
@@ -1637,6 +1745,7 @@ private fun ConsoleStatusLed(
 
 private const val IMMEDIATE_PARSE_LINE_BUDGET = 120
 private const val QUICK_PREVIEW_TAIL_LINES = 48
+private const val PTY_RESIZE_DEBOUNCE_MS = 180L
 
 @Composable
 private fun AnsiTerminalViewport(
@@ -1647,14 +1756,46 @@ private fun AnsiTerminalViewport(
     maskServerIp: Boolean,
     isRunning: Boolean,
     consoleFontScale: Float,
+    terminalAutoFitEnabled: Boolean,
     autoScrollConsole: Boolean,
+    onPinchZoom: (zoomFactor: Float, effectiveScale: Float) -> Unit,
+    onPtySizeChanged: (SshPtySize) -> Unit,
+    onLayoutSolved: (TerminalLayoutSolution) -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val codeTypography = NodePulseThemeTokens.extraTypography
     val isInspection = LocalInspectionMode.current
+    val density = LocalDensity.current
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    val textMeasurer = rememberTextMeasurer()
     val consoleListState = rememberLazyListState()
     val horizontalScroll = rememberScrollState()
     val liveConsoleBuffer = remember { SshTerminalConsoleBuffer() }
+
+    val (charWidthPxPerSp, lineHeightPxPerSp) = remember(
+        textMeasurer,
+        codeTypography.codeBody,
+        density.density,
+        density.fontScale,
+    ) {
+        measureTerminalFontUnitMetricsPx(
+            textMeasurer = textMeasurer,
+            baseStyle = codeTypography.codeBody,
+            density = density,
+            lineHeightRatio = TerminalFontSpec.DEFAULT_LINE_HEIGHT_RATIO,
+        )
+    }
+
+    val minViewportHeight = remember(screenHeightDp) {
+        if (screenHeightDp in 1..520) 180.dp else 240.dp
+    }
+    val maxViewportHeight = remember(screenHeightDp) {
+        if (screenHeightDp in 1..520) {
+            (screenHeightDp * 0.62f).dp.coerceIn(200.dp, 360.dp)
+        } else {
+            420.dp
+        }
+    }
 
     val streamState = consoleStreamHandle?.flow?.collectAsStateWithLifecycle()?.value
     val effectiveHost = if (streamState != null && !streamState.isEmpty) {
@@ -1664,9 +1805,9 @@ private fun AnsiTerminalViewport(
     }
 
     var asyncBackfillTag by remember { mutableStateOf("") }
-    var asyncBackfillLines by remember { mutableStateOf<List<RenderedTerminalLine>>(emptyList()) }
+    var asyncBackfillOutput by remember { mutableStateOf(TerminalRenderOutput()) }
 
-    val renderedLines: List<RenderedTerminalLine> = when {
+    val renderOutput: TerminalRenderOutput = when {
         streamState != null && !streamState.isEmpty -> {
             val uncachedWork = liveConsoleBuffer.estimatedUncachedWork(
                 runGeneration = streamState.runGeneration,
@@ -1681,7 +1822,7 @@ private fun AnsiTerminalViewport(
             LaunchedEffect(offloadToBackground, targetTag, ext.onCodeSurface) {
                 if (offloadToBackground) {
                     val full = withContext(Dispatchers.Default) {
-                        liveConsoleBuffer.renderSnapshot(
+                        liveConsoleBuffer.renderSnapshotWithMetrics(
                             runGeneration = streamState.runGeneration,
                             snapshot = streamState.bufferSnapshot,
                             maskIp = maskServerIp,
@@ -1689,7 +1830,7 @@ private fun AnsiTerminalViewport(
                             defaultForeground = ext.onCodeSurface,
                         )
                     }
-                    asyncBackfillLines = full
+                    asyncBackfillOutput = full
                     asyncBackfillTag = targetTag
                 }
             }
@@ -1702,7 +1843,7 @@ private fun AnsiTerminalViewport(
                     effectiveHost,
                     ext.onCodeSurface,
                 ) {
-                    liveConsoleBuffer.renderSnapshot(
+                    liveConsoleBuffer.renderSnapshotWithMetrics(
                         runGeneration = streamState.runGeneration,
                         snapshot = streamState.bufferSnapshot,
                         maskIp = maskServerIp,
@@ -1710,8 +1851,8 @@ private fun AnsiTerminalViewport(
                         defaultForeground = ext.onCodeSurface,
                     )
                 }
-            } else if (asyncBackfillTag == targetTag && asyncBackfillLines.isNotEmpty()) {
-                asyncBackfillLines
+            } else if (asyncBackfillTag == targetTag && asyncBackfillOutput.lines.isNotEmpty()) {
+                asyncBackfillOutput
             } else {
                 remember(
                     streamState.runGeneration,
@@ -1720,7 +1861,7 @@ private fun AnsiTerminalViewport(
                     effectiveHost,
                     ext.onCodeSurface,
                 ) {
-                    SshTerminalConsoleBuffer.renderQuickTailPreview(
+                    SshTerminalConsoleBuffer.renderQuickTailPreviewWithMetrics(
                         snapshot = streamState.bufferSnapshot,
                         maskIp = maskServerIp,
                         knownServerHost = effectiveHost,
@@ -1738,7 +1879,7 @@ private fun AnsiTerminalViewport(
             LaunchedEffect(isLargeStatic, staticTag, ext.onCodeSurface) {
                 if (isLargeStatic) {
                     val full = withContext(Dispatchers.Default) {
-                        SshTerminalConsoleBuffer.renderStaticTranscript(
+                        SshTerminalConsoleBuffer.renderStaticTranscriptWithMetrics(
                             sourceKey = staticSourceKey,
                             sanitizedAnsiText = staticAnsiOutput,
                             maskIp = maskServerIp,
@@ -1746,14 +1887,14 @@ private fun AnsiTerminalViewport(
                             defaultForeground = ext.onCodeSurface,
                         )
                     }
-                    asyncBackfillLines = full
+                    asyncBackfillOutput = full
                     asyncBackfillTag = staticTag
                 }
             }
 
             if (!isLargeStatic) {
                 remember(staticSourceKey, staticAnsiOutput, maskServerIp, effectiveHost, ext.onCodeSurface) {
-                    SshTerminalConsoleBuffer.renderStaticTranscript(
+                    SshTerminalConsoleBuffer.renderStaticTranscriptWithMetrics(
                         sourceKey = staticSourceKey,
                         sanitizedAnsiText = staticAnsiOutput,
                         maskIp = maskServerIp,
@@ -1761,12 +1902,12 @@ private fun AnsiTerminalViewport(
                         defaultForeground = ext.onCodeSurface,
                     )
                 }
-            } else if (asyncBackfillTag == staticTag && asyncBackfillLines.isNotEmpty()) {
-                asyncBackfillLines
+            } else if (asyncBackfillTag == staticTag && asyncBackfillOutput.lines.isNotEmpty()) {
+                asyncBackfillOutput
             } else {
                 remember(staticTag, ext.onCodeSurface) {
                     val tailChars = staticAnsiOutput.takeLast(6_000)
-                    SshTerminalConsoleBuffer.renderStaticTranscript(
+                    SshTerminalConsoleBuffer.renderStaticTranscriptWithMetrics(
                         sourceKey = "${staticSourceKey}_tail",
                         sanitizedAnsiText = tailChars,
                         maskIp = maskServerIp,
@@ -1778,9 +1919,10 @@ private fun AnsiTerminalViewport(
             }
         }
 
-        else -> emptyList()
+        else -> TerminalRenderOutput()
     }
 
+    val renderedLines = renderOutput.lines
     val lastLineId = renderedLines.lastOrNull()?.id ?: -1L
     LaunchedEffect(renderedLines.size, lastLineId, autoScrollConsole) {
         if (autoScrollConsole && !consoleListState.isScrollInProgress && renderedLines.isNotEmpty()) {
@@ -1788,21 +1930,77 @@ private fun AnsiTerminalViewport(
         }
     }
 
-    val lineTextStyle = remember(codeTypography.codeBody, consoleFontScale) {
-        codeTypography.codeBody.copy(
-            fontSize = (11.5f * consoleFontScale).sp,
-            lineHeight = (16.5f * consoleFontScale).sp,
-        )
-    }
+    val fitMode = if (terminalAutoFitEnabled) TerminalFitMode.AUTO_FIT else TerminalFitMode.FIXED
 
-    if (renderedLines.isNotEmpty()) {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val minRowWidth = maxWidth
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val minRowWidth = maxWidth
+        val horizontalPaddingPx = with(density) { 24.dp.toPx() }
+        val verticalPaddingPx = with(density) { 24.dp.toPx() }
+        val maxHeightPx = if (constraints.hasBoundedHeight) {
+            minOf(constraints.maxHeight.toFloat(), with(density) { maxViewportHeight.toPx() })
+        } else {
+            with(density) { maxViewportHeight.toPx() }
+        }
+        val availableWidthPx = (constraints.maxWidth.toFloat() - horizontalPaddingPx).coerceAtLeast(1f)
+        val availableHeightPx = (maxHeightPx - verticalPaddingPx).coerceAtLeast(1f)
+
+        val layoutSolution = remember(
+            availableWidthPx,
+            availableHeightPx,
+            charWidthPxPerSp,
+            lineHeightPxPerSp,
+            renderOutput.maxLineColumns,
+            fitMode,
+            consoleFontScale,
+        ) {
+            SshTerminalAutoFit.solveLayout(
+                viewportWidthPx = availableWidthPx,
+                viewportHeightPx = availableHeightPx,
+                charWidthPxPerSp = charWidthPxPerSp,
+                lineHeightPxPerSp = lineHeightPxPerSp,
+                maxLineColumns = renderOutput.maxLineColumns,
+                fitMode = fitMode,
+                manualFontScale = consoleFontScale,
+            )
+        }
+
+        LaunchedEffect(layoutSolution) {
+            onLayoutSolved(layoutSolution)
+        }
+
+        LaunchedEffect(layoutSolution.ptySize, isRunning) {
+            if (isRunning) {
+                delay(PTY_RESIZE_DEBOUNCE_MS)
+            }
+            onPtySizeChanged(layoutSolution.ptySize)
+        }
+
+        LaunchedEffect(layoutSolution.requiresHorizontalScroll) {
+            if (!layoutSolution.requiresHorizontalScroll && horizontalScroll.value > 0) {
+                horizontalScroll.scrollTo(0)
+            }
+        }
+
+        val lineTextStyle = remember(
+            codeTypography.codeBody,
+            layoutSolution.effectiveFontSizeSp,
+            layoutSolution.effectiveLineHeightSp,
+        ) {
+            codeTypography.codeBody.copy(
+                fontSize = layoutSolution.effectiveFontSizeSp.sp,
+                lineHeight = layoutSolution.effectiveLineHeightSp.sp,
+            )
+        }
+
+        if (renderedLines.isNotEmpty()) {
             LazyColumn(
                 state = consoleListState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 240.dp, max = 420.dp)
+                    .heightIn(min = minViewportHeight, max = maxViewportHeight)
+                    .terminalPinchToZoom { zoomFactor ->
+                        onPinchZoom(zoomFactor, layoutSolution.effectiveFontScale)
+                    }
                     .horizontalScroll(horizontalScroll),
                 contentPadding = PaddingValues(vertical = 12.dp),
             ) {
@@ -1822,29 +2020,32 @@ private fun AnsiTerminalViewport(
                     )
                 }
             }
-        }
-    } else {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 240.dp)
-                .padding(horizontal = 12.dp, vertical = 48.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = if (isRunning) {
-                    "$ 正在建立 SSH 加密通道并分配 xterm-256color PTY..."
-                } else {
-                    "$ 选择主机与预设脚本，点击「一键运行」即可实时查看高保真 ANSI 彩色输出"
-                },
-                style = codeTypography.codeBody.copy(fontSize = 12.sp, lineHeight = 18.sp),
-                color = ext.onCodeMuted,
-            )
-            Text(
-                text = "# 进度条 \\r 刷屏已自动折叠 · 公网 IP 默认自动打码 · 多脚本支持一键合并 :::: tabs",
-                style = codeTypography.codeLabel.copy(fontSize = 11.sp),
-                color = ext.onCodeMuted.copy(alpha = 0.72f),
-            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = minViewportHeight)
+                    .terminalPinchToZoom { zoomFactor ->
+                        onPinchZoom(zoomFactor, layoutSolution.effectiveFontScale)
+                    }
+                    .padding(horizontal = 12.dp, vertical = 48.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = if (isRunning) {
+                        "$ 正在建立 SSH 加密通道并分配 xterm-256color PTY (${layoutSolution.ptySize.cols}×${layoutSolution.ptySize.rows})..."
+                    } else {
+                        "$ 选择主机与预设脚本，点击「一键运行」即可实时查看高保真 ANSI 彩色输出"
+                    },
+                    style = codeTypography.codeBody.copy(fontSize = 12.sp, lineHeight = 18.sp),
+                    color = ext.onCodeMuted,
+                )
+                Text(
+                    text = "# 宽表格自动缩放适配 · 双指捏合可手动缩放 · 进度条 \\r 自动折叠 · 公网 IP 默认打码",
+                    style = codeTypography.codeLabel.copy(fontSize = 11.sp),
+                    color = ext.onCodeMuted.copy(alpha = 0.72f),
+                )
+            }
         }
     }
 }

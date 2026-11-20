@@ -24,6 +24,16 @@ data class RenderedTerminalLine(
 )
 
 /**
+ * Combined output of [SshTerminalConsoleBuffer]: virtualized styled lines paired with the
+ * incrementally maintained maximum display column width across buffered content lines.
+ */
+@Immutable
+data class TerminalRenderOutput(
+    val lines: List<RenderedTerminalLine> = emptyList(),
+    val maxLineColumns: Int = 0,
+)
+
+/**
  * High-frequency terminal stream payload isolated from [LiteSshUiState] so off-screen sections of
  * `LiteSshScreen` and root navigation never recompose when SSH output chunks arrive.
  */
@@ -73,10 +83,18 @@ class SshTerminalConsoleBuffer(
         val id: Long,
         val styledText: AnnotatedString,
         val exitSgrState: AnsiSgrState,
+        val displayColumns: Int,
+    )
+
+    private data class LineColumnEntry(
+        val id: Long,
+        val columns: Int,
     )
 
     private val lock = Any()
     private val committedDeque = ArrayDeque<CachedCommittedLine>()
+    // Monotonic decreasing deque tracking the sliding-window maximum displayColumns in O(1)
+    private val maxColsDeque = ArrayDeque<LineColumnEntry>()
 
     private var lastRunGeneration: Long = -1L
     private var lastSnapshotVersion: Long = -1L
@@ -88,10 +106,12 @@ class SshTerminalConsoleBuffer(
     private var lastActiveRaw: String? = null
     private var lastActiveCarry: AnsiSgrState? = null
     private var lastActiveRendered: RenderedTerminalLine? = null
+    private var lastActiveColumns: Int = 0
 
     private var lastDroppedCount: Int = -1
     private var lastDroppedNoticeLine: RenderedTerminalLine? = null
     private var lastResultLines: List<RenderedTerminalLine> = emptyList()
+    private var lastRenderOutput: TerminalRenderOutput = TerminalRenderOutput()
 
     fun renderSnapshot(
         runGeneration: Long,
@@ -99,10 +119,24 @@ class SshTerminalConsoleBuffer(
         maskIp: Boolean,
         knownServerHost: String?,
         defaultForeground: Color,
-    ): List<RenderedTerminalLine> = synchronized(lock) {
+    ): List<RenderedTerminalLine> = renderSnapshotWithMetrics(
+        runGeneration = runGeneration,
+        snapshot = snapshot,
+        maskIp = maskIp,
+        knownServerHost = knownServerHost,
+        defaultForeground = defaultForeground,
+    ).lines
+
+    fun renderSnapshotWithMetrics(
+        runGeneration: Long,
+        snapshot: SanitizedBufferSnapshot,
+        maskIp: Boolean,
+        knownServerHost: String?,
+        defaultForeground: Color,
+    ): TerminalRenderOutput = synchronized(lock) {
         if (snapshot.isEmpty) {
             clearLocked()
-            return emptyList()
+            return TerminalRenderOutput()
         }
 
         val normalizedHost = knownServerHost?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
@@ -112,14 +146,15 @@ class SshTerminalConsoleBuffer(
             defaultForeground != lastDefaultForeground
 
         if (!configChanged && snapshot.version == lastSnapshotVersion) {
-            return lastResultLines
+            return lastRenderOutput
         }
 
         if (configChanged) {
-            committedDeque.clear()
+            clearCommittedLocked()
             lastActiveRendered = null
             lastActiveRaw = null
             lastActiveCarry = null
+            lastActiveColumns = 0
             lastDroppedCount = -1
             lastDroppedNoticeLine = null
             lastRunGeneration = runGeneration
@@ -134,11 +169,11 @@ class SshTerminalConsoleBuffer(
         val windowStart = windowDrop
 
         if (windowStart >= srcCommitted.size) {
-            committedDeque.clear()
+            clearCommittedLocked()
         } else {
             val firstWantedId = srcCommitted[windowStart].id
             while (committedDeque.isNotEmpty() && committedDeque.first().id < firstWantedId) {
-                committedDeque.removeFirst()
+                evictHeadCommittedLocked()
             }
 
             val expectedTailIndex = windowStart + committedDeque.size
@@ -153,7 +188,7 @@ class SshTerminalConsoleBuffer(
             }
 
             if (!contiguous) {
-                committedDeque.clear()
+                clearCommittedLocked()
             }
 
             var carryState = committedDeque.lastOrNull()?.exitSgrState ?: AnsiSgrState.Default
@@ -169,11 +204,13 @@ class SshTerminalConsoleBuffer(
                     initialState = carryState,
                     defaultForeground = defaultForeground,
                 )
-                committedDeque.addLast(
+                val cols = SshTerminalAutoFit.measurePlainLineColumns(styled.text)
+                pushCommittedLineLocked(
                     CachedCommittedLine(
                         id = rawLine.id,
                         styledText = styled,
                         exitSgrState = exitState,
+                        displayColumns = cols,
                     ),
                 )
                 carryState = exitState
@@ -201,17 +238,20 @@ class SshTerminalConsoleBuffer(
                     initialState = carryState,
                     defaultForeground = defaultForeground,
                 )
+                val cols = SshTerminalAutoFit.measurePlainLineColumns(styled.text)
                 RenderedTerminalLine(id = active.id, styledText = styled).also {
                     lastActiveId = active.id
                     lastActiveRaw = active.ansiText
                     lastActiveCarry = carryState
                     lastActiveRendered = it
+                    lastActiveColumns = cols
                 }
             }
         } else {
             lastActiveRendered = null
             lastActiveRaw = null
             lastActiveCarry = null
+            lastActiveColumns = 0
             null
         }
 
@@ -253,9 +293,12 @@ class SshTerminalConsoleBuffer(
             out.add(renderedActive)
         }
 
+        val maxCols = maxOf(maxColsDeque.firstOrNull()?.columns ?: 0, lastActiveColumns)
         lastSnapshotVersion = snapshot.version
         lastResultLines = out
-        out
+        return TerminalRenderOutput(lines = out, maxLineColumns = maxCols).also {
+            lastRenderOutput = it
+        }
     }
 
     /**
@@ -289,15 +332,37 @@ class SshTerminalConsoleBuffer(
         clearLocked()
     }
 
-    private fun clearLocked() {
+    private fun pushCommittedLineLocked(entry: CachedCommittedLine) {
+        committedDeque.addLast(entry)
+        while (maxColsDeque.isNotEmpty() && maxColsDeque.last().columns <= entry.displayColumns) {
+            maxColsDeque.removeLast()
+        }
+        maxColsDeque.addLast(LineColumnEntry(id = entry.id, columns = entry.displayColumns))
+    }
+
+    private fun evictHeadCommittedLocked() {
+        val removed = committedDeque.removeFirst()
+        if (maxColsDeque.firstOrNull()?.id == removed.id) {
+            maxColsDeque.removeFirst()
+        }
+    }
+
+    private fun clearCommittedLocked() {
         committedDeque.clear()
+        maxColsDeque.clear()
+    }
+
+    private fun clearLocked() {
+        clearCommittedLocked()
         lastSnapshotVersion = -1L
         lastActiveRendered = null
         lastActiveRaw = null
         lastActiveCarry = null
+        lastActiveColumns = 0
         lastDroppedCount = -1
         lastDroppedNoticeLine = null
         lastResultLines = emptyList()
+        lastRenderOutput = TerminalRenderOutput()
     }
 
     companion object {
@@ -315,18 +380,14 @@ class SshTerminalConsoleBuffer(
         )
 
         private val staticCacheLock = Any()
-        private val staticLruCache = object : LinkedHashMap<StaticCacheKey, List<RenderedTerminalLine>>(12, 0.75f, true) {
+        private val staticLruCache = object : LinkedHashMap<StaticCacheKey, TerminalRenderOutput>(12, 0.75f, true) {
             override fun removeEldestEntry(
-                eldest: MutableMap.MutableEntry<StaticCacheKey, List<RenderedTerminalLine>>?,
+                eldest: MutableMap.MutableEntry<StaticCacheKey, TerminalRenderOutput>?,
             ): Boolean = size > MAX_STATIC_CACHE_ENTRIES
         }
 
         private const val MAX_STATIC_CACHE_ENTRIES: Int = 8
 
-        /**
-         * Parses a static/completed sanitized ANSI transcript into [RenderedTerminalLine]s with
-         * bounded LRU memoization so switching between session tabs or reopening the screen is O(1).
-         */
         fun renderStaticTranscript(
             sourceKey: String,
             sanitizedAnsiText: String,
@@ -334,8 +395,28 @@ class SshTerminalConsoleBuffer(
             knownServerHost: String?,
             defaultForeground: Color,
             maxLines: Int = DEFAULT_MAX_DISPLAY_LINES,
-        ): List<RenderedTerminalLine> {
-            if (sanitizedAnsiText.isEmpty()) return emptyList()
+        ): List<RenderedTerminalLine> = renderStaticTranscriptWithMetrics(
+            sourceKey = sourceKey,
+            sanitizedAnsiText = sanitizedAnsiText,
+            maskIp = maskIp,
+            knownServerHost = knownServerHost,
+            defaultForeground = defaultForeground,
+            maxLines = maxLines,
+        ).lines
+
+        /**
+         * Parses a static/completed sanitized ANSI transcript into [TerminalRenderOutput] with
+         * bounded LRU memoization so switching between session tabs or reopening the screen is O(1).
+         */
+        fun renderStaticTranscriptWithMetrics(
+            sourceKey: String,
+            sanitizedAnsiText: String,
+            maskIp: Boolean,
+            knownServerHost: String?,
+            defaultForeground: Color,
+            maxLines: Int = DEFAULT_MAX_DISPLAY_LINES,
+        ): TerminalRenderOutput {
+            if (sanitizedAnsiText.isEmpty()) return TerminalRenderOutput()
             val normalizedHost = knownServerHost?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
             val key = StaticCacheKey(
                 sourceKey = sourceKey,
@@ -354,7 +435,7 @@ class SshTerminalConsoleBuffer(
                 sanitizedText = sanitizedAnsiText,
                 maxLines = maxLines,
             )
-            val rendered = SshTerminalConsoleBuffer(maxDisplayLines = maxLines).renderSnapshot(
+            val rendered = SshTerminalConsoleBuffer(maxDisplayLines = maxLines).renderSnapshotWithMetrics(
                 runGeneration = 1L,
                 snapshot = snap,
                 maskIp = maskIp,
@@ -366,19 +447,34 @@ class SshTerminalConsoleBuffer(
             }
             return rendered
         }
-        /**
-         * Fast `< 0.3ms` tail-only slice used for the very first frame when scrolling into a console
-         * that already accumulated thousands of lines in the background while `Dispatchers.Default`
-         * completes full scrollback formatting.
-         */
+
         fun renderQuickTailPreview(
             snapshot: SanitizedBufferSnapshot,
             maskIp: Boolean,
             knownServerHost: String?,
             defaultForeground: Color,
             tailLines: Int = 48,
-        ): List<RenderedTerminalLine> {
-            if (snapshot.isEmpty) return emptyList()
+        ): List<RenderedTerminalLine> = renderQuickTailPreviewWithMetrics(
+            snapshot = snapshot,
+            maskIp = maskIp,
+            knownServerHost = knownServerHost,
+            defaultForeground = defaultForeground,
+            tailLines = tailLines,
+        ).lines
+
+        /**
+         * Fast `< 0.3ms` tail-only slice used for the very first frame when scrolling into a console
+         * that already accumulated thousands of lines in the background while `Dispatchers.Default`
+         * completes full scrollback formatting.
+         */
+        fun renderQuickTailPreviewWithMetrics(
+            snapshot: SanitizedBufferSnapshot,
+            maskIp: Boolean,
+            knownServerHost: String?,
+            defaultForeground: Color,
+            tailLines: Int = 48,
+        ): TerminalRenderOutput {
+            if (snapshot.isEmpty) return TerminalRenderOutput()
             val src = snapshot.completedLines
             val start = (src.size - tailLines).coerceAtLeast(0)
             val tailSlice = if (start > 0) src.subList(start, src.size) else src
@@ -389,7 +485,7 @@ class SshTerminalConsoleBuffer(
                 activeLine = snapshot.activeLine,
                 hasTrailingNewline = snapshot.hasTrailingNewline,
             )
-            return SshTerminalConsoleBuffer(maxDisplayLines = tailLines + 2).renderSnapshot(
+            return SshTerminalConsoleBuffer(maxDisplayLines = tailLines + 2).renderSnapshotWithMetrics(
                 runGeneration = 1L,
                 snapshot = miniSnapshot,
                 maskIp = maskIp,

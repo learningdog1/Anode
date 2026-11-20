@@ -19,6 +19,7 @@ import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
+import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
@@ -107,6 +108,7 @@ data class LiteSshUiState(
     val recentRuns: List<SshExecutionRecord> = emptyList(),
     val maskServerIp: Boolean = true,
     val consoleFontScale: Float = DEFAULT_CONSOLE_FONT_SCALE,
+    val terminalAutoFitEnabled: Boolean = true,
     val autoScrollConsole: Boolean = true,
     val pendingHostKeyMismatch: PendingHostKeyMismatchPrompt? = null,
     val showServerEditor: Boolean = false,
@@ -256,8 +258,8 @@ data class LiteSshUiState(
             }
 
     companion object {
-        const val MIN_CONSOLE_FONT_SCALE: Float = 0.70f
-        const val MAX_CONSOLE_FONT_SCALE: Float = 1.50f
+        const val MIN_CONSOLE_FONT_SCALE: Float = 0.50f
+        const val MAX_CONSOLE_FONT_SCALE: Float = 1.80f
         const val DEFAULT_CONSOLE_FONT_SCALE: Float = 1.00f
     }
 }
@@ -330,8 +332,13 @@ class LiteSshViewModel(
     fun cancelExecution() = sessionManager.cancelExecution()
 
     fun toggleMaskServerIp(enabled: Boolean) = sessionManager.toggleMaskServerIp(enabled)
-    fun adjustConsoleFontScale(delta: Float) = sessionManager.adjustConsoleFontScale(delta)
+    fun adjustConsoleFontScale(delta: Float, autoFitStartScale: Float? = null) =
+        sessionManager.adjustConsoleFontScale(delta, autoFitStartScale)
+    fun pinchConsoleFontScale(zoomFactor: Float, autoFitStartScale: Float? = null) =
+        sessionManager.pinchConsoleFontScale(zoomFactor, autoFitStartScale)
+    fun setTerminalAutoFitEnabled(enabled: Boolean) = sessionManager.setTerminalAutoFitEnabled(enabled)
     fun resetConsoleFontScale() = sessionManager.resetConsoleFontScale()
+    fun updateTerminalPtySize(ptySize: SshPtySize) = sessionManager.updateTerminalPtySize(ptySize)
     fun toggleAutoScrollConsole(enabled: Boolean) = sessionManager.toggleAutoScrollConsole(enabled)
 
     fun viewRun(runId: String?) = sessionManager.viewRun(runId)

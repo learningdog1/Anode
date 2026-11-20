@@ -45,6 +45,8 @@ data class SshConnectionRequest(
     val alias: String = "",
     val jumpHostId: String? = null,
     val jumpHosts: List<SshJumpHop> = emptyList(),
+    val ptyWidthPx: Int = 0,
+    val ptyHeightPx: Int = 0,
 ) {
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MILLIS: Int = 15_000
@@ -95,6 +97,46 @@ class SshStdinCallbackContext(
     val onStdinReady: (SshStdinWriter) -> Unit,
 ) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
     companion object Key : kotlin.coroutines.CoroutineContext.Key<SshStdinCallbackContext>
+}
+
+/**
+ * Target remote PTY dimensions delivered via initial `pty-req` and live SSH `window-change`.
+ */
+data class SshPtySize(
+    val cols: Int,
+    val rows: Int,
+    val widthPx: Int = 0,
+    val heightPx: Int = 0,
+) {
+    fun normalized(): SshPtySize = copy(
+        cols = cols.coerceIn(MIN_PTY_COLS, MAX_PTY_COLS),
+        rows = rows.coerceIn(MIN_PTY_ROWS, MAX_PTY_ROWS),
+        widthPx = widthPx.coerceAtLeast(0),
+        heightPx = heightPx.coerceAtLeast(0),
+    )
+
+    companion object {
+        const val MIN_PTY_COLS: Int = 20
+        const val MAX_PTY_COLS: Int = 320
+        const val MIN_PTY_ROWS: Int = 8
+        const val MAX_PTY_ROWS: Int = 200
+    }
+}
+
+/**
+ * Sink for sending live SSH `window-change` (`setPtySize`) requests to an active PTY channel.
+ */
+fun interface SshPtyResizer {
+    fun resize(size: SshPtySize)
+}
+
+/**
+ * Coroutine context element propagating [onPtyResizerReady] into [SshTransport.execute] streams.
+ */
+class SshPtyResizeCallbackContext(
+    val onPtyResizerReady: (SshPtyResizer) -> Unit,
+) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<SshPtyResizeCallbackContext>
 }
 
 /**

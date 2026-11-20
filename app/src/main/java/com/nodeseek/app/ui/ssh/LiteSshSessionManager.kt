@@ -20,6 +20,9 @@ import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPtyResizeCallbackContext
+import com.nodeseek.app.domain.ssh.SshPtyResizer
+import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -91,6 +95,12 @@ class LiteSshSessionManager(
     private var runGenerationCounter: Long = 0L
     @Volatile
     private var latestOutputTimestampMillis: Long? = null
+    @Volatile
+    private var desiredPtySize: SshPtySize? = null
+    @Volatile
+    private var activePtyResizer: SshPtyResizer? = null
+    @Volatile
+    private var activePtyResizerGeneration: Long = 0L
 
     init {
         externalScope.launch {
@@ -329,6 +339,7 @@ class LiteSshSessionManager(
         val activeJob = executionJob ?: return
         val state = _uiState.value
         executionJob = null
+        activePtyResizer = null
         elapsedTickerJob?.cancel()
         elapsedTickerJob = null
         activeJob.cancel()
@@ -406,18 +417,73 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(maskServerIp = enabled) }
     }
 
-    fun adjustConsoleFontScale(delta: Float) {
+    fun adjustConsoleFontScale(
+        delta: Float,
+        autoFitStartScale: Float? = null,
+    ) {
         _uiState.update { state ->
-            val next = (state.consoleFontScale + delta).coerceIn(
+            val baseScale = if (state.terminalAutoFitEnabled && autoFitStartScale != null) {
+                autoFitStartScale.coerceIn(
+                    LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                    LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+                )
+            } else {
+                state.consoleFontScale
+            }
+            val next = (baseScale + delta).coerceIn(
                 LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
                 LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
             )
-            state.copy(consoleFontScale = next)
+            state.copy(
+                terminalAutoFitEnabled = false,
+                consoleFontScale = next,
+            )
         }
     }
 
+    fun pinchConsoleFontScale(
+        zoomFactor: Float,
+        autoFitStartScale: Float? = null,
+    ) {
+        if (!zoomFactor.isFinite() || zoomFactor <= 0f) return
+        _uiState.update { state ->
+            val baseScale = if (state.terminalAutoFitEnabled && autoFitStartScale != null) {
+                autoFitStartScale.coerceIn(
+                    LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                    LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+                )
+            } else {
+                state.consoleFontScale
+            }
+            val next = (baseScale * zoomFactor).coerceIn(
+                LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+            )
+            state.copy(
+                terminalAutoFitEnabled = false,
+                consoleFontScale = next,
+            )
+        }
+    }
+
+    fun setTerminalAutoFitEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(terminalAutoFitEnabled = enabled) }
+    }
+
     fun resetConsoleFontScale() {
-        _uiState.update { it.copy(consoleFontScale = LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE) }
+        _uiState.update {
+            it.copy(
+                terminalAutoFitEnabled = true,
+                consoleFontScale = LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE,
+            )
+        }
+    }
+
+    fun updateTerminalPtySize(ptySize: SshPtySize) {
+        val normalized = ptySize.normalized()
+        if (desiredPtySize == normalized) return
+        desiredPtySize = normalized
+        activePtyResizer?.resize(normalized)
     }
 
     fun toggleAutoScrollConsole(enabled: Boolean) {
@@ -907,17 +973,36 @@ class LiteSshSessionManager(
         executionJob = externalScope.launch {
             var completedNormallyOrFailed = false
             try {
-                val request: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
+                val baseRequest: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
                     vaultRepository = vaultRepository,
                     server = server,
                     allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
                     mismatchOverrideServerId = mismatchOverrideServerId,
                 )
+                val initialPty = desiredPtySize
+                val request = if (initialPty != null) {
+                    baseRequest.copy(
+                        ptyCols = initialPty.cols,
+                        ptyRows = initialPty.rows,
+                        ptyWidthPx = initialPty.widthPx,
+                        ptyHeightPx = initialPty.heightPx,
+                    )
+                } else {
+                    baseRequest
+                }
 
                 executor.runCommand(
                     request = request,
                     command = command,
                     autoRespondConfig = SshAutoRespondConfig(enabled = autoRespondEnabled),
+                ).flowOn(
+                    SshPtyResizeCallbackContext { resizer ->
+                        if (activePtyResizerGeneration <= currentRunGeneration) {
+                            activePtyResizerGeneration = currentRunGeneration
+                            activePtyResizer = resizer
+                            desiredPtySize?.let(resizer::resize)
+                        }
+                    },
                 ).collect { event ->
                     when (event) {
                         LiteSshExecutionEvent.Connecting -> {
@@ -1152,6 +1237,9 @@ class LiteSshSessionManager(
                     dispatchCompletionNotices(record = failedRecord, errorDetail = friendlyError)
                 }
             } finally {
+                if (activePtyResizerGeneration == currentRunGeneration) {
+                    activePtyResizer = null
+                }
                 elapsedTickerJob?.cancel()
                 elapsedTickerJob = null
                 executionJob = null
