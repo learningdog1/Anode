@@ -1,96 +1,19 @@
 package com.nodeseek.app.domain.overseas
 
-import com.nodeseek.app.data.valuation.FxRatesState
-import com.nodeseek.app.domain.valuation.ValuationCurrency
-import java.math.BigDecimal
-
 /**
- * Supported upstream overseas VPS deal communities.
- */
-enum class OverseasSource(
-    val label: String,
-    val shortLabel: String,
-    val siteUrl: String,
-) {
-    LET(
-        label = "LowEndTalk",
-        shortLabel = "LET",
-        siteUrl = "https://lowendtalk.com/categories/offers",
-    ),
-    LEB(
-        label = "LowEndBox",
-        shortLabel = "LEB",
-        siteUrl = "https://lowendbox.com/",
-    ),
-}
-
-/**
- * Feed filter chips for the Overseas Intelligence screen and Deals Hub bridge.
- */
-enum class OverseasSourceFilter(val label: String) {
-    ALL("全部"),
-    LET("LowEndTalk"),
-    LEB("LowEndBox"),
-    BLACK_FRIDAY_FLASH("黑五 Flash"),
-}
-
-/**
- * Language presentation mode for overseas offers.
+ * Language presentation mode for overseas promotion detail content.
  */
 enum class OverseasDisplayMode(
     val label: String,
     val shortLabel: String,
 ) {
-    CHINESE("中文机翻", "译"),
+    ORIGINAL("通知原文", "原"),
+    CHINESE("中文译文", "译"),
     BILINGUAL("双语对照", "双语"),
-    ORIGINAL("英文原文", "EN"),
 }
 
 /**
- * Billing cycle parsed from an overseas VPS price mention.
- */
-enum class OverseasPriceCycle(
-    val shortCode: String,
-    val labelZh: String,
-) {
-    MONTHLY("mo", "月"),
-    QUARTERLY("qtr", "季"),
-    SEMI_ANNUAL("semi", "半年"),
-    ANNUAL("yr", "年"),
-    BIENNIAL("2yr", "两年"),
-    TRIENNIAL("3yr", "三年"),
-    ONE_TIME("once", "一次性"),
-    UNKNOWN("", ""),
-}
-
-/**
- * A foreign-currency price extracted from an overseas offer together with its real-time CNY conversion.
- */
-data class ConvertedPriceTag(
-    val rawText: String,
-    val originalAmount: BigDecimal,
-    val currency: ValuationCurrency,
-    val cycle: OverseasPriceCycle,
-    val cnyAmount: BigDecimal,
-    val formattedCny: String,
-    val annualizedUsd: BigDecimal? = null,
-    val annualizedCny: BigDecimal? = null,
-) {
-    /**
-     * Compact highlight text suitable for cards and restock watch prefill (e.g. `$14.99/yr · ≈ ¥108.68/年`).
-     */
-    val badgeText: String
-        get() = "$rawText · $formattedCny"
-
-    /**
-     * Expressive hero badge emphasizing CNY equivalent (e.g. `$14.99/yr · ≈ ¥108.68 人民币`).
-     */
-    val prominentBadgeText: String
-        get() = "$rawText · ≈ ¥${cnyAmount.toPlainString()} 人民币"
-}
-
-/**
- * Translation backend configuration tier selected by the user.
+ * Translation backend configuration tier selected by the user for detail translation.
  */
 enum class TranslationEngineKind(
     val label: String,
@@ -115,7 +38,7 @@ enum class TranslationEngineKind(
 }
 
 /**
- * Provenance of the active translation on an [OverseasDealOffer].
+ * Provenance of an optional translation on [OverseasOfferDetail].
  */
 enum class TranslationTier(val label: String) {
     NONE("原文"),
@@ -125,15 +48,15 @@ enum class TranslationTier(val label: String) {
 }
 
 /**
- * Persisted user configuration for [OverseasTranslator].
+ * Persisted user configuration for [com.nodeseek.app.data.overseas.OverseasTranslator].
  */
 data class OverseasTranslationConfig(
     val engineKind: TranslationEngineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY,
     val customEndpointUrl: String = "",
     val customApiKey: String = "",
     val customModel: String = DEFAULT_OPENAI_MODEL,
-    val autoTranslateOnRefresh: Boolean = true,
-    val displayMode: OverseasDisplayMode = OverseasDisplayMode.BILINGUAL,
+    val autoTranslateOnRefresh: Boolean = false,
+    val displayMode: OverseasDisplayMode = OverseasDisplayMode.ORIGINAL,
 ) {
     val hasValidCustomEndpoint: Boolean
         get() = customEndpointUrl.trim().startsWith("http://", ignoreCase = true) ||
@@ -147,86 +70,127 @@ data class OverseasTranslationConfig(
 }
 
 /**
- * Normalized overseas VPS offer aggregated from LowEndTalk or LowEndBox.
+ * Lightweight list item returned by `GET /api/v1/offers` for card feed display.
+ * Cards intentionally render only [title] and [summary] without prices, specs, coupons, or tags.
  */
 data class OverseasDealOffer(
     val id: String,
-    val source: OverseasSource,
-    val originalTitle: String,
-    val translatedTitle: String? = null,
-    val originalSummary: String,
-    val translatedSummary: String? = null,
-    val authorOrProvider: String,
+    val title: String,
+    val originalTitle: String = "",
+    val summary: String,
+    val merchant: String = "",
     val sourceLink: String,
-    val orderLinks: List<String> = emptyList(),
-    val couponCodes: List<String> = emptyList(),
-    val priceMatches: List<ConvertedPriceTag> = emptyList(),
-    val specHighlights: List<String> = emptyList(),
     val publishedAtEpochMillis: Long = 0L,
-    val isFlashOrBlackFriday: Boolean = false,
-    val isOutOfStockHint: Boolean = false,
+    val publishedAtIso: String = "",
+)
+
+data class OverseasDetailSection(
+    val header: String,
+    val items: List<String> = emptyList(),
+)
+
+data class OverseasLabeledLink(
+    val text: String,
+    val url: String,
+)
+
+data class OverseasMediaImage(
+    val alt: String,
+    val url: String,
+)
+
+/**
+ * Optional structured fields accompanying `GET /api/v1/offers/{id}`.
+ */
+data class OverseasDetailStructured(
+    val titleCn: String = "",
+    val sections: List<OverseasDetailSection> = emptyList(),
+    val orderLinks: List<OverseasLabeledLink> = emptyList(),
+    val promoCode: String = "",
+    val pros: List<String> = emptyList(),
+    val cons: List<String> = emptyList(),
+    val suitableFor: String = "",
+    val aiComment: String = "",
+    val viewCount: String = "",
+    val commentCount: String = "",
+    val aiModel: String = "",
+)
+
+/**
+ * Full Telegram promotion notification detail returned by `GET /api/v1/offers/{id}`.
+ */
+data class OverseasOfferDetail(
+    val id: String,
+    val title: String,
+    val originalTitle: String = "",
+    val merchant: String = "",
+    val author: String = "",
+    val publishedAtEpochMillis: Long = 0L,
+    val publishedAtIso: String = "",
+    val sourceLink: String,
+    val tgMarkdown: String,
+    val tgHtml: String = "",
+    val tgPlainText: String = "",
+    val structured: OverseasDetailStructured? = null,
+    val translatedMarkdown: String? = null,
     val translationTier: TranslationTier = TranslationTier.NONE,
 ) {
-    val primaryPrice: ConvertedPriceTag?
-        get() = priceMatches.firstOrNull()
-
-    val primaryOrderUrl: String
-        get() = orderLinks.firstOrNull()?.takeIf { it.isNotBlank() } ?: sourceLink
-
-    fun resolveHeadlineTitle(mode: OverseasDisplayMode): String = when (mode) {
-        OverseasDisplayMode.ORIGINAL -> originalTitle
-        OverseasDisplayMode.CHINESE,
-        OverseasDisplayMode.BILINGUAL,
-        -> translatedTitle?.takeIf { it.isNotBlank() } ?: originalTitle
-    }
-
-    fun resolveSecondaryOriginalTitle(mode: OverseasDisplayMode): String? =
-        if (
-            mode == OverseasDisplayMode.BILINGUAL &&
-            !translatedTitle.isNullOrBlank() &&
-            !translatedTitle.equals(originalTitle, ignoreCase = true)
-        ) {
-            originalTitle
-        } else {
-            null
+    fun resolveDisplayMarkdown(mode: OverseasDisplayMode): String {
+        val translated = translatedMarkdown?.takeIf { it.isNotBlank() }
+        return when (mode) {
+            OverseasDisplayMode.ORIGINAL -> tgMarkdown
+            OverseasDisplayMode.CHINESE -> translated ?: tgMarkdown
+            OverseasDisplayMode.BILINGUAL -> {
+                if (translated != null && !translated.equals(tgMarkdown, ignoreCase = true)) {
+                    "$translated\n\n---\n\n### 原通知内容\n\n$tgMarkdown"
+                } else {
+                    tgMarkdown
+                }
+            }
         }
-
-    fun resolvePrimarySummary(mode: OverseasDisplayMode): String = when (mode) {
-        OverseasDisplayMode.ORIGINAL -> originalSummary
-        OverseasDisplayMode.CHINESE,
-        OverseasDisplayMode.BILINGUAL,
-        -> translatedSummary?.takeIf { it.isNotBlank() } ?: originalSummary
     }
-
-    fun resolveSecondaryOriginalSummary(mode: OverseasDisplayMode): String? =
-        if (
-            mode == OverseasDisplayMode.BILINGUAL &&
-            !translatedSummary.isNullOrBlank() &&
-            !translatedSummary.equals(originalSummary, ignoreCase = true)
-        ) {
-            originalSummary
-        } else {
-            null
-        }
 }
 
 /**
- * Synchronization and translation progress metadata for the overseas aggregator.
+ * Original thread first-post (OP / 主楼) content returned by `GET /api/v1/offers/{id}/repost`
+ * strictly excluding all comments, used for one-click forum reposting.
+ */
+data class OverseasRepostContent(
+    val id: String,
+    val title: String,
+    val titleCn: String = "",
+    val merchant: String = "",
+    val author: String = "",
+    val publishedAtEpochMillis: Long = 0L,
+    val publishedAtIso: String = "",
+    val sourceLink: String,
+    val bodyMarkdown: String,
+    val bodyText: String = "",
+    val bodyHtml: String = "",
+    val images: List<OverseasMediaImage> = emptyList(),
+    val links: List<OverseasLabeledLink> = emptyList(),
+    val suggestedCategorySlug: String = "info",
+)
+
+/**
+ * Synchronization and pagination metadata for the overseas promotion monitor feed.
  */
 data class OverseasSyncStatus(
     val isRefreshing: Boolean = false,
-    val isTranslating: Boolean = false,
+    val isLoadingMore: Boolean = false,
     val lastSyncedEpochMillis: Long = 0L,
-    val sourceErrors: Map<OverseasSource, String> = emptyMap(),
+    val currentPage: Int = 1,
+    val totalCount: Int = 0,
+    val hasMore: Boolean = false,
+    val errorMessage: String? = null,
     val loadedFromCache: Boolean = false,
 )
 
 /**
- * Complete reactive repository snapshot consumed by UI and cross-feature bridges.
+ * Complete reactive repository snapshot consumed by UI.
  */
 data class OverseasIntelSnapshot(
     val offers: List<OverseasDealOffer> = emptyList(),
-    val fxRatesState: FxRatesState,
     val translationConfig: OverseasTranslationConfig = OverseasTranslationConfig(),
     val syncStatus: OverseasSyncStatus = OverseasSyncStatus(),
 )

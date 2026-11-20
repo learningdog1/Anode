@@ -139,6 +139,13 @@ data object ActivityRoute : AppDestination
 data object OverseasIntelRoute : AppDestination
 
 @Serializable
+data class OverseasIntelDetailRoute(
+    val offerId: String,
+    val initialTitle: String = "",
+    val initialSourceUrl: String = "",
+) : AppDestination
+
+@Serializable
 data class MyServersRoute(
     val initialTab: Int = 0,
     val importName: String = "",

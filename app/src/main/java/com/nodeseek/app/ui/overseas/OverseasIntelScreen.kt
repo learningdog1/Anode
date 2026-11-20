@@ -1,10 +1,6 @@
 package com.nodeseek.app.ui.overseas
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Refresh
@@ -35,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,38 +39,28 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
 import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
-import com.nodeseek.app.data.valuation.ExchangeRateRepository
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
+import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.theme.NodePulseTheme
-import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseThemeMode
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 
 /**
- * Standalone Overseas VPS Intelligence Aggregator Screen (`海外情报聚合`).
- *
- * Cross-feature callbacks:
- * - [onAddRestockWatch]: plugs straight into Feature 1 (`AddRestockWatchBottomSheet` / `RestockMonitor`)
- * - [onShareDealToForum]: prefills `TopicComposerScreen` with formatted Chinese + source-credited Markdown
- * - [onOpenUrl]: opens external original post or direct merchant checkout URL (defaults to browser Intent)
+ * Standalone Overseas VPS Promotions Screen (`海外情报`) powered by the LowEndTalk Promotion Monitor API.
  */
 @Composable
 fun OverseasIntelScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     repository: OverseasIntelRepository? = null,
+    onOpenOfferDetail: ((OverseasDealOffer) -> Unit)? = null,
     onOpenUrl: ((String) -> Unit)? = null,
-    onAddRestockWatch: ((orderUrl: String, title: String, priceLabel: String) -> Unit)? = null,
     onShareDealToForum: ((suggestedTitle: String, markdownBody: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val resolvedRepository = remember(repository, context) {
-        repository ?: OverseasIntelRepositoryImpl(
-            context = context,
-            exchangeRateRepository = ExchangeRateRepository.forContext(context),
-        )
+        repository ?: OverseasIntelRepositoryImpl(context = context)
     }
     val viewModel: OverseasIntelViewModel = viewModel(
         factory = OverseasIntelViewModel.factory(resolvedRepository),
@@ -84,6 +68,7 @@ fun OverseasIntelScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var showTranslatorSheet by rememberSaveable { mutableStateOf(false) }
+    var fallbackSelectedOfferId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val openLinkHandler: (String) -> Unit = remember(onOpenUrl, context) {
         { url ->
@@ -101,6 +86,28 @@ fun OverseasIntelScreen(
         }
     }
 
+    LaunchedEffect(viewModel, onShareDealToForum) {
+        viewModel.repostDraftEvents.collect { draft ->
+            onShareDealToForum?.invoke(draft.title, draft.markdownBody)
+        }
+    }
+
+    val activeFallbackId = fallbackSelectedOfferId
+    if (onOpenOfferDetail == null && activeFallbackId != null) {
+        val selectedOffer = uiState.allOffers.firstOrNull { it.id == activeFallbackId }
+        OverseasIntelDetailScreen(
+            offerId = activeFallbackId,
+            initialTitle = selectedOffer?.title.orEmpty(),
+            initialSourceUrl = selectedOffer?.sourceLink.orEmpty(),
+            onBack = { fallbackSelectedOfferId = null },
+            modifier = modifier,
+            repository = resolvedRepository,
+            onOpenUrl = openLinkHandler,
+            onShareDealToForum = onShareDealToForum,
+        )
+        return
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -108,38 +115,30 @@ fun OverseasIntelScreen(
         snackbarHost = { PulseSnackbarHost(hostState = snackbarHostState) },
         topBar = {
             OverseasIntelTopBar(
-                displayMode = uiState.displayMode,
                 isRefreshing = uiState.syncStatus.isRefreshing,
                 onBack = onBack,
-                onCycleDisplayMode = viewModel::cycleDisplayMode,
                 onOpenSettings = {
                     viewModel.clearTranslatorTestFeedback()
                     showTranslatorSheet = true
                 },
-                onRefresh = { viewModel.refresh(forceTranslate = false) },
+                onRefresh = viewModel::refresh,
             )
         },
     ) { innerPadding ->
         OverseasOfferFeedContent(
             uiState = uiState,
-            onSelectFilter = viewModel::selectFilter,
             onSearchQueryChange = viewModel::updateSearchQuery,
-            onSelectDisplayMode = viewModel::setDisplayMode,
-            onRefresh = { viewModel.refresh(forceTranslate = false) },
-            onRefreshFxRates = viewModel::refreshExchangeRates,
-            onOpenTranslatorSettings = {
-                viewModel.clearTranslatorTestFeedback()
-                showTranslatorSheet = true
-            },
-            onTranslateOffer = { offerId -> viewModel.translateOffer(offerId, forceRefresh = true) },
-            onCopyCoupon = { code ->
-                copyOverseasCouponToClipboard(context, code)
-                viewModel.notifyMessage("已复制优惠码：$code")
+            onRefresh = viewModel::refresh,
+            onLoadNextPage = viewModel::loadNextPage,
+            onOpenDetail = { offer ->
+                if (onOpenOfferDetail != null) {
+                    onOpenOfferDetail(offer)
+                } else {
+                    fallbackSelectedOfferId = offer.id
+                }
             },
             onOpenSourceLink = openLinkHandler,
-            onOpenOrderLink = openLinkHandler,
-            onAddRestockWatch = onAddRestockWatch,
-            onShareDealToForum = onShareDealToForum,
+            onRepostToForum = viewModel::prepareRepostToForum,
             modifier = Modifier.padding(innerPadding),
         )
     }
@@ -150,25 +149,27 @@ fun OverseasIntelScreen(
             isTesting = uiState.isTestingTranslator,
             testFeedback = uiState.translatorTestFeedback,
             testSuccess = uiState.translatorTestSuccess,
+            showTranslateDetailButton = false,
             onDismiss = { showTranslatorSheet = false },
             onTestConnection = viewModel::testTranslationConfig,
             onClearCache = viewModel::clearTranslationCache,
-            onSave = { config, retranslate ->
-                viewModel.saveTranslationConfig(config, retranslateAfterSave = retranslate)
+            onSave = { config, _ ->
+                viewModel.saveTranslationConfig(config)
             },
         )
     }
 }
 
 /**
- * Drop-in stateful embed wrapper so `DealsHubScreen` (Feature 2) can render the complete
- * LET/LEB translated overseas deals tab with minimal boilerplate.
+ * Stateful embed wrapper preserved for cross-feature compatibility.
  */
 @Composable
 fun EmbeddedOverseasOfferFeed(
     modifier: Modifier = Modifier,
     repository: OverseasIntelRepository? = null,
+    onOpenOfferDetail: ((OverseasDealOffer) -> Unit)? = null,
     onOpenUrl: ((String) -> Unit)? = null,
+    @Suppress("UNUSED_PARAMETER")
     onAddRestockWatch: ((orderUrl: String, title: String, priceLabel: String) -> Unit)? = null,
     onShareDealToForum: ((suggestedTitle: String, markdownBody: String) -> Unit)? = null,
     onFeedbackMessage: ((String) -> Unit)? = null,
@@ -176,17 +177,14 @@ fun EmbeddedOverseasOfferFeed(
 ) {
     val context = LocalContext.current
     val resolvedRepository = remember(repository, context) {
-        repository ?: OverseasIntelRepositoryImpl(
-            context = context,
-            exchangeRateRepository = ExchangeRateRepository.forContext(context),
-        )
+        repository ?: OverseasIntelRepositoryImpl(context = context)
     }
     val viewModel: OverseasIntelViewModel = viewModel(
         key = "embedded_overseas_feed",
         factory = OverseasIntelViewModel.factory(resolvedRepository),
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var showTranslatorSheet by rememberSaveable { mutableStateOf(false) }
+    var fallbackSelectedOfferId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val openLinkHandler: (String) -> Unit = remember(onOpenUrl, context) {
         { url ->
@@ -204,56 +202,54 @@ fun EmbeddedOverseasOfferFeed(
         }
     }
 
+    LaunchedEffect(viewModel, onShareDealToForum) {
+        viewModel.repostDraftEvents.collect { draft ->
+            onShareDealToForum?.invoke(draft.title, draft.markdownBody)
+        }
+    }
+
+    val activeFallbackId = fallbackSelectedOfferId
+    if (onOpenOfferDetail == null && activeFallbackId != null) {
+        val selectedOffer = uiState.allOffers.firstOrNull { it.id == activeFallbackId }
+        OverseasIntelDetailScreen(
+            offerId = activeFallbackId,
+            initialTitle = selectedOffer?.title.orEmpty(),
+            initialSourceUrl = selectedOffer?.sourceLink.orEmpty(),
+            onBack = { fallbackSelectedOfferId = null },
+            modifier = modifier,
+            repository = resolvedRepository,
+            onOpenUrl = openLinkHandler,
+            onShareDealToForum = onShareDealToForum,
+        )
+        return
+    }
+
     OverseasOfferFeedContent(
         uiState = uiState,
-        onSelectFilter = viewModel::selectFilter,
         onSearchQueryChange = viewModel::updateSearchQuery,
-        onSelectDisplayMode = viewModel::setDisplayMode,
-        onRefresh = { viewModel.refresh(forceTranslate = false) },
-        onRefreshFxRates = viewModel::refreshExchangeRates,
-        onOpenTranslatorSettings = {
-            viewModel.clearTranslatorTestFeedback()
-            showTranslatorSheet = true
-        },
-        onTranslateOffer = { offerId -> viewModel.translateOffer(offerId, forceRefresh = true) },
-        onCopyCoupon = { code ->
-            copyOverseasCouponToClipboard(context, code)
-            viewModel.notifyMessage("已复制优惠码：$code")
+        onRefresh = viewModel::refresh,
+        onLoadNextPage = viewModel::loadNextPage,
+        onOpenDetail = { offer ->
+            if (onOpenOfferDetail != null) {
+                onOpenOfferDetail(offer)
+            } else {
+                fallbackSelectedOfferId = offer.id
+            }
         },
         onOpenSourceLink = openLinkHandler,
-        onOpenOrderLink = openLinkHandler,
-        onAddRestockWatch = onAddRestockWatch,
-        onShareDealToForum = onShareDealToForum,
+        onRepostToForum = viewModel::prepareRepostToForum,
         modifier = modifier,
         contentPadding = contentPadding,
     )
-
-    if (showTranslatorSheet) {
-        OverseasTranslatorSettingsSheet(
-            currentConfig = uiState.translationConfig,
-            isTesting = uiState.isTestingTranslator,
-            testFeedback = uiState.translatorTestFeedback,
-            testSuccess = uiState.translatorTestSuccess,
-            onDismiss = { showTranslatorSheet = false },
-            onTestConnection = viewModel::testTranslationConfig,
-            onClearCache = viewModel::clearTranslationCache,
-            onSave = { config, retranslate ->
-                viewModel.saveTranslationConfig(config, retranslateAfterSave = retranslate)
-            },
-        )
-    }
 }
 
 @Composable
 private fun OverseasIntelTopBar(
-    displayMode: OverseasDisplayMode,
     isRefreshing: Boolean,
     onBack: () -> Unit,
-    onCycleDisplayMode: () -> Unit,
     onOpenSettings: () -> Unit,
     onRefresh: () -> Unit,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -273,14 +269,14 @@ private fun OverseasIntelTopBar(
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "海外情报聚合",
+                text = "海外情报",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "LET · LEB 实时搬运与人民币折算",
+                text = "LowEndTalk 全量促销实时监控",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -288,27 +284,10 @@ private fun OverseasIntelTopBar(
             )
         }
 
-        // Language cycle pill (译 / 双语 / EN)
-        Box(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .border(0.8.dp, ext.cardBorder, CircleShape)
-                .clickable(onClick = onCycleDisplayMode)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = displayMode.shortLabel,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-        }
-
         IconButton(onClick = onOpenSettings) {
             Icon(
                 imageVector = Icons.Rounded.Tune,
-                contentDescription = "翻译设置",
+                contentDescription = "详情翻译设置",
                 tint = MaterialTheme.colorScheme.onSurface,
             )
         }
@@ -338,7 +317,6 @@ private fun OverseasIntelScreenLightPreview() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
-            onAddRestockWatch = { _, _, _ -> },
             onShareDealToForum = { _, _ -> },
         )
     }
@@ -352,7 +330,6 @@ private fun OverseasIntelScreenDarkPreview() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
-            onAddRestockWatch = { _, _, _ -> },
             onShareDealToForum = { _, _ -> },
         )
     }

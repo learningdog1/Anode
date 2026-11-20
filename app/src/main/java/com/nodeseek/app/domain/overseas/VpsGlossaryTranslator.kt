@@ -3,9 +3,6 @@ package com.nodeseek.app.domain.overseas
 /**
  * Always-available, zero-network offline VPS-domain English-to-Chinese terminology engine (Tier 3)
  * and post-processor for online machine translation output (Tier 2).
- *
- * Guarantees clean Chinese titles and structured Chinese VPS summaries even when offline or when
- * Google Translate GTX is unreachable.
  */
 object VpsGlossaryTranslator {
 
@@ -17,10 +14,6 @@ object VpsGlossaryTranslator {
     // Ordered from multi-word / specific phrases down to shorter terms to avoid partial clobbering.
     private val OFFLINE_PHRASE_RULES: List<TermRule> = listOf(
         // Promo & Stock phrases
-        rule("""\bblack\s+friday\s+deals?\b""", "黑五特惠"),
-        rule("""\bblack\s+friday\s+specials?\b""", "黑五特惠"),
-        rule("""\bblack\s+friday\s+sales?\b""", "黑五促销"),
-        rule("""\bblack\s+friday\b""", "黑五特惠"),
         rule("""\bcyber\s+monday\b""", "网一大促"),
         rule("""\bflash\s+sales?\b""", "限时闪购"),
         rule("""\bflash\s+deals?\b""", "限时闪购"),
@@ -154,7 +147,6 @@ object VpsGlossaryTranslator {
         rule("""\bfrance\b""", "法国"),
         rule("""\beurope\b""", "欧洲"),
         rule("""\bsoftbank\b""", "软银线路"),
-        // Standalone common abbreviations at word boundaries
         rule("""\bUSA\b""", "美国"),
         rule("""\bUS\b""", "美国"),
         rule("""\bUK\b""", "英国"),
@@ -176,7 +168,6 @@ object VpsGlossaryTranslator {
         rule("""反复出现|经常性|循环计费|定期折扣""", "续费同价"),
         rule("""未计量(?:带宽|流量)?""", "不限流量"),
         rule("""闪光销售|闪卖|闪电销售""", "限时闪购"),
-        rule("""黑色星期五""", "黑五"),
         rule("""网络星期一""", "网一"),
         rule("""双带宽""", "双倍流量"),
         rule("""存储\s*VPS""", "大盘鸡 (存储型 VPS)"),
@@ -187,12 +178,13 @@ object VpsGlossaryTranslator {
         rule("""专门的\s*CPU|专用\s*CPU""", "独享 CPU"),
     )
 
+    private val PROTECTED_MARKDOWN_SPAN_REGEX = Regex(
+        """`[^`\n]+`|\]\([^\)\s]+\)|https?://\S+""",
+    )
+
     private fun rule(pattern: String, replacement: String): TermRule =
         TermRule(Regex(pattern, RegexOption.IGNORE_CASE), replacement)
 
-    /**
-     * Offline glossary translation for a title or short single-line string.
-     */
     fun translateTitleOffline(englishTitle: String): String {
         val trimmed = englishTitle.trim()
         if (trimmed.isEmpty()) return ""
@@ -200,47 +192,31 @@ object VpsGlossaryTranslator {
     }
 
     /**
-     * Offline glossary translation for a summary, optionally enriched with structured Chinese
-     * bullets from already-extracted specs, prices, and coupon codes so that even dense English
-     * prose renders clearly in Chinese when completely offline.
+     * Offline glossary translation for Markdown text while preserving fenced code blocks,
+     * inline code spans, and URL targets.
      */
-    fun translateSummaryOffline(
-        englishSummary: String,
-        specHighlights: List<String> = emptyList(),
-        priceMatches: List<ConvertedPriceTag> = emptyList(),
-        couponCodes: List<String> = emptyList(),
-    ): String {
-        val translatedBody = applyGlossaryRules(englishSummary.trim())
-            .take(360)
-            .trim()
+    fun translateMarkdownOffline(markdown: String): String {
+        if (markdown.isBlank()) return ""
+        val lines = markdown.lines()
+        val out = ArrayList<String>(lines.size)
+        var insideFence = false
 
-        val structuredParts = ArrayList<String>()
-        if (specHighlights.isNotEmpty()) {
-            structuredParts += "【配置/机房】${specHighlights.joinToString(" · ")}"
+        for (line in lines) {
+            val trimmed = line.trimStart()
+            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+                insideFence = !insideFence
+                out += line
+                continue
+            }
+            if (insideFence || line.isBlank()) {
+                out += line
+                continue
+            }
+            out += translateLinePreservingSpans(line)
         }
-        if (priceMatches.isNotEmpty()) {
-            val prices = priceMatches.take(3).joinToString(" / ") { it.badgeText }
-            structuredParts += "【折算参考】$prices"
-        }
-        if (couponCodes.isNotEmpty()) {
-            structuredParts += "【优惠码】${couponCodes.joinToString(", ")}"
-        }
-
-        if (structuredParts.isEmpty()) {
-            return translatedBody
-        }
-
-        val header = structuredParts.joinToString("\n")
-        return if (translatedBody.isBlank()) {
-            header
-        } else {
-            "$header\n$translatedBody"
-        }
+        return out.joinToString("\n")
     }
 
-    /**
-     * Polishes online machine translation output (e.g. Google GTX) with VPS domain idioms.
-     */
     fun enhanceMachineTranslation(rawChinese: String): String {
         var text = rawChinese.trim()
         if (text.isEmpty()) return ""
@@ -248,6 +224,20 @@ object VpsGlossaryTranslator {
             text = rule.regex.replace(text, rule.replacement)
         }
         return text.replace(Regex("""[ \t]{2,}"""), " ").trim()
+    }
+
+    private fun translateLinePreservingSpans(line: String): String {
+        val placeholders = ArrayList<String>()
+        val masked = PROTECTED_MARKDOWN_SPAN_REGEX.replace(line) { match ->
+            val idx = placeholders.size
+            placeholders += match.value
+            "__NS_SPAN_${idx}__"
+        }
+        var translated = applyGlossaryRules(masked)
+        placeholders.forEachIndexed { idx, original ->
+            translated = translated.replace("__NS_SPAN_${idx}__", original)
+        }
+        return translated
     }
 
     private fun applyGlossaryRules(input: String): String {

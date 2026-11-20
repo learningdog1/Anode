@@ -1,7 +1,6 @@
 package com.nodeseek.app.data.overseas
 
 import android.content.Context
-import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.domain.overseas.TranslationEngineKind
 import com.nodeseek.app.domain.overseas.TranslationTier
@@ -9,7 +8,6 @@ import com.nodeseek.app.domain.overseas.VpsGlossaryTranslator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -20,7 +18,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -66,20 +63,17 @@ private data class TranslationCachePayload(
 )
 
 /**
- * 3-Tier VPS-Domain-Aware Chinese Translation Engine with persistent content-hash cache
- * (`filesDir/overseas_translations.json`):
+ * 3-Tier VPS-Domain-Aware Chinese Translation Engine for Overseas Promotion Details with persistent
+ * content-hash cache (`filesDir/overseas_translations.json`):
  * - Tier 1 (Optional Custom Provider): OpenAI-compatible (`/v1/chat/completions`) or DeepLX (`/translate`)
- * - Tier 2 (Zero-Config Free Online): Google GTX (`translate.googleapis.com/translate_a/single`) with
- *   graceful fast timeout, rate-limit pacing, and VPS glossary post-processing
- * - Tier 3 (Always-Available Offline Fallback): [VpsGlossaryTranslator] ensuring readable Chinese
- *   titles and structured summaries even when offline or when Google GTX is blocked
+ * - Tier 2 (Zero-Config Free Online): Google GTX (`translate.googleapis.com/translate_a/single`)
+ * - Tier 3 (Always-Available Offline Fallback): [VpsGlossaryTranslator]
  */
 class OverseasTranslator(
     private val cacheFile: File,
     private val httpClient: OkHttpClient = defaultHttpClient(),
     private val gtxBaseUrl: String = DEFAULT_GTX_BASE_URL,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val rateLimitDelayMillis: Long = 120L,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
 ) {
     constructor(context: Context) : this(
@@ -97,105 +91,29 @@ class OverseasTranslator(
     private val memoryCache = LinkedHashMap<String, TranslationCacheEntry>()
 
     /**
-     * Translates an entire [OverseasDealOffer]'s title & summary, reusing cached hashes when available.
+     * Translates Markdown notification content while preserving Markdown headings, bullets,
+     * fenced code blocks, inline code, and link targets.
      */
-    suspend fun translateOffer(
-        offer: OverseasDealOffer,
+    suspend fun translateMarkdown(
+        markdown: String,
         config: OverseasTranslationConfig,
         forceRefresh: Boolean = false,
-    ): OverseasDealOffer = withContext(ioDispatcher) {
-        val titleResult = translateText(
-            text = offer.originalTitle,
-            config = config,
-            forceRefresh = forceRefresh,
-            offlineFallback = { VpsGlossaryTranslator.translateTitleOffline(offer.originalTitle) },
-        )
-
-        val summaryResult = if (offer.originalSummary.isNotBlank()) {
-            translateText(
-                text = offer.originalSummary,
-                config = config,
-                forceRefresh = forceRefresh,
-                offlineFallback = {
-                    VpsGlossaryTranslator.translateSummaryOffline(
-                        englishSummary = offer.originalSummary,
-                        specHighlights = offer.specHighlights,
-                        priceMatches = offer.priceMatches,
-                        couponCodes = offer.couponCodes,
-                    )
-                },
-            )
-        } else {
-            null
-        }
-
-        val resolvedTier = resolveHigherTier(titleResult.tier, summaryResult?.tier ?: TranslationTier.NONE)
-        offer.copy(
-            translatedTitle = titleResult.translatedText,
-            translatedSummary = summaryResult?.translatedText,
-            translationTier = resolvedTier,
-        )
-    }
+    ): TranslationResult = translateText(
+        text = markdown,
+        config = config,
+        forceRefresh = forceRefresh,
+        preserveMarkdown = true,
+        offlineFallback = { VpsGlossaryTranslator.translateMarkdownOffline(markdown) },
+    )
 
     /**
-     * Batch translates a list of offers with graceful concurrency & rate-limit pacing.
-     * Note: If Google GTX fails consecutively (e.g. blocked in mainland China), remaining offers in the
-     * batch immediately fall back to Tier 3 offline glossary without stalling on repeated timeouts!
-     */
-    suspend fun translateBatch(
-        offers: List<OverseasDealOffer>,
-        config: OverseasTranslationConfig,
-        forceRefresh: Boolean = false,
-    ): List<OverseasDealOffer> = withContext(ioDispatcher) {
-        var consecutiveGtxFailures = 0
-        val results = ArrayList<OverseasDealOffer>(offers.size)
-
-        for ((index, offer) in offers.withIndex()) {
-            val effectiveConfig = if (
-                config.engineKind == TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY &&
-                consecutiveGtxFailures >= MAX_CONSECUTIVE_GTX_FAILURES
-            ) {
-                config.copy(engineKind = TranslationEngineKind.OFFLINE_GLOSSARY_ONLY)
-            } else {
-                config
-            }
-
-            val translated = translateOffer(
-                offer = offer,
-                config = effectiveConfig,
-                forceRefresh = forceRefresh,
-            )
-
-            if (
-                effectiveConfig.engineKind == TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY &&
-                translated.translationTier == TranslationTier.OFFLINE_GLOSSARY
-            ) {
-                consecutiveGtxFailures++
-            } else if (translated.translationTier == TranslationTier.GOOGLE_GTX) {
-                consecutiveGtxFailures = 0
-            }
-
-            results += translated
-
-            if (
-                rateLimitDelayMillis > 0L &&
-                index < offers.lastIndex &&
-                effectiveConfig.engineKind != TranslationEngineKind.OFFLINE_GLOSSARY_ONLY &&
-                translated.translationTier != TranslationTier.OFFLINE_GLOSSARY
-            ) {
-                delay(rateLimitDelayMillis)
-            }
-        }
-        results
-    }
-
-    /**
-     * Translates a single piece of text through the configured tier waterfall + SHA-256 disk cache.
+     * Translates a piece of text through the configured tier waterfall + SHA-256 disk cache.
      */
     suspend fun translateText(
         text: String,
         config: OverseasTranslationConfig,
         forceRefresh: Boolean = false,
+        preserveMarkdown: Boolean = false,
         offlineFallback: () -> String = { VpsGlossaryTranslator.translateTitleOffline(text) },
     ): TranslationResult = withContext(ioDispatcher) {
         val normalized = text.trim()
@@ -203,9 +121,8 @@ class OverseasTranslator(
             return@withContext TranslationResult("", TranslationTier.NONE)
         }
 
-        val contentKey = sha256Hex(normalized)
+        val contentKey = sha256Hex(if (preserveMarkdown) "md:$normalized" else normalized)
 
-        // Check persistent cache first
         if (!forceRefresh) {
             val cached = readCacheEntry(contentKey)
             if (cached != null) {
@@ -233,12 +150,12 @@ class OverseasTranslator(
         if (config.engineKind == TranslationEngineKind.OPENAI_COMPATIBLE && config.hasValidCustomEndpoint) {
             val customResult = runCatching {
                 networkSemaphore.withPermit {
-                    translateViaOpenAiCompatible(normalized, config)
+                    translateViaOpenAiCompatible(normalized, config, preserveMarkdown)
                 }
             }.onFailure { if (it is CancellationException) throw it }.getOrNull()
 
             if (!customResult.isNullOrBlank()) {
-                val polished = VpsGlossaryTranslator.enhanceMachineTranslation(customResult)
+                val polished = polishOutput(customResult, preserveMarkdown)
                 writeCacheEntry(contentKey, polished, TranslationTier.CUSTOM_API)
                 return@withContext TranslationResult(polished, TranslationTier.CUSTOM_API, fromCache = false)
             }
@@ -250,7 +167,7 @@ class OverseasTranslator(
             }.onFailure { if (it is CancellationException) throw it }.getOrNull()
 
             if (!customResult.isNullOrBlank()) {
-                val polished = VpsGlossaryTranslator.enhanceMachineTranslation(customResult)
+                val polished = polishOutput(customResult, preserveMarkdown)
                 writeCacheEntry(contentKey, polished, TranslationTier.CUSTOM_API)
                 return@withContext TranslationResult(polished, TranslationTier.CUSTOM_API, fromCache = false)
             }
@@ -265,7 +182,7 @@ class OverseasTranslator(
             }.onFailure { if (it is CancellationException) throw it }.getOrNull()
 
             if (!gtxResult.isNullOrBlank()) {
-                val polished = VpsGlossaryTranslator.enhanceMachineTranslation(gtxResult)
+                val polished = polishOutput(gtxResult, preserveMarkdown)
                 writeCacheEntry(contentKey, polished, TranslationTier.GOOGLE_GTX)
                 return@withContext TranslationResult(polished, TranslationTier.GOOGLE_GTX, fromCache = false)
             }
@@ -278,10 +195,10 @@ class OverseasTranslator(
     }
 
     /**
-     * Tests connectivity and output of [config] using a representative VPS deal headline without touching cache.
+     * Tests connectivity and output of [config] using a representative VPS deal phrase without touching cache.
      */
     suspend fun testConnection(config: OverseasTranslationConfig): Result<String> = withContext(ioDispatcher) {
-        val sample = "Black Friday Flash Sale: 2 vCPU 4GB RAM NVMe VPS in Tokyo - \$14.99/yr Recurring"
+        val sample = "Special Offer: 2 vCPU 4GB RAM NVMe VPS in Tokyo - \$14.99/yr Recurring"
         when (config.engineKind) {
             TranslationEngineKind.OFFLINE_GLOSSARY_ONLY -> {
                 Result.success("离线术语引擎就绪：${VpsGlossaryTranslator.translateTitleOffline(sample)}")
@@ -291,7 +208,7 @@ class OverseasTranslator(
                     return@withContext Result.failure(IllegalArgumentException("请填写有效的 OpenAI 兼容 API 地址（http/https）"))
                 }
                 runCatching {
-                    val out = translateViaOpenAiCompatible(sample, config)
+                    val out = translateViaOpenAiCompatible(sample, config, preserveMarkdown = false)
                     "OpenAI 兼容接口测试成功：${VpsGlossaryTranslator.enhanceMachineTranslation(out)}"
                 }
             }
@@ -387,15 +304,24 @@ class OverseasTranslator(
         }
     }
 
+    private fun polishOutput(rawText: String, preserveMarkdown: Boolean): String {
+        if (!preserveMarkdown) {
+            return VpsGlossaryTranslator.enhanceMachineTranslation(rawText)
+        }
+        return rawText.lines().joinToString("\n") { line ->
+            if (line.isBlank()) "" else VpsGlossaryTranslator.enhanceMachineTranslation(line)
+        }.trim()
+    }
+
     private suspend fun translateViaGoogleGtx(text: String): String {
         val base = gtxBaseUrl.toHttpUrlOrNull()
             ?: throw IOException("Invalid Google GTX URL")
         val url = base.newBuilder()
             .setQueryParameter("client", "gtx")
-            .setQueryParameter("sl", "en")
+            .setQueryParameter("sl", "auto")
             .setQueryParameter("tl", "zh-CN")
             .setQueryParameter("dt", "t")
-            .setQueryParameter("q", text.take(1500))
+            .setQueryParameter("q", text.take(2800))
             .build()
 
         val request = Request.Builder()
@@ -412,9 +338,19 @@ class OverseasTranslator(
     private suspend fun translateViaOpenAiCompatible(
         text: String,
         config: OverseasTranslationConfig,
+        preserveMarkdown: Boolean,
     ): String {
         val endpoint = resolveOpenAiCompletionsUrl(config.customEndpointUrl)
         val modelName = config.customModel.trim().ifBlank { OverseasTranslationConfig.DEFAULT_OPENAI_MODEL }
+
+        val systemInstruction = if (preserveMarkdown) {
+            "你是资深 VPS/主机社区翻译助手。请将输入的 VPS 促销通知内容翻译成地道中文，严格保留原有的 Markdown 标题、列表、代码块、优惠码和所有 URL 链接不变；" +
+                "将 Recurring 译为「续费同价」，Unmetered 译为「不限流量」，Storage VPS 译为「大盘鸡」。只输出译文 Markdown，不要附加解释。"
+        } else {
+            "你是资深 VPS/主机社区翻译助手。请将英文 VPS 促销标题或摘要翻译成简洁地道的中文：" +
+                "保留所有价格、货币符号、优惠码、CPU/内存/硬盘/流量规格；将 Recurring 译为「续费同价」，" +
+                "Unmetered 译为「不限流量」，Storage VPS 译为「大盘鸡」。只输出译文，不要附加解释。"
+        }
 
         val payload = buildJsonObject {
             put("model", modelName)
@@ -425,18 +361,13 @@ class OverseasTranslator(
                     add(
                         buildJsonObject {
                             put("role", "system")
-                            put(
-                                "content",
-                                "你是资深 VPS/主机社区翻译助手。请将英文 VPS 促销标题或配置摘要翻译成简洁地道的中文：" +
-                                    "保留所有价格、货币符号、优惠码、CPU/内存/硬盘/流量规格；将 Recurring 译为「续费同价」，" +
-                                    "Unmetered 译为「不限流量」，Storage VPS 译为「大盘鸡」。只输出译文，不要附加解释。",
-                            )
+                            put("content", systemInstruction)
                         },
                     )
                     add(
                         buildJsonObject {
                             put("role", "user")
-                            put("content", text.take(1800))
+                            put("content", text.take(3600))
                         },
                     )
                 },
@@ -461,7 +392,7 @@ class OverseasTranslator(
     ): String {
         val endpoint = config.customEndpointUrl.trim()
         val payload = buildJsonObject {
-            put("text", text.take(1800))
+            put("text", text.take(3600))
             put("source_lang", "EN")
             put("target_lang", "ZH")
         }
@@ -561,16 +492,6 @@ class OverseasTranslator(
         }
     }
 
-    private fun resolveHigherTier(a: TranslationTier, b: TranslationTier): TranslationTier {
-        fun rank(tier: TranslationTier): Int = when (tier) {
-            TranslationTier.CUSTOM_API -> 3
-            TranslationTier.GOOGLE_GTX -> 2
-            TranslationTier.OFFLINE_GLOSSARY -> 1
-            TranslationTier.NONE -> 0
-        }
-        return if (rank(a) >= rank(b)) a else b
-    }
-
     internal fun sha256Hex(input: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
@@ -580,7 +501,6 @@ class OverseasTranslator(
         const val DEFAULT_GTX_BASE_URL = "https://translate.googleapis.com/translate_a/single"
         const val TRANSLATIONS_CACHE_FILE_NAME = "overseas_translations.json"
         private const val MAX_CACHE_ENTRIES = 600
-        private const val MAX_CONSECUTIVE_GTX_FAILURES = 2
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()

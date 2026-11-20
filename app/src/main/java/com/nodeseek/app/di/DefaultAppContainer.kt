@@ -397,7 +397,6 @@ class DefaultAppContainer(
     override val overseasIntelRepository: OverseasIntelRepository by lazy {
         OverseasIntelRepositoryImpl(
             context = appContext,
-            exchangeRateRepository = exchangeRateRepository,
         )
     }
 

@@ -837,7 +837,6 @@ fun Showcase08OverseasIntelHub() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
-            onAddRestockWatch = { _, _, _ -> },
             onShareDealToForum = { _, _ -> },
         )
     }
