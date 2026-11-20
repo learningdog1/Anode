@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -61,7 +62,9 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.TcpPortPreset
@@ -141,10 +144,15 @@ fun NetBenchQuickBottomSheet(
         }
     }
 
-    val controller = remember(historyStore, sheetScope) {
+    val networkBridge = remember(context, isInspection) {
+        if (isInspection) SystemDefaultNetworkBridge else AndroidNetBenchNetworkBridge(context)
+    }
+
+    val controller = remember(historyStore, networkBridge, sheetScope) {
         NetBenchSessionController(
             scope = sheetScope,
             historyStore = historyStore,
+            networkBridge = networkBridge,
             initialTarget = initialTarget,
             initialMarkdownStyle = initialMarkdownStyle,
         )
@@ -212,9 +220,20 @@ fun NetBenchQuickBottomSheet(
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                     )
-                    val envSubtitle = uiState.clientNetwork?.let {
-                        "${it.carrierDisplayName} · ${it.ipFamily.label} · 隐藏本机 IP"
-                    } ?: "TCPing · 原生 iperf3 · IP 原生/广播鉴定"
+                    val envSubtitle = when {
+                        uiState.clientEgress?.isShowingProxyFallback == true ->
+                            "检测到代理/VPN · 以下为代理出口 IP · 隐藏本机 IP"
+                        uiState.clientEgress?.hasDualExitIps == true -> {
+                            val direct = uiState.clientEgress?.directNetwork!!
+                            val proxy = uiState.clientEgress?.proxyNetwork!!
+                            "真实 ${direct.carrierDisplayName} · 代理 ${proxy.carrierDisplayName} · 隐藏本机 IP"
+                        }
+                        uiState.clientNetwork != null -> {
+                            val net = uiState.clientNetwork!!
+                            "${net.carrierDisplayName} · ${net.ipFamily.label} · 隐藏本机 IP"
+                        }
+                        else -> "TCPing · 原生 iperf3 · IP 原生/广播鉴定"
+                    }
                     Text(
                         text = envSubtitle,
                         style = MaterialTheme.typography.labelSmall,
@@ -280,6 +299,20 @@ fun NetBenchQuickBottomSheet(
                         }
                     }
                 }
+
+                NetBenchClientEgressBanner(
+                    egress = uiState.clientEgress,
+                    fallbackNetwork = uiState.clientNetwork,
+                    testViaProxy = uiState.testViaProxy,
+                    isRefreshing = uiState.isRefreshingEgress,
+                    onRefresh = controller::refreshClientEgress,
+                    onEnableProxyTest = if (!uiState.isRunning) {
+                        { controller.toggleTestViaProxy(true) }
+                    } else {
+                        null
+                    },
+                    compact = true,
+                )
 
                 // Target input
                 OutlinedTextField(
@@ -378,6 +411,13 @@ fun NetBenchQuickBottomSheet(
                         enabled = !uiState.isRunning,
                         onClick = { controller.toggleIperf3(!uiState.enableIperf3) },
                     )
+                    NetBenchSelectableChip(
+                        label = "经由代理测试",
+                        selected = uiState.testViaProxy,
+                        icon = Icons.Rounded.VpnLock,
+                        enabled = !uiState.isRunning,
+                        onClick = { controller.toggleTestViaProxy(!uiState.testViaProxy) },
+                    )
                 }
 
                 // Compact iperf3 direction & port bar when enabled
@@ -457,6 +497,7 @@ fun NetBenchQuickBottomSheet(
                         report = intel,
                         clientNetwork = uiState.clientNetwork,
                         compact = true,
+                        clientEgress = uiState.clientEgress,
                     )
                 }
 

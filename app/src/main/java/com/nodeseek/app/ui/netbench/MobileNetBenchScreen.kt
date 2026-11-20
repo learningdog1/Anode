@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -208,6 +209,8 @@ fun MobileNetBenchScreen(
                         onApplyHistory = viewModel::applyHistoryEntry,
                         onRemoveHistory = viewModel::removeHistoryEntry,
                         onClearHistory = viewModel::clearHistory,
+                        onRefreshEgress = viewModel::refreshClientEgress,
+                        onEnableProxyTest = { viewModel.toggleTestViaProxy(true) },
                         onSubmit = {
                             keyboardController?.hide()
                             viewModel.startBenchmark()
@@ -225,6 +228,7 @@ fun MobileNetBenchScreen(
                         onToggleIpCheck = viewModel::toggleIpCheck,
                         onToggleIperf3 = viewModel::toggleIperf3,
                         onToggleHttpProbe = viewModel::toggleHttpProbe,
+                        onToggleTestViaProxy = viewModel::toggleTestViaProxy,
                         onIperfPortChange = viewModel::updateIperfPortText,
                         onIperfDurationChange = viewModel::updateIperfDurationSec,
                         onIperfModeChange = viewModel::updateIperfTestMode,
@@ -297,6 +301,7 @@ fun MobileNetBenchScreen(
                     NetBenchIpIntelligenceCard(
                         report = intel,
                         clientNetwork = uiState.clientNetwork,
+                        clientEgress = uiState.clientEgress,
                     )
                 }
             }
@@ -342,8 +347,11 @@ private fun TargetAndPortConfigCard(
     onApplyHistory: (com.nodeseek.app.domain.netbench.NetBenchHistoryEntry) -> Unit,
     onRemoveHistory: (com.nodeseek.app.domain.netbench.NetBenchHistoryEntry) -> Unit,
     onClearHistory: () -> Unit,
+    onRefreshEgress: () -> Unit,
+    onEnableProxyTest: () -> Unit,
     onSubmit: () -> Unit,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -357,13 +365,36 @@ private fun TargetAndPortConfigCard(
             icon = Icons.Rounded.NetworkCheck,
             trailing = {
                 uiState.clientNetwork?.let { net ->
+                    val isFallback = uiState.clientEgress?.isShowingProxyFallback == true
+                    val pillText = when {
+                        uiState.testViaProxy -> "经由代理 · ${net.ipFamily.label}"
+                        isFallback -> "代理出口 · ${net.ipFamily.label}"
+                        else -> "${net.carrier.shortLabel} · ${net.ipFamily.label}"
+                    }
                     PulseAccentPill(
-                        text = "${net.carrier.shortLabel} · ${net.ipFamily.label}",
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        text = pillText,
+                        containerColor = if (isFallback) {
+                            ext.drumstickContainer.copy(alpha = 0.72f)
+                        } else {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                        },
+                        contentColor = if (isFallback) {
+                            ext.onDrumstickContainer
+                        } else {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        },
                     )
                 }
             },
+        )
+
+        NetBenchClientEgressBanner(
+            egress = uiState.clientEgress,
+            fallbackNetwork = uiState.clientNetwork,
+            testViaProxy = uiState.testViaProxy,
+            isRefreshing = uiState.isRefreshingEgress,
+            onRefresh = onRefreshEgress,
+            onEnableProxyTest = if (!uiState.isRunning) onEnableProxyTest else null,
         )
 
         OutlinedTextField(
@@ -485,6 +516,7 @@ private fun TestModulesConfigCard(
     onToggleIpCheck: (Boolean) -> Unit,
     onToggleIperf3: (Boolean) -> Unit,
     onToggleHttpProbe: (Boolean) -> Unit,
+    onToggleTestViaProxy: (Boolean) -> Unit,
     onIperfPortChange: (String) -> Unit,
     onIperfDurationChange: (Int) -> Unit,
     onIperfModeChange: (Iperf3TestMode) -> Unit,
@@ -605,6 +637,21 @@ private fun TestModulesConfigCard(
             checked = uiState.enableHttpProbe,
             enabled = !uiState.isRunning,
             onCheckedChange = onToggleHttpProbe,
+        )
+
+        PulseGradientDivider()
+
+        ModuleToggleRow(
+            title = "经由代理测试",
+            subtitle = if (uiState.testViaProxy) {
+                "TCPing / HTTP / iperf3 将通过当前代理/VPN 链路测试"
+            } else {
+                "默认绑定非 VPN 底层真实网络直连测机，反映真实线路"
+            },
+            icon = Icons.Rounded.VpnLock,
+            checked = uiState.testViaProxy,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleTestViaProxy,
         )
     }
 }
