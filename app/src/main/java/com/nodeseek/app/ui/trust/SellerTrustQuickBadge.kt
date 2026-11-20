@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -37,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
@@ -164,35 +166,71 @@ internal object TrustPalette {
 }
 
 /**
- * Compact inline badge (`查信誉` or live saved [TrustTag] pill such as `靠谱` / `观察` / `谨慎` / `避雷`)
- * designed for trade topic headers, direct message top bars, and user profiles.
+ * Compact inline badge (`查信誉`, live local [TrustTag] pill such as `靠谱` / `观察` / `谨慎` / `避雷`,
+ * or cached risk verdict `高危` / `存疑` / `已核验`) designed for trade topic headers, floor lists,
+ * direct message top bars, and user profiles.
  *
- * Automatically observes the local seller note for [uid] so updating a seller tag inside
- * [SellerTrustCardSheet] immediately refreshes the pill everywhere on screen.
+ * **Zero unprompted per-badge network hits**:
+ * By default ([enqueueIfUncached] = `false`), this composable strictly observes local notes and
+ * memory/disk cached [SellerTrustReport] snapshots (`observeCachedReport`), never hitting the
+ * origin server when rendering 20+ reply badges in a topic thread. If [enqueueIfUncached] is
+ * explicitly enabled, uncached UIDs are submitted to the repository's deduplicated, rate-limited
+ * background queue instead of firing direct concurrent requests.
  */
 @Composable
 fun SellerTrustQuickBadge(
     uid: Long,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    usernameHint: String = "",
     tagOverride: TrustTag? = null,
     compact: Boolean = false,
+    enqueueIfUncached: Boolean = false,
     repository: SellerTrustRepository? = null,
 ) {
     val isInspection = LocalInspectionMode.current
+    var cachedReport: SellerTrustReport? = null
+
     val resolvedTag: TrustTag = if (tagOverride != null) {
         tagOverride
     } else if (!isInspection && uid > 0L) {
         val repo = rememberSellerTrustRepository(override = repository)
         val noteFlow = remember(repo, uid) { repo.observeLocalNote(uid) }
+        val cachedFlow = remember(repo, uid) { repo.observeCachedReport(uid) }
         val localNote by noteFlow.collectAsStateWithLifecycle(initialValue = null)
+        val observedCached by cachedFlow.collectAsStateWithLifecycle(initialValue = null)
+        cachedReport = observedCached
+
+        if (enqueueIfUncached && localNote == null && observedCached == null) {
+            LaunchedEffect(repo, uid, usernameHint, enqueueIfUncached) {
+                repo.enqueueInspect(uid = uid, usernameHint = usernameHint)
+            }
+        }
         localNote?.tag ?: TrustTag.NONE
     } else {
         TrustTag.NONE
     }
 
-    val tone = TrustPalette.forTag(resolvedTag)
-    val label = if (resolvedTag.isTagged) resolvedTag.shortLabel else "查信誉"
+    val cachedRiskLevel = cachedReport
+        ?.takeIf { !resolvedTag.isTagged && it.anyRemoteSucceeded }
+        ?.riskAssessment
+        ?.level
+
+    val tone = when {
+        resolvedTag.isTagged -> TrustPalette.forTag(resolvedTag)
+        cachedRiskLevel != null -> TrustPalette.forRiskLevel(cachedRiskLevel)
+        else -> TrustPalette.forTag(TrustTag.NONE)
+    }
+
+    val label = when {
+        resolvedTag.isTagged -> resolvedTag.shortLabel
+        cachedRiskLevel == TrustRiskLevel.HIGH_RISK_RED -> "高危"
+        cachedRiskLevel == TrustRiskLevel.CAUTION_AMBER -> "存疑"
+        cachedRiskLevel == TrustRiskLevel.NORMAL_CLEAR -> "已核验"
+        else -> "查信誉"
+    }
+
+    val isHighRisk = resolvedTag == TrustTag.RISK_BLACKLIST || cachedRiskLevel == TrustRiskLevel.HIGH_RISK_RED
     val shape = if (compact) CircleShape else RoundedCornerShape(9.dp)
     val interactionSource = remember { MutableInteractionSource() }
 
@@ -206,7 +244,7 @@ fun SellerTrustQuickBadge(
             .clip(shape)
             .background(tone.backgroundBrush)
             .border(
-                width = if (resolvedTag == TrustTag.RISK_BLACKLIST) 1.dp else 0.8.dp,
+                width = if (isHighRisk) 1.dp else 0.8.dp,
                 color = tone.border,
                 shape = shape,
             )

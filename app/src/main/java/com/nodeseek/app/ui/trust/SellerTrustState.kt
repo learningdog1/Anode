@@ -16,6 +16,7 @@ import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.trust.LocalSellerNote
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
+import com.nodeseek.app.domain.trust.TrustFetchStatus
 import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.trust.TrustTag
 import kotlinx.coroutines.CancellationException
@@ -27,17 +28,74 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+/**
+ * High-level inspection state surfaced by [SellerTrustCardSheet]:
+ * - [LOADING]: Initial remote verification in flight
+ * - [FRESH]: Freshly fetched from NodeSeek
+ * - [FROM_CACHE]: Served from memory LRU or persistent disk cache (displays update timestamp)
+ * - [RATE_LIMITED]: Upstream 429/503 rate-limit cooldown with no usable cached snapshot
+ * - [FAILED_RETRYABLE]: Remote failure or empty/unresolvable seller with manual retry available
+ */
+enum class SellerTrustLoadStatus {
+    LOADING,
+    FRESH,
+    FROM_CACHE,
+    RATE_LIMITED,
+    FAILED_RETRYABLE,
+}
+
+private val TRUST_TIME_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("HH:mm", Locale.US)
+private val TRUST_MONTH_DAY_TIME_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MM-dd HH:mm", Locale.US)
+private val TRUST_FULL_DATE_TIME_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
+
+/**
+ * Formats [epochMillis] into a concise Chinese timestamp string showing both recency and wall-clock time
+ * (e.g. `"刚刚 (12:30)"`, `"15 分钟前 (12:15)"`, `"今日 09:20"`, `"昨日 21:40"`, `"11-18 14:05"`).
+ */
+internal fun formatTrustUpdatedAt(
+    epochMillis: Long,
+    nowEpochMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.of("Asia/Shanghai"),
+): String {
+    if (epochMillis <= 0L) return "时间未知"
+    val targetZdt = Instant.ofEpochMilli(epochMillis).atZone(zoneId)
+    val nowZdt = Instant.ofEpochMilli(nowEpochMillis).atZone(zoneId)
+    val targetDate = targetZdt.toLocalDate()
+    val nowDate = nowZdt.toLocalDate()
+    val diffSeconds = ((nowEpochMillis - epochMillis) / 1_000L).coerceAtLeast(0L)
+    val timePart = TRUST_TIME_FORMATTER.format(targetZdt)
+
+    return when {
+        diffSeconds < 60L && targetDate == nowDate -> "刚刚 ($timePart)"
+        diffSeconds < 3_600L && targetDate == nowDate -> "${diffSeconds / 60L} 分钟前 ($timePart)"
+        targetDate == nowDate -> {
+            val hours = (diffSeconds / 3_600L).coerceAtLeast(1L)
+            "今日 $timePart（${hours}小时前）"
+        }
+        targetDate == nowDate.minusDays(1) -> "昨日 $timePart"
+        targetZdt.year == nowZdt.year -> TRUST_MONTH_DAY_TIME_FORMATTER.format(targetZdt)
+        else -> TRUST_FULL_DATE_TIME_FORMATTER.format(targetZdt)
+    }
+}
 
 /**
  * Optional CompositionLocal for providing a shared [SellerTrustRepository] (e.g. from `AppContainer`).
- * When not explicitly provided, [rememberSellerTrustRepository] falls back to a process-scoped
- * [SellerTrustRepositoryImpl.forContext] backed by `LocalAppContainer.current`.
+ * When not explicitly provided, [rememberSellerTrustRepository] falls back to `LocalAppContainer.current.sellerTrustRepository`
+ * or process-scoped [SellerTrustRepositoryImpl.forContext].
  */
 val LocalSellerTrustRepository = staticCompositionLocalOf<SellerTrustRepository?> { null }
 
 /**
  * Resolves the active [SellerTrustRepository] from an explicit override, [LocalSellerTrustRepository],
- * or process-scoped [SellerTrustRepositoryImpl.forContext] using [LocalAppContainer].
+ * or [LocalAppContainer].
  */
 @Composable
 fun rememberSellerTrustRepository(
@@ -48,11 +106,7 @@ fun rememberSellerTrustRepository(
     val context = LocalContext.current
     val container = LocalAppContainer.current
     return remember(context, container) {
-        SellerTrustRepositoryImpl.forContext(
-            context = context,
-            userRepository = container.userRepository,
-            forumRepository = container.forumRepository,
-        )
+        container.sellerTrustRepository
     }
 }
 
@@ -73,6 +127,10 @@ data class SellerTrustUiState(
     val isSavingNote: Boolean = false,
     val noteSavedFeedback: Boolean = false,
     val errorMessage: String? = null,
+    val cooldownUntilEpochMillis: Long = 0L,
+    val cooldownRemainingSeconds: Int = 0,
+    val statusNoticeMessage: String? = null,
+    val isManualRefreshThrottled: Boolean = false,
 ) {
     val resolvedUid: Long
         get() = report?.uid?.takeIf { it > 0L } ?: uid
@@ -88,6 +146,29 @@ data class SellerTrustUiState(
                 if (id > 0L) "https://www.nodeseek.com/avatar/$id.png" else ""
             }
 
+    val hasUsableReport: Boolean
+        get() = report != null && report.anyRemoteSucceeded
+
+    val loadStatus: SellerTrustLoadStatus
+        get() = when {
+            isLoading && !hasUsableReport -> SellerTrustLoadStatus.LOADING
+            hasUsableReport -> {
+                if (report!!.isFromCache) {
+                    SellerTrustLoadStatus.FROM_CACHE
+                } else {
+                    SellerTrustLoadStatus.FRESH
+                }
+            }
+            report?.fetchStatus == TrustFetchStatus.RATE_LIMITED ||
+                (!isManualRefreshThrottled && cooldownRemainingSeconds > 0 && report == null) -> {
+                SellerTrustLoadStatus.RATE_LIMITED
+            }
+            else -> SellerTrustLoadStatus.FAILED_RETRYABLE
+        }
+
+    val canManualRefresh: Boolean
+        get() = !isLoading && !isRefreshing && cooldownRemainingSeconds <= 0
+
     val hasUnsavedNoteChanges: Boolean
         get() {
             val savedTag = localNote?.tag ?: TrustTag.NONE
@@ -97,8 +178,8 @@ data class SellerTrustUiState(
 }
 
 /**
- * State holder managing inspection loading, refresh, reactive local note observation,
- * 1-tap tag persistence, and debounced/manual local note saving for [SellerTrustCardSheet].
+ * State holder managing inspection loading, throttled manual refresh, cooldown countdown,
+ * reactive local note observation, 1-tap tag persistence, and debounced/manual local note saving.
  */
 @Stable
 class SellerTrustStateHolder(
@@ -107,6 +188,8 @@ class SellerTrustStateHolder(
     uid: Long,
     usernameHint: String,
     avatarUrlHint: String = "",
+    private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val uiRefreshMinIntervalMillis: Long = DEFAULT_UI_REFRESH_MIN_INTERVAL_MILLIS,
 ) {
     private val _uiState = MutableStateFlow(
         SellerTrustUiState(
@@ -121,6 +204,8 @@ class SellerTrustStateHolder(
     private var observeNoteJob: Job? = null
     private var autoSaveJob: Job? = null
     private var feedbackJob: Job? = null
+    private var cooldownTickerJob: Job? = null
+    private var lastManualRefreshAcceptedAtMillis: Long = 0L
     private var noteEditSequence: Long = 0L
     private var tagEditSequence: Long = 0L
     private var saveSequence: Long = 0L
@@ -135,13 +220,54 @@ class SellerTrustStateHolder(
 
     fun load(forceRefresh: Boolean = false) {
         val snapshot = _uiState.value
+        val now = clockMillis()
+
+        if (forceRefresh) {
+            if (snapshot.isLoading || snapshot.isRefreshing) return
+            if (snapshot.cooldownUntilEpochMillis > now) {
+                val remSec = computeRemainingSeconds(snapshot.cooldownUntilEpochMillis, now)
+                _uiState.update {
+                    it.copy(
+                        cooldownRemainingSeconds = remSec,
+                        statusNoticeMessage = if (it.isManualRefreshThrottled) {
+                            "刷新过于频繁，请 ${remSec} 秒后再试"
+                        } else {
+                            "当前处于限流冷却期，请 ${remSec} 秒后再试"
+                        },
+                    )
+                }
+                startCooldownTicker(snapshot.cooldownUntilEpochMillis)
+                return
+            }
+            if (lastManualRefreshAcceptedAtMillis > 0L &&
+                now >= lastManualRefreshAcceptedAtMillis &&
+                (now - lastManualRefreshAcceptedAtMillis) < uiRefreshMinIntervalMillis
+            ) {
+                val throttleUntil = lastManualRefreshAcceptedAtMillis + uiRefreshMinIntervalMillis
+                val remSec = computeRemainingSeconds(throttleUntil, now)
+                _uiState.update {
+                    it.copy(
+                        cooldownUntilEpochMillis = throttleUntil,
+                        cooldownRemainingSeconds = remSec,
+                        isManualRefreshThrottled = true,
+                        statusNoticeMessage = "手动刷新受节流保护，请 ${remSec} 秒后再试",
+                    )
+                }
+                startCooldownTicker(throttleUntil)
+                return
+            }
+            lastManualRefreshAcceptedAtMillis = now
+        }
+
         inspectJob?.cancel()
         inspectJob = scope.launch {
             _uiState.update { current ->
                 current.copy(
-                    isLoading = current.report == null,
-                    isRefreshing = forceRefresh || current.report != null,
+                    isLoading = !current.hasUsableReport,
+                    isRefreshing = forceRefresh || current.hasUsableReport,
                     errorMessage = null,
+                    statusNoticeMessage = null,
+                    isManualRefreshThrottled = false,
                 )
             }
             try {
@@ -153,33 +279,65 @@ class SellerTrustStateHolder(
                 if (report.uid > 0L && report.uid != snapshot.uid) {
                     startObservingNote(report.uid)
                 }
+
+                val finishedNow = clockMillis()
+                val untilMillis = report.cooldownUntilEpochMillis.takeIf { it > finishedNow } ?: 0L
+                val remainingSec = computeRemainingSeconds(untilMillis, finishedNow)
+
                 _uiState.update { current ->
                     val note = current.localNote ?: report.localNote
+                    val syncedReport = if (note != report.localNote) {
+                        report.copy(
+                            localNote = note,
+                            riskAssessment = TrustRiskEvaluator.evaluate(
+                                rankLevel = report.rankLevel,
+                                registrationDays = report.registrationDays,
+                                historicalTradeTopicCount = report.historicalTradeTopicCount,
+                                exposureSearchHits = report.exposureSearchHits,
+                                searchSucceeded = report.searchSucceeded,
+                                localNote = note,
+                                profileSucceeded = report.profileSucceeded,
+                                registrationDurationLabel = report.registrationDurationLabel,
+                            ),
+                        )
+                    } else {
+                        report
+                    }
+
+                    val errorText = if (!syncedReport.anyRemoteSucceeded) {
+                        syncedReport.failureMessage
+                            ?: syncedReport.searchFailureReason
+                            ?: "信誉核验加载失败，请手动重试"
+                    } else {
+                        null
+                    }
+
+                    val noticeText = when {
+                        syncedReport.isRefreshThrottled -> syncedReport.failureMessage
+                        syncedReport.fetchStatus == TrustFetchStatus.STALE_CACHE_FALLBACK ->
+                            syncedReport.failureMessage
+                        else -> null
+                    }
+
                     current.copy(
                         isLoading = false,
                         isRefreshing = false,
-                        report = if (note != report.localNote) {
-                            report.copy(
-                                localNote = note,
-                                riskAssessment = TrustRiskEvaluator.evaluate(
-                                    rankLevel = report.rankLevel,
-                                    registrationDays = report.registrationDays,
-                                    historicalTradeTopicCount = report.historicalTradeTopicCount,
-                                    exposureSearchHits = report.exposureSearchHits,
-                                    searchSucceeded = report.searchSucceeded,
-                                    localNote = note,
-                                    profileSucceeded = report.profileSucceeded,
-                                    registrationDurationLabel = report.registrationDurationLabel,
-                                ),
-                            )
-                        } else {
-                            report
-                        },
+                        report = syncedReport,
                         localNote = note,
                         draftTag = if (userEditedTag) current.draftTag else (note?.tag ?: TrustTag.NONE),
                         draftNoteText = if (userEditedNoteText) current.draftNoteText else note?.noteText.orEmpty(),
-                        errorMessage = null,
+                        errorMessage = errorText,
+                        cooldownUntilEpochMillis = untilMillis,
+                        cooldownRemainingSeconds = remainingSec,
+                        statusNoticeMessage = noticeText,
+                        isManualRefreshThrottled = syncedReport.isRefreshThrottled,
                     )
+                }
+
+                if (untilMillis > finishedNow) {
+                    startCooldownTicker(untilMillis)
+                } else {
+                    cooldownTickerJob?.cancel()
                 }
             } catch (c: CancellationException) {
                 throw c
@@ -188,7 +346,7 @@ class SellerTrustStateHolder(
                     current.copy(
                         isLoading = false,
                         isRefreshing = false,
-                        errorMessage = t.message?.takeIf { it.isNotBlank() } ?: "信誉核验加载失败，请重试",
+                        errorMessage = t.message?.takeIf { it.isNotBlank() } ?: "信誉核验加载失败，请手动重试",
                     )
                 }
             }
@@ -241,6 +399,36 @@ class SellerTrustStateHolder(
         autoSaveJob?.cancel()
         val latest = _uiState.value
         persistNote(tag = latest.draftTag, noteText = latest.draftNoteText)
+    }
+
+    private fun startCooldownTicker(untilMillis: Long) {
+        cooldownTickerJob?.cancel()
+        cooldownTickerJob = scope.launch {
+            while (true) {
+                val now = clockMillis()
+                val remaining = computeRemainingSeconds(untilMillis, now)
+                if (remaining <= 0) {
+                    _uiState.update { current ->
+                        current.copy(
+                            cooldownUntilEpochMillis = 0L,
+                            cooldownRemainingSeconds = 0,
+                            isManualRefreshThrottled = false,
+                            statusNoticeMessage = if (current.isManualRefreshThrottled) null else current.statusNoticeMessage,
+                        )
+                    }
+                    break
+                }
+                _uiState.update { current ->
+                    current.copy(cooldownRemainingSeconds = remaining)
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
+    private fun computeRemainingSeconds(untilMillis: Long, nowMillis: Long): Int {
+        if (untilMillis <= nowMillis) return 0
+        return ((untilMillis - nowMillis + 999L) / 1_000L).coerceAtLeast(1L).toInt()
     }
 
     private fun startObservingNote(targetUid: Long) {
@@ -331,6 +519,7 @@ class SellerTrustStateHolder(
 
     companion object {
         const val MAX_NOTE_LENGTH: Int = 240
+        const val DEFAULT_UI_REFRESH_MIN_INTERVAL_MILLIS: Long = 3_000L
         private const val AUTO_SAVE_DEBOUNCE_MILLIS: Long = 700L
         private const val SAVED_FEEDBACK_DURATION_MILLIS: Long = 2200L
     }

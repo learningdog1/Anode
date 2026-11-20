@@ -15,15 +15,15 @@ import com.nodeseek.app.domain.model.UserProfile
 import com.nodeseek.app.domain.model.UserReplyExcerpt
 import com.nodeseek.app.domain.repository.ForumRepository
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.trust.TrustFetchStatus
 import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
+import com.nodeseek.app.ui.trust.SellerTrustLoadStatus
 import com.nodeseek.app.ui.trust.SellerTrustStateHolder
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -55,26 +55,13 @@ class SellerTrustRepositoryImplTest {
     private val baseClockMillis: Long = Instant.parse("2026-11-19T04:00:00Z").toEpochMilli()
 
     @Test
-    fun inspectSeller_runsProfileTopicsAndBothSearchesConcurrently() = runTest {
+    fun inspectSeller_fetchesProfileTopicsAndSearchesWithBoundedConcurrencyAndPacing() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val startedCount = AtomicInteger(0)
-        val allFourStarted = CompletableDeferred<Unit>()
-        val releaseGate = CompletableDeferred<Unit>()
-
-        suspend fun awaitBarrier() {
-            if (startedCount.incrementAndGet() >= 4) {
-                allFourStarted.complete(Unit)
-            }
-            releaseGate.await()
-        }
-
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
-                awaitBarrier()
                 Result.success(sampleProfile(uid = uid, username = "CloudSeller", coins = 1750, joinedAtIso = "2024-07-10T08:00:00Z"))
             },
             onGetTopics = { uid, _ ->
-                awaitBarrier()
                 Result.success(
                     listOf(
                         sampleTopic(id = 11L, title = "[出] DMIT LAX Pro", categorySlug = "trade", categoryName = "交易", authorId = uid, authorName = "CloudSeller"),
@@ -85,8 +72,7 @@ class SellerTrustRepositoryImplTest {
             },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { _ ->
-                awaitBarrier()
+            onSearch = {
                 Result.success(FeedPageResult(topics = emptyList()))
             },
         )
@@ -96,20 +82,15 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "seller_trust_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
-        val reportDeferred = async {
-            repo.inspectSeller(uid = 1001L, usernameHint = "CloudSeller")
-        }
-
-        // Advance so all 4 concurrent coroutines hit the barrier; sequential execution would deadlock here
-        advanceUntilIdle()
-        assertTrue("Expected all 4 remote calls to start concurrently", allFourStarted.isCompleted)
-        releaseGate.complete(Unit)
-
-        val report = reportDeferred.await()
+        val report = repo.inspectSeller(uid = 1001L, usernameHint = "CloudSeller")
+        assertTrue(
+            "Expected global concurrency cap <= 2, actual=${repo.rateLimiter.peakConcurrencyForTest}",
+            repo.rateLimiter.peakConcurrencyForTest <= 2,
+        )
         assertEquals(1001L, report.uid)
         assertEquals("CloudSeller", report.username)
         assertEquals(4, report.rankLevel)
@@ -120,11 +101,13 @@ class SellerTrustRepositoryImplTest {
         assertTrue(report.exposureSearchHits.isEmpty())
         assertEquals(TrustRiskLevel.NORMAL_CLEAR, report.riskAssessment.level)
         assertFalse(report.isFromCache)
+        assertEquals(TrustFetchStatus.FRESH, report.fetchStatus)
     }
 
     @Test
-    fun inspectSeller_handlesSearchRateLimitGracefullyWhileProfileSucceeds() = runTest {
+    fun inspectSeller_handlesSearchRateLimitGracefullyWhileProfileSucceeds_andShortCircuitsSiblingSearch() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        val searchCalls = AtomicInteger(0)
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
                 Result.success(sampleProfile(uid = uid, username = "VeteranUser", coins = 2600, joinedAtIso = "2023-05-01T00:00:00Z"))
@@ -139,7 +122,8 @@ class SellerTrustRepositoryImplTest {
         )
         val forumRepo = FakeForumRepository(
             onSearch = {
-                Result.failure(NodeSeekApiException(message = "Too Many Requests", statusCode = 429))
+                searchCalls.incrementAndGet()
+                Result.failure(NodeSeekApiException(message = "Too Many Requests", statusCode = 429, retryAfterSeconds = 20L))
             },
         )
 
@@ -148,7 +132,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "seller_trust_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
@@ -158,9 +142,11 @@ class SellerTrustRepositoryImplTest {
         assertFalse(report.searchSucceeded)
         assertNotNull(report.searchFailureReason)
         assertTrue(report.searchFailureReason!!.contains("限流"))
+        assertEquals(1, searchCalls.get()) // Second search aborted immediately once first tripped 429 cooldown!
         assertEquals(5, report.rankLevel)
         assertEquals(1, report.historicalTradeTopicCount)
         assertEquals(TrustRiskLevel.CAUTION_AMBER, report.riskAssessment.level)
+        assertTrue(report.cooldownUntilEpochMillis > baseClockMillis)
     }
 
     @Test
@@ -200,7 +186,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "seller_trust_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
@@ -248,7 +234,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "seller_trust_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
@@ -259,10 +245,12 @@ class SellerTrustRepositoryImplTest {
     }
 
     @Test
-    fun inspectSeller_cachesFor5Minutes_andForceRefreshBypassesCache() = runTest {
+    fun inspectSeller_cachesPositiveResultFor18Hours_persistsToDisk_andThrottlesRapidForceRefresh() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        var nowMillis = baseClockMillis
+        var manualClockOffsetMillis = 0L
+        val clock = { baseClockMillis + testScheduler.currentTime + manualClockOffsetMillis }
         val profileCalls = AtomicInteger(0)
+        val notesFile = File(tempFolder.root, "seller_trust_notes.json")
 
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
@@ -278,30 +266,47 @@ class SellerTrustRepositoryImplTest {
         val repo = SellerTrustRepositoryImpl(
             userRepository = userRepo,
             forumRepository = forumRepo,
-            notesFile = File(tempFolder.root, "seller_trust_notes.json"),
+            notesFile = notesFile,
             ioDispatcher = dispatcher,
-            clockMillis = { nowMillis },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
         val first = repo.inspectSeller(uid = 5005L, usernameHint = "CachedSeller")
         assertFalse(first.isFromCache)
+        assertEquals(TrustFetchStatus.FRESH, first.fetchStatus)
         assertEquals(1, profileCalls.get())
 
-        // 2 minutes later -> served from cache
-        nowMillis += 2L * 60L * 1000L
-        val second = repo.inspectSeller(uid = 5005L, usernameHint = "CachedSeller")
-        assertTrue(second.isFromCache)
+        // Immediate forceRefresh 2s later -> throttled by manualRefreshMinIntervalMillis (15s)!
+        manualClockOffsetMillis += 2_000L
+        val throttledForce = repo.inspectSeller(uid = 5005L, usernameHint = "CachedSeller", forceRefresh = true)
+        assertTrue(throttledForce.isFromCache)
+        assertTrue(throttledForce.isRefreshThrottled)
         assertEquals(1, profileCalls.get())
 
-        // forceRefresh -> bypasses cache
-        val forced = repo.inspectSeller(uid = 5005L, usernameHint = "CachedSeller", forceRefresh = true)
+        // 12 hours later -> still fresh within 18h TTL across a brand-new repository instance (disk cache)!
+        manualClockOffsetMillis += 12L * 60L * 60L * 1000L
+        val repoReloadedFromDisk = SellerTrustRepositoryImpl(
+            userRepository = userRepo,
+            forumRepository = forumRepo,
+            notesFile = notesFile,
+            ioDispatcher = dispatcher,
+            clockMillis = clock,
+            zoneId = shanghaiZone,
+        )
+        val fromDisk = repoReloadedFromDisk.inspectSeller(uid = 5005L, usernameHint = "CachedSeller")
+        assertTrue(fromDisk.isFromCache)
+        assertEquals(TrustFetchStatus.FROM_CACHE, fromDisk.fetchStatus)
+        assertEquals(1, profileCalls.get())
+
+        // forceRefresh past 15s throttle -> bypasses cache and refetches
+        val forced = repoReloadedFromDisk.inspectSeller(uid = 5005L, usernameHint = "CachedSeller", forceRefresh = true)
         assertFalse(forced.isFromCache)
         assertEquals(2, profileCalls.get())
 
-        // 6 minutes later -> TTL expired -> refetches
-        nowMillis += 6L * 60L * 1000L
-        val expired = repo.inspectSeller(uid = 5005L, usernameHint = "CachedSeller")
+        // 19 hours later -> 18h TTL expired -> refetches automatically
+        manualClockOffsetMillis += 19L * 60L * 60L * 1000L
+        val expired = repoReloadedFromDisk.inspectSeller(uid = 5005L, usernameHint = "CachedSeller")
         assertFalse(expired.isFromCache)
         assertEquals(3, profileCalls.get())
     }
@@ -309,7 +314,8 @@ class SellerTrustRepositoryImplTest {
     @Test
     fun localSellerNotes_persistAcrossRepositoryInstances_andReEvaluateCachedRisk() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        var nowMillis = baseClockMillis
+        var manualOffsetMillis = 0L
+        val clock = { baseClockMillis + testScheduler.currentTime + manualOffsetMillis }
         val notesFile = File(tempFolder.root, "seller_trust_notes.json")
 
         val userRepo = FakeUserRepository(
@@ -327,7 +333,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = notesFile,
             ioDispatcher = dispatcher,
-            clockMillis = { nowMillis },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
@@ -348,7 +354,7 @@ class SellerTrustRepositoryImplTest {
         assertEquals("先款后失联，绝对避雷", cachedAfterBlacklist.localNote?.noteText)
 
         // Save second seller note with later timestamp
-        nowMillis += 5_000L
+        manualOffsetMillis += 5_000L
         repo1.saveLocalNote(
             uid = 6007L,
             username = "GoodGuy",
@@ -362,7 +368,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = notesFile,
             ioDispatcher = dispatcher,
-            clockMillis = { nowMillis },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
@@ -383,7 +389,7 @@ class SellerTrustRepositoryImplTest {
     }
 
     @Test
-    fun inspectSeller_resolvesCanonicalUsernameWhenHintIsPlaceholder() = runTest {
+    fun inspectSeller_resolvesCanonicalUsernameUpfront_withoutDuplicateSpeculativeHintSearches() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val searchedQueries = mutableListOf<String>()
 
@@ -405,22 +411,26 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "seller_trust_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
-        val report = repo.inspectSeller(uid = 7007L, usernameHint = "用户 #7007")
+        // Even when caller passes an outdated/mismatched usernameHint, only canonical searches are issued (2 instead of 4)!
+        val report = repo.inspectSeller(uid = 7007L, usernameHint = "OutdatedHintName")
         assertEquals("RealSellerName", report.username)
+        assertEquals(2, searchedQueries.size)
         assertEquals(setOf("曝光 RealSellerName", "骗子 RealSellerName"), searchedQueries.toSet())
     }
 
     @Test
-    fun stateHolder_updatesTagAndDebouncedNoteAndReflectsLiveRiskReEvaluation() = runTest {
+    fun stateHolder_updatesTagDebouncedNote_andEnforcesManualRefreshThrottle() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val notesFile = File(tempFolder.root, "state_holder_notes.json")
+        val profileCalls = AtomicInteger(0)
 
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
+                profileCalls.incrementAndGet()
                 Result.success(sampleProfile(uid = uid, username = "LiveSeller", coins = 1600, joinedAtIso = "2024-03-01T00:00:00Z"))
             },
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
@@ -429,12 +439,13 @@ class SellerTrustRepositoryImplTest {
             onSearch = { Result.success(FeedPageResult(topics = emptyList())) },
         )
 
+        val clock = { baseClockMillis + testScheduler.currentTime }
         val repo = SellerTrustRepositoryImpl(
             userRepository = userRepo,
             forumRepository = forumRepo,
             notesFile = notesFile,
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
@@ -445,12 +456,28 @@ class SellerTrustRepositoryImplTest {
                 scope = holderScope,
                 uid = 8008L,
                 usernameHint = "LiveSeller",
+                clockMillis = clock,
             )
             holder.load()
             advanceUntilIdle()
 
             assertNotNull(holder.uiState.value.report)
+            assertEquals(SellerTrustLoadStatus.FRESH, holder.uiState.value.loadStatus)
             assertEquals(TrustRiskLevel.NORMAL_CLEAR, holder.uiState.value.report?.riskAssessment?.level)
+            assertEquals(1, profileCalls.get())
+
+            // Rapid manual refresh tap 1s later is throttled and enters countdown
+            advanceTimeBy(1_000L)
+            holder.refresh()
+            advanceTimeBy(100L)
+            assertEquals(1, profileCalls.get())
+            assertTrue(holder.uiState.value.isManualRefreshThrottled)
+            assertTrue(holder.uiState.value.cooldownRemainingSeconds > 0)
+
+            // Let countdown tick down to 0
+            advanceTimeBy(16_000L)
+            advanceUntilIdle()
+            assertEquals(0, holder.uiState.value.cooldownRemainingSeconds)
 
             // 1-tap select RISK_BLACKLIST -> immediately flips risk to HIGH_RISK_RED
             holder.toggleTag(TrustTag.RISK_BLACKLIST)
@@ -510,7 +537,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "profile_fail_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
@@ -525,8 +552,10 @@ class SellerTrustRepositoryImplTest {
     }
 
     @Test
-    fun inspectSeller_totalRemoteFailureIsNotCached_andStillHonorsLocalBlacklist() = runTest {
+    fun inspectSeller_totalRemoteFailureUsesShortNegativeCache_andStillHonorsLocalBlacklist() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        var manualOffsetMillis = 0L
+        val clock = { baseClockMillis + testScheduler.currentTime + manualOffsetMillis }
         val profileCalls = AtomicInteger(0)
         val userRepo = FakeUserRepository(
             onGetProfile = {
@@ -544,7 +573,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "offline_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
@@ -553,13 +582,29 @@ class SellerTrustRepositoryImplTest {
         val first = repo.inspectSeller(uid = 9002L, usernameHint = "OfflineBad")
         assertFalse(first.profileSucceeded)
         assertFalse(first.searchSucceeded)
+        assertEquals(TrustFetchStatus.FAILED_RETRYABLE, first.fetchStatus)
         assertEquals(TrustRiskLevel.HIGH_RISK_RED, first.riskAssessment.level)
         assertEquals(1, profileCalls.get())
 
-        // Second call must retry because total failure is not cached
-        val second = repo.inspectSeller(uid = 9002L, usernameHint = "OfflineBad")
-        assertFalse(second.isFromCache)
+        // Within 3-minute negative TTL -> non-forced read hits short negative cache instead of hammering server
+        manualOffsetMillis += 30_000L
+        val negativeHit = repo.inspectSeller(uid = 9002L, usernameHint = "OfflineBad")
+        assertTrue(negativeHit.isFromCache)
+        assertTrue(negativeHit.isNegativeCache)
+        assertEquals(TrustFetchStatus.FAILED_RETRYABLE, negativeHit.fetchStatus)
+        assertEquals(TrustRiskLevel.HIGH_RISK_RED, negativeHit.riskAssessment.level)
+        assertEquals(1, profileCalls.get())
+
+        // Manual retry (forceRefresh = true) after failedRetryMinIntervalMillis (3s) bypasses negative cache
+        val manualRetry = repo.inspectSeller(uid = 9002L, usernameHint = "OfflineBad", forceRefresh = true)
+        assertFalse(manualRetry.isFromCache)
         assertEquals(2, profileCalls.get())
+
+        // After 3-minute negative TTL expires -> automatic read retries again
+        manualOffsetMillis += 4L * 60L * 1000L
+        val afterNegTtl = repo.inspectSeller(uid = 9002L, usernameHint = "OfflineBad")
+        assertFalse(afterNegTtl.isFromCache)
+        assertEquals(3, profileCalls.get())
     }
 
     @Test
@@ -583,7 +628,7 @@ class SellerTrustRepositoryImplTest {
             forumRepository = forumRepo,
             notesFile = File(tempFolder.root, "uid_resolve_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis },
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
@@ -599,6 +644,7 @@ class SellerTrustRepositoryImplTest {
         username: String,
         coins: Int,
         joinedAtIso: String,
+        topicCount: Int = 15,
     ): UserProfile = UserProfile(
         uid = uid,
         username = username,
@@ -606,7 +652,7 @@ class SellerTrustRepositoryImplTest {
         joinedAtIso = joinedAtIso,
         drumsticks = coins,
         stardust = 120,
-        topicCount = 15,
+        topicCount = topicCount,
         replyCount = 88,
     )
 
