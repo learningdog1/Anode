@@ -1628,6 +1628,13 @@ fun NodePulseNavHost(
                     onInsertMarkdown = { markdown ->
                         openComposerWithPrefill("review", "", markdown)
                     },
+                    onOpenLiteSshIperf3Setup = { targetHost, port ->
+                        container.sshSessionManager.openIperf3ServerDialog(
+                            preferredHost = targetHost,
+                            preferredPort = port,
+                        )
+                        navController.navigate(LiteSshRoute)
+                    },
                     insertActionLabel = "一键发测评帖",
                 )
             }

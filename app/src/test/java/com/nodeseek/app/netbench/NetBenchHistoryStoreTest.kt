@@ -7,6 +7,7 @@ import com.nodeseek.app.domain.netbench.NetBenchHistoryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -81,5 +82,23 @@ class NetBenchHistoryStoreTest {
         file.writeText("{not valid json!!!")
         val recovered = NetBenchHistoryStore(historyFile = file, maxEntries = 3, ioDispatcher = Dispatchers.IO)
         assertTrue(recovered.entries.value.isEmpty())
+    }
+
+    @Test
+    fun `report preferences default to maskTargetIp true and includeClientNetwork true and persist across restarts`() = runBlocking {
+        val file = File(tempFolder.root, "prefs_${NetBenchHistoryStore.HISTORY_FILE_NAME}")
+        val store = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+
+        // Defaults required by spec: maskTargetIp = true, includeClientNetwork = true
+        assertTrue(store.preferences.value.maskTargetIp)
+        assertTrue(store.preferences.value.includeClientNetwork)
+
+        // Toggle preferences and verify persistence across store re-instantiation & clear()
+        store.updatePreferences { it.copy(maskTargetIp = false, includeClientNetwork = false) }
+        store.clear()
+
+        val reloaded = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+        assertFalse(reloaded.preferences.value.maskTargetIp)
+        assertFalse(reloaded.preferences.value.includeClientNetwork)
     }
 }

@@ -73,7 +73,9 @@ data class MobileNetBenchUiState(
     val iperfDurationSec: Int = Iperf3Config.DEFAULT_DURATION_SEC,
     val iperfTestMode: Iperf3TestMode = Iperf3TestMode.DOWNLOAD,
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
-    val maskTargetIpInReport: Boolean = false,
+    val maskTargetIpInReport: Boolean = true,
+    val includeClientNetworkInReport: Boolean = true,
+    val showIperf3ServerPrompt: Boolean = false,
     val isRunning: Boolean = false,
     val activePhase: NetBenchPhase = NetBenchPhase.IDLE,
     val resolvedTarget: ResolvedTarget? = null,
@@ -125,6 +127,8 @@ class NetBenchSessionController(
         MobileNetBenchUiState(
             targetInput = initialTarget.trim(),
             markdownStyle = initialMarkdownStyle,
+            maskTargetIpInReport = historyStore.preferences.value.maskTargetIp,
+            includeClientNetworkInReport = historyStore.preferences.value.includeClientNetwork,
             recentTargets = historyStore.entries.value,
         ),
     )
@@ -141,6 +145,22 @@ class NetBenchSessionController(
         scope.launch {
             historyStore.entries.collect { entries ->
                 _uiState.update { it.copy(recentTargets = entries) }
+            }
+        }
+        scope.launch {
+            historyStore.preferences.collect { prefs ->
+                _uiState.update { state ->
+                    if (state.maskTargetIpInReport == prefs.maskTargetIp &&
+                        state.includeClientNetworkInReport == prefs.includeClientNetwork
+                    ) {
+                        state
+                    } else {
+                        state.copy(
+                            maskTargetIpInReport = prefs.maskTargetIp,
+                            includeClientNetworkInReport = prefs.includeClientNetwork,
+                        ).withRegeneratedMarkdown()
+                    }
+                }
             }
         }
         // Pre-warm local egress carrier detection lazily in background
@@ -223,7 +243,25 @@ class NetBenchSessionController(
     }
 
     fun toggleIperf3(enabled: Boolean) {
-        _uiState.update { it.copy(enableIperf3 = enabled) }
+        _uiState.update { state ->
+            val shouldPrompt = enabled && !state.enableIperf3
+            state.copy(
+                enableIperf3 = enabled,
+                showIperf3ServerPrompt = when {
+                    shouldPrompt -> true
+                    !enabled -> false
+                    else -> state.showIperf3ServerPrompt
+                },
+            )
+        }
+    }
+
+    fun openIperf3ServerPrompt() {
+        _uiState.update { it.copy(showIperf3ServerPrompt = true) }
+    }
+
+    fun dismissIperf3ServerPrompt() {
+        _uiState.update { it.copy(showIperf3ServerPrompt = false) }
     }
 
     fun updateIperfPortText(value: String) {
@@ -243,11 +281,26 @@ class NetBenchSessionController(
         _uiState.update { state ->
             state.copy(markdownStyle = style).withRegeneratedMarkdown()
         }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(markdownStyle = style) }
+        }
     }
 
     fun toggleMaskTargetIp(mask: Boolean) {
         _uiState.update { state ->
             state.copy(maskTargetIpInReport = mask).withRegeneratedMarkdown()
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(maskTargetIp = mask) }
+        }
+    }
+
+    fun toggleIncludeClientNetwork(include: Boolean) {
+        _uiState.update { state ->
+            state.copy(includeClientNetworkInReport = include).withRegeneratedMarkdown()
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(includeClientNetwork = include) }
         }
     }
 
@@ -545,6 +598,7 @@ class NetBenchSessionController(
             options = NetBenchMarkdownOptions(
                 style = markdownStyle,
                 maskTargetIp = maskTargetIpInReport,
+                includeClientNetwork = includeClientNetworkInReport,
             ),
         )
         return copy(generatedMarkdown = md)
@@ -588,11 +642,14 @@ class MobileNetBenchViewModel(
     fun toggleHttpProbe(enabled: Boolean) = controller.toggleHttpProbe(enabled)
     fun toggleIpCheck(enabled: Boolean) = controller.toggleIpCheck(enabled)
     fun toggleIperf3(enabled: Boolean) = controller.toggleIperf3(enabled)
+    fun openIperf3ServerPrompt() = controller.openIperf3ServerPrompt()
+    fun dismissIperf3ServerPrompt() = controller.dismissIperf3ServerPrompt()
     fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
     fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
     fun updateIperfTestMode(mode: Iperf3TestMode) = controller.updateIperfTestMode(mode)
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) = controller.selectMarkdownStyle(style)
     fun toggleMaskTargetIp(mask: Boolean) = controller.toggleMaskTargetIp(mask)
+    fun toggleIncludeClientNetwork(include: Boolean) = controller.toggleIncludeClientNetwork(include)
     fun applyHistoryEntry(entry: NetBenchHistoryEntry) = controller.applyHistoryEntry(entry)
     fun removeHistoryEntry(entry: NetBenchHistoryEntry) = controller.removeHistoryEntry(entry)
     fun clearHistory() = controller.clearHistory()
