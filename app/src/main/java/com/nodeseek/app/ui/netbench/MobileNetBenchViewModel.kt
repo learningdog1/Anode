@@ -5,12 +5,16 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.HttpLatencyRunner
 import com.nodeseek.app.data.netbench.IpIntelligenceClient
 import com.nodeseek.app.data.netbench.Iperf3ClientRunner
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchTargetResolver
+import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
 import com.nodeseek.app.data.netbench.TcpPingRunner
+import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
@@ -39,6 +43,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -88,6 +93,9 @@ data class MobileNetBenchUiState(
     val errorMessage: String? = null,
     val recentTargets: List<NetBenchHistoryEntry> = emptyList(),
     val generatedMarkdown: String = "",
+    val clientEgress: ClientEgressSnapshot? = null,
+    val isRefreshingEgress: Boolean = false,
+    val testViaProxy: Boolean = false,
 ) {
     val effectiveTcpPort: Int
         get() = tcpPortText.trim().toIntOrNull()?.coerceIn(1, 65535) ?: TcpPingConfig.DEFAULT_PORT
@@ -115,11 +123,12 @@ data class MobileNetBenchUiState(
 class NetBenchSessionController(
     private val scope: CoroutineScope,
     private val historyStore: NetBenchHistoryStore,
-    private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(),
-    private val tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver),
-    private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(),
-    private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver),
-    private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(),
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
+    private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
+    private val tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
+    private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
+    private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
+    private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
     initialTarget: String = "",
     initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
 ) {
@@ -138,7 +147,8 @@ class NetBenchSessionController(
     val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
 
     private var activeJob: Job? = null
-    private var cachedClientNetwork: ClientNetworkInfo? = null
+    private var egressJob: Job? = null
+    private var cachedEgressSnapshot: ClientEgressSnapshot? = null
     private var lastAppliedInitialTarget: String = initialTarget.trim()
 
     init {
@@ -163,18 +173,50 @@ class NetBenchSessionController(
                 }
             }
         }
-        // Pre-warm local egress carrier detection lazily in background
+        // Pre-warm dual/direct local egress detection in background
+        refreshClientEgress()
+        // Automatically re-detect egress IP when Wi-Fi / Cellular / VPN topology changes
         scope.launch {
-            runCatching { ipIntelligenceClient.lookupLocalClientNetwork() }
-                .onSuccess { info ->
-                    if (info.source != null) {
-                        cachedClientNetwork = info
-                        _uiState.update { state ->
-                            val updated = state.copy(clientNetwork = info)
-                            updated.withRegeneratedMarkdown()
-                        }
-                    }
+            networkBridge.observeNetworkChanges().collectLatest {
+                delay(450L)
+                val currentFp = networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                if (cachedEgressSnapshot?.networkFingerprint != currentFp) {
+                    refreshClientEgress()
                 }
+            }
+        }
+    }
+
+    fun refreshClientEgress() {
+        egressJob?.cancel()
+        egressJob = scope.launch {
+            _uiState.update { it.copy(isRefreshingEgress = true) }
+            try {
+                val snapshot = ipIntelligenceClient.detectClientEgress()
+                cachedEgressSnapshot = snapshot
+                _uiState.update { state ->
+                    val effective = snapshot.activeNetworkForTest(state.testViaProxy)
+                    state.copy(
+                        clientEgress = snapshot,
+                        clientNetwork = effective ?: state.clientNetwork,
+                        isRefreshingEgress = false,
+                    ).withRegeneratedMarkdown()
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                _uiState.update { it.copy(isRefreshingEgress = false) }
+            }
+        }
+    }
+
+    fun toggleTestViaProxy(useProxy: Boolean) {
+        _uiState.update { state ->
+            val updatedNetwork = state.clientEgress?.activeNetworkForTest(useProxy) ?: state.clientNetwork
+            state.copy(
+                testViaProxy = useProxy,
+                clientNetwork = updatedNetwork,
+            ).withRegeneratedMarkdown()
         }
     }
 
@@ -384,20 +426,24 @@ class NetBenchSessionController(
 
         activeJob = scope.launch {
             try {
-                // Ensure local client egress ISP detection runs concurrently if not cached yet
-                val clientNetDeferred = if (cachedClientNetwork != null) {
+                // Re-detect client egress if uncached or network topology changed (e.g. Wi-Fi <-> Cellular / VPN)
+                val currentFp = networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                val clientEgressDeferred = if (cachedEgressSnapshot != null &&
+                    cachedEgressSnapshot?.networkFingerprint == currentFp
+                ) {
                     null
                 } else {
                     async {
-                        runCatching { ipIntelligenceClient.lookupLocalClientNetwork() }.getOrNull()
+                        runCatching { ipIntelligenceClient.detectClientEgress() }.getOrNull()
                     }
                 }
 
-                // Step 0: Resolve target DNS
+                // Step 0: Resolve target DNS via selected route (underlying physical network by default)
                 val resolvedResult = targetResolver.resolve(
                     rawTarget = rawInput,
                     defaultPort = effectiveTcpPort,
                     preferredFamily = snapshot.preferredFamily,
+                    useProxy = snapshot.testViaProxy,
                 )
                 val endpoint = resolvedResult.getOrElse { err ->
                     val errMsg = err.message ?: "无法解析目标主机"
@@ -426,6 +472,7 @@ class NetBenchSessionController(
                         timeoutMs = TcpPingConfig.DEFAULT_TIMEOUT_MS,
                         intervalMs = TcpPingConfig.DEFAULT_INTERVAL_MS,
                         preferredFamily = snapshot.preferredFamily,
+                        useProxy = snapshot.testViaProxy,
                     )
                     tcpPingRunner.run(tcpConfig).collect { progress ->
                         val corrected = progress.copy(
@@ -444,6 +491,7 @@ class NetBenchSessionController(
                     val httpRes = httpLatencyRunner.probe(
                         rawTarget = rawInput,
                         port = effectiveTcpPort,
+                        useProxy = snapshot.testViaProxy,
                     )
                     _uiState.update { state ->
                         state.copy(httpLatencyResult = httpRes).withRegeneratedMarkdown()
@@ -460,10 +508,14 @@ class NetBenchSessionController(
                 }
 
                 // Collect local egress carrier info if ready
-                clientNetDeferred?.await()?.let { detected ->
-                    cachedClientNetwork = detected
+                clientEgressDeferred?.await()?.let { detected ->
+                    cachedEgressSnapshot = detected
                     _uiState.update { state ->
-                        state.copy(clientNetwork = detected).withRegeneratedMarkdown()
+                        val effective = detected.activeNetworkForTest(state.testViaProxy)
+                        state.copy(
+                            clientEgress = detected,
+                            clientNetwork = effective ?: state.clientNetwork,
+                        ).withRegeneratedMarkdown()
                     }
                 }
 
@@ -482,6 +534,7 @@ class NetBenchSessionController(
                             durationSec = snapshot.iperfDurationSec,
                             direction = Iperf3Direction.DOWNLOAD,
                             preferredFamily = snapshot.preferredFamily,
+                            useProxy = snapshot.testViaProxy,
                         )
                         iperf3ClientRunner.run(dlConfig).collect { progress ->
                             _uiState.update { state ->
@@ -503,6 +556,7 @@ class NetBenchSessionController(
                             durationSec = snapshot.iperfDurationSec,
                             direction = Iperf3Direction.UPLOAD,
                             preferredFamily = snapshot.preferredFamily,
+                            useProxy = snapshot.testViaProxy,
                         )
                         iperf3ClientRunner.run(ulConfig).collect { progress ->
                             _uiState.update { state ->
@@ -582,16 +636,19 @@ class NetBenchSessionController(
 
     private fun MobileNetBenchUiState.withRegeneratedMarkdown(): MobileNetBenchUiState {
         if (!hasAnyResult) return copy(generatedMarkdown = "")
+        val effectiveClientNet = clientEgress?.activeNetworkForTest(testViaProxy) ?: clientNetwork
         val report = NetBenchReport(
             targetInput = targetInput,
             resolvedTarget = resolvedTarget,
             tcpPort = effectiveTcpPort,
-            clientNetwork = clientNetwork,
+            clientNetwork = effectiveClientNet,
             tcpPingSummary = tcpPingProgress?.summary,
             httpLatencyResult = httpLatencyResult,
             ipIntelligence = ipIntelligence,
             iperfDownloadResult = iperfDownloadProgress?.finalResult,
             iperfUploadResult = iperfUploadProgress?.finalResult,
+            testedViaProxy = testViaProxy,
+            proxyNetwork = clientEgress?.proxyNetwork,
         )
         val md = NetBenchMarkdownFormatter.format(
             report = report,
@@ -610,17 +667,19 @@ class NetBenchSessionController(
  */
 class MobileNetBenchViewModel(
     historyStore: NetBenchHistoryStore,
-    targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(),
-    tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver),
-    httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(),
-    iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver),
-    ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(),
+    networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
+    targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
+    tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
+    httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
+    iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
+    ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
     initialTarget: String = "",
 ) : ViewModel() {
 
     private val controller = NetBenchSessionController(
         scope = viewModelScope,
         historyStore = historyStore,
+        networkBridge = networkBridge,
         targetResolver = targetResolver,
         tcpPingRunner = tcpPingRunner,
         httpLatencyRunner = httpLatencyRunner,
@@ -644,6 +703,8 @@ class MobileNetBenchViewModel(
     fun toggleIperf3(enabled: Boolean) = controller.toggleIperf3(enabled)
     fun openIperf3ServerPrompt() = controller.openIperf3ServerPrompt()
     fun dismissIperf3ServerPrompt() = controller.dismissIperf3ServerPrompt()
+    fun toggleTestViaProxy(useProxy: Boolean) = controller.toggleTestViaProxy(useProxy)
+    fun refreshClientEgress() = controller.refreshClientEgress()
     fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
     fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
     fun updateIperfTestMode(mode: Iperf3TestMode) = controller.updateIperfTestMode(mode)
@@ -669,8 +730,10 @@ class MobileNetBenchViewModel(
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val bridge = AndroidNetBenchNetworkBridge(context)
                 return MobileNetBenchViewModel(
                     historyStore = NetBenchHistoryStore.forContext(context),
+                    networkBridge = bridge,
                     initialTarget = initialTarget,
                 ) as T
             }

@@ -1,10 +1,17 @@
 package com.nodeseek.app.netbench
 
 import com.nodeseek.app.data.netbench.Iperf3ClientRunner
+import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
+import com.nodeseek.app.data.netbench.NetBenchSocketChannel
+import com.nodeseek.app.data.netbench.NetBenchTargetResolver
+import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3Direction
 import com.nodeseek.app.domain.netbench.Iperf3ErrorKind
 import com.nodeseek.app.domain.netbench.Iperf3Stage
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
+import com.nodeseek.app.domain.netbench.NetBenchTransportKind
+import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -26,10 +33,14 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.SocketFactory
 import kotlin.concurrent.thread
 
 class Iperf3ClientRunnerTest {
@@ -409,5 +420,106 @@ class Iperf3ClientRunnerTest {
         assertEquals(Iperf3Stage.FAILED, nonIperfLast.stage)
         assertEquals(Iperf3ErrorKind.PROTOCOL_ERROR, nonIperfLast.errorKind)
         assertTrue(nonIperfLast.errorMessage!!.contains("非 iperf3 协议响应"))
+    }
+
+    @Test
+    fun `binds control and data sockets to direct underlying network by default and reports EPERM lockdown cleanly`() = runBlocking {
+        val server = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
+        val serverThread = thread(isDaemon = true) {
+            try {
+                server.soTimeout = 4_000
+                repeat(2) {
+                    val s = server.accept()
+                    val input = DataInputStream(s.getInputStream())
+                    input.readFully(ByteArray(37))
+                    s.getOutputStream().write(Iperf3ClientRunner.STATE_ACCESS_DENIED.toInt())
+                    s.getOutputStream().flush()
+                    s.close()
+                }
+            } finally {
+                runCatching { server.close() }
+            }
+        }
+
+        val directSocketCalls = AtomicInteger(0)
+        val proxySocketCalls = AtomicInteger(0)
+        val directChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                directSocketCalls.incrementAndGet()
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val proxyChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-200"
+            override val transportLabel: String = "VPN 代理"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                proxySocketCalls.incrementAndGet()
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(proxyChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(directChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, directChannel, proxyChannel)
+            }
+        }
+
+        val runner = Iperf3ClientRunner(
+            resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = bridge),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = bridge,
+        )
+        runner.run(Iperf3Config(target = "127.0.0.1", port = server.localPort, durationSec = 1, useProxy = false)).toList()
+        assertEquals(1, directSocketCalls.get())
+        assertEquals(0, proxySocketCalls.get())
+
+        runner.run(Iperf3Config(target = "127.0.0.1", port = server.localPort, durationSec = 1, useProxy = true)).toList()
+        assertEquals(1, directSocketCalls.get())
+        assertEquals(1, proxySocketCalls.get())
+        serverThread.join(2_000)
+
+        // Verify EPERM lockdown error emitted cleanly inside Flow
+        val blockedDirectChannel = object : NetBenchSocketChannel by directChannel {
+            override fun createSocket(): Socket = throw SocketException("bind failed: EPERM (Operation not permitted)")
+        }
+        val blockedBridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(proxyChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(blockedDirectChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, blockedDirectChannel, proxyChannel)
+            }
+        }
+        val blockedRunner = Iperf3ClientRunner(
+            resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = blockedBridge),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = blockedBridge,
+        )
+        val blockedLast = blockedRunner.run(
+            Iperf3Config(target = "127.0.0.1", port = 5201, durationSec = 1, useProxy = false),
+        ).toList().last()
+        assertEquals(Iperf3Stage.FAILED, blockedLast.stage)
+        assertEquals(Iperf3ErrorKind.IO_ERROR, blockedLast.errorKind)
+        assertTrue(blockedLast.errorMessage!!.contains("经由代理测试"))
     }
 }

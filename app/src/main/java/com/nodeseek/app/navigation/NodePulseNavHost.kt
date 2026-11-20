@@ -322,7 +322,6 @@ fun NodePulseNavHost(
     val latestActiveDmPeerUid by rememberUpdatedState(activeDmPeerUid)
     val latestChallengeRequired by rememberUpdatedState(challengeRequired)
     val latestWebViewActive by rememberUpdatedState(activeWebViewRequest != null)
-    val sshSessionState by container.sshSessionManager.uiState.collectAsStateWithLifecycle()
     val isOnLiteSshRoute = remember(currentBackStackEntry) {
         currentBackStackEntry?.destination?.hasRoute<LiteSshRoute>() == true
     }
@@ -1749,8 +1748,8 @@ fun NodePulseNavHost(
                 ),
         )
 
-        com.nodeseek.app.ui.ssh.LiteSshRunningGlobalBar(
-            uiState = sshSessionState,
+        com.nodeseek.app.ui.ssh.LiteSshRunningGlobalBarHost(
+            sessionManager = container.sshSessionManager,
             visible = !isOnLiteSshRoute && activeWebViewRequest == null,
             onReturnToLiteSsh = openLiteSsh,
             modifier = Modifier

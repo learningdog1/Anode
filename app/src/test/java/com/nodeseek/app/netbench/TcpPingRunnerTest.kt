@@ -1,11 +1,17 @@
 package com.nodeseek.app.netbench
 
 import com.nodeseek.app.data.netbench.NetBenchDnsResolver
+import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
+import com.nodeseek.app.data.netbench.NetBenchSocketChannel
 import com.nodeseek.app.data.netbench.NetBenchTargetResolver
+import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.data.netbench.TcpPingRunner
 import com.nodeseek.app.data.netbench.TcpProbeConnector
 import com.nodeseek.app.domain.netbench.IpFamily
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
+import com.nodeseek.app.domain.netbench.NetBenchTransportKind
+import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import kotlinx.coroutines.Dispatchers
@@ -20,9 +26,12 @@ import org.junit.Test
 import java.net.ConnectException
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.SocketFactory
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
@@ -208,5 +217,234 @@ class TcpPingRunnerTest {
         assertEquals(40.0, summary.avgMs!!, 0.001)
         assertEquals(60.0, summary.maxMs!!, 0.001)
         assertEquals(sqrt(800.0 / 3.0), summary.jitterMdevMs!!, 0.001)
+    }
+
+    @Test
+    fun `resolver and tcping default to direct physical channel and switch to proxy only when useProxy is true`() = runBlocking {
+        val running = AtomicBoolean(true)
+        val server = ServerSocket(0, 32, InetAddress.getByName("127.0.0.1"))
+        val acceptThread = thread(isDaemon = true) {
+            while (running.get()) {
+                try {
+                    server.accept().close()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }
+
+        val directSocketCalls = AtomicInteger(0)
+        val directDnsCalls = AtomicInteger(0)
+        val proxySocketCalls = AtomicInteger(0)
+        val proxyDnsCalls = AtomicInteger(0)
+
+        val directChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                directSocketCalls.incrementAndGet()
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> {
+                directDnsCalls.incrementAndGet()
+                return listOf(InetAddress.getByName("127.0.0.1"))
+            }
+        }
+        val proxyChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-200"
+            override val transportLabel: String = "VPN 代理"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                proxySocketCalls.incrementAndGet()
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> {
+                proxyDnsCalls.incrementAndGet()
+                return listOf(InetAddress.getByName("127.0.0.1"))
+            }
+        }
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(proxyChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(directChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, directChannel, proxyChannel)
+            }
+        }
+
+        try {
+            val resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = bridge)
+            val runner = TcpPingRunner(
+                resolver = resolver,
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+            )
+
+            val directEmissions = runner.run(
+                TcpPingConfig(
+                    target = "vps.example.com",
+                    port = server.localPort,
+                    probeCount = 4,
+                    intervalMs = 0L,
+                    useProxy = false,
+                ),
+            ).toList()
+            assertEquals(4, directEmissions.last().summary.received)
+            assertEquals(1, directDnsCalls.get())
+            assertEquals(4, directSocketCalls.get())
+            assertEquals(0, proxyDnsCalls.get())
+            assertEquals(0, proxySocketCalls.get())
+
+            val proxyEmissions = runner.run(
+                TcpPingConfig(
+                    target = "vps.example.com",
+                    port = server.localPort,
+                    probeCount = 4,
+                    intervalMs = 0L,
+                    useProxy = true,
+                ),
+            ).toList()
+            assertEquals(4, proxyEmissions.last().summary.received)
+            assertEquals(1, proxyDnsCalls.get())
+            assertEquals(4, proxySocketCalls.get())
+        } finally {
+            running.set(false)
+            runCatching { server.close() }
+            acceptThread.join(500)
+        }
+    }
+
+    @Test
+    fun `tcping recovers on mid-test Wi-Fi to cellular switch and surfaces VPN lockdown diagnostics`() = runBlocking {
+        val running = AtomicBoolean(true)
+        val server = ServerSocket(0, 32, InetAddress.getByName("127.0.0.1"))
+        val acceptThread = thread(isDaemon = true) {
+            while (running.get()) {
+                try {
+                    server.accept().close()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }
+
+        val wifiLost = AtomicBoolean(false)
+        val wifiChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                if (wifiLost.get()) {
+                    throw SocketException("Network is unreachable (ENETUNREACH)")
+                }
+                wifiLost.set(true)
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val cellCalls = AtomicInteger(0)
+        val cellChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "cell-102"
+            override val transportLabel: String = "蜂窝移动"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket {
+                cellCalls.incrementAndGet()
+                return Socket()
+            }
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val vpnChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-200"
+            override val transportLabel: String = "VPN 代理"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val physical: NetworkDescriptor<NetBenchSocketChannel> = if (wifiLost.get()) {
+                    NetworkDescriptor<NetBenchSocketChannel>(cellChannel, "cell-102", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.CELLULAR))
+                } else {
+                    NetworkDescriptor<NetBenchSocketChannel>(wifiChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI))
+                }
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor<NetBenchSocketChannel>(vpnChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        physical,
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, physical.token, vpnChannel)
+            }
+        }
+
+        try {
+            val runner = TcpPingRunner(
+                resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = bridge),
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+            )
+            val handoffResults = runner.run(
+                TcpPingConfig(target = "127.0.0.1", port = server.localPort, probeCount = 4, intervalMs = 0L),
+            ).toList()
+            assertEquals(4, handoffResults.last().summary.received)
+            assertEquals(3, cellCalls.get())
+
+            // Now test EPERM lockdown failure
+            val lockdownChannel = object : NetBenchSocketChannel {
+                override val networkId: String = "wifi-locked"
+                override val transportLabel: String = "Wi-Fi"
+                override val isVpn: Boolean = false
+                override val isDirectPhysical: Boolean = true
+                override val bypassSystemHttpProxy: Boolean = true
+                override val socketFactory: SocketFactory = SocketFactory.getDefault()
+                override fun createSocket(): Socket = throw SocketException("bind failed: EPERM (Operation not permitted)")
+                override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+            }
+            val lockdownBridge = object : NetBenchNetworkBridge {
+                override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                    val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                        listOf(
+                            NetworkDescriptor(vpnChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                            NetworkDescriptor(lockdownChannel, "wifi-locked", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                        ),
+                    )
+                    return ResolvedNetworkBinding(plan, lockdownChannel, vpnChannel)
+                }
+            }
+            val lockdownRunner = TcpPingRunner(
+                resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = lockdownBridge),
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = lockdownBridge,
+            )
+            val lockdownResult = lockdownRunner.run(
+                TcpPingConfig(target = "127.0.0.1", port = server.localPort, probeCount = 4, intervalMs = 0L),
+            ).toList().last()
+            assertEquals(0, lockdownResult.summary.received)
+            assertTrue(lockdownResult.errorMessage!!.contains("经由代理测试"))
+        } finally {
+            running.set(false)
+            runCatching { server.close() }
+            acceptThread.join(500)
+        }
     }
 }

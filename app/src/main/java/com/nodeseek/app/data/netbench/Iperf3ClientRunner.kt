@@ -67,6 +67,7 @@ class Iperf3ClientRunner(
     private val resolver: NetBenchTargetResolver = NetBenchTargetResolver(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val progressIntervalMs: Long = DEFAULT_PROGRESS_INTERVAL_MS,
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
 ) {
 
     private val json = Json {
@@ -97,6 +98,7 @@ class Iperf3ClientRunner(
             rawTarget = config.target,
             defaultPort = config.normalizedPort,
             preferredFamily = config.preferredFamily,
+            useProxy = config.useProxy,
         )
 
         val endpoint = resolvedResult.getOrElse { err ->
@@ -110,7 +112,37 @@ class Iperf3ClientRunner(
         val resolvedTarget = endpoint.resolvedTarget
         val cookieBytes = generateCookieBytes()
 
-        val controlSocket = Socket()
+        val binding = networkBridge.inspectCurrentNetworks()
+        val activeChannel: NetBenchSocketChannel = when (val selection = binding.selectChannel(config.useProxy)) {
+            is ChannelSelectionResult.Selected -> selection.channel
+            is ChannelSelectionResult.Blocked -> {
+                emit(
+                    failedProgress(
+                        direction = direction,
+                        port = port,
+                        resolvedTarget = resolvedTarget,
+                        durationSec = durationSec,
+                        kind = Iperf3ErrorKind.IO_ERROR,
+                        message = selection.message,
+                    ),
+                )
+                return@flow
+            }
+        }
+
+        val controlSocket = try {
+            activeChannel.createSocket()
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val fallbackMsg = if (!config.useProxy && binding.plan.isVpnActive) {
+                "绑定底层网络失败：${t.message ?: t.javaClass.simpleName}"
+            } else {
+                "创建测速连接失败：${t.message ?: t.javaClass.simpleName}"
+            }
+            val msg = binding.formatBindOrIoError(t, config.useProxy, fallbackMsg)
+            emit(failedProgress(direction, port, resolvedTarget, durationSec, Iperf3ErrorKind.IO_ERROR, msg))
+            return@flow
+        }
         val dataSocketRef = AtomicReference<Socket?>(null)
         val job = currentCoroutineContext()[Job]
         val cancelHandle = job?.invokeOnCompletion {
@@ -202,7 +234,7 @@ class Iperf3ClientRunner(
                                 peakMbps = 0.0,
                             ),
                         )
-                        val dataSocket = Socket()
+                        val dataSocket = activeChannel.createSocket()
                         dataSocketRef.set(dataSocket)
                         runCatching {
                             dataSocket.sendBufferSize = SOCKET_BUFFER_BYTES

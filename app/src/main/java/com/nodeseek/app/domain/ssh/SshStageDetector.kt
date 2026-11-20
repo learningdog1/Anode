@@ -30,15 +30,13 @@ data class SshLiveProgressStatus(
  */
 object SshStageDetector {
     const val DEFAULT_SILENCE_THRESHOLD_MILLIS: Long = 8_000L
-    private const val TAIL_SCAN_CHARS: Int = 3_500
+    internal const val TAIL_SCAN_CHARS: Int = 3_500
 
     private data class StageRule(
         val keywords: List<String>,
         val stageLabel: String,
         val detailHint: String,
     )
-
-    private val ANSI_ESCAPE_REGEX = Regex("""\u001B\[[0-9;:?]*[A-Za-z]""")
 
     fun detect(
         presetId: String?,
@@ -73,9 +71,7 @@ object SshStageDetector {
             )
         }
 
-        val tail = sanitizedOutput
-            .takeLast(TAIL_SCAN_CHARS)
-            .let { ANSI_ESCAPE_REGEX.replace(it, "") }
+        val tail = stripCsiEscapesFast(sanitizedOutput.takeLast(TAIL_SCAN_CHARS))
 
         val (stageLabel, detailHint) = inferStage(
             presetId = presetId.orEmpty(),
@@ -91,6 +87,74 @@ object SshStageDetector {
             currentStageLabel = stageLabel,
             stageDetailHint = detailHint,
         )
+    }
+
+    /**
+     * Zero-full-string overload that inspects only the trailing window of [bufferSnapshot].
+     */
+    fun detectFromBuffer(
+        presetId: String?,
+        command: String,
+        bufferSnapshot: SanitizedBufferSnapshot,
+        fallbackOutput: String = "",
+        isConnecting: Boolean,
+        startedAtEpochMillis: Long,
+        lastOutputEpochMillis: Long?,
+        nowEpochMillis: Long,
+        silenceThresholdMillis: Long = DEFAULT_SILENCE_THRESHOLD_MILLIS,
+    ): SshLiveProgressStatus {
+        val rawTail = if (!bufferSnapshot.isEmpty) {
+            bufferSnapshot.tailText(TAIL_SCAN_CHARS)
+        } else {
+            fallbackOutput.takeLast(TAIL_SCAN_CHARS)
+        }
+        return detect(
+            presetId = presetId,
+            command = command,
+            sanitizedOutput = rawTail,
+            isConnecting = isConnecting,
+            startedAtEpochMillis = startedAtEpochMillis,
+            lastOutputEpochMillis = lastOutputEpochMillis,
+            nowEpochMillis = nowEpochMillis,
+            silenceThresholdMillis = silenceThresholdMillis,
+        )
+    }
+
+    private fun stripCsiEscapesFast(text: String): String {
+        val firstEsc = text.indexOf("\u001B[")
+        if (firstEsc < 0) return text
+        val sb = StringBuilder(text.length)
+        var cursor = 0
+        var searchFrom = firstEsc
+        while (searchFrom >= 0 && searchFrom < text.length) {
+            var i = searchFrom + 2
+            var csiEnd = -1
+            while (i < text.length) {
+                val ch = text[i]
+                if (ch in 'A'..'Z' || ch in 'a'..'z') {
+                    csiEnd = i
+                    break
+                }
+                if (ch !in '0'..'9' && ch != ';' && ch != ':' && ch != '?') {
+                    break
+                }
+                i++
+            }
+            if (csiEnd >= 0) {
+                if (searchFrom > cursor) {
+                    sb.append(text, cursor, searchFrom)
+                }
+                cursor = csiEnd + 1
+                searchFrom = text.indexOf("\u001B[", startIndex = cursor)
+            } else {
+                searchFrom = text.indexOf("\u001B[", startIndex = searchFrom + 2)
+            }
+        }
+        if (cursor == 0) return text
+        if (cursor < text.length) {
+            sb.append(text, cursor, text.length)
+        }
+        return sb.toString()
     }
 
     private fun inferStage(
@@ -149,9 +213,11 @@ object SshStageDetector {
 
         // When YABS finishes iperf3 table (or skips iperf3 after fio table), it immediately starts
         // downloading & running Geekbench silently before printing "Geekbench X Benchmark Test:"!
-        val hasFinishedIperfTable = lastIperfIdx >= 0 && lower.indexOf("busy", startIndex = lastIperfIdx) >= 0 ||
-            (lastIperfIdx >= 0 && lower.substring(lastIperfIdx).lines().count { it.contains("|") } >= 3)
-        val hasFinishedFioTable = lastFioResultIdx >= 0 && lower.substring(lastFioResultIdx).contains("total")
+        val hasFinishedIperfTable = lastIperfIdx >= 0 && (
+            lower.indexOf("busy", startIndex = lastIperfIdx) >= 0 ||
+                countPipeLinesFrom(lower, lastIperfIdx, minRequired = 3)
+            )
+        val hasFinishedFioTable = lastFioResultIdx >= 0 && lower.indexOf("total", startIndex = lastFioResultIdx) >= 0
 
         return when {
             lastGeekbenchIdx > lastIperfIdx && lastGeekbenchIdx > lastFioResultIdx ->
@@ -326,5 +392,26 @@ object SshStageDetector {
             }
         }
         return bestPair
+    }
+
+    private fun countPipeLinesFrom(text: String, startIndex: Int, minRequired: Int): Boolean {
+        var pipeLines = 0
+        var lineHasPipe = false
+        var i = startIndex
+        while (i < text.length) {
+            when (text[i]) {
+                '|' -> lineHasPipe = true
+                '\n' -> {
+                    if (lineHasPipe) {
+                        pipeLines++
+                        if (pipeLines >= minRequired) return true
+                        lineHasPipe = false
+                    }
+                }
+            }
+            i++
+        }
+        if (lineHasPipe) pipeLines++
+        return pipeLines >= minRequired
     }
 }

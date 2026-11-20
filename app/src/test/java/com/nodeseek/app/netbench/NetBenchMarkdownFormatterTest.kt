@@ -2,6 +2,7 @@ package com.nodeseek.app.netbench
 
 import com.nodeseek.app.domain.netbench.ClientCarrier
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
+import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
@@ -236,5 +237,34 @@ class NetBenchMarkdownFormatterTest {
                 NetBenchMarkdownFormatter.displayWidth(line),
             )
         }
+    }
+
+    @Test
+    fun `labels proxy-tested and proxy-fallback routes while scrubbing both real and proxy client IPs`() {
+        val base = sampleReport()
+        val proxyNet = ClientNetworkInfo(
+            carrier = ClientCarrier.OVERSEAS,
+            carrierDisplayName = "海外网络 (日本)",
+            ipFamily = IpFamily.IPV4,
+            countryCode = "JP",
+            maskedIp = "45.76.*.*",
+            rawIp = "45.76.200.10",
+            routeKind = EgressRouteKind.PROXY_FALLBACK,
+        )
+
+        val fallbackMd = NetBenchMarkdownFormatter.format(
+            report = base.copy(clientNetwork = proxyNet, testedViaProxy = false),
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 17:00"),
+        )
+        assertTrue(fallbackMd.contains("代理出口(直连受限)"))
+        assertFalse(fallbackMd.contains("45.76.200.10"))
+
+        val viaProxyMd = NetBenchMarkdownFormatter.format(
+            report = base.copy(testedViaProxy = true, proxyNetwork = proxyNet),
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 17:00"),
+        )
+        assertTrue(viaProxyMd.contains("经由代理"))
+        assertFalse(viaProxyMd.contains("114.240.88.123"))
+        assertFalse(viaProxyMd.contains("45.76.200.10"))
     }
 }

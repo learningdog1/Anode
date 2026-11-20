@@ -13,8 +13,6 @@ package com.nodeseek.app.domain.ssh
  *   `8.8.8.8`, `8.8.4.4`, `9.9.9.9`) unless explicitly equal to [knownServerHost].
  */
 object IpPrivacyMasker {
-    private val ANSI_SGR_REGEX = Regex("""\u001B\[[0-9;]*m""")
-
     private val IPV4_CANDIDATE_REGEX = Regex(
         pattern = """(?<![A-Za-z0-9.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![A-Za-z0-9.])""",
     )
@@ -46,17 +44,33 @@ object IpPrivacyMasker {
         text: String,
         knownServerHost: String? = null,
     ): String {
-        if (text.isEmpty()) return text
+        if (text.isEmpty() || !hasAnyIpDelimiter(text)) return text
         val normalizedHost = knownServerHost?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+
+        val firstEsc = text.indexOf("\u001B[")
+        if (firstEsc < 0) {
+            return maskPlainSegment(text, normalizedHost)
+        }
 
         val sb = StringBuilder(text.length)
         var cursor = 0
-        for (ansiMatch in ANSI_SGR_REGEX.findAll(text)) {
-            if (ansiMatch.range.first > cursor) {
-                sb.append(maskPlainSegment(text.substring(cursor, ansiMatch.range.first), normalizedHost))
+        var searchFrom = firstEsc
+        while (searchFrom >= 0 && searchFrom < text.length) {
+            val sgrEnd = findSgrEndIndex(text, searchFrom)
+            if (sgrEnd >= 0) {
+                if (searchFrom > cursor) {
+                    val plain = text.substring(cursor, searchFrom)
+                    sb.append(maskPlainSegment(plain, normalizedHost))
+                }
+                sb.append(text, searchFrom, sgrEnd + 1)
+                cursor = sgrEnd + 1
+                searchFrom = text.indexOf("\u001B[", startIndex = cursor)
+            } else {
+                searchFrom = text.indexOf("\u001B[", startIndex = searchFrom + 2)
             }
-            sb.append(ansiMatch.value)
-            cursor = ansiMatch.range.last + 1
+        }
+        if (cursor == 0) {
+            return maskPlainSegment(text, normalizedHost)
         }
         if (cursor < text.length) {
             sb.append(maskPlainSegment(text.substring(cursor), normalizedHost))
@@ -64,29 +78,71 @@ object IpPrivacyMasker {
         return sb.toString()
     }
 
-    private fun maskPlainSegment(segment: String, normalizedHost: String?): String {
-        val afterV4 = IPV4_CANDIDATE_REGEX.replace(segment) { match ->
-            val a = match.groupValues[1].toIntOrNull() ?: return@replace match.value
-            val b = match.groupValues[2].toIntOrNull() ?: return@replace match.value
-            val c = match.groupValues[3].toIntOrNull() ?: return@replace match.value
-            val d = match.groupValues[4].toIntOrNull() ?: return@replace match.value
-            if (a !in 0..255 || b !in 0..255 || c !in 0..255 || d !in 0..255) {
-                return@replace match.value
-            }
-            // Reject leading-zero tokens like "01.02.03.04" that are usually version numbers or dates
-            if (hasDisallowedLeadingZero(match.groupValues[1]) ||
-                hasDisallowedLeadingZero(match.groupValues[2]) ||
-                hasDisallowedLeadingZero(match.groupValues[3]) ||
-                hasDisallowedLeadingZero(match.groupValues[4])
+    private fun hasAnyIpDelimiter(text: String): Boolean {
+        for (i in text.indices) {
+            val ch = text[i]
+            if (ch == '.' || ch == ':') return true
+        }
+        return false
+    }
+
+    private fun findSgrEndIndex(text: String, escBracketIndex: Int): Int {
+        var i = escBracketIndex + 2
+        while (i < text.length) {
+            val ch = text[i]
+            if (ch == 'm') return i
+            if (ch !in '0'..'9' && ch != ';') return -1
+            i++
+        }
+        return -1
+    }
+
+    private fun hasIpv4Hint(segment: String): Boolean {
+        var dotIdx = segment.indexOf('.')
+        while (dotIdx >= 0) {
+            if (dotIdx > 0 && dotIdx + 1 < segment.length &&
+                segment[dotIdx - 1] in '0'..'9' &&
+                segment[dotIdx + 1] in '0'..'9'
             ) {
-                return@replace match.value
+                return true
             }
-            val literal = match.value
-            val isExplicitServerHost = normalizedHost != null && literal == normalizedHost
-            if (!isExplicitServerHost && shouldPreserveIpv4(literal, a, b, c)) {
-                return@replace literal
+            dotIdx = segment.indexOf('.', startIndex = dotIdx + 1)
+        }
+        return false
+    }
+
+    private fun maskPlainSegment(segment: String, normalizedHost: String?): String {
+        if (segment.isEmpty()) return segment
+        val afterV4 = if (hasIpv4Hint(segment)) {
+            IPV4_CANDIDATE_REGEX.replace(segment) { match ->
+                val a = match.groupValues[1].toIntOrNull() ?: return@replace match.value
+                val b = match.groupValues[2].toIntOrNull() ?: return@replace match.value
+                val c = match.groupValues[3].toIntOrNull() ?: return@replace match.value
+                val d = match.groupValues[4].toIntOrNull() ?: return@replace match.value
+                if (a !in 0..255 || b !in 0..255 || c !in 0..255 || d !in 0..255) {
+                    return@replace match.value
+                }
+                // Reject leading-zero tokens like "01.02.03.04" that are usually version numbers or dates
+                if (hasDisallowedLeadingZero(match.groupValues[1]) ||
+                    hasDisallowedLeadingZero(match.groupValues[2]) ||
+                    hasDisallowedLeadingZero(match.groupValues[3]) ||
+                    hasDisallowedLeadingZero(match.groupValues[4])
+                ) {
+                    return@replace match.value
+                }
+                val literal = match.value
+                val isExplicitServerHost = normalizedHost != null && literal == normalizedHost
+                if (!isExplicitServerHost && shouldPreserveIpv4(literal, a, b, c)) {
+                    return@replace literal
+                }
+                "$a.$b.*.*"
             }
-            "$a.$b.*.*"
+        } else {
+            segment
+        }
+
+        if (afterV4.indexOf(':') < 0) {
+            return afterV4
         }
 
         return IPV6_CANDIDATE_REGEX.replace(afterV4) { match ->

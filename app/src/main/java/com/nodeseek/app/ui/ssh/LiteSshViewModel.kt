@@ -13,6 +13,7 @@ import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.Iperf3MissingProbeResult
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
+import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
@@ -68,6 +69,11 @@ data class PendingIperf3InstallPrompt(
 )
 
 @Immutable
+fun interface LiveBufferAccessor {
+    fun currentSnapshot(): SanitizedBufferSnapshot
+}
+
+@Immutable
 data class LiteSshUiState(
     val servers: List<SshServerProfile> = emptyList(),
     val selectedServerId: String? = null,
@@ -84,6 +90,8 @@ data class LiteSshUiState(
     val activePresetName: String? = null,
     val activeCommand: String = "",
     val liveAnsiOutput: String = "",
+    val hasLiveOutputFlag: Boolean = false,
+    internal val liveBufferAccessor: LiveBufferAccessor? = null,
     val startedAtEpochMillis: Long = 0L,
     val lastOutputEpochMillis: Long? = null,
     val elapsedMillis: Long = 0L,
@@ -135,12 +143,24 @@ data class LiteSshUiState(
             sessionRuns.firstOrNull { it.id == id } ?: recentRuns.firstOrNull { it.id == id }
         }
 
+    val hasLiveOutput: Boolean
+        get() = hasLiveOutputFlag ||
+            liveAnsiOutput.isNotBlank() ||
+            (liveBufferAccessor?.currentSnapshot()?.isEmpty == false)
+
+    val resolvedLiveAnsiOutput: String
+        get() = if (liveAnsiOutput.isNotEmpty()) {
+            liveAnsiOutput
+        } else {
+            liveBufferAccessor?.currentSnapshot()?.takeIf { !it.isEmpty }?.fullAnsiText.orEmpty()
+        }
+
     /**
      * Raw sanitized ANSI output currently displayed in the console (either live stream or a
      * selected completed session/history run).
      */
     val rawConsoleOutput: String
-        get() = viewingRun?.sanitizedAnsiOutput ?: liveAnsiOutput
+        get() = viewingRun?.sanitizedAnsiOutput ?: resolvedLiveAnsiOutput
 
     /**
      * Display-ready ANSI output respecting the [maskServerIp] privacy toggle.
@@ -158,6 +178,42 @@ data class LiteSshUiState(
         }
 
     /**
+     * O(1) summary metadata for `LiteSshExportDock` avoiding per-frame regex masking & post formatting.
+     */
+    fun computeExportSummaryMeta(): SshExportSummaryMeta? {
+        var checkedCount = 0
+        for (run in sessionRuns) {
+            if (run.id in selectedRunIdsForExport && run.hasOutput) {
+                checkedCount++
+            }
+        }
+        if (checkedCount > 0) {
+            return SshExportSummaryMeta(runCount = checkedCount, usesTabsLayout = checkedCount >= 2)
+        }
+        if (viewingRun?.hasOutput == true) {
+            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = false)
+        }
+        if (hasLiveOutput) {
+            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = false)
+        }
+        return null
+    }
+
+    fun toGlobalBarState(): LiteSshGlobalBarState = if (!isRunning) {
+        LiteSshGlobalBarState(isRunning = false)
+    } else {
+        LiteSshGlobalBarState(
+            isRunning = true,
+            serverAlias = activeServerAlias ?: selectedServer?.displayName ?: "VPS",
+            presetName = activePresetName ?: selectedPreset.name,
+            currentStageLabel = liveProgress.currentStageLabel,
+            silentRunningBannerText = liveProgress.silentRunningBannerText,
+            isSilentLong = liveProgress.isSilentLong,
+            elapsedSeconds = (elapsedMillis / 1_000L).coerceAtLeast(0L),
+        )
+    }
+
+    /**
      * Completed runs currently included for 1-click NodeSeek export.
      */
     val exportableRuns: List<SshExecutionRecord>
@@ -166,7 +222,8 @@ data class LiteSshUiState(
             if (checked.isNotEmpty()) return checked
             val viewed = viewingRun?.takeIf { it.hasOutput }
             if (viewed != null) return listOf(viewed)
-            if (liveAnsiOutput.isNotBlank()) {
+            val liveText = resolvedLiveAnsiOutput
+            if (liveText.isNotBlank()) {
                 return listOf(
                     SshExecutionRecord(
                         id = "live_snapshot",
@@ -177,7 +234,7 @@ data class LiteSshUiState(
                         presetName = activePresetName ?: selectedPreset.name,
                         tabTitle = selectedPreset.tabTitle,
                         command = activeCommand.ifBlank { resolvedSelectedCommand },
-                        sanitizedAnsiOutput = liveAnsiOutput,
+                        sanitizedAnsiOutput = liveText,
                         exitCode = exitCode,
                         status = if (isRunning) SshRunStatus.RUNNING else SshRunStatus.SUCCEEDED,
                         startedAtEpochMillis = startedAtEpochMillis,
@@ -237,6 +294,12 @@ class LiteSshViewModel(
 
     val uiState: StateFlow<LiteSshUiState>
         get() = sessionManager.uiState
+
+    val consoleStreamState: StateFlow<SshConsoleStreamState>
+        get() = sessionManager.consoleStreamState
+
+    val consoleStreamHandle: SshConsoleStreamHandle
+        get() = sessionManager.consoleStreamHandle
 
     fun selectServer(serverId: String) = sessionManager.selectServer(serverId)
     fun openAddServerDialog() = sessionManager.openAddServerDialog()
@@ -318,7 +381,10 @@ class LiteSshViewModel(
             val vault = SshServerVault.getDefault(appContext)
             return factory(
                 vaultRepository = vault,
-                executor = LiteSshExecutor(transport = JSchSshTransport(vaultRepository = vault)),
+                executor = LiteSshExecutor(
+                    transport = JSchSshTransport(vaultRepository = vault),
+                    processingDispatcher = Dispatchers.Default,
+                ),
             )
         }
 
