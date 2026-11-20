@@ -290,6 +290,7 @@ fun NodePulseNavHost(
     var selectedTab by rememberSaveable { mutableStateOf(PulseNavTab.EXPLORE) }
     var fabExpanded by rememberSaveable { mutableStateOf(true) }
     var exploreScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var exploreRefreshOnScrollToTop by rememberSaveable { mutableStateOf(false) }
     var featureHubScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
     var pendingExploreCategorySlug by rememberSaveable { mutableStateOf<String?>(null) }
     var lastSelectedCategorySlug by rememberSaveable { mutableStateOf("") }
@@ -992,6 +993,7 @@ fun NodePulseNavHost(
                 val onTabReselected: (PulseNavTab) -> Unit = { reselectedTab ->
                     when (reselectedTab) {
                         PulseNavTab.EXPLORE -> {
+                            exploreRefreshOnScrollToTop = true
                             exploreScrollToTopTrigger += 1
                             fabExpanded = true
                         }
@@ -1097,7 +1099,11 @@ fun NodePulseNavHost(
                                                 },
                                                 externalCategorySlug = pendingExploreCategorySlug,
                                                 scrollToTopTrigger = exploreScrollToTopTrigger,
-                                                onScrollToTopConsumed = { exploreScrollToTopTrigger = 0 },
+                                                onScrollToTopConsumed = {
+                                                    exploreScrollToTopTrigger = 0
+                                                    exploreRefreshOnScrollToTop = false
+                                                },
+                                                refreshOnScrollToTop = exploreRefreshOnScrollToTop,
                                                 onScrollDirectionChanged = { isScrollingUp ->
                                                     fabExpanded = isScrollingUp
                                                 },

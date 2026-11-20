@@ -146,6 +146,7 @@ fun ExploreScreen(
     externalCategorySlug: String? = null,
     scrollToTopTrigger: Int = 0,
     onScrollToTopConsumed: () -> Unit = {},
+    refreshOnScrollToTop: Boolean = false,
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)? = null,
     bottomContentPadding: Dp = 88.dp,
     selectedTopicId: Long? = null,
@@ -444,6 +445,7 @@ fun ExploreScreen(
                 listState = pageListState,
                 scrollToTopTrigger = scrollToTopTrigger,
                 onScrollToTopConsumed = onScrollToTopConsumed,
+                refreshOnScrollToTop = refreshOnScrollToTop,
                 bottomContentPadding = bottomContentPadding,
                 selectedTopicId = selectedTopicId,
                 onScrollDirectionChanged = onScrollDirectionChanged,
@@ -665,6 +667,7 @@ private fun ExploreBoardFeedPage(
     listState: LazyListState,
     scrollToTopTrigger: Int,
     onScrollToTopConsumed: () -> Unit,
+    refreshOnScrollToTop: Boolean,
     bottomContentPadding: Dp,
     selectedTopicId: Long?,
     onScrollDirectionChanged: ((isScrollingUp: Boolean) -> Unit)?,
@@ -680,6 +683,9 @@ private fun ExploreBoardFeedPage(
     val pageScope = rememberCoroutineScope()
     var scrollToTopJob by remember { mutableStateOf<Job?>(null) }
     val latestOnScrollToTopConsumed by rememberUpdatedState(onScrollToTopConsumed)
+    val latestRefreshOnScrollToTop by rememberUpdatedState(refreshOnScrollToTop)
+    val latestOnRefresh by rememberUpdatedState(onRefresh)
+    val latestIsRefreshing by rememberUpdatedState(slice.isRefreshing || slice.isInitialLoading)
 
     LaunchedEffect(isActivePage) {
         if (!isActivePage) {
@@ -690,6 +696,8 @@ private fun ExploreBoardFeedPage(
 
     LaunchedEffect(scrollToTopTrigger, canConsumeScrollToTop) {
         if (scrollToTopTrigger > 0 && canConsumeScrollToTop) {
+            // Capture before consuming: the consumer resets the refresh flag together with the trigger.
+            val shouldRefresh = latestRefreshOnScrollToTop
             latestOnScrollToTopConsumed()
             scrollToTopJob?.cancel()
             scrollToTopJob = pageScope.launch {
@@ -699,6 +707,10 @@ private fun ExploreBoardFeedPage(
                 listState.animateScrollToItem(0)
                 if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) {
                     listState.scrollToItem(0)
+                }
+                // Re-tapping the home tab: back to top, then refresh (GitHub issue #1).
+                if (shouldRefresh && !latestIsRefreshing) {
+                    latestOnRefresh()
                 }
             }
         }
