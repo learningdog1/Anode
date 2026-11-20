@@ -31,6 +31,7 @@ data class SshLiveProgressStatus(
 object SshStageDetector {
     const val DEFAULT_SILENCE_THRESHOLD_MILLIS: Long = 8_000L
     internal const val TAIL_SCAN_CHARS: Int = 3_500
+    private const val RAW_TAIL_WINDOW_CHARS: Int = 24_576
 
     private data class StageRule(
         val keywords: List<String>,
@@ -71,7 +72,13 @@ object SshStageDetector {
             )
         }
 
-        val tail = stripCsiEscapesFast(sanitizedOutput.takeLast(TAIL_SCAN_CHARS))
+        val rawWindow = sanitizedOutput.takeLast(RAW_TAIL_WINDOW_CHARS)
+        val collapsedWindow = if (rawWindow.indexOf('\r') >= 0) {
+            collapseCarriageReturnsFast(rawWindow)
+        } else {
+            rawWindow
+        }
+        val tail = stripEscapesFast(collapsedWindow.takeLast(TAIL_SCAN_CHARS))
 
         val (stageLabel, detailHint) = inferStage(
             presetId = presetId.orEmpty(),
@@ -106,7 +113,7 @@ object SshStageDetector {
         val rawTail = if (!bufferSnapshot.isEmpty) {
             bufferSnapshot.tailText(TAIL_SCAN_CHARS)
         } else {
-            fallbackOutput.takeLast(TAIL_SCAN_CHARS)
+            fallbackOutput.takeLast(RAW_TAIL_WINDOW_CHARS)
         }
         return detect(
             presetId = presetId,
@@ -120,39 +127,80 @@ object SshStageDetector {
         )
     }
 
-    private fun stripCsiEscapesFast(text: String): String {
-        val firstEsc = text.indexOf("\u001B[")
+    private fun collapseCarriageReturnsFast(text: String): String {
+        val sb = StringBuilder(text.length.coerceAtMost(TAIL_SCAN_CHARS * 2))
+        var lineStartInSb = 0
+        var i = 0
+        val n = text.length
+        while (i < n) {
+            val ch = text[i]
+            if (ch == '\r') {
+                if (i + 1 < n && text[i + 1] == '\n') {
+                    sb.append('\n')
+                    lineStartInSb = sb.length
+                    i += 2
+                    continue
+                }
+                // Standalone \r overwrites current line unless at very end of buffer
+                if (i + 1 < n) {
+                    sb.setLength(lineStartInSb)
+                }
+            } else if (ch == '\n') {
+                sb.append('\n')
+                lineStartInSb = sb.length
+            } else {
+                sb.append(ch)
+            }
+            i++
+        }
+        return sb.toString()
+    }
+
+    private fun stripEscapesFast(text: String): String {
+        val firstEsc = text.indexOf('\u001B')
         if (firstEsc < 0) return text
         val sb = StringBuilder(text.length)
-        var cursor = 0
-        var searchFrom = firstEsc
-        while (searchFrom >= 0 && searchFrom < text.length) {
-            var i = searchFrom + 2
-            var csiEnd = -1
-            while (i < text.length) {
-                val ch = text[i]
-                if (ch in 'A'..'Z' || ch in 'a'..'z') {
-                    csiEnd = i
-                    break
-                }
-                if (ch !in '0'..'9' && ch != ';' && ch != ':' && ch != '?') {
-                    break
-                }
-                i++
-            }
-            if (csiEnd >= 0) {
-                if (searchFrom > cursor) {
-                    sb.append(text, cursor, searchFrom)
-                }
-                cursor = csiEnd + 1
-                searchFrom = text.indexOf("\u001B[", startIndex = cursor)
-            } else {
-                searchFrom = text.indexOf("\u001B[", startIndex = searchFrom + 2)
-            }
+        if (firstEsc > 0) {
+            sb.append(text, 0, firstEsc)
         }
-        if (cursor == 0) return text
-        if (cursor < text.length) {
-            sb.append(text, cursor, text.length)
+        var i = firstEsc
+        val n = text.length
+        while (i < n) {
+            val ch = text[i]
+            if (ch != '\u001B') {
+                sb.append(ch)
+                i++
+                continue
+            }
+            if (i + 1 >= n) break
+            when (text[i + 1]) {
+                '[' -> {
+                    var j = i + 2
+                    while (j < n && text[j].code in 0x20..0x3F) j++
+                    i = if (j < n && text[j].code in 0x40..0x7E) j + 1 else j
+                }
+                ']', 'P', 'X', '^', '_' -> {
+                    var j = i + 2
+                    while (j < n) {
+                        if (text[j] == '\u0007') {
+                            j++
+                            break
+                        }
+                        if (text[j] == '\u001B' && j + 1 < n && text[j + 1] == '\\') {
+                            j += 2
+                            break
+                        }
+                        j++
+                    }
+                    i = j
+                }
+                '(', ')', '*', '+', '#', ' ', '%' -> {
+                    i = (i + 3).coerceAtMost(n)
+                }
+                else -> {
+                    i += 2
+                }
+            }
         }
         return sb.toString()
     }
@@ -241,7 +289,7 @@ object SshStageDetector {
         }
         val rules = listOf(
             StageRule(
-                keywords = listOf("安装后清理", "Clean Up after", "清理中"),
+                keywords = listOf("安装后清理", "Clean Up after", "清理中", "nodequality.com/r/"),
                 stageLabel = "报告上传与沙箱清理阶段",
                 detailHint = "正在汇总测评结果并卸载临时无痕环境",
             ),
@@ -251,17 +299,24 @@ object SshStageDetector {
                 detailHint = "正在探测电信 / 联通 / 移动回程跳点与线路类型",
             ),
             StageRule(
-                keywords = listOf("正在运行网络质量", "Running Network Quality", "BGP", "三网"),
+                keywords = listOf("正在运行网络质量", "Running Network Quality", "网络质量体检报告", "NET QUALITY CHECK"),
                 stageLabel = "网络质量与三网测速阶段",
                 detailHint = "正在测试海内外节点连接速率与延迟，可能持续 1~3 分钟",
             ),
             StageRule(
-                keywords = listOf("正在运行 IP 质量", "Running IP Quality", "欺诈", "原生"),
+                keywords = listOf("正在运行 IP 质量", "Running IP Quality", "IP质量体检报告", "IP QUALITY CHECK"),
                 stageLabel = "IP 质量与流媒体解锁阶段",
                 detailHint = "正在并发查询多库欺诈评分、原生属性及流媒体/AI 解锁状态",
             ),
             StageRule(
-                keywords = listOf("正在运行硬件质量", "Running Hardware Quality", "硬件信息", "Hardware Info"),
+                keywords = listOf(
+                    "正在运行硬件质量",
+                    "Running Hardware Quality",
+                    "硬件质量体检报告",
+                    "HARDWARE QUALITY CHECK",
+                    "硬件信息",
+                    "Hardware Info",
+                ),
                 stageLabel = "硬件性能基准测试阶段",
                 detailHint = "正在沙箱中测试 CPU 算力、内存带宽与磁盘 IOPS",
             ),

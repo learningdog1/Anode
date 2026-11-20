@@ -254,7 +254,7 @@ object AnsiAndCodeFormatter {
                     var p = paramsStart
                     while (p < sgrEnd) {
                         val ch = rawText[p]
-                        if (ch == ';') {
+                        if (ch == ';' || ch == ':') {
                             if (codeCount >= codesBuf.size) {
                                 codesBuf = codesBuf.copyOf(codesBuf.size * 2)
                             }
@@ -356,19 +356,153 @@ object AnsiAndCodeFormatter {
 
     private fun findSgrEndIndex(text: String, escBracketIndex: Int): Int {
         var i = escBracketIndex + 2
-        while (i < text.length) {
+        val limit = (escBracketIndex + 66).coerceAtMost(text.length)
+        while (i < limit) {
             val ch = text[i]
             if (ch == 'm') return i
-            if (ch !in '0'..'9' && ch != ';') return -1
+            if (ch !in '0'..'9' && ch != ';' && ch != ':') return -1
             i++
         }
         return -1
     }
 
-    private val CODE_TOKEN_REGEX = Regex(
-        pattern = """(//[^\n]*|#[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(fun|val|var|class|object|interface|if|else|when|for|while|return|import|package|suspend|async|await|def|from|const|let|function|export|default|public|private|struct|enum|impl|fn|sudo|curl|wget|docker|apt|yum|systemctl|bash|sh|echo|grep|awk|sed|true|false|null|None)\b|(--?[a-zA-Z0-9_-]+)|\b(\d+(?:\.\d+)?(?:GiB|MiB|KiB|GB|MB|KB|Gbps|Mbps|ms|%)?)\b""",
+    private const val MAX_HIGHLIGHT_CHARS: Int = 32_768
+    const val DEFAULT_CODE_CHUNK_LINES: Int = 80
+    const val DEFAULT_INITIAL_MAX_CODE_LINES: Int = 320
+    const val HARD_MAX_RENDERED_CODE_LINES: Int = 1_600
+
+    @Immutable
+    data class ChunkedStyledCode(
+        val chunks: List<AnnotatedString>,
+        val totalLineCount: Int,
+        val renderedLineCount: Int,
+        val plainSampleForMeasure: String,
+    ) {
+        val hiddenLineCount: Int
+            get() = (totalLineCount - renderedLineCount).coerceAtLeast(0)
+    }
+
+    /**
+     * Splits [code] into bounded [AnnotatedString] chunks of [linesPerChunk] lines (up to [maxLines]),
+     * preserving [AnsiSgrState] across chunk boundaries so Compose never hands a single monolithic
+     * 100,000-span `AnnotatedString` to Android `StaticLayout`.
+     */
+    fun buildStyledCodeChunks(
+        code: String,
+        hasAnsi: Boolean,
+        isTerminalReport: Boolean,
+        defaultForeground: Color = Color(0xFFE6EDF3),
+        linesPerChunk: Int = DEFAULT_CODE_CHUNK_LINES,
+        maxLines: Int = DEFAULT_INITIAL_MAX_CODE_LINES,
+    ): ChunkedStyledCode {
+        if (code.isEmpty()) {
+            return ChunkedStyledCode(
+                chunks = listOf(AnnotatedString("")),
+                totalLineCount = 0,
+                renderedLineCount = 0,
+                plainSampleForMeasure = "",
+            )
+        }
+
+        val safeLinesPerChunk = linesPerChunk.coerceAtLeast(16)
+        val safeMaxLines = maxLines.coerceIn(safeLinesPerChunk, HARD_MAX_RENDERED_CODE_LINES)
+
+        // Count lines and slice into chunks in a single pass without allocating a List of all lines
+        val chunks = ArrayList<AnnotatedString>()
+        val measureSampleBuilder = StringBuilder()
+        var sampledLines = 0
+        var totalLines = 0
+        var renderedLines = 0
+        var carryState = AnsiSgrState.Default
+
+        var chunkStartOffset = 0
+        var linesInCurrentChunk = 0
+        var cursor = 0
+        val n = code.length
+
+        fun commitChunkSlice(startOffset: Int, endOffset: Int, lineCountInSlice: Int) {
+            val slice = code.substring(startOffset, endOffset)
+            if (sampledLines < 48) {
+                val plainSlice = if (hasAnsi) stripAnsiEscapes(slice) else slice
+                if (measureSampleBuilder.isNotEmpty()) measureSampleBuilder.append('\n')
+                measureSampleBuilder.append(
+                    if (plainSlice.length > 6_000) plainSlice.substring(0, 6_000) else plainSlice,
+                )
+                sampledLines += lineCountInSlice
+            }
+            val styled = when {
+                hasAnsi -> {
+                    val (annotated, nextState) = parseAnsiLine(
+                        rawText = slice,
+                        initialState = carryState,
+                        defaultForeground = defaultForeground,
+                    )
+                    carryState = nextState
+                    annotated
+                }
+                isTerminalReport -> buildAnnotatedString {
+                    append(slice)
+                    addStyle(SpanStyle(color = defaultForeground), 0, slice.length)
+                }
+                else -> highlightSourceCode(slice, defaultForeground = defaultForeground)
+            }
+            chunks.add(styled)
+        }
+
+        while (cursor <= n) {
+            val nlIdx = if (cursor < n) code.indexOf('\n', startIndex = cursor) else -1
+            val lineEnd = if (nlIdx >= 0) nlIdx else n
+            totalLines++
+
+            if (renderedLines < safeMaxLines) {
+                renderedLines++
+                linesInCurrentChunk++
+                if (linesInCurrentChunk >= safeLinesPerChunk || nlIdx < 0) {
+                    commitChunkSlice(chunkStartOffset, lineEnd, linesInCurrentChunk)
+                    chunkStartOffset = if (nlIdx >= 0) nlIdx + 1 else n
+                    linesInCurrentChunk = 0
+                }
+            }
+
+            if (nlIdx < 0) break
+            cursor = nlIdx + 1
+        }
+
+        if (chunks.isEmpty()) {
+            chunks.add(AnnotatedString(""))
+        }
+
+        return ChunkedStyledCode(
+            chunks = chunks,
+            totalLineCount = totalLines,
+            renderedLineCount = renderedLines,
+            plainSampleForMeasure = measureSampleBuilder.toString(),
+        )
+    }
+
+    private val CODE_KEYWORDS: Set<String> = setOf(
+        "fun", "val", "var", "class", "object", "interface", "if", "else", "when", "for", "while",
+        "return", "import", "package", "suspend", "async", "await", "def", "from", "const", "let",
+        "function", "export", "default", "public", "private", "struct", "enum", "impl", "fn",
+        "sudo", "curl", "wget", "docker", "apt", "yum", "systemctl", "bash", "sh", "echo",
+        "grep", "awk", "sed", "true", "false", "null", "None",
     )
 
+    private val CODE_NUMBER_UNITS: Array<String> = arrayOf(
+        "Gbps", "Mbps", "GiB", "MiB", "KiB", "GB", "MB", "KB", "ms", "%",
+    )
+
+    private val STYLE_COMMENT = SpanStyle(color = Color(0xFF7D8590), fontStyle = FontStyle.Italic)
+    private val STYLE_STRING = SpanStyle(color = Color(0xFFA5D6FF))
+    private val STYLE_KEYWORD = SpanStyle(color = Color(0xFFFF7B72), fontWeight = FontWeight.SemiBold)
+    private val STYLE_FLAG = SpanStyle(color = Color(0xFF79C0FF))
+    private val STYLE_NUMBER = SpanStyle(color = Color(0xFFD2A8FF))
+
+    /**
+     * Zero-regex iterative O(N) syntax highlighter. Eliminates `java.util.regex.Pattern$Loop`
+     * recursive NFA `StackOverflowError` on long escaped string literals and prevents unclosed
+     * quotes from scanning multi-MB terminal transcripts.
+     */
     fun highlightSourceCode(
         code: String,
         defaultForeground: Color = Color(0xFFE6EDF3),
@@ -376,27 +510,121 @@ object AnsiAndCodeFormatter {
         append(code)
         addStyle(SpanStyle(color = defaultForeground), 0, code.length)
 
-        for (match in CODE_TOKEN_REGEX.findAll(code)) {
-            val range = match.range
-            val style = when {
-                match.groups[1] != null -> SpanStyle(
-                    color = Color(0xFF7D8590),
-                    fontStyle = FontStyle.Italic,
-                )
-                match.groups[2] != null -> SpanStyle(color = Color(0xFFA5D6FF))
-                match.groups[3] != null -> SpanStyle(
-                    color = Color(0xFFFF7B72),
-                    fontWeight = FontWeight.SemiBold,
-                )
-                match.groups[4] != null -> SpanStyle(color = Color(0xFF79C0FF))
-                match.groups[5] != null -> SpanStyle(color = Color(0xFFD2A8FF))
-                else -> null
-            }
-            if (style != null) {
-                addStyle(style, range.first, range.last + 1)
+        val limit = code.length.coerceAtMost(MAX_HIGHLIGHT_CHARS)
+        var noCloseDoubleQuoteBefore = -1
+        var noCloseSingleQuoteBefore = -1
+        var i = 0
+
+        while (i < limit) {
+            val ch = code[i]
+            when {
+                // 1. Single-line comments (`#...` or `//...`)
+                ch == '#' || (ch == '/' && i + 1 < limit && code[i + 1] == '/') -> {
+                    val nl = code.indexOf('\n', startIndex = i)
+                    val end = if (nl < 0 || nl > limit) limit else nl
+                    addStyle(STYLE_COMMENT, i, end)
+                    i = end
+                }
+
+                // 2. Single-line quoted literals (`"..."` or `'...'`) with backslash escapes
+                ch == '"' || ch == '\'' -> {
+                    val deadUntil = if (ch == '"') noCloseDoubleQuoteBefore else noCloseSingleQuoteBefore
+                    if (i < deadUntil) {
+                        i++
+                    } else {
+                        var j = i + 1
+                        var closedAt = -1
+                        while (j < limit) {
+                            val c = code[j]
+                            if (c == '\n') break
+                            if (c == '\\') {
+                                if (j + 1 < limit && code[j + 1] != '\n') {
+                                    j += 2
+                                    continue
+                                } else {
+                                    j++
+                                    break
+                                }
+                            }
+                            if (c == ch) {
+                                closedAt = j + 1
+                                break
+                            }
+                            j++
+                        }
+                        if (closedAt > i) {
+                            addStyle(STYLE_STRING, i, closedAt)
+                            i = closedAt
+                        } else {
+                            if (ch == '"') noCloseDoubleQuoteBefore = j else noCloseSingleQuoteBefore = j
+                            i++
+                        }
+                    }
+                }
+
+                // 3. CLI flags (`-f`, `--flag-name`)
+                ch == '-' && (i == 0 || !isCodeWordChar(code[i - 1])) -> {
+                    var j = i + 1
+                    if (j < limit && code[j] == '-') j++
+                    val bodyStart = j
+                    while (j < limit && (isCodeWordChar(code[j]) || code[j] == '-')) {
+                        j++
+                    }
+                    if (j > bodyStart) {
+                        addStyle(STYLE_FLAG, i, j)
+                        i = j
+                    } else {
+                        i++
+                    }
+                }
+
+                // 4. Numbers with optional decimal & benchmark unit (`1024MiB`, `985.4Mbps`, `32.1ms`, `99%`)
+                ch in '0'..'9' && (i == 0 || !isCodeWordChar(code[i - 1])) -> {
+                    var j = i + 1
+                    while (j < limit && code[j] in '0'..'9') j++
+                    if (j + 1 < limit && code[j] == '.' && code[j + 1] in '0'..'9') {
+                        j += 2
+                        while (j < limit && code[j] in '0'..'9') j++
+                    }
+                    for (unit in CODE_NUMBER_UNITS) {
+                        if (j + unit.length <= limit && code.regionMatches(j, unit, 0, unit.length)) {
+                            val afterUnit = j + unit.length
+                            if (unit == "%" || afterUnit >= limit || !isCodeWordChar(code[afterUnit])) {
+                                j = afterUnit
+                                break
+                            }
+                        }
+                    }
+                    if (j >= limit || code[j - 1] == '%' || !isCodeWordChar(code[j])) {
+                        addStyle(STYLE_NUMBER, i, j)
+                        i = j
+                    } else {
+                        while (j < limit && isCodeWordChar(code[j])) j++
+                        i = j
+                    }
+                }
+
+                // 5. Identifiers & language/shell keywords
+                isCodeIdentStart(ch) -> {
+                    var j = i + 1
+                    while (j < limit && isCodeWordChar(code[j])) j++
+                    val wordLen = j - i
+                    if (wordLen in 2..9 && code.substring(i, j) in CODE_KEYWORDS) {
+                        addStyle(STYLE_KEYWORD, i, j)
+                    }
+                    i = j
+                }
+
+                else -> i++
             }
         }
     }
+
+    private fun isCodeIdentStart(ch: Char): Boolean =
+        ch in 'a'..'z' || ch in 'A'..'Z' || ch == '_'
+
+    private fun isCodeWordChar(ch: Char): Boolean =
+        ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '_'
 
     private fun ansi16Color(index: Int, bright: Boolean): Color = when (index) {
         0 -> if (bright) Color(0xFF6E7681) else Color(0xFF484F58)

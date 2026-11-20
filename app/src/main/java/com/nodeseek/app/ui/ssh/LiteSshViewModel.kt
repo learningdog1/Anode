@@ -13,6 +13,8 @@ import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.Iperf3MissingProbeResult
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
+import com.nodeseek.app.domain.ssh.NodeQualityReportFormatter
+import com.nodeseek.app.domain.ssh.SshMergeLayout
 import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
@@ -116,6 +118,7 @@ data class LiteSshUiState(
     val showCustomPresetEditor: Boolean = false,
     val editingCustomPreset: CustomSshPreset? = null,
     val showExportPreviewSheet: Boolean = false,
+    val mergeLayout: SshMergeLayout = SshMergeLayout.TABS,
     val showHistorySheet: Boolean = false,
     val statusMessage: String? = null,
     val showIperf3ServerDialog: Boolean = false,
@@ -184,22 +187,69 @@ data class LiteSshUiState(
      */
     fun computeExportSummaryMeta(): SshExportSummaryMeta? {
         var checkedCount = 0
+        var singleCheckedIsNq = false
         for (run in sessionRuns) {
             if (run.id in selectedRunIdsForExport && run.hasOutput) {
                 checkedCount++
+                if (checkedCount == 1) {
+                    singleCheckedIsNq = run.presetId == SshPresetCatalog.PRESET_NODE_QUALITY ||
+                        run.command.contains("nodequality", ignoreCase = true)
+                }
             }
         }
         if (checkedCount > 0) {
-            return SshExportSummaryMeta(runCount = checkedCount, usesTabsLayout = checkedCount >= 2)
+            val usesTabs = if (checkedCount >= 2) {
+                mergeLayout == SshMergeLayout.TABS
+            } else {
+                singleCheckedIsNq
+            }
+            return SshExportSummaryMeta(runCount = checkedCount, usesTabsLayout = usesTabs)
         }
-        if (viewingRun?.hasOutput == true) {
-            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = false)
+        val viewed = viewingRun
+        if (viewed?.hasOutput == true) {
+            val isNq = viewed.presetId == SshPresetCatalog.PRESET_NODE_QUALITY ||
+                viewed.command.contains("nodequality", ignoreCase = true)
+            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = isNq)
         }
         if (hasLiveOutput) {
-            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = false)
+            val isNq = (activePresetId ?: selectedPreset.id) == SshPresetCatalog.PRESET_NODE_QUALITY ||
+                activeCommand.contains("nodequality", ignoreCase = true)
+            return SshExportSummaryMeta(runCount = 1, usesTabsLayout = isNq)
         }
         return null
     }
+
+    /**
+     * All candidate runs available for multi-run merging in the Preview & Publish sheet
+     * (`sessionRuns` first, followed by same-server and recent persisted runs with output).
+     */
+    val mergeCandidateRuns: List<SshExecutionRecord>
+        get() {
+            val seenIds = HashSet<String>(sessionRuns.size + recentRuns.size)
+            val result = ArrayList<SshExecutionRecord>(sessionRuns.size + recentRuns.size)
+            for (run in sessionRuns) {
+                if (run.hasOutput && seenIds.add(run.id)) {
+                    result.add(run)
+                }
+            }
+            val preferredServerId = viewingRun?.serverId ?: selectedServer?.id
+            val preferredHost = viewingRun?.serverHost ?: activeServerHost ?: selectedServer?.host
+            for (run in recentRuns) {
+                if (run.hasOutput &&
+                    ((!preferredServerId.isNullOrBlank() && run.serverId == preferredServerId) ||
+                        (!preferredHost.isNullOrBlank() && run.serverHost.equals(preferredHost, ignoreCase = true))) &&
+                    seenIds.add(run.id)
+                ) {
+                    result.add(run)
+                }
+            }
+            for (run in recentRuns) {
+                if (run.hasOutput && seenIds.add(run.id)) {
+                    result.add(run)
+                }
+            }
+            return result
+        }
 
     fun toGlobalBarState(): LiteSshGlobalBarState = if (!isRunning) {
         LiteSshGlobalBarState(isRunning = false)
@@ -254,6 +304,7 @@ data class LiteSshUiState(
                 SshBenchmarkPostFormatter.format(
                     runs = runs,
                     maskIp = maskServerIp,
+                    mergeLayout = mergeLayout,
                 )
             }
 
@@ -343,6 +394,8 @@ class LiteSshViewModel(
 
     fun viewRun(runId: String?) = sessionManager.viewRun(runId)
     fun toggleRunForExport(runId: String) = sessionManager.toggleRunForExport(runId)
+    fun toggleCandidateRunForExport(record: SshExecutionRecord) = sessionManager.toggleCandidateRunForExport(record)
+    fun setSelectedRunsForExport(records: List<SshExecutionRecord>) = sessionManager.setSelectedRunsForExport(records)
     fun removeSessionRun(runId: String) = sessionManager.removeSessionRun(runId)
     fun clearSessionRuns() = sessionManager.clearSessionRuns()
 
@@ -353,9 +406,11 @@ class LiteSshViewModel(
 
     fun openExportPreviewSheet() = sessionManager.openExportPreviewSheet()
     fun dismissExportPreviewSheet() = sessionManager.dismissExportPreviewSheet()
+    fun setMergeLayout(layout: SshMergeLayout) = sessionManager.setMergeLayout(layout)
     fun openHistorySheet() = sessionManager.openHistorySheet()
     fun dismissHistorySheet() = sessionManager.dismissHistorySheet()
     fun buildExportPayload(): SshFormattedPost? = sessionManager.buildExportPayload()
+    suspend fun buildExportPayloadAsync(): SshFormattedPost? = sessionManager.buildExportPayloadAsync()
     fun consumeStatusMessage() = sessionManager.consumeStatusMessage()
 
     fun openIperf3ServerDialog(preferredHost: String? = null, preferredPort: Int? = null) =
