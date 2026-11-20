@@ -32,7 +32,6 @@ import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,7 +66,8 @@ import com.nodeseek.app.ui.theme.pulseCard
 
 /**
  * Bottom sheet allowing users to configure Tier 1 custom OpenAI-compatible or DeepLX endpoints,
- * Tier 2 zero-config Google GTX, or Tier 3 offline VPS glossary translation + display preferences.
+ * Tier 2 zero-config Google GTX, or Tier 3 offline VPS glossary translation + display preferences
+ * for English titles in the overseas promotion feed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,8 +79,7 @@ fun OverseasTranslatorSettingsSheet(
     onDismiss: () -> Unit,
     onTestConnection: (OverseasTranslationConfig) -> Unit,
     onClearCache: () -> Unit,
-    onSave: (OverseasTranslationConfig, Boolean) -> Unit,
-    showTranslateDetailButton: Boolean = true,
+    onSave: (OverseasTranslationConfig) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val ext = NodePulseThemeTokens.extendedColors
@@ -137,12 +136,12 @@ fun OverseasTranslatorSettingsSheet(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "详情翻译引擎配置",
+                        text = "列表翻译引擎配置",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "用于促销详情通知翻译，支持 Google GTX 与自定义 OpenAI / DeepLX",
+                        text = "仅用于海外情报列表的英文条目翻译与术语润色，中文条目自动跳过",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -153,7 +152,7 @@ fun OverseasTranslatorSettingsSheet(
 
             // Display Mode selector
             Text(
-                text = "展示语言模式",
+                text = "列表标题语言模式",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -163,6 +162,11 @@ fun OverseasTranslatorSettingsSheet(
             ) {
                 OverseasDisplayMode.entries.forEach { mode ->
                     val selected = displayMode == mode
+                    val modeLabel = when (mode) {
+                        OverseasDisplayMode.ORIGINAL -> "标题原文"
+                        OverseasDisplayMode.CHINESE -> "中文译文"
+                        OverseasDisplayMode.BILINGUAL -> "双语对照"
+                    }
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -181,7 +185,7 @@ fun OverseasTranslatorSettingsSheet(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = mode.label,
+                            text = modeLabel,
                             style = MaterialTheme.typography.labelMedium.copy(
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                             ),
@@ -330,12 +334,12 @@ fun OverseasTranslatorSettingsSheet(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "打开详情时自动附带译文",
+                        text = "加载列表时自动翻译英文标题",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "内容按哈希持久化缓存，已翻译过的详情不会重复消耗额度",
+                        text = "结果按内容哈希本地持久化缓存，不会重复消耗额度",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -411,44 +415,16 @@ fun OverseasTranslatorSettingsSheet(
                 }
             }
 
-            // Save actions
-            if (showTranslateDetailButton) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    FilledTonalButton(
-                        onClick = {
-                            onSave(draftConfig, false)
-                            onDismiss()
-                        },
-                        modifier = Modifier.weight(1f),
-                        shape = CircleShape,
-                    ) {
-                        Text("保存配置")
-                    }
-                    Button(
-                        onClick = {
-                            onSave(draftConfig, true)
-                            onDismiss()
-                        },
-                        modifier = Modifier.weight(1.25f),
-                        shape = CircleShape,
-                    ) {
-                        Text("保存并翻译详情")
-                    }
-                }
-            } else {
-                Button(
-                    onClick = {
-                        onSave(draftConfig, false)
-                        onDismiss()
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = CircleShape,
-                ) {
-                    Text("保存配置")
-                }
+            // Save action
+            Button(
+                onClick = {
+                    onSave(draftConfig)
+                    onDismiss()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = CircleShape,
+            ) {
+                Text("保存配置")
             }
         }
     }
