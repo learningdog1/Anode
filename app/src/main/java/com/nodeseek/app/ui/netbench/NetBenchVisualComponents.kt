@@ -45,6 +45,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
@@ -1118,6 +1119,7 @@ internal fun NetBenchIperf3Card(
     uploadProgress: Iperf3Progress?,
     iperfPort: Int,
     compact: Boolean = false,
+    onOpenIperf3ServerSetup: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     if (downloadProgress == null && uploadProgress == null) return
@@ -1160,6 +1162,33 @@ internal fun NetBenchIperf3Card(
                     progress = progress,
                     modifier = Modifier.fillMaxWidth(),
                     gaugeSize = if (compact) 114.dp else 136.dp,
+                )
+            }
+        }
+
+        if (onOpenIperf3ServerSetup != null && items.any { it.stage == Iperf3Stage.FAILED }) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PulseArchitecturalShapes.SmallChip)
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f))
+                    .pulseBouncyClickable(onClick = onOpenIperf3ServerSetup)
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Terminal,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "一键开启 VPS 的 iperf3 服务端 (端口 $iperfPort)",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             }
         }
@@ -1466,8 +1495,10 @@ internal fun NetBenchMarkdownReportCard(
     markdown: String,
     selectedStyle: NetBenchMarkdownStyle,
     maskTargetIp: Boolean,
+    includeClientNetwork: Boolean = true,
     onSelectStyle: (NetBenchMarkdownStyle) -> Unit,
     onToggleMaskTargetIp: (Boolean) -> Unit,
+    onToggleIncludeClientNetwork: (Boolean) -> Unit = {},
     onCopyMarkdown: () -> Unit,
     onInsertMarkdown: ((String) -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
@@ -1511,20 +1542,63 @@ internal fun NetBenchMarkdownReportCard(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(PulseArchitecturalShapes.MediumBadge)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text(
-                text = "隐藏目标 IP 末段（保护小鸡 IP）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Switch(
-                checked = maskTargetIp,
-                onCheckedChange = onToggleMaskTargetIp,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "隐藏目标 IP/端口",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "自动打码目标小鸡 IP 末段并隐藏测速端口",
+                        style = NodePulseThemeTokens.extraTypography.microLabel,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = maskTargetIp,
+                    onCheckedChange = onToggleMaskTargetIp,
+                )
+            }
+
+            PulseGradientDivider()
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "包含本机网络环境",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "显示本机运营商与协议栈（始终隐藏本机 IP）",
+                        style = NodePulseThemeTokens.extraTypography.microLabel,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = includeClientNetwork,
+                    onCheckedChange = onToggleIncludeClientNetwork,
+                )
+            }
         }
 
         if (showRawSource) {

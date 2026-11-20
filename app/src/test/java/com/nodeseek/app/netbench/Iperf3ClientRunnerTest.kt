@@ -397,6 +397,29 @@ class Iperf3ClientRunnerTest {
         assertEquals(Iperf3Stage.FAILED, refusedLast.stage)
         assertEquals(Iperf3ErrorKind.CONNECTION_REFUSED, refusedLast.errorKind)
         assertTrue(refusedLast.errorMessage!!.contains("iperf3 -s"))
+
+        // Non-iperf3 service (e.g. OpenSSH banner) on wrong port fails immediately with clear diagnostic
+        val sshBannerServer = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
+        val sshThread = thread(isDaemon = true) {
+            try {
+                sshBannerServer.soTimeout = 4_000
+                val socket = sshBannerServer.accept()
+                socket.getOutputStream().write("SSH-2.0-OpenSSH_9.6\r\n".toByteArray(StandardCharsets.US_ASCII))
+                socket.getOutputStream().flush()
+                Thread.sleep(100)
+                socket.close()
+            } finally {
+                runCatching { sshBannerServer.close() }
+            }
+        }
+        val nonIperfEmissions = runner.run(
+            Iperf3Config(target = "127.0.0.1", port = sshBannerServer.localPort, durationSec = 1),
+        ).toList()
+        sshThread.join(2_000)
+        val nonIperfLast = nonIperfEmissions.last()
+        assertEquals(Iperf3Stage.FAILED, nonIperfLast.stage)
+        assertEquals(Iperf3ErrorKind.PROTOCOL_ERROR, nonIperfLast.errorKind)
+        assertTrue(nonIperfLast.errorMessage!!.contains("非 iperf3 协议响应"))
     }
 
     @Test

@@ -168,15 +168,34 @@ class NetBenchOrchestrationTest {
             val finalState = controller.uiState.value
             assertEquals(NetBenchPhase.COMPLETED, finalState.activePhase)
             assertFalse(finalState.isRunning)
+            assertTrue("maskTargetIpInReport must default to true", finalState.maskTargetIpInReport)
+            assertTrue("includeClientNetworkInReport must default to true", finalState.includeClientNetworkInReport)
             assertEquals(4, finalState.tcpPingProgress?.summary?.received)
             assertEquals(IpOriginType.NATIVE, finalState.ipIntelligence?.originType)
             assertTrue(finalState.generatedMarkdown.contains("中国电信"))
             assertTrue(finalState.generatedMarkdown.contains("原生 IP"))
             assertFalse(finalState.generatedMarkdown.contains("114.240.99.77"))
+            assertTrue("Target IP last octet should be masked by default", finalState.generatedMarkdown.contains("127.0.0.*"))
+
+            // Toggle includeClientNetwork off -> removes carrier info from markdown immediately
+            controller.toggleIncludeClientNetwork(false)
+            assertFalse(controller.uiState.value.generatedMarkdown.contains("中国电信"))
+            controller.toggleIncludeClientNetwork(true)
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("中国电信"))
+
+            // Enabling iperf3 triggers server preparation prompt
+            assertFalse(controller.uiState.value.showIperf3ServerPrompt)
+            controller.toggleIperf3(true)
+            assertTrue(controller.uiState.value.enableIperf3)
+            assertTrue(controller.uiState.value.showIperf3ServerPrompt)
+            controller.dismissIperf3ServerPrompt()
+            assertFalse(controller.uiState.value.showIperf3ServerPrompt)
+            assertTrue(controller.uiState.value.enableIperf3)
 
             // Switch style to FULL_TABLE and verify live regeneration
             controller.selectMarkdownStyle(NetBenchMarkdownStyle.FULL_TABLE)
-            assertTrue(controller.uiState.value.generatedMarkdown.contains("| 测试项目 | 实测结果 | 备注 |"))
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("测试项目"))
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("实测结果"))
             assertFalse(controller.uiState.value.generatedMarkdown.contains("114.240.99.77"))
 
             // History should be persisted

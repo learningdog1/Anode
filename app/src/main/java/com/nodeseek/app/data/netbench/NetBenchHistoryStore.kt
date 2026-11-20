@@ -2,6 +2,7 @@ package com.nodeseek.app.data.netbench
 
 import android.content.Context
 import com.nodeseek.app.domain.netbench.NetBenchHistoryEntry
+import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,14 +17,25 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Persisted NodeSeek Markdown export/share toggles for Mobile Network Tester.
+ */
+@Serializable
+data class NetBenchReportPreferences(
+    val maskTargetIp: Boolean = true,
+    val includeClientNetwork: Boolean = true,
+    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+)
+
 @Serializable
 private data class NetBenchHistoryPayload(
-    val version: Int = 1,
+    val version: Int = 2,
     val entries: List<NetBenchHistoryEntry> = emptyList(),
+    val preferences: NetBenchReportPreferences = NetBenchReportPreferences(),
 )
 
 /**
- * Self-contained recent target history store backed by `filesDir/netbench_history.json`.
+ * Self-contained recent target history and report-preference store backed by `filesDir/netbench_history.json`.
  */
 class NetBenchHistoryStore(
     private val historyFile: File,
@@ -37,14 +49,19 @@ class NetBenchHistoryStore(
     }
 
     private val mutex = Mutex()
-    private val _entries = MutableStateFlow<List<NetBenchHistoryEntry>>(readFromDiskSafely())
+    private val initialPayload = readPayloadFromDiskSafely()
+    private val _entries = MutableStateFlow<List<NetBenchHistoryEntry>>(initialPayload.entries)
     val entries: StateFlow<List<NetBenchHistoryEntry>> = _entries.asStateFlow()
+
+    private val _preferences = MutableStateFlow<NetBenchReportPreferences>(initialPayload.preferences)
+    val preferences: StateFlow<NetBenchReportPreferences> = _preferences.asStateFlow()
 
     suspend fun reload(): List<NetBenchHistoryEntry> = withContext(ioDispatcher) {
         mutex.withLock {
-            val loaded = readFromDiskSafely()
-            _entries.value = loaded
-            loaded
+            val loaded = readPayloadFromDiskSafely()
+            _entries.value = loaded.entries
+            _preferences.value = loaded.preferences
+            loaded.entries
         }
     }
 
@@ -65,7 +82,7 @@ class NetBenchHistoryStore(
                 .sortedByDescending { it.testedAtEpochMillis }
                 .take(maxEntries.coerceAtLeast(1))
             _entries.value = updated
-            writeToDiskSafely(updated)
+            writeToDiskSafely(entries = updated, preferences = _preferences.value)
             updated
         }
     }
@@ -76,7 +93,7 @@ class NetBenchHistoryStore(
                 it.host.equals(host.trim(), ignoreCase = true) && it.port == port
             }
             _entries.value = updated
-            writeToDiskSafely(updated)
+            writeToDiskSafely(entries = updated, preferences = _preferences.value)
             updated
         }
     }
@@ -84,32 +101,48 @@ class NetBenchHistoryStore(
     suspend fun clear(): Unit = withContext(ioDispatcher) {
         mutex.withLock {
             _entries.value = emptyList()
-            runCatching {
-                if (historyFile.exists()) {
-                    historyFile.delete()
-                }
-            }
+            writeToDiskSafely(entries = emptyList(), preferences = _preferences.value)
         }
     }
 
-    private fun readFromDiskSafely(): List<NetBenchHistoryEntry> {
-        if (!historyFile.isFile) return emptyList()
+    suspend fun updatePreferences(
+        transform: (NetBenchReportPreferences) -> NetBenchReportPreferences,
+    ): NetBenchReportPreferences = withContext(ioDispatcher) {
+        mutex.withLock {
+            val next = transform(_preferences.value)
+            _preferences.value = next
+            writeToDiskSafely(entries = _entries.value, preferences = next)
+            next
+        }
+    }
+
+    private fun readPayloadFromDiskSafely(): NetBenchHistoryPayload {
+        if (!historyFile.isFile) return NetBenchHistoryPayload()
         return runCatching {
             val raw = historyFile.readText(Charsets.UTF_8)
-            if (raw.isBlank()) return emptyList()
+            if (raw.isBlank()) return NetBenchHistoryPayload()
             val payload = json.decodeFromString<NetBenchHistoryPayload>(raw)
-            payload.entries
+            val cleanEntries = payload.entries
                 .filter { it.host.isNotBlank() }
                 .sortedByDescending { it.testedAtEpochMillis }
                 .take(maxEntries.coerceAtLeast(1))
-        }.getOrDefault(emptyList())
+            payload.copy(entries = cleanEntries)
+        }.getOrDefault(NetBenchHistoryPayload())
     }
 
-    private fun writeToDiskSafely(list: List<NetBenchHistoryEntry>) {
+    private fun writeToDiskSafely(
+        entries: List<NetBenchHistoryEntry>,
+        preferences: NetBenchReportPreferences,
+    ) {
         runCatching {
             historyFile.parentFile?.mkdirs()
             val tempFile = File(historyFile.parentFile, "${historyFile.name}.tmp")
-            val serialized = json.encodeToString(NetBenchHistoryPayload(entries = list))
+            val serialized = json.encodeToString(
+                NetBenchHistoryPayload(
+                    entries = entries,
+                    preferences = preferences,
+                ),
+            )
             tempFile.writeText(serialized, Charsets.UTF_8)
             if (!tempFile.renameTo(historyFile)) {
                 historyFile.writeText(serialized, Charsets.UTF_8)

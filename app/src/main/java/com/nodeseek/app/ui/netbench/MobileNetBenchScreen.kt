@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.CircularProgressIndicator
@@ -55,8 +56,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,6 +106,7 @@ fun MobileNetBenchScreen(
     modifier: Modifier = Modifier,
     initialTarget: String = "",
     onInsertMarkdown: ((String) -> Unit)? = null,
+    onOpenLiteSshIperf3Setup: ((targetHost: String, port: Int) -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
     initialListItemIndex: Int = 0,
     previewUiState: MobileNetBenchUiState? = null,
@@ -118,6 +123,7 @@ fun MobileNetBenchScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
+    var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
 
     LaunchedEffect(initialTarget) {
         if (initialTarget.isNotBlank()) {
@@ -232,6 +238,7 @@ fun MobileNetBenchScreen(
                         onIperfPortChange = viewModel::updateIperfPortText,
                         onIperfDurationChange = viewModel::updateIperfDurationSec,
                         onIperfModeChange = viewModel::updateIperfTestMode,
+                        onOpenIperf3SshManager = { directSshControlTrigger++ },
                     )
                 }
             }
@@ -291,6 +298,7 @@ fun MobileNetBenchScreen(
                         downloadProgress = uiState.iperfDownloadProgress,
                         uploadProgress = uiState.iperfUploadProgress,
                         iperfPort = uiState.effectiveIperfPort,
+                        onOpenIperf3ServerSetup = { directSshControlTrigger++ },
                     )
                 }
             }
@@ -313,8 +321,10 @@ fun MobileNetBenchScreen(
                         markdown = uiState.generatedMarkdown,
                         selectedStyle = uiState.markdownStyle,
                         maskTargetIp = uiState.maskTargetIpInReport,
+                        includeClientNetwork = uiState.includeClientNetworkInReport,
                         onSelectStyle = viewModel::selectMarkdownStyle,
                         onToggleMaskTargetIp = viewModel::toggleMaskTargetIp,
+                        onToggleIncludeClientNetwork = viewModel::toggleIncludeClientNetwork,
                         onCopyMarkdown = {
                             val ok = copyTextToClipboard(
                                 context = context,
@@ -334,6 +344,20 @@ fun MobileNetBenchScreen(
             }
         }
     }
+
+    NetBenchIperf3DialogsHost(
+        showPrepPrompt = uiState.showIperf3ServerPrompt,
+        openDirectSshControlTrigger = directSshControlTrigger,
+        targetInput = uiState.targetInput,
+        iperfPortText = uiState.iperfPortText,
+        onPortTextChange = viewModel::updateIperfPortText,
+        onDismissPrepPrompt = viewModel::dismissIperf3ServerPrompt,
+        onDisableIperf3 = { viewModel.toggleIperf3(false) },
+        onFeedbackMessage = { msg ->
+            coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+        },
+        onNavigateToLiteSsh = onOpenLiteSshIperf3Setup,
+    )
 }
 
 @Composable
@@ -520,6 +544,7 @@ private fun TestModulesConfigCard(
     onIperfPortChange: (String) -> Unit,
     onIperfDurationChange: (Int) -> Unit,
     onIperfModeChange: (Iperf3TestMode) -> Unit,
+    onOpenIperf3SshManager: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -626,6 +651,29 @@ private fun TestModulesConfigCard(
                             }
                         }
                     }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "测速前需在目标 VPS 开启 iperf3 服务端",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    NetBenchSelectableChip(
+                        label = "一键开启/停止",
+                        selected = true,
+                        icon = Icons.Rounded.Terminal,
+                        enabled = !uiState.isRunning,
+                        onClick = onOpenIperf3SshManager,
+                    )
                 }
             }
         }

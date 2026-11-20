@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -44,9 +45,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -166,6 +169,7 @@ fun NetBenchQuickBottomSheet(
 
     val uiState by controller.uiState.collectAsStateWithLifecycle()
     var inlineBanner by remember { mutableStateOf<String?>(null) }
+    var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
 
     LaunchedEffect(controller) {
         controller.snackbarMessages.collect { msg ->
@@ -422,33 +426,43 @@ fun NetBenchQuickBottomSheet(
 
                 // Compact iperf3 direction & port bar when enabled
                 AnimatedVisibility(visible = uiState.enableIperf3) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedTextField(
-                            value = uiState.iperfPortText,
-                            onValueChange = controller::updateIperfPortText,
-                            modifier = Modifier.width(96.dp),
-                            enabled = !uiState.isRunning,
-                            singleLine = true,
-                            label = { Text("端口") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            shape = PulseArchitecturalShapes.SmallChip,
-                        )
-                        Iperf3TestMode.entries.forEach { mode ->
-                            NetBenchSelectableChip(
-                                label = when (mode) {
-                                    Iperf3TestMode.DOWNLOAD -> "下载"
-                                    Iperf3TestMode.UPLOAD -> "上传"
-                                    Iperf3TestMode.BOTH -> "双向"
-                                },
-                                selected = uiState.iperfTestMode == mode,
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = uiState.iperfPortText,
+                                onValueChange = controller::updateIperfPortText,
+                                modifier = Modifier.width(96.dp),
                                 enabled = !uiState.isRunning,
-                                onClick = { controller.updateIperfTestMode(mode) },
+                                singleLine = true,
+                                label = { Text("端口") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                shape = PulseArchitecturalShapes.SmallChip,
                             )
+                            Iperf3TestMode.entries.forEach { mode ->
+                                NetBenchSelectableChip(
+                                    label = when (mode) {
+                                        Iperf3TestMode.DOWNLOAD -> "下载"
+                                        Iperf3TestMode.UPLOAD -> "上传"
+                                        Iperf3TestMode.BOTH -> "双向"
+                                    },
+                                    selected = uiState.iperfTestMode == mode,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { controller.updateIperfTestMode(mode) },
+                                )
+                            }
                         }
+
+                        NetBenchSelectableChip(
+                            label = "一键开启/停止 VPS 的 iperf3 服务端 (端口 ${uiState.effectiveIperfPort})",
+                            selected = true,
+                            icon = Icons.Rounded.Terminal,
+                            enabled = !uiState.isRunning,
+                            onClick = { directSshControlTrigger++ },
+                        )
                     }
                 }
 
@@ -489,6 +503,7 @@ fun NetBenchQuickBottomSheet(
                         uploadProgress = uiState.iperfUploadProgress,
                         iperfPort = uiState.effectiveIperfPort,
                         compact = true,
+                        onOpenIperf3ServerSetup = { directSshControlTrigger++ },
                     )
                 }
 
@@ -506,8 +521,10 @@ fun NetBenchQuickBottomSheet(
                         markdown = uiState.generatedMarkdown,
                         selectedStyle = uiState.markdownStyle,
                         maskTargetIp = uiState.maskTargetIpInReport,
+                        includeClientNetwork = uiState.includeClientNetworkInReport,
                         onSelectStyle = controller::selectMarkdownStyle,
                         onToggleMaskTargetIp = controller::toggleMaskTargetIp,
+                        onToggleIncludeClientNetwork = controller::toggleIncludeClientNetwork,
                         onCopyMarkdown = {
                             val ok = copyTextToClipboard(
                                 context = context,
@@ -532,4 +549,15 @@ fun NetBenchQuickBottomSheet(
             }
         }
     }
+
+    NetBenchIperf3DialogsHost(
+        showPrepPrompt = uiState.showIperf3ServerPrompt,
+        openDirectSshControlTrigger = directSshControlTrigger,
+        targetInput = uiState.targetInput,
+        iperfPortText = uiState.iperfPortText,
+        onPortTextChange = controller::updateIperfPortText,
+        onDismissPrepPrompt = controller::dismissIperf3ServerPrompt,
+        onDisableIperf3 = { controller.toggleIperf3(false) },
+        onFeedbackMessage = { msg -> inlineBanner = msg },
+    )
 }

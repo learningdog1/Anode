@@ -409,8 +409,14 @@ class Iperf3ClientRunner(
                     }
 
                     else -> {
-                        // Ignore minor informational state codes if any, abort on negative unknown codes.
-                        if (state < 0) {
+                        // Valid iperf3 server control state codes are 1..16; anything outside (such as
+                        // ASCII 'H' from HTTP or 'S' from OpenSSH) means the port is not an iperf3 server.
+                        if (state < 1 || state > STATE_IPERF_DONE) {
+                            val nonIperfHint = if (state == 'H'.code.toByte() || state == 'S'.code.toByte()) {
+                                "目标端口 $port 返回了非 iperf3 协议响应（可能是 Web/SSH 服务），请确认端口填写正确且已在 VPS 开启 iperf3 -s -p $port"
+                            } else {
+                                "收到非标准 iperf3 服务端状态码 ($state)，请确认目标端口 $port 运行的是 iperf3 v3 服务端"
+                            }
                             emit(
                                 failedProgress(
                                     direction = direction,
@@ -418,7 +424,7 @@ class Iperf3ClientRunner(
                                     resolvedTarget = resolvedTarget,
                                     durationSec = durationSec,
                                     kind = Iperf3ErrorKind.PROTOCOL_ERROR,
-                                    message = "收到未知的 iperf3 服务端状态码 ($state)",
+                                    message = nonIperfHint,
                                 ),
                             )
                             break@stateLoop
@@ -436,7 +442,7 @@ class Iperf3ClientRunner(
                     resolvedTarget = resolvedTarget,
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.CONNECTION_REFUSED,
-                    message = "无法连接 $port 端口（连接被拒绝），请确认目标已运行 iperf3 -s 且防火墙已放行",
+                    message = "无法连接 $port 端口（连接被拒绝）：对应 VPS 尚未开启 iperf3 服务端或监听端口不一致，请先开启 iperf3 -s -p $port",
                 ),
             )
         } catch (e: SocketTimeoutException) {
@@ -447,7 +453,7 @@ class Iperf3ClientRunner(
                     resolvedTarget = resolvedTarget,
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.TIMEOUT,
-                    message = "连接或响应超时，请检查目标端口 $port 是否可达",
+                    message = "连接或响应超时（端口 $port）：请确认 VPS 已运行 iperf3 -s -p $port，且防火墙（ufw/firewalld/iptables）与云安全组已放行 TCP $port",
                 ),
             )
         } catch (e: EOFException) {
@@ -458,18 +464,38 @@ class Iperf3ClientRunner(
                     resolvedTarget = resolvedTarget,
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.PROTOCOL_ERROR,
-                    message = "iperf3 协议数据流意外中断，请检查目标是否为标准 iperf3 服务端",
+                    message = "iperf3 协议数据流意外中断，请检查目标端口 $port 是否为标准 iperf3 服务端",
                 ),
             )
         } catch (e: IOException) {
+            val rawMsg = e.message.orEmpty()
+            val (kind, friendlyMsg) = when {
+                rawMsg.contains("ECONNREFUSED", ignoreCase = true) ||
+                    rawMsg.contains("Connection refused", ignoreCase = true) ->
+                    Iperf3ErrorKind.CONNECTION_REFUSED to
+                        "无法连接 $port 端口（连接被拒绝）：对应 VPS 尚未开启 iperf3 服务端或监听端口不一致，请先开启 iperf3 -s -p $port"
+                rawMsg.contains("NoRouteToHost", ignoreCase = true) ||
+                    rawMsg.contains("EHOSTUNREACH", ignoreCase = true) ||
+                    rawMsg.contains("ENETUNREACH", ignoreCase = true) ||
+                    rawMsg.contains("unreachable", ignoreCase = true) ->
+                    Iperf3ErrorKind.IO_ERROR to
+                        "目标主机或网络不可达（端口 $port）：请检查目标 IPv4/IPv6 地址与当前网络连接"
+                rawMsg.contains("ECONNRESET", ignoreCase = true) ||
+                    rawMsg.contains("Connection reset", ignoreCase = true) ->
+                    Iperf3ErrorKind.IO_ERROR to
+                        "连接被对端重置（端口 $port）：请确认 VPS 上的 iperf3 服务端正常运行且未被防火墙/安全策略阻断"
+                else ->
+                    Iperf3ErrorKind.IO_ERROR to
+                        "网络测速中断（端口 $port）：${rawMsg.ifBlank { e.javaClass.simpleName }}"
+            }
             emit(
                 failedProgress(
                     direction = direction,
                     port = port,
                     resolvedTarget = resolvedTarget,
                     durationSec = durationSec,
-                    kind = Iperf3ErrorKind.IO_ERROR,
-                    message = "网络测速中断：${e.message ?: e.javaClass.simpleName}",
+                    kind = kind,
+                    message = friendlyMsg,
                 ),
             )
         } finally {
