@@ -23,6 +23,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Request describing an external ping command invocation.
@@ -62,6 +63,7 @@ object SystemPingProcessExecutor : PingProcessExecutor {
             return@channelFlow
         }
 
+        val timedOut = AtomicBoolean(false)
         val stderrJob = launch(Dispatchers.IO) {
             runCatching {
                 process.errorStream.bufferedReader(Charsets.UTF_8).use { reader ->
@@ -75,23 +77,38 @@ object SystemPingProcessExecutor : PingProcessExecutor {
 
         val watchdogJob = launch {
             delay(request.timeoutMs.coerceAtLeast(1_000L))
+            timedOut.set(true)
             runCatching { process.destroyForcibly() }
         }
 
         try {
             withContext(Dispatchers.IO) {
-                process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                    while (isActive) {
-                        val line = reader.readLine() ?: break
-                        send(PingExecutionEvent.StdoutLine(line))
+                try {
+                    process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                        while (isActive) {
+                            val line = reader.readLine() ?: break
+                            send(PingExecutionEvent.StdoutLine(line))
+                        }
+                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (ioe: IOException) {
+                    // On Android ART, destroyForcibly() closes pipe FDs from another thread while
+                    // readLine() is blocked, throwing "read interrupted by close() on another thread".
+                    if (!isActive) throw CancellationException("Ping cancelled", ioe)
+                    if (timedOut.get()) {
+                        send(PingExecutionEvent.StderrLine("ping 执行超时 (${request.timeoutMs}ms)"))
                     }
                 }
             }
+            watchdogJob.cancel()
             stderrJob.join()
             val exitCode = withContext(Dispatchers.IO) {
-                process.waitFor()
+                runCatching { process.waitFor() }.getOrElse { t ->
+                    if (t is CancellationException) throw t
+                    -1
+                }
             }
-            watchdogJob.cancel()
             send(PingExecutionEvent.Exited(exitCode))
         } finally {
             watchdogJob.cancel()
@@ -113,6 +130,7 @@ object IcmpPingParser {
 
     const val DEFAULT_PING_BINARY = "/system/bin/ping"
     const val DEFAULT_PING6_BINARY = "/system/bin/ping6"
+    const val MAX_VALID_RTT_MS = 30_000.0
 
     data class PingPacketStats(
         val sent: Int,
@@ -138,6 +156,8 @@ object IcmpPingParser {
         OTHER,
     }
 
+    private val DUP_REPLY_REGEX = Regex("""(?i)\(\s*DUP!\s*\)""")
+    private val WRONG_DATA_REGEX = Regex("""(?i)\bwrong\s+data\s+byte\b""")
     private val REPLY_LINE_GUARD_REGEX = Regex("""(?i)(?:\bbytes\s+from\b|\bicmp_seq\s*[=\s]|\bseq\s*=)""")
     private val TIME_EQ_REGEX = Regex("""(?i)\btime\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*ms\b""")
     private val TIME_LT_REGEX = Regex("""(?i)\btime\s*<\s*([0-9]+(?:\.[0-9]+)?)\s*ms\b""")
@@ -207,9 +227,16 @@ object IcmpPingParser {
      * Parses a single `ping` stdout line representing either an echo reply or a per-seq failure.
      * Returns `null` for headers, blank lines, and summary lines.
      */
-    fun parseLine(line: String, fallbackSeq: Int = 1): IcmpPingSample? {
+    fun parseLine(
+        line: String,
+        fallbackSeq: Int = 1,
+        maxValidRttMs: Double = MAX_VALID_RTT_MS,
+    ): IcmpPingSample? {
         val trimmed = line.trim()
         if (trimmed.isEmpty()) return null
+        if (DUP_REPLY_REGEX.containsMatchIn(trimmed) || WRONG_DATA_REGEX.containsMatchIn(trimmed)) {
+            return null
+        }
 
         TIMEOUT_SEQ_REGEX.find(trimmed)?.let { match ->
             val seq = match.groupValues[1].toIntOrNull() ?: fallbackSeq
@@ -239,17 +266,28 @@ object IcmpPingParser {
 
         if (!REPLY_LINE_GUARD_REGEX.containsMatchIn(trimmed)) return null
 
-        val rttMs = TIME_EQ_REGEX.find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()?.coerceAtLeast(0.01)
-            ?: TIME_LT_REGEX.find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()?.let { (it / 2.0).coerceAtLeast(0.05) }
+        val rawRtt = TIME_EQ_REGEX.find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()
+            ?: TIME_LT_REGEX.find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()?.let { it / 2.0 }
             ?: return null
 
         val seq = SEQ_REGEX.find(trimmed)?.groupValues?.get(1)?.toIntOrNull() ?: fallbackSeq
         val ttl = TTL_REGEX.find(trimmed)?.groupValues?.get(1)?.toIntOrNull()
 
+        if (!rawRtt.isFinite() || rawRtt < 0.0 || rawRtt > maxValidRttMs) {
+            // Packet arrived, but payload timestamp underflowed/corrupted (e.g. emulator NAT mangling)
+            return IcmpPingSample(
+                seq = seq,
+                success = true,
+                rttMs = null,
+                ttl = ttl,
+                errorMessage = "RTT 异常已忽略",
+            )
+        }
+
         return IcmpPingSample(
             seq = seq,
             success = true,
-            rttMs = rttMs,
+            rttMs = rawRtt.coerceAtLeast(0.01),
             ttl = ttl,
         )
     }
@@ -272,22 +310,39 @@ object IcmpPingParser {
     /**
      * Parses the `rtt min/avg/max/mdev` or `round-trip min/avg/max/stddev` line.
      */
-    fun parseRttStatsLine(line: String): PingRttStats? {
+    fun parseRttStatsLine(
+        line: String,
+        maxValidRttMs: Double = MAX_VALID_RTT_MS,
+    ): PingRttStats? {
         val match = RTT_STATS_REGEX.find(line.trim()) ?: return null
         val min = match.groupValues[1].toDoubleOrNull() ?: return null
         val avg = match.groupValues[2].toDoubleOrNull() ?: return null
         val max = match.groupValues[3].toDoubleOrNull() ?: return null
         val mdev = match.groupValues.getOrNull(4)?.takeIf { it.isNotBlank() }?.toDoubleOrNull()
-        return PingRttStats(
+        val parsed = PingRttStats(
             minMs = min,
             avgMs = avg,
             maxMs = max,
             mdevMs = mdev,
         )
+        return parsed.takeIf { isSaneRttStats(it, maxValidRttMs) }
+    }
+
+    internal fun isSaneRttStats(
+        stats: PingRttStats,
+        maxValidRttMs: Double = MAX_VALID_RTT_MS,
+    ): Boolean {
+        if (!stats.minMs.isFinite() || !stats.avgMs.isFinite() || !stats.maxMs.isFinite()) return false
+        if (stats.minMs < 0.0 || stats.avgMs < stats.minMs || stats.maxMs < stats.avgMs) return false
+        if (stats.maxMs > maxValidRttMs) return false
+        val mdev = stats.mdevMs
+        if (mdev != null && (!mdev.isFinite() || mdev < 0.0 || mdev > maxValidRttMs)) return false
+        return true
     }
 
     /**
-     * Fills missing `icmp_seq` slots as lost packets so the live/final RTT chart reflects packet loss accurately.
+     * Fills missing `icmp_seq` slots as lost packets so the live/final RTT chart reflects packet loss accurately
+     * while guaranteeing output length never exceeds [expectedCount].
      */
     fun reconcileSamples(samples: List<IcmpPingSample>, expectedCount: Int): List<IcmpPingSample> {
         if (expectedCount <= 0) return samples
@@ -300,28 +355,27 @@ object IcmpPingParser {
         val deduplicated = LinkedHashMap<Int, IcmpPingSample>(samples.size)
         for (sample in samples) {
             val existing = deduplicated[sample.seq]
-            if (existing == null || (!existing.success && sample.success)) {
+            if (existing == null ||
+                (!existing.success && sample.success) ||
+                (existing.success && existing.rttMs == null && sample.success && sample.rttMs != null)
+            ) {
                 deduplicated[sample.seq] = sample
             }
         }
 
-        val startSeq = if (deduplicated.containsKey(0)) 0 else 1
+        val zeroSample = deduplicated[0]
+        val startSeq = if (zeroSample != null && zeroSample.rttMs != null && !deduplicated.containsKey(expectedCount)) 0 else 1
         val endSeqExclusive = startSeq + expectedCount
         return buildList(expectedCount) {
             for (seq in startSeq until endSeqExclusive) {
                 add(deduplicated[seq] ?: IcmpPingSample(seq = seq, success = false, errorMessage = "丢包/超时"))
-            }
-            for ((seq, sample) in deduplicated) {
-                if (seq < startSeq || seq >= endSeqExclusive) {
-                    add(sample)
-                }
             }
         }
     }
 
     /**
      * Computes aggregated [IcmpPingSummary], preferring authoritative summary stats from `ping`
-     * and falling back to sample-derived min/avg/max/mdev when absent (e.g. BusyBox or cancelled run).
+     * and falling back to sample-derived min/avg/max/mdev when absent or when any sample had corrupted RTT.
      */
     fun computeSummary(
         resolvedTarget: ResolvedTarget?,
@@ -335,19 +389,26 @@ object IcmpPingParser {
     ): IcmpPingSummary {
         val sent = packetStats?.sent ?: samples.size
         val rtts = samples.mapNotNull { if (it.success) it.rttMs else null }
-        val received = packetStats?.received ?: rtts.size
+        val hasCorruptedSample = samples.any { it.success && it.rttMs == null }
+        val received = packetStats?.received ?: samples.count { it.success }
         val lossPercent = packetStats?.lossPercent ?: if (sent == 0) {
             100.0
         } else {
             (((sent - received).coerceAtLeast(0)) * 100.0) / sent.toDouble()
         }
 
+        val safeRttStats = rttStats?.takeIf { !hasCorruptedSample && isSaneRttStats(it) }
         val sampleComputed = computeRttStats(rtts)
-        if (received == 0 || (rttStats == null && sampleComputed == null)) {
+        if (received == 0 || (safeRttStats == null && sampleComputed == null)) {
+            val fallbackErr = if (received > 0 && hasCorruptedSample && errorMessage == null) {
+                "设备/NAT 回包的 ping 时间戳异常，未能测得有效 RTT"
+            } else {
+                errorMessage ?: samples.lastOrNull()?.errorMessage
+            }
             return IcmpPingSummary(
                 resolvedTarget = resolvedTarget,
                 sent = sent,
-                received = 0,
+                received = received,
                 lossPercent = if (sent == 0) 100.0 else lossPercent,
                 minMs = null,
                 avgMs = null,
@@ -357,7 +418,7 @@ object IcmpPingParser {
                 bindingMode = bindingMode,
                 boundInterfaceName = boundInterfaceName,
                 networkBindingNote = networkBindingNote,
-                errorMessage = errorMessage ?: samples.lastOrNull()?.errorMessage,
+                errorMessage = fallbackErr,
             )
         }
 
@@ -366,10 +427,10 @@ object IcmpPingParser {
             sent = sent,
             received = received,
             lossPercent = lossPercent,
-            minMs = rttStats?.minMs ?: sampleComputed?.minMs,
-            avgMs = rttStats?.avgMs ?: sampleComputed?.avgMs,
-            maxMs = rttStats?.maxMs ?: sampleComputed?.maxMs,
-            jitterMdevMs = rttStats?.mdevMs ?: sampleComputed?.mdevMs,
+            minMs = safeRttStats?.minMs ?: sampleComputed?.minMs,
+            avgMs = safeRttStats?.avgMs ?: sampleComputed?.avgMs,
+            maxMs = safeRttStats?.maxMs ?: sampleComputed?.maxMs,
+            jitterMdevMs = safeRttStats?.mdevMs ?: sampleComputed?.mdevMs,
             samples = samples,
             bindingMode = bindingMode,
             boundInterfaceName = boundInterfaceName,
@@ -416,7 +477,13 @@ object IcmpPingParser {
         }
 
         val errorMsg = if ((packetStats?.received ?: finalSamples.count { it.success }) == 0 && finalSamples.isEmpty()) {
-            lines.firstOrNull { it.isNotBlank() && !it.startsWith("PING ", ignoreCase = true) && !it.startsWith("---") }
+            lines.firstOrNull {
+                it.isNotBlank() &&
+                    !it.startsWith("PING ", ignoreCase = true) &&
+                    !it.startsWith("---") &&
+                    !WRONG_DATA_REGEX.containsMatchIn(it) &&
+                    !DUP_REPLY_REGEX.containsMatchIn(it)
+            }
         } else {
             null
         }
@@ -614,75 +681,93 @@ class IcmpPingRunner(
                 preferPing6Binary = preferPing6,
                 includeNumericFlag = includeNumericFlag,
             )
-            val processTimeoutMs = (plannedCount * (currentIntervalMs + 150L)) + (timeoutSec * 1_000L) + 4_000L
+            val perPacketBudgetMs = maxOf(currentIntervalMs + 500L, 1_200L)
+            val processTimeoutMs = (plannedCount * perPacketBudgetMs) + (timeoutSec * 1_000L) + 6_000L
 
-            val liveSamples = mutableListOf<IcmpPingSample>()
+            val liveSamplesBySeq = LinkedHashMap<Int, IcmpPingSample>(plannedCount)
             val stderrLines = mutableListOf<String>()
             val nonSampleStdoutLines = mutableListOf<String>()
             var packetStats: IcmpPingParser.PingPacketStats? = null
             var rttStats: IcmpPingParser.PingRttStats? = null
             var exitCode = -1
+            var streamException: Throwable? = null
 
-            executor.execute(
-                PingProcessRequest(
-                    command = command,
-                    timeoutMs = processTimeoutMs,
-                ),
-            ).collect { event ->
-                when (event) {
-                    is PingExecutionEvent.StdoutLine -> {
-                        val line = event.line
-                        val pkt = IcmpPingParser.parsePacketStatsLine(line)
-                        if (pkt != null) {
-                            packetStats = pkt
-                            return@collect
-                        }
-                        val rtt = IcmpPingParser.parseRttStatsLine(line)
-                        if (rtt != null) {
-                            rttStats = rtt
-                            return@collect
-                        }
-                        val sample = IcmpPingParser.parseLine(line, fallbackSeq = liveSamples.size + 1)
-                        if (sample != null) {
-                            liveSamples += sample
-                            val snapshot = liveSamples.toList()
-                            val liveSummary = IcmpPingParser.computeSummary(
-                                resolvedTarget = endpoint.resolvedTarget,
-                                samples = snapshot,
-                                bindingMode = bindingMode,
-                                boundInterfaceName = currentInterface,
-                                networkBindingNote = bindingNote,
-                            )
-                            emit(
-                                IcmpPingProgress(
+            try {
+                executor.execute(
+                    PingProcessRequest(
+                        command = command,
+                        timeoutMs = processTimeoutMs,
+                    ),
+                ).collect { event ->
+                    when (event) {
+                        is PingExecutionEvent.StdoutLine -> {
+                            val line = event.line
+                            val pkt = IcmpPingParser.parsePacketStatsLine(line)
+                            if (pkt != null) {
+                                packetStats = pkt
+                                return@collect
+                            }
+                            val rtt = IcmpPingParser.parseRttStatsLine(line)
+                            if (rtt != null) {
+                                rttStats = rtt
+                                return@collect
+                            }
+                            val sample = IcmpPingParser.parseLine(line, fallbackSeq = liveSamplesBySeq.size + 1)
+                            if (sample != null) {
+                                val existing = liveSamplesBySeq[sample.seq]
+                                if (existing == null ||
+                                    (!existing.success && sample.success) ||
+                                    (existing.success && existing.rttMs == null && sample.success && sample.rttMs != null)
+                                ) {
+                                    liveSamplesBySeq[sample.seq] = sample
+                                }
+                                val snapshot = liveSamplesBySeq.values.toList().take(plannedCount)
+                                val liveSummary = IcmpPingParser.computeSummary(
                                     resolvedTarget = endpoint.resolvedTarget,
-                                    totalPlanned = plannedCount,
-                                    latestSample = sample,
                                     samples = snapshot,
-                                    summary = liveSummary,
-                                    isFinished = false,
-                                ),
-                            )
-                        } else if (line.isNotBlank()) {
-                            nonSampleStdoutLines += line
+                                    bindingMode = bindingMode,
+                                    boundInterfaceName = currentInterface,
+                                    networkBindingNote = bindingNote,
+                                )
+                                emit(
+                                    IcmpPingProgress(
+                                        resolvedTarget = endpoint.resolvedTarget,
+                                        totalPlanned = plannedCount,
+                                        latestSample = sample,
+                                        samples = snapshot,
+                                        summary = liveSummary,
+                                        isFinished = false,
+                                    ),
+                                )
+                            } else if (line.isNotBlank() &&
+                                !line.contains("wrong data byte", ignoreCase = true) &&
+                                !line.contains("(DUP!)", ignoreCase = true)
+                            ) {
+                                nonSampleStdoutLines += line
+                            }
                         }
-                    }
 
-                    is PingExecutionEvent.StderrLine -> {
-                        if (event.line.isNotBlank()) {
-                            stderrLines += event.line
+                        is PingExecutionEvent.StderrLine -> {
+                            if (event.line.isNotBlank()) {
+                                stderrLines += event.line
+                            }
                         }
-                    }
 
-                    is PingExecutionEvent.Exited -> {
-                        exitCode = event.exitCode
+                        is PingExecutionEvent.Exited -> {
+                            exitCode = event.exitCode
+                        }
                     }
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                streamException = t
             }
 
+            val liveSamples = liveSamplesBySeq.values.toList()
             val receivedCount = packetStats?.received ?: liveSamples.count { it.success }
             if (receivedCount > 0) {
-                val expectedTotal = packetStats?.sent?.takeIf { it > 0 } ?: plannedCount
+                val expectedTotal = packetStats?.sent?.takeIf { it > 0 }?.coerceAtMost(plannedCount) ?: plannedCount
                 val finalSamples = IcmpPingParser.reconcileSamples(liveSamples, expectedTotal)
                 val finalSummary = IcmpPingParser.computeSummary(
                     resolvedTarget = endpoint.resolvedTarget,
@@ -701,6 +786,7 @@ class IcmpPingRunner(
                         samples = finalSamples,
                         summary = finalSummary,
                         isFinished = true,
+                        errorMessage = finalSummary.errorMessage,
                     ),
                 )
                 return@flow
@@ -713,6 +799,7 @@ class IcmpPingRunner(
                 hadInterfaceFlag = currentInterface != null,
                 hadFractionalInterval = currentIntervalMs < 1_000L,
                 hadNumericFlag = includeNumericFlag,
+                throwable = streamException,
             )
 
             if (attempt < maxAttempts) {

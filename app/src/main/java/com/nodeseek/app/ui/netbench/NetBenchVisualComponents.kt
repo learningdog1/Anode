@@ -801,6 +801,16 @@ internal fun LatencyWaveformChart(
                     } else {
                         sparkPath.lineTo(centerX, topY)
                     }
+                } else if (sample.success) {
+                    // Received packet whose payload timestamp was corrupted (RTT omitted)
+                    val mutedHeight = h * 0.14f
+                    drawRoundRect(
+                        color = gridColor.copy(alpha = 0.85f),
+                        topLeft = Offset(leftX, h - mutedHeight),
+                        size = Size(barWidth, mutedHeight),
+                        cornerRadius = failCorner,
+                    )
+                    hasSparkStart = false
                 } else {
                     // Timeout / dropped packet indicator bar
                     val failHeight = h * 0.22f
