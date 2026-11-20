@@ -45,6 +45,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
@@ -323,6 +324,7 @@ fun LiteSshScreen(
             existing = uiState.editingServer,
             onDismiss = viewModel::dismissServerEditor,
             onSave = viewModel::saveServer,
+            servers = uiState.servers,
         )
     }
 
@@ -552,10 +554,14 @@ private fun ServerVaultSection(
             ) {
                 items(servers, key = { it.id }) { server ->
                     val selected = server.id == selectedServerId
+                    val jumpHostName = server.jumpHostId?.let { jumpId ->
+                        servers.firstOrNull { it.id == jumpId }?.displayName
+                    }
                     ServerVaultCard(
                         server = server,
                         selected = selected,
                         enabled = !isRunning,
+                        jumpHostName = jumpHostName,
                         onSelect = { onSelectServer(server.id) },
                         onEdit = { onEditServer(server) },
                         onDelete = { onDeleteServer(server) },
@@ -571,6 +577,7 @@ private fun ServerVaultCard(
     server: SshServerProfile,
     selected: Boolean,
     enabled: Boolean,
+    jumpHostName: String? = null,
     onSelect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -651,9 +658,9 @@ private fun ServerVaultCard(
             overflow = TextOverflow.Ellipsis,
         )
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             PulseAccentPill(
                 text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
@@ -674,6 +681,14 @@ private fun ServerVaultCard(
                     icon = Icons.Rounded.Lock,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (server.usesJumpHost) {
+                PulseAccentPill(
+                    text = if (!jumpHostName.isNullOrBlank()) "跳板 · $jumpHostName" else "跳板",
+                    icon = Icons.AutoMirrored.Rounded.AltRoute,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
             }
         }

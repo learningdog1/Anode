@@ -13,7 +13,10 @@ import java.util.concurrent.atomic.AtomicReference
  */
 sealed interface LiteSshExecutionEvent {
     data object Connecting : LiteSshExecutionEvent
-    data class HostKeyChecked(val verification: HostKeyVerificationResult) : LiteSshExecutionEvent
+    data class HostKeyChecked(
+        val verification: HostKeyVerificationResult,
+        val serverId: String? = null,
+    ) : LiteSshExecutionEvent
     data object Connected : LiteSshExecutionEvent
     data class OutputUpdated(
         val sanitizedAnsiOutput: String,
@@ -70,7 +73,7 @@ class LiteSshExecutor(
             ).collect { event ->
                 when (event) {
                     is SshStreamEvent.HostKeyObserved -> {
-                        emit(LiteSshExecutionEvent.HostKeyChecked(event.verification))
+                        emit(LiteSshExecutionEvent.HostKeyChecked(event.verification, event.serverId))
                     }
                     SshStreamEvent.Connected -> {
                         emit(LiteSshExecutionEvent.Connected)

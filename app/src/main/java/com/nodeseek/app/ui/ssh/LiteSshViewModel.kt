@@ -286,9 +286,10 @@ class LiteSshViewModel(
             if (sharedManager != null) {
                 return factory(sessionManager = sharedManager)
             }
+            val vault = SshServerVault.getDefault(appContext)
             return factory(
-                vaultRepository = SshServerVault.getDefault(appContext),
-                executor = LiteSshExecutor(transport = JSchSshTransport()),
+                vaultRepository = vault,
+                executor = LiteSshExecutor(transport = JSchSshTransport(vaultRepository = vault)),
             )
         }
 

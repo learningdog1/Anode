@@ -58,6 +58,7 @@ data class SshServerProfile(
     val knownHostKeyAlgorithm: String? = null,
     val lastConnectedEpochMillis: Long? = null,
     val createdAtEpochMillis: Long = 0L,
+    val jumpHostId: String? = null,
 ) {
     val displayName: String
         get() = alias.trim().ifBlank { host.trim() }
@@ -75,6 +76,9 @@ data class SshServerProfile(
 
     val hasTrustedHostKey: Boolean
         get() = !knownHostKeyFingerprint.isNullOrBlank()
+
+    val usesJumpHost: Boolean
+        get() = !jumpHostId.isNullOrBlank()
 
     companion object {
         const val DEFAULT_PORT: Int = 22
@@ -97,6 +101,7 @@ data class SshServerDraft(
     val passphrase: String? = null,
     val keepExistingSecret: Boolean = false,
     val keepExistingPassphrase: Boolean = false,
+    val jumpHostId: String? = null,
 )
 
 /**

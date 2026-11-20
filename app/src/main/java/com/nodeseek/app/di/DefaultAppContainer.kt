@@ -443,7 +443,9 @@ class DefaultAppContainer(
         com.nodeseek.app.ui.ssh.LiteSshSessionManager(
             vaultRepository = sshVaultRepository,
             executor = com.nodeseek.app.domain.ssh.LiteSshExecutor(
-                transport = com.nodeseek.app.data.ssh.JSchSshTransport(),
+                transport = com.nodeseek.app.data.ssh.JSchSshTransport(
+                    vaultRepository = sshVaultRepository,
+                ),
             ),
             externalScope = applicationScope,
             foregroundServiceController = com.nodeseek.app.ui.ssh.AndroidSshForegroundServiceController(
