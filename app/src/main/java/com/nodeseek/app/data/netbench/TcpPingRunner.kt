@@ -560,30 +560,46 @@ class TcpPingRunner(
                 )
             }
 
-            val minMs = rtts.min()
-            val maxMs = rtts.max()
-            val avgMs = rtts.average()
-            val variance = rtts.fold(0.0) { acc, v ->
-                val diff = v - avgMs
-                acc + diff * diff
-            } / rtts.size.toDouble()
-            val mdevMs = sqrt(variance)
-
+            val computed = computeRttStats(rtts)
             return TcpPingSummary(
                 resolvedTarget = resolvedTarget,
                 port = port,
                 sent = sent,
                 received = received,
                 lossPercent = lossPercent,
-                minMs = minMs,
-                avgMs = avgMs,
-                maxMs = maxMs,
-                jitterMdevMs = mdevMs,
+                minMs = computed?.minMs,
+                avgMs = computed?.avgMs,
+                maxMs = computed?.maxMs,
+                jitterMdevMs = computed?.mdevMs,
                 samples = samples,
                 errorMessage = errorMessage,
             )
         }
     }
+}
+
+internal data class ComputedRttStats(
+    val minMs: Double,
+    val avgMs: Double,
+    val maxMs: Double,
+    val mdevMs: Double,
+)
+
+internal fun computeRttStats(rtts: List<Double>): ComputedRttStats? {
+    if (rtts.isEmpty()) return null
+    val minMs = rtts.min()
+    val maxMs = rtts.max()
+    val avgMs = rtts.average()
+    val variance = rtts.fold(0.0) { acc, v ->
+        val diff = v - avgMs
+        acc + diff * diff
+    } / rtts.size.toDouble()
+    return ComputedRttStats(
+        minMs = minMs,
+        avgMs = avgMs,
+        maxMs = maxMs,
+        mdevMs = sqrt(variance),
+    )
 }
 
 /**

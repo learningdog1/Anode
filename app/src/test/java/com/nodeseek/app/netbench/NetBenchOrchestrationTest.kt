@@ -3,12 +3,15 @@ package com.nodeseek.app.netbench
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.nodeseek.app.data.netbench.HttpLatencyRunner
+import com.nodeseek.app.data.netbench.IcmpPingRunner
 import com.nodeseek.app.data.netbench.IpIntelligenceClient
 import com.nodeseek.app.data.netbench.IpIntelligenceEndpoints
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchSocketChannel
 import com.nodeseek.app.data.netbench.NetBenchTargetResolver
+import com.nodeseek.app.data.netbench.PingExecutionEvent
+import com.nodeseek.app.data.netbench.PingProcessExecutor
 import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.data.netbench.TcpPingRunner
 import com.nodeseek.app.data.netbench.TcpProbeConnector
@@ -28,6 +31,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
@@ -392,6 +396,87 @@ class NetBenchOrchestrationTest {
             scope.cancel()
             directServer.shutdown()
             proxyServer.shutdown()
+        }
+    }
+
+    @Test
+    fun `session controller executes ICMP Ping before TCPing records ping history and formats Ping first`() = runBlocking {
+        val phaseOrder = mutableListOf<String>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val historyStore = NetBenchHistoryStore(
+                historyFile = File(tempFolder.root, "icmp_${NetBenchHistoryStore.HISTORY_FILE_NAME}"),
+                ioDispatcher = Dispatchers.IO,
+            )
+            val resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO)
+            val icmpRunner = IcmpPingRunner(
+                resolver = resolver,
+                executor = PingProcessExecutor {
+                    phaseOrder += "icmp"
+                    flow {
+                        emit(PingExecutionEvent.StdoutLine("64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=18.0 ms"))
+                        emit(PingExecutionEvent.StdoutLine("64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=20.0 ms"))
+                        emit(PingExecutionEvent.StdoutLine("64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=22.0 ms"))
+                        emit(PingExecutionEvent.StdoutLine("64 bytes from 127.0.0.1: icmp_seq=4 ttl=64 time=20.0 ms"))
+                        emit(PingExecutionEvent.StdoutLine("4 packets transmitted, 4 received, 0% packet loss"))
+                        emit(PingExecutionEvent.StdoutLine("rtt min/avg/max/mdev = 18.0/20.0/22.0/1.414 ms"))
+                        emit(PingExecutionEvent.Exited(0))
+                    }
+                },
+                ioDispatcher = Dispatchers.IO,
+            )
+            val tcpRunner = TcpPingRunner(
+                resolver = resolver,
+                connector = TcpProbeConnector { _, _, _ ->
+                    if ("tcp" !in phaseOrder) phaseOrder += "tcp"
+                    31.0
+                },
+                ioDispatcher = Dispatchers.IO,
+            )
+
+            val controller = NetBenchSessionController(
+                scope = scope,
+                historyStore = historyStore,
+                targetResolver = resolver,
+                icmpPingRunner = icmpRunner,
+                tcpPingRunner = tcpRunner,
+            )
+
+            assertTrue(controller.uiState.value.enableIcmpPing)
+            controller.toggleIpCheck(false)
+            controller.updateTargetInput("127.0.0.1")
+            controller.updateProbeCount(4)
+            controller.startBenchmark()
+
+            var tries = 0
+            while (controller.uiState.value.activePhase != NetBenchPhase.COMPLETED && tries < 80) {
+                delay(50)
+                tries++
+            }
+
+            val finalState = controller.uiState.value
+            assertEquals(NetBenchPhase.COMPLETED, finalState.activePhase)
+            assertEquals(listOf("icmp", "tcp"), phaseOrder)
+            assertNotNull(finalState.icmpPingProgress)
+            assertEquals(20.0, finalState.icmpPingProgress!!.summary.avgMs!!, 0.01)
+            assertEquals(4, finalState.tcpPingProgress?.summary?.received)
+
+            val pingIdx = finalState.generatedMarkdown.indexOf("**Ping (4次)**")
+            val tcpIdx = finalState.generatedMarkdown.indexOf("**TCPing (4次)**")
+            assertTrue(pingIdx in 0 until tcpIdx)
+
+            val saved = historyStore.entries.value.single()
+            assertEquals(20.0, saved.lastPingAvgMs!!, 0.01)
+            assertEquals(0.0, saved.lastPingLossPercent!!, 0.01)
+            assertEquals(31.0, saved.lastAvgMs!!, 0.01)
+
+            // Verify toggleIcmpPing and clearResults
+            controller.clearResults()
+            assertEquals(null, controller.uiState.value.icmpPingProgress)
+            controller.toggleIcmpPing(false)
+            assertFalse(controller.uiState.value.enableIcmpPing)
+        } finally {
+            scope.cancel()
         }
     }
 }
