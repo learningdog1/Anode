@@ -135,6 +135,28 @@ data class OverseasOfferDetail(
     val translatedMarkdown: String? = null,
     val translationTier: TranslationTier = TranslationTier.NONE,
 ) {
+    /**
+     * True when the backend only returned a minimal placeholder notification because AI/OP
+     * hydration is still pending asynchronously on the server; client cache should use a short
+     * TTL so re-opening shortly afterward picks up the enriched result.
+     */
+    val isPendingAiHydration: Boolean
+        get() {
+            val hasRichStructured = structured != null && (
+                structured.sections.isNotEmpty() ||
+                    structured.orderLinks.isNotEmpty() ||
+                    structured.aiComment.isNotBlank() ||
+                    structured.pros.isNotEmpty() ||
+                    structured.cons.isNotEmpty() ||
+                    structured.suitableFor.isNotBlank()
+                )
+            if (hasRichStructured) return false
+            val trimmedMd = tgMarkdown.trimStart()
+            return trimmedMd.startsWith("📢 **新优惠信息**") ||
+                trimmedMd.startsWith("📢 新优惠信息") ||
+                trimmedMd.isEmpty()
+        }
+
     fun resolveDisplayMarkdown(mode: OverseasDisplayMode): String {
         val translated = translatedMarkdown?.takeIf { it.isNotBlank() }
         return when (mode) {
@@ -187,12 +209,26 @@ data class OverseasSyncStatus(
 )
 
 /**
+ * Configurable domain-layer fallback filter for overseas VPS promotion offers.
+ */
+data class OverseasOfferFilterConfig(
+    val enabled: Boolean = true,
+    val excludeGenericMarketingBuzz: Boolean = true,
+    val excludeNonServerServices: Boolean = true,
+    val requireMinimumHostingSignal: Boolean = true,
+    val blockedMerchants: Set<String> = emptySet(),
+    val extraBlockedKeywords: Set<String> = emptySet(),
+)
+
+/**
  * Complete reactive repository snapshot consumed by UI.
  */
 data class OverseasIntelSnapshot(
     val offers: List<OverseasDealOffer> = emptyList(),
     val translationConfig: OverseasTranslationConfig = OverseasTranslationConfig(),
     val syncStatus: OverseasSyncStatus = OverseasSyncStatus(),
+    val filterConfig: OverseasOfferFilterConfig = OverseasOfferFilterConfig(),
+    val filteredOutCount: Int = 0,
 )
 
 /**

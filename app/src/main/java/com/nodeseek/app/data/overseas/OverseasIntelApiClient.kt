@@ -39,7 +39,15 @@ class OverseasApiException(
     val errorCode: String = "",
     message: String,
     cause: Throwable? = null,
+    val retryAfterSeconds: Long? = null,
 ) : IOException(message, cause)
+
+data class ConditionalFetchResult<T>(
+    val data: T? = null,
+    val notModified: Boolean = false,
+    val etag: String? = null,
+    val lastModified: String? = null,
+)
 
 data class OverseasOffersPageResult(
     val page: Int,
@@ -158,7 +166,7 @@ private data class ApiOfferRepostDto(
 class OverseasIntelApiClient(
     private val baseUrlProvider: () -> String = OverseasApiSecretVault::resolveBaseUrl,
     masterSecretProvider: () -> ByteArray = OverseasApiSecretVault::resolveMasterSecret,
-    private val httpClient: OkHttpClient = OverseasApiSecretVault.buildPinnedHttpClient(),
+    private val httpClient: OkHttpClient = OverseasApiSecretVault.sharedPinnedHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val maxAttempts: Int = 3,
     private val baseRetryDelayMillis: Long = 400L,
@@ -185,6 +193,7 @@ class OverseasIntelApiClient(
     }
 
     private val clockOffsetSeconds = AtomicLong(0L)
+    private val rateLimitedUntilSeconds = AtomicLong(0L)
 
     suspend fun checkHealth(): Boolean = withContext(ioDispatcher) {
         val url = baseHttpUrl().newBuilder()
@@ -203,7 +212,22 @@ class OverseasIntelApiClient(
         page: Int = 1,
         pageSize: Int = DEFAULT_PAGE_SIZE,
         query: String = "",
-    ): OverseasOffersPageResult = withContext(ioDispatcher) {
+    ): OverseasOffersPageResult =
+        checkNotNull(
+            fetchOffersPageConditional(
+                page = page,
+                pageSize = pageSize,
+                query = query,
+            ).data,
+        )
+
+    suspend fun fetchOffersPageConditional(
+        page: Int = 1,
+        pageSize: Int = DEFAULT_PAGE_SIZE,
+        query: String = "",
+        ifNoneMatch: String? = null,
+        ifModifiedSince: String? = null,
+    ): ConditionalFetchResult<OverseasOffersPageResult> = withContext(ioDispatcher) {
         val builder = baseHttpUrl().newBuilder()
             .addPathSegments("api/v1/offers")
             .addQueryParameter("page", page.coerceAtLeast(1).toString())
@@ -212,32 +236,96 @@ class OverseasIntelApiClient(
         if (trimmedQuery.isNotEmpty()) {
             builder.addQueryParameter("q", trimmedQuery)
         }
-        val plaintextJson = executeSignedEncryptedGet(builder.build())
-        parseOffersPageJson(plaintextJson)
+        val cond = executeSignedEncryptedGet(
+            url = builder.build(),
+            ifNoneMatch = ifNoneMatch,
+            ifModifiedSince = ifModifiedSince,
+        )
+        ConditionalFetchResult(
+            data = cond.plaintextJson?.let(::parseOffersPageJson),
+            notModified = cond.notModified,
+            etag = cond.etag,
+            lastModified = cond.lastModified,
+        )
     }
 
-    suspend fun fetchOfferDetail(offerId: String): OverseasOfferDetail = withContext(ioDispatcher) {
+    suspend fun fetchOfferDetail(offerId: String): OverseasOfferDetail =
+        checkNotNull(fetchOfferDetailConditional(offerId = offerId).data)
+
+    suspend fun fetchOfferDetailConditional(
+        offerId: String,
+        ifNoneMatch: String? = null,
+        ifModifiedSince: String? = null,
+    ): ConditionalFetchResult<OverseasOfferDetail> = withContext(ioDispatcher) {
         require(offerId.isNotBlank()) { "offerId must not be blank" }
         val url = baseHttpUrl().newBuilder()
             .addPathSegments("api/v1/offers")
             .addPathSegment(offerId.trim())
             .build()
-        val plaintextJson = executeSignedEncryptedGet(url)
-        parseOfferDetailJson(plaintextJson)
+        val cond = executeSignedEncryptedGet(
+            url = url,
+            ifNoneMatch = ifNoneMatch,
+            ifModifiedSince = ifModifiedSince,
+        )
+        ConditionalFetchResult(
+            data = cond.plaintextJson?.let(::parseOfferDetailJson),
+            notModified = cond.notModified,
+            etag = cond.etag,
+            lastModified = cond.lastModified,
+        )
     }
 
-    suspend fun fetchOfferRepost(offerId: String): OverseasRepostContent = withContext(ioDispatcher) {
+    suspend fun fetchOfferRepost(offerId: String): OverseasRepostContent =
+        checkNotNull(fetchOfferRepostConditional(offerId = offerId).data)
+
+    suspend fun fetchOfferRepostConditional(
+        offerId: String,
+        ifNoneMatch: String? = null,
+        ifModifiedSince: String? = null,
+    ): ConditionalFetchResult<OverseasRepostContent> = withContext(ioDispatcher) {
         require(offerId.isNotBlank()) { "offerId must not be blank" }
         val url = baseHttpUrl().newBuilder()
             .addPathSegments("api/v1/offers")
             .addPathSegment(offerId.trim())
             .addPathSegment("repost")
             .build()
-        val plaintextJson = executeSignedEncryptedGet(url)
-        parseOfferRepostJson(plaintextJson)
+        val cond = executeSignedEncryptedGet(
+            url = url,
+            ifNoneMatch = ifNoneMatch,
+            ifModifiedSince = ifModifiedSince,
+        )
+        ConditionalFetchResult(
+            data = cond.plaintextJson?.let(::parseOfferRepostJson),
+            notModified = cond.notModified,
+            etag = cond.etag,
+            lastModified = cond.lastModified,
+        )
     }
 
-    private suspend fun executeSignedEncryptedGet(url: HttpUrl): String {
+    private data class RawConditionalResponse(
+        val notModified: Boolean,
+        val plaintextJson: String?,
+        val etag: String?,
+        val lastModified: String?,
+    )
+
+    private suspend fun executeSignedEncryptedGet(
+        url: HttpUrl,
+        ifNoneMatch: String? = null,
+        ifModifiedSince: String? = null,
+    ): RawConditionalResponse {
+        val nowSec = nowSecondsProvider()
+        val cooldownUntil = rateLimitedUntilSeconds.get()
+        if (nowSec < cooldownUntil) {
+            val remaining = (cooldownUntil - nowSec).coerceAtLeast(1L)
+            throw OverseasApiException(
+                statusCode = 429,
+                errorCode = "RATE_LIMITED",
+                message = "请求过于频繁，请 ${remaining} 秒后重试",
+                retryAfterSeconds = remaining,
+            )
+        }
+
         val totalAttempts = maxAttempts.coerceAtLeast(1)
         var lastException: Throwable? = null
         var retriedClockSkew = false
@@ -245,12 +333,32 @@ class OverseasIntelApiClient(
         var attempt = 1
         while (attempt <= totalAttempts) {
             try {
-                val request = buildSignedGetRequest(url)
+                val request = buildSignedGetRequest(
+                    url = url,
+                    ifNoneMatch = ifNoneMatch,
+                    ifModifiedSince = ifModifiedSince,
+                )
                 val response = executeRaw(request)
+                if (response.code == 304) {
+                    rateLimitedUntilSeconds.set(0L)
+                    return RawConditionalResponse(
+                        notModified = true,
+                        plaintextJson = null,
+                        etag = response.etag ?: ifNoneMatch?.trim()?.takeIf { it.isNotEmpty() },
+                        lastModified = response.lastModified ?: ifModifiedSince?.trim()?.takeIf { it.isNotEmpty() },
+                    )
+                }
                 if (response.code == 200) {
-                    return OverseasApiCrypto.decryptEnvelope(
+                    rateLimitedUntilSeconds.set(0L)
+                    val plaintext = OverseasApiCrypto.decryptEnvelope(
                         aesKey = aesKey,
                         rawEnvelopeJson = response.body,
+                    )
+                    return RawConditionalResponse(
+                        notModified = false,
+                        plaintextJson = plaintext,
+                        etag = response.etag,
+                        lastModified = response.lastModified,
                     )
                 }
 
@@ -265,8 +373,19 @@ class OverseasIntelApiClient(
                     }
                 }
 
-                val apiError = parseApiError(response.code, response.body)
+                val apiError = parseApiError(response.code, response.body, response.retryAfterSeconds)
+                if (response.code == 429 && response.retryAfterSeconds != null &&
+                    response.retryAfterSeconds > MAX_INLINE_RETRY_AFTER_SEC
+                ) {
+                    // Respect large Retry-After without sleeping long on a UI call or retrying prematurely.
+                    updateRateLimitCooldown(response.retryAfterSeconds)
+                    throw apiError
+                }
+
                 if (!isRetryableStatus(response.code) || attempt >= totalAttempts) {
+                    if (response.code == 429) {
+                        updateRateLimitCooldown(response.retryAfterSeconds ?: DEFAULT_RATE_LIMIT_COOLDOWN_SEC)
+                    }
                     throw apiError
                 }
                 lastException = apiError
@@ -274,11 +393,16 @@ class OverseasIntelApiClient(
                 sleeper(waitMs)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                if (t is OverseasApiException && !isRetryableStatus(t.statusCode)) {
+                if (t is OverseasApiException && (!isRetryableStatus(t.statusCode) ||
+                        (t.statusCode == 429 && (t.retryAfterSeconds ?: 0L) > MAX_INLINE_RETRY_AFTER_SEC))
+                ) {
                     throw t
                 }
                 lastException = t
                 if (attempt >= totalAttempts) {
+                    if (t is OverseasApiException && t.statusCode == 429) {
+                        updateRateLimitCooldown(t.retryAfterSeconds ?: DEFAULT_RATE_LIMIT_COOLDOWN_SEC)
+                    }
                     throw t
                 }
                 val waitMs = computeRetryDelayMs(attempt, retryAfterSeconds = null)
@@ -290,7 +414,16 @@ class OverseasIntelApiClient(
         throw (lastException ?: IOException("Overseas API request failed"))
     }
 
-    internal fun buildSignedGetRequest(url: HttpUrl): Request {
+    private fun updateRateLimitCooldown(retryAfterSeconds: Long) {
+        val targetUntil = nowSecondsProvider() + retryAfterSeconds.coerceIn(1L, MAX_COOLDOWN_CAP_SEC)
+        rateLimitedUntilSeconds.updateAndGet { prev -> maxOf(prev, targetUntil) }
+    }
+
+    internal fun buildSignedGetRequest(
+        url: HttpUrl,
+        ifNoneMatch: String? = null,
+        ifModifiedSince: String? = null,
+    ): Request {
         val method = "GET"
         val pathWithQuery = url.encodedPath + (url.encodedQuery?.let { "?$it" }.orEmpty())
         val timestampSec = (nowSecondsProvider() + clockOffsetSeconds.get()).toString()
@@ -302,14 +435,20 @@ class OverseasIntelApiClient(
             timestampSec = timestampSec,
             nonce = nonce,
         )
-        return Request.Builder()
+        val builder = Request.Builder()
             .url(url)
             .get()
             .header("Accept", "application/json")
             .header(HEADER_TIMESTAMP, timestampSec)
             .header(HEADER_NONCE, nonce)
             .header(HEADER_SIGNATURE, signature)
-            .build()
+        if (!ifNoneMatch.isNullOrBlank()) {
+            builder.header("If-None-Match", ifNoneMatch.trim())
+        }
+        if (!ifModifiedSince.isNullOrBlank()) {
+            builder.header("If-Modified-Since", ifModifiedSince.trim())
+        }
+        return builder.build()
     }
 
     private fun baseHttpUrl(): HttpUrl =
@@ -322,13 +461,12 @@ class OverseasIntelApiClient(
         if (retryAfterSeconds != null && retryAfterSeconds > 0L) {
             return (retryAfterSeconds * 1000L).coerceAtMost(MAX_RETRY_WAIT_MS)
         }
-        val exp = baseRetryDelayMillis * (1L shl (attempt - 1).coerceAtMost(4))
-        val jitter = if (baseRetryDelayMillis > 0L) {
-            ThreadLocalRandom.current().nextLong(0L, (baseRetryDelayMillis / 2L).coerceAtLeast(1L))
-        } else {
-            0L
-        }
-        return (exp + jitter).coerceAtMost(MAX_RETRY_WAIT_MS)
+        if (baseRetryDelayMillis <= 0L) return 0L
+        val exp = (baseRetryDelayMillis * (1L shl (attempt - 1).coerceAtMost(5)))
+            .coerceAtMost(MAX_RETRY_WAIT_MS)
+        val half = (exp / 2L).coerceAtLeast(1L)
+        val jitter = ThreadLocalRandom.current().nextLong(0L, half + 1L)
+        return (half + jitter).coerceAtMost(MAX_RETRY_WAIT_MS)
     }
 
     private data class RawHttpResponse(
@@ -336,6 +474,8 @@ class OverseasIntelApiClient(
         val body: String,
         val retryAfterSeconds: Long?,
         val serverEpochSeconds: Long?,
+        val etag: String?,
+        val lastModified: String?,
     )
 
     private suspend fun executeRaw(request: Request): RawHttpResponse =
@@ -354,6 +494,8 @@ class OverseasIntelApiClient(
                         val bodyText = resp.body?.string().orEmpty()
                         val retryAfter = resp.header("Retry-After")?.trim()?.toLongOrNull()
                         val serverSec = resp.header("Date")?.let(::parseHttpDateSeconds)
+                        val etag = resp.header("ETag")?.trim()?.takeIf { it.isNotEmpty() }
+                        val lastModified = resp.header("Last-Modified")?.trim()?.takeIf { it.isNotEmpty() }
                         if (continuation.isActive) {
                             continuation.resume(
                                 RawHttpResponse(
@@ -361,6 +503,8 @@ class OverseasIntelApiClient(
                                     body = bodyText,
                                     retryAfterSeconds = retryAfter,
                                     serverEpochSeconds = serverSec,
+                                    etag = etag,
+                                    lastModified = lastModified,
                                 ),
                             )
                         }
@@ -374,7 +518,10 @@ class OverseasIntelApiClient(
         const val HEADER_NONCE = "X-Nonce"
         const val HEADER_SIGNATURE = "X-Signature"
         const val DEFAULT_PAGE_SIZE = 20
-        private const val MAX_RETRY_WAIT_MS = 5_000L
+        private const val MAX_RETRY_WAIT_MS = 10_000L
+        private const val MAX_INLINE_RETRY_AFTER_SEC = 10L
+        private const val DEFAULT_RATE_LIMIT_COOLDOWN_SEC = 5L
+        private const val MAX_COOLDOWN_CAP_SEC = 120L
 
         private val apiJson = Json {
             ignoreUnknownKeys = true
@@ -560,7 +707,11 @@ class OverseasIntelApiClient(
                     .toEpochSecond()
             }.getOrNull()
 
-        private fun parseApiError(statusCode: Int, rawBody: String): OverseasApiException {
+        private fun parseApiError(
+            statusCode: Int,
+            rawBody: String,
+            retryAfterSeconds: Long? = null,
+        ): OverseasApiException {
             val dto = runCatching {
                 if (rawBody.isBlank()) null else apiJson.decodeFromString<ApiErrorEnvelopeDto>(rawBody)
             }.getOrNull()?.error
@@ -568,6 +719,8 @@ class OverseasIntelApiClient(
             val code = dto?.code?.trim().orEmpty()
             val serverMessage = dto?.message?.trim().orEmpty()
             val friendlyMessage = when {
+                statusCode == 429 && retryAfterSeconds != null && retryAfterSeconds > 0L ->
+                    "请求过于频繁，请 ${retryAfterSeconds} 秒后重试"
                 statusCode == 429 -> "请求过于频繁，请稍后重试"
                 serverMessage.isNotBlank() -> serverMessage
                 statusCode == 401 -> "接口鉴权失败（HTTP 401）"
@@ -579,6 +732,7 @@ class OverseasIntelApiClient(
                 statusCode = statusCode,
                 errorCode = code,
                 message = friendlyMessage,
+                retryAfterSeconds = retryAfterSeconds,
             )
         }
     }

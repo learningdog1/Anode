@@ -67,7 +67,24 @@ interface OverseasIntelRepository {
     suspend fun testTranslationConfig(config: OverseasTranslationConfig): Result<String>
 
     /**
+     * Refreshes page 1 of promotions only if cached data is missing or older than [maxAgeMillis].
+     */
+    suspend fun refreshIfStale(
+        query: String = "",
+        maxAgeMillis: Long = DEFAULT_STALE_REFRESH_MILLIS,
+    ): Result<List<OverseasDealOffer>> = refresh(query)
+
+    /**
+     * Updates the domain-layer spam/low-quality offer filter configuration and re-evaluates cached items.
+     */
+    suspend fun updateFilterConfig(config: OverseasOfferFilterConfig) = Unit
+
+    /**
      * Clears persisted translation cache on disk.
      */
     suspend fun clearTranslationCache()
+
+    companion object {
+        const val DEFAULT_STALE_REFRESH_MILLIS = 10L * 60_000L
+    }
 }

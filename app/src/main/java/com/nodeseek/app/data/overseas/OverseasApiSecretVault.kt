@@ -1,6 +1,7 @@
 package com.nodeseek.app.data.overseas
 
 import okhttp3.CertificatePinner
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import java.io.ByteArrayInputStream
@@ -145,6 +146,12 @@ object OverseasApiSecretVault {
     }
 
     /**
+     * Shared singleton [OkHttpClient] reusing connection pool, dispatcher, and TLS sessions
+     * across repository instances.
+     */
+    val sharedPinnedHttpClient: OkHttpClient by lazy { buildPinnedHttpClient() }
+
+    /**
      * Builds an [OkHttpClient] exclusively trusting the pinned X.509 v3 server certificate
      * plus SPKI [CertificatePinner] verification.
      */
@@ -199,10 +206,12 @@ object OverseasApiSecretVault {
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, strictPinnedTrustManager)
             .certificatePinner(pinner)
+            .connectionPool(ConnectionPool(5, 5L, TimeUnit.MINUTES))
             .connectTimeout(connectTimeoutSec, TimeUnit.SECONDS)
             .readTimeout(readTimeoutSec, TimeUnit.SECONDS)
             .callTimeout(callTimeoutSec, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+            // Disabled here so OverseasIntelApiClient retries with a fresh HMAC nonce & backoff+jitter.
+            .retryOnConnectionFailure(false)
             .build()
     }
 
