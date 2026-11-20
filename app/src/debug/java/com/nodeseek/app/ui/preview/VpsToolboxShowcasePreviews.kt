@@ -23,11 +23,6 @@ import androidx.compose.ui.unit.dp
 import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
 import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.di.LocalAppContainer
-import com.nodeseek.app.domain.deals.DealFilterEngine
-import com.nodeseek.app.domain.deals.DealFilterState
-import com.nodeseek.app.domain.deals.DealSource
-import com.nodeseek.app.domain.deals.DealTags
-import com.nodeseek.app.domain.deals.PromoDealCardModel
 import com.nodeseek.app.domain.fleet.AssetExpiryUrgency
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetPortfolioSummary
@@ -76,8 +71,7 @@ import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.ValuationCurrency
-import com.nodeseek.app.ui.deals.DealsHubScreen
-import com.nodeseek.app.ui.deals.DealsHubUiState
+import com.nodeseek.app.ui.activity.ActivityScreen
 import com.nodeseek.app.ui.fleet.MyServersScreen
 import com.nodeseek.app.ui.fleet.MyServersTab
 import com.nodeseek.app.ui.fleet.MyServersUiState
@@ -102,128 +96,18 @@ import java.math.BigDecimal
 private const val TOOLBOX_PHONE_SPEC = "spec:width=412dp,height=915dp,dpi=320"
 private const val TOOLBOX_TALL_SPEC = "spec:width=412dp,height=1080dp,dpi=320"
 
-// Fixed reference timestamp: 2026-11-19 21:50:00 +08:00 (8 days before Black Friday 2026-11-27)
 private const val SHOWCASE_NOW_MILLIS = 1_795_096_200_000L
 
-// ── Feature 2: Black Friday & Major Promo Hub ────────────────────────────────────────────
+// ── Feature 2: Activity Hub (ForumWatch Placeholder) ──────────────────────────────────────
 
 @Preview(device = TOOLBOX_PHONE_SPEC, showBackground = true)
 @Composable
-fun Showcase01BlackFridayDealsHub() {
-    val sampleDeals = remember {
-        listOf(
-            PromoDealCardModel(
-                id = "ns-bf-01",
-                source = DealSource.NODESEEK,
-                topicId = 412088L,
-                sourceUrl = "https://www.nodeseek.com/post-412088-1",
-                orderUrl = "https://www.dmit.io/cart.php?a=add&pid=186",
-                merchantName = "DMIT",
-                title = "[黑五补货] DMIT LAX.Pro.WEE 美西三网 CN2 GIA 限量款回归 \$36.90/年",
-                translatedSummary = "1 vCPU · 1GB RAM · 20GB NVMe · 500GB@500Mbps · 三网 CN2 GIA / CMIN2 回程",
-                rawPriceText = "\$36.90/年",
-                priceAmount = BigDecimal("36.90"),
-                currency = ValuationCurrency.USD,
-                annualizedUsd = BigDecimal("36.90"),
-                annualizedCny = BigDecimal("267.16"),
-                billingCycleLabel = "年付",
-                cpuCores = 1,
-                ramText = "1GB RAM",
-                storageText = "20G NVMe",
-                trafficText = "500GB",
-                portSpeedText = "500Mbps",
-                regionTags = listOf(DealTags.REGION_US_WEST),
-                routeTags = listOf(DealTags.ROUTE_CN2_GIA, DealTags.ROUTE_CMIN2),
-                promoCode = "BF2026-GIA",
-                expiresAtEpochMillis = SHOWCASE_NOW_MILLIS + 36L * 3_600_000L,
-                publishedAtEpochMillis = SHOWCASE_NOW_MILLIS - 18L * 60_000L,
-                replyCount = 142,
-                isOutOfStockHint = false,
-                authorName = "gia_watcher",
-                categorySlug = "info",
-            ),
-            PromoDealCardModel(
-                id = "ns-bf-02",
-                source = DealSource.NODESEEK,
-                topicId = 412055L,
-                sourceUrl = "https://www.nodeseek.com/post-412055-1",
-                orderUrl = "https://my.racknerd.com/cart.php?a=add&pid=901",
-                merchantName = "RackNerd",
-                title = "RackNerd 黑五闪购 2C 2.5G 45G NVMe 洛杉矶/圣何塞 年付仅 \$14.99",
-                translatedSummary = "续费同价，可选 DC02 洛杉矶多线机房，支持支付宝/PayPal",
-                rawPriceText = "\$14.99/年",
-                priceAmount = BigDecimal("14.99"),
-                currency = ValuationCurrency.USD,
-                annualizedUsd = BigDecimal("14.99"),
-                annualizedCny = BigDecimal("108.53"),
-                billingCycleLabel = "年付",
-                cpuCores = 2,
-                ramText = "2.5GB RAM",
-                storageText = "45G NVMe",
-                trafficText = "4TB",
-                portSpeedText = "1Gbps",
-                regionTags = listOf(DealTags.REGION_US_WEST),
-                routeTags = listOf(DealTags.ROUTE_BGP),
-                promoCode = "RNBF2026",
-                expiresAtEpochMillis = SHOWCASE_NOW_MILLIS + 6L * 3_600_000L,
-                publishedAtEpochMillis = SHOWCASE_NOW_MILLIS - 45L * 60_000L,
-                replyCount = 96,
-                isOutOfStockHint = false,
-                authorName = "deal_radar",
-                categorySlug = "info",
-            ),
-            PromoDealCardModel(
-                id = "ns-bf-03",
-                source = DealSource.NODESEEK,
-                topicId = 412019L,
-                sourceUrl = "https://www.nodeseek.com/post-412019-1",
-                orderUrl = "https://claw.cloud/cart.php?a=add&pid=88",
-                merchantName = "ClawCloud",
-                title = "ClawCloud 香港优化直连 2C 2G 40G NVMe 1TB 双向 \$18.00/年 限量缺货蹲守",
-                translatedSummary = "香港阿里云 BGP 优化路线，电信/联通/移动晚高峰低延迟",
-                rawPriceText = "\$18.00/年",
-                priceAmount = BigDecimal("18.00"),
-                currency = ValuationCurrency.USD,
-                annualizedUsd = BigDecimal("18.00"),
-                annualizedCny = BigDecimal("130.32"),
-                billingCycleLabel = "年付",
-                cpuCores = 2,
-                ramText = "2GB RAM",
-                storageText = "40G NVMe",
-                trafficText = "1TB",
-                portSpeedText = "1Gbps",
-                regionTags = listOf(DealTags.REGION_HK),
-                routeTags = listOf(DealTags.ROUTE_BGP, DealTags.ROUTE_CMIN2),
-                promoCode = "HKBF18",
-                expiresAtEpochMillis = SHOWCASE_NOW_MILLIS + 72L * 3_600_000L,
-                publishedAtEpochMillis = SHOWCASE_NOW_MILLIS - 95L * 60_000L,
-                replyCount = 218,
-                isOutOfStockHint = true,
-                authorName = "hk_routing",
-                categorySlug = "info",
-            ),
-        )
-    }
-
+fun Showcase01ActivityHub() {
     PreviewPhoneFrame(themeMode = PulseThemeMode.PAPER_LIGHT) {
         val container = LocalAppContainer.current
-        DealsHubScreen(
-            dealsRepository = container.dealsRepository,
-            onOpenTopic = { _, _ -> },
-            onAddRestockWatch = { _, _, _, _ -> },
+        ActivityScreen(
+            repository = container.activityRepository,
             onBack = {},
-            nowMillisProvider = { SHOWCASE_NOW_MILLIS },
-            previewUiState = DealsHubUiState(
-                allDeals = sampleDeals,
-                filteredDeals = sampleDeals,
-                filterState = DealFilterState(),
-                summaryStats = DealFilterEngine.summarize(sampleDeals),
-                isInitialLoading = false,
-                isRefreshing = false,
-                fxUsdToCnyRate = BigDecimal("7.24"),
-                fxProviderDate = "2026-11-19",
-                lastUpdatedEpochMillis = SHOWCASE_NOW_MILLIS - 60_000L,
-            ),
         )
     }
 }

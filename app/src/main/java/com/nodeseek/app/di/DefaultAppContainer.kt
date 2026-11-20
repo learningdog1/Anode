@@ -5,7 +5,6 @@ import android.os.Build
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
-import com.nodeseek.app.data.deals.DealsRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetAlertNotifier
 import com.nodeseek.app.data.fleet.FleetMonitorWorker
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
@@ -53,20 +52,13 @@ import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.domain.activity.ActivityRepository
+import com.nodeseek.app.domain.activity.EmptyActivityRepository
 import com.nodeseek.app.domain.backup.BackupManager
-import com.nodeseek.app.domain.deals.DealBillingCycle
-import com.nodeseek.app.domain.deals.DealPostExtractor
-import com.nodeseek.app.domain.deals.DealSource
-import com.nodeseek.app.domain.deals.DealsRepository
-import com.nodeseek.app.domain.deals.ExternalDealsBridge
-import com.nodeseek.app.domain.deals.PromoDealCardModel
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
-import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
-import com.nodeseek.app.domain.overseas.OverseasPriceCycle
-import com.nodeseek.app.domain.overseas.OverseasSource
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
@@ -409,30 +401,9 @@ class DefaultAppContainer(
         )
     }
 
-    private val overseasExternalDealsBridge: ExternalDealsBridge by lazy {
-        ExternalDealsBridge {
-            val cached = runCatching { overseasIntelRepository.loadFromCache() }.getOrDefault(emptyList())
-            val lastSynced = overseasIntelRepository.snapshot.value.syncStatus.lastSyncedEpochMillis
-            val isStale = cached.isEmpty() ||
-                lastSynced <= 0L ||
-                (System.currentTimeMillis() - lastSynced) > 15L * 60_000L
-            val offers = if (isStale) {
-                overseasIntelRepository.refresh(forceTranslate = false).getOrDefault(cached)
-            } else {
-                cached
-            }
-            val fxRates = exchangeRateRepository.state.value
-            offers.map { offer -> offer.toPromoDealCardModel(fxRates) }
-        }
-    }
-
-    override val dealsRepository: DealsRepository by lazy {
-        DealsRepositoryImpl(
-            context = appContext,
-            forumRepository = forumRepository,
-            exchangeRateRepository = exchangeRateRepository,
-            externalDealsBridge = overseasExternalDealsBridge,
-        )
+    override val activityRepository: ActivityRepository by lazy {
+        // TODO(ForumWatch): 接入真实 ForumWatch ActivityRepository 实现
+        EmptyActivityRepository()
     }
 
     override val sellerTrustRepository: SellerTrustRepository by lazy {
@@ -478,69 +449,4 @@ class DefaultAppContainer(
             repository = fleetRepository,
         )
     }
-}
-
-private fun OverseasDealOffer.toPromoDealCardModel(
-    fxRates: com.nodeseek.app.data.valuation.FxRatesState,
-): PromoDealCardModel {
-    val extracted = DealPostExtractor.extract(
-        title = originalTitle,
-        body = originalSummary,
-        fxRates = fxRates,
-        publishedAtEpochMillis = publishedAtEpochMillis,
-        fallbackUrl = primaryOrderUrl,
-    )
-    val bestPrice = primaryPrice
-    val cycleLabel = bestPrice?.cycle?.toDealBillingCycleLabel()?.takeIf { it.isNotBlank() }
-        ?: extracted.billingCycle.label
-    val displayTitle = translatedTitle?.takeIf { it.isNotBlank() } ?: originalTitle
-    val displaySummary = translatedSummary?.takeIf { it.isNotBlank() }
-        ?: originalSummary.ifBlank { extracted.cleanSummary }
-    val resolvedOrderUrl = orderLinks.firstOrNull()?.takeIf { it.isNotBlank() } ?: extracted.orderUrl
-
-    return PromoDealCardModel(
-        id = "overseas_${source.name.lowercase()}_$id",
-        source = when (source) {
-            OverseasSource.LET -> DealSource.OVERSEAS_LET
-            OverseasSource.LEB -> DealSource.OVERSEAS_LEB
-        },
-        topicId = null,
-        sourceUrl = sourceLink,
-        orderUrl = resolvedOrderUrl,
-        merchantName = extracted.merchantName.ifBlank { authorOrProvider },
-        title = displayTitle,
-        translatedSummary = displaySummary,
-        rawPriceText = bestPrice?.rawText ?: extracted.rawPriceText,
-        priceAmount = bestPrice?.originalAmount ?: extracted.priceAmount,
-        currency = bestPrice?.currency ?: extracted.currency,
-        annualizedUsd = bestPrice?.annualizedUsd ?: extracted.annualizedUsd,
-        annualizedCny = bestPrice?.annualizedCny ?: extracted.annualizedCny,
-        billingCycleLabel = cycleLabel,
-        cpuCores = extracted.cpuCores,
-        ramText = extracted.ramText,
-        storageText = extracted.storageText,
-        trafficText = extracted.trafficText,
-        portSpeedText = extracted.portSpeedText,
-        regionTags = extracted.regionTags,
-        routeTags = extracted.routeTags,
-        promoCode = couponCodes.firstOrNull()?.takeIf { it.isNotBlank() } ?: extracted.promoCode,
-        expiresAtEpochMillis = extracted.expiresAtEpochMillis,
-        publishedAtEpochMillis = publishedAtEpochMillis,
-        replyCount = 0,
-        isOutOfStockHint = isOutOfStockHint || extracted.isOutOfStockHint,
-        authorName = authorOrProvider,
-        categorySlug = "overseas",
-        isDetailEnriched = true,
-    )
-}
-
-private fun OverseasPriceCycle.toDealBillingCycleLabel(): String = when (this) {
-    OverseasPriceCycle.MONTHLY -> DealBillingCycle.MONTHLY.label
-    OverseasPriceCycle.QUARTERLY -> DealBillingCycle.QUARTERLY.label
-    OverseasPriceCycle.SEMI_ANNUAL -> DealBillingCycle.SEMI_ANNUAL.label
-    OverseasPriceCycle.ANNUAL -> DealBillingCycle.ANNUAL.label
-    OverseasPriceCycle.BIENNIAL -> DealBillingCycle.BIENNIAL.label
-    OverseasPriceCycle.TRIENNIAL -> DealBillingCycle.TRIENNIAL.label
-    OverseasPriceCycle.ONE_TIME -> DealBillingCycle.ONE_TIME.label
-    OverseasPriceCycle.UNKNOWN -> ""
 }

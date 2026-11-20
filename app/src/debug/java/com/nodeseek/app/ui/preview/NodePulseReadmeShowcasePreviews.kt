@@ -1078,7 +1078,7 @@ fun Preview16PulseRadarRules() {
 fun Preview17SeekMailInbox() {
     PreviewPhoneFrame(
         themeMode = PulseThemeMode.PAPER_LIGHT,
-        bottomDockTab = PulseNavTab.SEEK_MAIL,
+        bottomDockTab = PulseNavTab.FEATURE_HUB,
         showFab = false,
         unreadCount = 3,
     ) {
@@ -1419,7 +1419,7 @@ fun Preview25DynamicRedSeekMailLight() {
     PreviewPhoneFrame(
         themeMode = PulseThemeMode.PAPER_LIGHT,
         dynamicColor = true,
-        bottomDockTab = PulseNavTab.SEEK_MAIL,
+        bottomDockTab = PulseNavTab.FEATURE_HUB,
         showFab = false,
         unreadCount = 3,
     ) {

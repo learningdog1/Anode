@@ -38,13 +38,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.Mail
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material3.Icon
@@ -103,10 +103,10 @@ enum class PulseNavTab(
         selectedIcon = Icons.Rounded.Home,
         unselectedIcon = Icons.Outlined.Home,
     ),
-    SEEK_MAIL(
-        label = "邮箱",
-        selectedIcon = Icons.Rounded.Mail,
-        unselectedIcon = Icons.Outlined.Mail,
+    FEATURE_HUB(
+        label = "功能栏",
+        selectedIcon = Icons.Rounded.GridView,
+        unselectedIcon = Icons.Outlined.GridView,
     ),
     PULSE_HUB(
         label = "我的",
@@ -190,7 +190,7 @@ fun PulseNavTabIconWithBadge(
 }
 
 /**
- * Edge-to-edge Floating Glass Pill Dock (`首页` / `邮箱` / `我的`).
+ * Edge-to-edge Floating Glass Pill Dock (`首页` / `功能栏` / `我的`).
  * Features a translucent beveled glass capsule, spring-driven gradient pill indicator,
  * subtle icon bounce, and crisp unread / check-in telemetry badges.
  */

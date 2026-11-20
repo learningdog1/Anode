@@ -197,7 +197,7 @@ fun AddRestockWatchBottomSheet(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (editingItem != null) "编辑补货蹲守" else "添加 VPS 补货蹲守",
+                        text = if (editingItem != null) "编辑补货监控" else "添加补货监控",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -357,7 +357,7 @@ fun AddRestockWatchBottomSheet(
                 onValueChange = { titleText = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("商品名称（留空自动提取）") },
-                placeholder = { Text("例如：RackNerd 2C2G 黑五特惠款") },
+                placeholder = { Text("例如：RackNerd 2C2G 年付特惠款") },
                 singleLine = true,
                 shape = PulseArchitecturalShapes.MediumBadge,
             )

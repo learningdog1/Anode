@@ -543,7 +543,7 @@ private fun RestockMonitorTopBar(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
-                    text = "VPS 补货抢购监控",
+                    text = "补货监控",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.ExtraBold,
                     color = MaterialTheme.colorScheme.onSurface,

@@ -133,9 +133,7 @@ data class RestockMonitorRoute(
 ) : AppDestination
 
 @Serializable
-data class DealsHubRoute(
-    val initialTab: Int = 0,
-) : AppDestination
+data object ActivityRoute : AppDestination
 
 @Serializable
 data object OverseasIntelRoute : AppDestination

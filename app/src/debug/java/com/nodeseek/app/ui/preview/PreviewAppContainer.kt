@@ -58,10 +58,10 @@ import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.activity.ActivityRepository
+import com.nodeseek.app.domain.activity.EmptyActivityRepository
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.backup.BackupManager
-import com.nodeseek.app.domain.deals.DealsFeedSnapshot
-import com.nodeseek.app.domain.deals.DealsRepository
 import com.nodeseek.app.domain.filter.ContentBlockRule
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
@@ -633,12 +633,7 @@ internal class PreviewAppContainer(
             RestockBackgroundPollOutcome.Completed()
     }
 
-    override val dealsRepository: DealsRepository = object : DealsRepository {
-        private val state = MutableStateFlow(DealsFeedSnapshot())
-        override val dealsState: StateFlow<DealsFeedSnapshot> = state.asStateFlow()
-        override suspend fun loadCachedDeals(): DealsFeedSnapshot = state.value
-        override suspend fun refreshDeals(force: Boolean): Result<DealsFeedSnapshot> = Result.success(state.value)
-    }
+    override val activityRepository: ActivityRepository = EmptyActivityRepository()
 
     override val sellerTrustRepository: SellerTrustRepository = object : SellerTrustRepository {
         private val notes = MutableStateFlow<Map<Long, LocalSellerNote>>(emptyMap())
