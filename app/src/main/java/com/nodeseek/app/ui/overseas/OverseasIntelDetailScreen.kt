@@ -1,5 +1,8 @@
 package com.nodeseek.app.ui.overseas
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,14 +23,16 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Article
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.ConfirmationNumber
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,16 +47,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -59,32 +62,32 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
+import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasForumPostFormatter
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.domain.overseas.SuggestedForumPost
-import com.nodeseek.app.domain.overseas.TranslationTier
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
+import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
+import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseShimmerBox
+import com.nodeseek.app.ui.theme.PulseThemeMode
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
+import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -92,25 +95,8 @@ data class OverseasOfferDetailUiState(
     val offerId: String = "",
     val detail: OverseasOfferDetail? = null,
     val isLoading: Boolean = true,
-    val isTranslating: Boolean = false,
     val isReposting: Boolean = false,
     val errorMessage: String? = null,
-    val displayMode: OverseasDisplayMode = OverseasDisplayMode.ORIGINAL,
-    val translationConfig: OverseasTranslationConfig = OverseasTranslationConfig(),
-    val isTestingTranslator: Boolean = false,
-    val translatorTestFeedback: String? = null,
-    val translatorTestSuccess: Boolean? = null,
-)
-
-private data class DetailLocalState(
-    val detail: OverseasOfferDetail? = null,
-    val isLoading: Boolean = true,
-    val isTranslating: Boolean = false,
-    val isReposting: Boolean = false,
-    val errorMessage: String? = null,
-    val isTestingTranslator: Boolean = false,
-    val translatorTestFeedback: String? = null,
-    val translatorTestSuccess: Boolean? = null,
 )
 
 class OverseasIntelDetailViewModel(
@@ -118,7 +104,8 @@ class OverseasIntelDetailViewModel(
     private val repository: OverseasIntelRepository,
 ) : ViewModel() {
 
-    private val localState = MutableStateFlow(DetailLocalState())
+    private val _uiState = MutableStateFlow(OverseasOfferDetailUiState(offerId = offerId))
+    val uiState: StateFlow<OverseasOfferDetailUiState> = _uiState.asStateFlow()
 
     private val _snackbarMessages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val snackbarMessages: SharedFlow<String> = _snackbarMessages.asSharedFlow()
@@ -126,39 +113,16 @@ class OverseasIntelDetailViewModel(
     private val _repostDraftEvents = MutableSharedFlow<SuggestedForumPost>(extraBufferCapacity = 4)
     val repostDraftEvents: SharedFlow<SuggestedForumPost> = _repostDraftEvents.asSharedFlow()
 
-    val uiState: StateFlow<OverseasOfferDetailUiState> = combine(
-        repository.snapshot,
-        localState,
-    ) { snapshot, local ->
-        OverseasOfferDetailUiState(
-            offerId = offerId,
-            detail = local.detail,
-            isLoading = local.isLoading,
-            isTranslating = local.isTranslating,
-            isReposting = local.isReposting,
-            errorMessage = local.errorMessage,
-            displayMode = snapshot.translationConfig.displayMode,
-            translationConfig = snapshot.translationConfig,
-            isTestingTranslator = local.isTestingTranslator,
-            translatorTestFeedback = local.translatorTestFeedback,
-            translatorTestSuccess = local.translatorTestSuccess,
-        )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = OverseasOfferDetailUiState(offerId = offerId),
-    )
-
     init {
         loadDetail(forceRefresh = false)
     }
 
     fun loadDetail(forceRefresh: Boolean) {
         viewModelScope.launch {
-            localState.update { it.copy(isLoading = true, errorMessage = null) }
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             val result = repository.getOfferDetail(offerId = offerId, forceRefresh = forceRefresh)
             result.onSuccess { detail ->
-                localState.update {
+                _uiState.update {
                     it.copy(
                         detail = detail,
                         isLoading = false,
@@ -166,7 +130,7 @@ class OverseasIntelDetailViewModel(
                     )
                 }
             }.onFailure { err ->
-                localState.update {
+                _uiState.update {
                     it.copy(
                         isLoading = false,
                         errorMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "加载促销详情失败，请检查网络连接",
@@ -176,49 +140,13 @@ class OverseasIntelDetailViewModel(
         }
     }
 
-    fun translateDetail(forceRefresh: Boolean = true) {
-        if (localState.value.isTranslating) return
-        viewModelScope.launch {
-            localState.update { it.copy(isTranslating = true) }
-            try {
-                val result = repository.translateOfferDetail(offerId = offerId, forceRefresh = forceRefresh)
-                result.onSuccess { updated ->
-                    localState.update { it.copy(detail = updated) }
-                    if (repository.snapshot.value.translationConfig.displayMode == OverseasDisplayMode.ORIGINAL) {
-                        repository.updateDisplayMode(OverseasDisplayMode.CHINESE)
-                    }
-                    _snackbarMessages.tryEmit("详情翻译完成（${updated.translationTier.label}）")
-                }.onFailure { err ->
-                    _snackbarMessages.tryEmit(err.message?.takeIf { it.isNotBlank() } ?: "详情翻译失败")
-                }
-            } finally {
-                localState.update { it.copy(isTranslating = false) }
-            }
-        }
-    }
-
-    fun cycleDisplayMode() {
-        viewModelScope.launch {
-            val current = uiState.value.displayMode
-            val next = when (current) {
-                OverseasDisplayMode.ORIGINAL -> OverseasDisplayMode.CHINESE
-                OverseasDisplayMode.CHINESE -> OverseasDisplayMode.BILINGUAL
-                OverseasDisplayMode.BILINGUAL -> OverseasDisplayMode.ORIGINAL
-            }
-            repository.updateDisplayMode(next)
-            if (next != OverseasDisplayMode.ORIGINAL && localState.value.detail?.translatedMarkdown.isNullOrBlank()) {
-                translateDetail(forceRefresh = false)
-            }
-        }
-    }
-
     fun prepareRepost() {
-        if (localState.value.isReposting) return
+        if (_uiState.value.isReposting) return
         viewModelScope.launch {
-            localState.update { it.copy(isReposting = true) }
+            _uiState.update { it.copy(isReposting = true) }
             try {
                 val fallbackOffer = repository.snapshot.value.offers.firstOrNull { it.id == offerId }
-                    ?: localState.value.detail?.let { d ->
+                    ?: _uiState.value.detail?.let { d ->
                         OverseasDealOffer(
                             id = d.id,
                             title = d.title,
@@ -241,70 +169,13 @@ class OverseasIntelDetailViewModel(
                     _snackbarMessages.tryEmit(err.message?.takeIf { it.isNotBlank() } ?: "获取主楼搬运内容失败，请稍后重试")
                 }
             } finally {
-                localState.update { it.copy(isReposting = false) }
+                _uiState.update { it.copy(isReposting = false) }
             }
         }
     }
 
-    fun saveTranslationConfig(
-        config: OverseasTranslationConfig,
-        retranslateAfterSave: Boolean,
-    ) {
-        viewModelScope.launch {
-            repository.updateTranslationConfig(config)
-            _snackbarMessages.tryEmit("翻译引擎配置已保存")
-            if (retranslateAfterSave) {
-                translateDetail(forceRefresh = true)
-            }
-        }
-    }
-
-    fun testTranslationConfig(config: OverseasTranslationConfig) {
-        if (localState.value.isTestingTranslator) return
-        viewModelScope.launch {
-            localState.update {
-                it.copy(
-                    isTestingTranslator = true,
-                    translatorTestFeedback = null,
-                    translatorTestSuccess = null,
-                )
-            }
-            val result = repository.testTranslationConfig(config)
-            localState.update {
-                it.copy(
-                    isTestingTranslator = false,
-                    translatorTestFeedback = result.fold(
-                        onSuccess = { msg -> msg },
-                        onFailure = { err -> err.message ?: "连接测试失败" },
-                    ),
-                    translatorTestSuccess = result.isSuccess,
-                )
-            }
-        }
-    }
-
-    fun clearTranslatorTestFeedback() {
-        localState.update {
-            it.copy(
-                translatorTestFeedback = null,
-                translatorTestSuccess = null,
-            )
-        }
-    }
-
-    fun clearTranslationCache() {
-        viewModelScope.launch {
-            repository.clearTranslationCache()
-            localState.update { state ->
-                state.copy(
-                    detail = state.detail?.copy(
-                        translatedMarkdown = null,
-                        translationTier = TranslationTier.NONE,
-                    ),
-                )
-            }
-            _snackbarMessages.tryEmit("已清空本地翻译缓存")
-        }
+    fun notifyMessage(message: String) {
+        _snackbarMessages.tryEmit(message)
     }
 
     companion object {
@@ -323,9 +194,9 @@ class OverseasIntelDetailViewModel(
 }
 
 /**
- * Detail screen presenting the full Telegram notification content (`GET /api/v1/offers/{id}`)
- * rendered cleanly with [MarkdownRenderer], optional detail translation, original post link,
- * and one-click main-post reposting (`GET /api/v1/offers/{id}/repost`).
+ * Detail screen presenting the full Telegram Chinese notification content (`GET /api/v1/offers/{id}`)
+ * rendered cleanly with [MarkdownRenderer], original thread link, and one-click main-post reposting
+ * (`GET /api/v1/offers/{id}/repost`).
  */
 @Composable
 fun OverseasIntelDetailScreen(
@@ -350,7 +221,6 @@ fun OverseasIntelDetailScreen(
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showTranslatorSheet by rememberSaveable { mutableStateOf(false) }
 
     val openLinkHandler: (String) -> Unit = remember(onOpenUrl, context) {
         { url ->
@@ -359,6 +229,14 @@ fun OverseasIntelDetailScreen(
             } else {
                 openOverseasExternalUrl(context, url)
             }
+        }
+    }
+
+    val copyPromoCodeHandler: (String) -> Unit = remember(context, viewModel) {
+        { code ->
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("promo_code", code))
+            viewModel.notifyMessage("已复制优惠码 $code")
         }
     }
 
@@ -384,14 +262,8 @@ fun OverseasIntelDetailScreen(
         topBar = {
             OverseasDetailTopBar(
                 subtitle = uiState.detail?.merchant?.takeIf { it.isNotBlank() } ?: "Telegram 促销通知详情",
-                displayMode = uiState.displayMode,
                 isRefreshing = uiState.isLoading,
                 onBack = onBack,
-                onCycleDisplayMode = viewModel::cycleDisplayMode,
-                onOpenSettings = {
-                    viewModel.clearTranslatorTestFeedback()
-                    showTranslatorSheet = true
-                },
                 onRefresh = { viewModel.loadDetail(forceRefresh = true) },
             )
         },
@@ -425,12 +297,12 @@ fun OverseasIntelDetailScreen(
                 }
                 else -> {
                     val detail = uiState.detail!!
-                    OverseasDetailHeaderCard(detail = detail)
+                    OverseasDetailHeaderCard(
+                        detail = detail,
+                        onCopyPromoCode = copyPromoCodeHandler,
+                    )
                     OverseasDetailMarkdownCard(
                         detail = detail,
-                        displayMode = uiState.displayMode,
-                        isTranslating = uiState.isTranslating,
-                        onTranslate = { viewModel.translateDetail(forceRefresh = true) },
                         onUrlClick = openLinkHandler,
                     )
                 }
@@ -438,34 +310,15 @@ fun OverseasIntelDetailScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
-
-    if (showTranslatorSheet) {
-        OverseasTranslatorSettingsSheet(
-            currentConfig = uiState.translationConfig,
-            isTesting = uiState.isTestingTranslator,
-            testFeedback = uiState.translatorTestFeedback,
-            testSuccess = uiState.translatorTestSuccess,
-            onDismiss = { showTranslatorSheet = false },
-            onTestConnection = viewModel::testTranslationConfig,
-            onClearCache = viewModel::clearTranslationCache,
-            onSave = { config, retranslate ->
-                viewModel.saveTranslationConfig(config, retranslateAfterSave = retranslate)
-            },
-        )
-    }
 }
 
 @Composable
 private fun OverseasDetailTopBar(
     subtitle: String,
-    displayMode: OverseasDisplayMode,
     isRefreshing: Boolean,
     onBack: () -> Unit,
-    onCycleDisplayMode: () -> Unit,
-    onOpenSettings: () -> Unit,
     onRefresh: () -> Unit,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -500,30 +353,6 @@ private fun OverseasDetailTopBar(
             )
         }
 
-        Box(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .border(0.8.dp, ext.cardBorder, CircleShape)
-                .clickable(onClick = onCycleDisplayMode)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = displayMode.shortLabel,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-        }
-
-        IconButton(onClick = onOpenSettings) {
-            Icon(
-                imageVector = Icons.Rounded.Tune,
-                contentDescription = "翻译设置",
-                tint = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-
         IconButton(onClick = onRefresh, enabled = !isRefreshing) {
             if (isRefreshing) {
                 CircularProgressIndicator(
@@ -542,20 +371,57 @@ private fun OverseasDetailTopBar(
 }
 
 @Composable
-private fun OverseasDetailHeaderCard(detail: OverseasOfferDetail) {
+private fun OverseasDetailHeaderCard(
+    detail: OverseasOfferDetail,
+    onCopyPromoCode: (String) -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
     val providerText = detail.merchant.ifBlank { detail.author }
+    val promoCode = detail.structured?.promoCode?.trim().orEmpty()
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                elevation = PulseElevation.Card,
+            )
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (providerText.isNotBlank() || detail.publishedAtEpochMillis > 0L) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (providerText.isNotBlank()) {
+                    PulseAccentPill(
+                        text = providerText,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
+                            alpha = if (isDark) 0.72f else 0.86f,
+                        ),
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                if (detail.publishedAtEpochMillis > 0L) {
+                    Text(
+                        text = formatRelativeTimeChinese(detail.publishedAtEpochMillis.toString()),
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         Text(
             text = detail.title,
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = MaterialTheme.colorScheme.onSurface,
         )
+
         if (detail.originalTitle.isNotBlank() && !detail.originalTitle.equals(detail.title, ignoreCase = true)) {
             Text(
                 text = detail.originalTitle,
@@ -564,25 +430,38 @@ private fun OverseasDetailHeaderCard(detail: OverseasOfferDetail) {
             )
         }
 
-        if (providerText.isNotBlank() || detail.publishedAtEpochMillis > 0L) {
+        if (promoCode.isNotBlank()) {
             Row(
+                modifier = Modifier
+                    .clip(PulseArchitecturalShapes.SmallChip)
+                    .background(ext.drumstickContainer.copy(alpha = if (isDark) 0.78f else 0.90f))
+                    .border(
+                        width = 0.8.dp,
+                        color = ext.onDrumstickContainer.copy(alpha = if (isDark) 0.36f else 0.22f),
+                        shape = PulseArchitecturalShapes.SmallChip,
+                    )
+                    .clickable { onCopyPromoCode(promoCode) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (providerText.isNotBlank()) {
-                    PulseAccentPill(
-                        text = providerText,
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-                if (detail.publishedAtEpochMillis > 0L) {
-                    Text(
-                        text = formatRelativeTimeChinese(detail.publishedAtEpochMillis.toString()),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.ConfirmationNumber,
+                    contentDescription = null,
+                    tint = ext.onDrumstickContainer,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    text = "优惠码 $promoCode",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = ext.onDrumstickContainer,
+                )
+                Icon(
+                    imageVector = Icons.Rounded.ContentCopy,
+                    contentDescription = "复制优惠码",
+                    tint = ext.onDrumstickContainer,
+                    modifier = Modifier.size(13.dp),
+                )
             }
         }
     }
@@ -591,19 +470,15 @@ private fun OverseasDetailHeaderCard(detail: OverseasOfferDetail) {
 @Composable
 private fun OverseasDetailMarkdownCard(
     detail: OverseasOfferDetail,
-    displayMode: OverseasDisplayMode,
-    isTranslating: Boolean,
-    onTranslate: () -> Unit,
     onUrlClick: (String) -> Unit,
 ) {
-    val renderedMarkdown = remember(detail, displayMode) {
-        detail.resolveDisplayMarkdown(displayMode)
-    }
-
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                elevation = PulseElevation.Card,
+            )
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -614,55 +489,40 @@ private fun OverseasDetailMarkdownCard(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                Text(
-                    text = "Telegram 通知正文",
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                if (detail.translationTier != TranslationTier.NONE && displayMode != OverseasDisplayMode.ORIGINAL) {
-                    Text(
-                        text = "· ${detail.translationTier.label}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .clickable(enabled = !isTranslating, onClick = onTranslate)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                if (isTranslating) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(13.dp),
-                        strokeWidth = 1.8.dp,
-                    )
-                } else {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
-                        imageVector = Icons.Rounded.AutoAwesome,
+                        imageVector = Icons.AutoMirrored.Rounded.Article,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.size(14.dp),
                     )
                 }
                 Text(
-                    text = if (isTranslating) "翻译中…" else "翻译详情",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
+                    text = "Telegram 通知正文",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
+
+            PulseAccentPill(
+                text = "中文推送",
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         PulseGradientDivider()
 
         MarkdownRenderer(
-            markdown = renderedMarkdown,
+            markdown = detail.tgMarkdown,
             bodyStyle = MaterialTheme.typography.bodyMedium,
             enableTextSelection = true,
             onUrlClick = onUrlClick,
@@ -801,5 +661,33 @@ private fun OverseasDetailErrorCard(
             Spacer(modifier = Modifier.width(6.dp))
             Text("重试加载")
         }
+    }
+}
+
+@Preview(showBackground = true, widthDp = 412, heightDp = 840)
+@Composable
+private fun OverseasIntelDetailScreenLightPreview() {
+    NodePulseTheme(themeMode = PulseThemeMode.PAPER_LIGHT) {
+        val repo = remember { PreviewOverseasIntelRepository() }
+        OverseasIntelDetailScreen(
+            offerId = "223566",
+            onBack = {},
+            repository = repo,
+            onShareDealToForum = { _, _ -> },
+        )
+    }
+}
+
+@Preview(showBackground = true, widthDp = 412, heightDp = 840)
+@Composable
+private fun OverseasIntelDetailScreenDarkPreview() {
+    NodePulseTheme(themeMode = PulseThemeMode.OBSIDIAN_DARK) {
+        val repo = remember { PreviewOverseasIntelRepository() }
+        OverseasIntelDetailScreen(
+            offerId = "223566",
+            onBack = {},
+            repository = repo,
+            onShareDealToForum = { _, _ -> },
+        )
     }
 }
