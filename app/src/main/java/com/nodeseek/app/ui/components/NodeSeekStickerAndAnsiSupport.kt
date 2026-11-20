@@ -110,33 +110,224 @@ fun unwrapNodeSeekJumpUrl(rawUrl: String): String {
 }
 
 /**
+ * Immutable ANSI SGR style state carried across lines during incremental terminal rendering.
+ */
+@Immutable
+data class AnsiSgrState(
+    val fg: Color? = null,
+    val bg: Color? = null,
+    val isBold: Boolean = false,
+    val isDim: Boolean = false,
+    val isItalic: Boolean = false,
+    val isUnderline: Boolean = false,
+) {
+    val isDefault: Boolean
+        get() = fg == null && bg == null && !isBold && !isDim && !isItalic && !isUnderline
+
+    fun toSpanStyle(defaultForeground: Color): SpanStyle {
+        val resolvedFg = fg ?: defaultForeground
+        return SpanStyle(
+            color = if (isDim) resolvedFg.copy(alpha = 0.62f) else resolvedFg,
+            background = bg ?: Color.Unspecified,
+            fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal,
+            fontStyle = if (isItalic) FontStyle.Italic else FontStyle.Normal,
+            textDecoration = if (isUnderline) TextDecoration.Underline else TextDecoration.None,
+        )
+    }
+
+    companion object {
+        val Default = AnsiSgrState()
+    }
+}
+
+/**
  * ANSI SGR terminal escape sequence parser for VPS benchmark outputs (YABS, NodeQuality, etc.)
  * and lightweight source syntax highlighter for standard code blocks.
  */
 object AnsiAndCodeFormatter {
-    private val ANSI_CSI_REGEX = Regex("\u001B\\[([0-9;]*)m")
+    fun containsAnsiEscapes(text: String): Boolean = text.indexOf("\u001B[") >= 0
 
-    fun containsAnsiEscapes(text: String): Boolean = text.contains("\u001B[")
-
-    fun stripAnsiEscapes(text: String): String = ANSI_CSI_REGEX.replace(text, "")
+    fun stripAnsiEscapes(text: String): String {
+        val firstEsc = text.indexOf("\u001B[")
+        if (firstEsc < 0) return text
+        val sb = StringBuilder(text.length)
+        var cursor = 0
+        var searchFrom = firstEsc
+        while (searchFrom >= 0 && searchFrom < text.length) {
+            val sgrEnd = findSgrEndIndex(text, searchFrom)
+            if (sgrEnd >= 0) {
+                if (searchFrom > cursor) {
+                    sb.append(text, cursor, searchFrom)
+                }
+                cursor = sgrEnd + 1
+                searchFrom = text.indexOf("\u001B[", startIndex = cursor)
+            } else {
+                searchFrom = text.indexOf("\u001B[", startIndex = searchFrom + 2)
+            }
+        }
+        if (cursor == 0) return text
+        if (cursor < text.length) {
+            sb.append(text, cursor, text.length)
+        }
+        return sb.toString()
+    }
 
     fun parseAnsiTerminalText(
         rawText: String,
         defaultForeground: Color = Color(0xFFE6EDF3),
-    ): AnnotatedString = buildAnnotatedString {
-        var currentFg: Color? = null
-        var currentBg: Color? = null
-        var isBold = false
-        var isDim = false
-        var isItalic = false
-        var isUnderline = false
+    ): AnnotatedString = parseAnsiLine(
+        rawText = rawText,
+        initialState = AnsiSgrState.Default,
+        defaultForeground = defaultForeground,
+    ).first
 
-        var cursor = 0
-        for (match in ANSI_CSI_REGEX.findAll(rawText)) {
-            if (match.range.first > cursor) {
-                val chunk = rawText.substring(cursor, match.range.first)
+    /**
+     * Incrementally parses a single line (or multi-line block) starting from [initialState] and
+     * returns both the styled [AnnotatedString] and the resulting [AnsiSgrState] for the next line.
+     *
+     * Uses a zero-regex scanner and stack-allocated integer parsing buffer to eliminate per-token
+     * `MatchResult` and `split(';')` allocations on multi-thousand-line terminal outputs.
+     */
+    fun parseAnsiLine(
+        rawText: String,
+        initialState: AnsiSgrState = AnsiSgrState.Default,
+        defaultForeground: Color = Color(0xFFE6EDF3),
+    ): Pair<AnnotatedString, AnsiSgrState> {
+        if (rawText.isEmpty()) {
+            return AnnotatedString("") to initialState
+        }
+
+        val firstEsc = rawText.indexOf("\u001B[")
+        if (firstEsc < 0) {
+            val styled = buildAnnotatedString {
+                append(rawText)
+                addStyle(initialState.toSpanStyle(defaultForeground), 0, rawText.length)
+            }
+            return styled to initialState
+        }
+
+        var currentFg: Color? = initialState.fg
+        var currentBg: Color? = initialState.bg
+        var isBold: Boolean = initialState.isBold
+        var isDim: Boolean = initialState.isDim
+        var isItalic: Boolean = initialState.isItalic
+        var isUnderline: Boolean = initialState.isUnderline
+
+        var codesBuf = IntArray(16)
+
+        val annotated = buildAnnotatedString {
+            var cursor = 0
+            var searchFrom = firstEsc
+            while (searchFrom >= 0 && searchFrom < rawText.length) {
+                val sgrEnd = findSgrEndIndex(rawText, searchFrom)
+                if (sgrEnd < 0) {
+                    searchFrom = rawText.indexOf("\u001B[", startIndex = searchFrom + 2)
+                    continue
+                }
+
+                if (searchFrom > cursor) {
+                    val start = length
+                    append(rawText, cursor, searchFrom)
+                    val fg = currentFg ?: defaultForeground
+                    addStyle(
+                        style = SpanStyle(
+                            color = if (isDim) fg.copy(alpha = 0.62f) else fg,
+                            background = currentBg ?: Color.Unspecified,
+                            fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal,
+                            fontStyle = if (isItalic) FontStyle.Italic else FontStyle.Normal,
+                            textDecoration = if (isUnderline) TextDecoration.Underline else TextDecoration.None,
+                        ),
+                        start = start,
+                        end = length,
+                    )
+                }
+
+                // Parse semicolon-delimited SGR integer parameters in rawText[searchFrom+2 .. sgrEnd-1]
+                var codeCount = 0
+                val paramsStart = searchFrom + 2
+                if (paramsStart == sgrEnd) {
+                    codesBuf[0] = 0
+                    codeCount = 1
+                } else {
+                    var acc = 0
+                    var hasDigits = false
+                    var p = paramsStart
+                    while (p < sgrEnd) {
+                        val ch = rawText[p]
+                        if (ch == ';') {
+                            if (codeCount >= codesBuf.size) {
+                                codesBuf = codesBuf.copyOf(codesBuf.size * 2)
+                            }
+                            codesBuf[codeCount++] = if (hasDigits) acc else 0
+                            acc = 0
+                            hasDigits = false
+                        } else {
+                            // Guard overflow on malformed giant numbers
+                            acc = if (acc > 100_000) 100_000 else acc * 10 + (ch - '0')
+                            hasDigits = true
+                        }
+                        p++
+                    }
+                    if (codeCount >= codesBuf.size) {
+                        codesBuf = codesBuf.copyOf(codesBuf.size * 2)
+                    }
+                    codesBuf[codeCount++] = if (hasDigits) acc else 0
+                }
+
+                var i = 0
+                while (i < codeCount) {
+                    when (val code = codesBuf[i]) {
+                        0 -> {
+                            currentFg = null
+                            currentBg = null
+                            isBold = false
+                            isDim = false
+                            isItalic = false
+                            isUnderline = false
+                        }
+                        1 -> isBold = true
+                        2 -> isDim = true
+                        3 -> isItalic = true
+                        4 -> isUnderline = true
+                        22 -> {
+                            isBold = false
+                            isDim = false
+                        }
+                        23 -> isItalic = false
+                        24 -> isUnderline = false
+                        in 30..37 -> currentFg = ansi16Color(code - 30, bright = false)
+                        39 -> currentFg = null
+                        in 40..47 -> currentBg = ansi16Color(code - 40, bright = false).copy(alpha = 0.35f)
+                        49 -> currentBg = null
+                        in 90..97 -> currentFg = ansi16Color(code - 90, bright = true)
+                        in 100..107 -> currentBg = ansi16Color(code - 100, bright = true).copy(alpha = 0.35f)
+                        38, 48 -> {
+                            val isForeground = code == 38
+                            val mode = if (i + 1 < codeCount) codesBuf[i + 1] else -1
+                            if (mode == 5 && i + 2 < codeCount) {
+                                val c = xterm256Color(codesBuf[i + 2])
+                                if (isForeground) currentFg = c else currentBg = c.copy(alpha = 0.35f)
+                                i += 2
+                            } else if (mode == 2 && i + 4 < codeCount) {
+                                val r = codesBuf[i + 2].coerceIn(0, 255)
+                                val g = codesBuf[i + 3].coerceIn(0, 255)
+                                val b = codesBuf[i + 4].coerceIn(0, 255)
+                                val c = Color(red = r, green = g, blue = b)
+                                if (isForeground) currentFg = c else currentBg = c.copy(alpha = 0.35f)
+                                i += 4
+                            }
+                        }
+                    }
+                    i++
+                }
+
+                cursor = sgrEnd + 1
+                searchFrom = rawText.indexOf("\u001B[", startIndex = cursor)
+            }
+
+            if (cursor < rawText.length) {
                 val start = length
-                append(chunk)
+                append(rawText, cursor, rawText.length)
                 val fg = currentFg ?: defaultForeground
                 addStyle(
                     style = SpanStyle(
@@ -150,80 +341,28 @@ object AnsiAndCodeFormatter {
                     end = length,
                 )
             }
-
-            val codesRaw = match.groupValues[1]
-            val codes = if (codesRaw.isEmpty()) {
-                listOf(0)
-            } else {
-                codesRaw.split(';').map { it.toIntOrNull() ?: 0 }
-            }
-
-            var i = 0
-            while (i < codes.size) {
-                when (val code = codes[i]) {
-                    0 -> {
-                        currentFg = null
-                        currentBg = null
-                        isBold = false
-                        isDim = false
-                        isItalic = false
-                        isUnderline = false
-                    }
-                    1 -> isBold = true
-                    2 -> isDim = true
-                    3 -> isItalic = true
-                    4 -> isUnderline = true
-                    22 -> {
-                        isBold = false
-                        isDim = false
-                    }
-                    23 -> isItalic = false
-                    24 -> isUnderline = false
-                    in 30..37 -> currentFg = ansi16Color(code - 30, bright = false)
-                    39 -> currentFg = null
-                    in 40..47 -> currentBg = ansi16Color(code - 40, bright = false).copy(alpha = 0.35f)
-                    49 -> currentBg = null
-                    in 90..97 -> currentFg = ansi16Color(code - 90, bright = true)
-                    in 100..107 -> currentBg = ansi16Color(code - 100, bright = true).copy(alpha = 0.35f)
-                    38, 48 -> {
-                        val isForeground = code == 38
-                        val mode = codes.getOrNull(i + 1)
-                        if (mode == 5 && i + 2 < codes.size) {
-                            val c = xterm256Color(codes[i + 2])
-                            if (isForeground) currentFg = c else currentBg = c.copy(alpha = 0.35f)
-                            i += 2
-                        } else if (mode == 2 && i + 4 < codes.size) {
-                            val r = codes[i + 2].coerceIn(0, 255)
-                            val g = codes[i + 3].coerceIn(0, 255)
-                            val b = codes[i + 4].coerceIn(0, 255)
-                            val c = Color(red = r, green = g, blue = b)
-                            if (isForeground) currentFg = c else currentBg = c.copy(alpha = 0.35f)
-                            i += 4
-                        }
-                    }
-                }
-                i++
-            }
-            cursor = match.range.last + 1
         }
 
-        if (cursor < rawText.length) {
-            val tail = rawText.substring(cursor)
-            val start = length
-            append(tail)
-            val fg = currentFg ?: defaultForeground
-            addStyle(
-                style = SpanStyle(
-                    color = if (isDim) fg.copy(alpha = 0.62f) else fg,
-                    background = currentBg ?: Color.Unspecified,
-                    fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal,
-                    fontStyle = if (isItalic) FontStyle.Italic else FontStyle.Normal,
-                    textDecoration = if (isUnderline) TextDecoration.Underline else TextDecoration.None,
-                ),
-                start = start,
-                end = length,
-            )
+        val exitState = AnsiSgrState(
+            fg = currentFg,
+            bg = currentBg,
+            isBold = isBold,
+            isDim = isDim,
+            isItalic = isItalic,
+            isUnderline = isUnderline,
+        )
+        return annotated to exitState
+    }
+
+    private fun findSgrEndIndex(text: String, escBracketIndex: Int): Int {
+        var i = escBracketIndex + 2
+        while (i < text.length) {
+            val ch = text[i]
+            if (ch == 'm') return i
+            if (ch !in '0'..'9' && ch != ';') return -1
+            i++
         }
+        return -1
     }
 
     private val CODE_TOKEN_REGEX = Regex(

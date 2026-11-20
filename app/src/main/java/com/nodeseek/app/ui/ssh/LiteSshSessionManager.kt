@@ -7,6 +7,7 @@ import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
 import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
+import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
@@ -34,9 +35,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
@@ -63,7 +67,16 @@ class LiteSshSessionManager(
     private val enableElapsedTicker: Boolean = true,
     private val silenceThresholdMillis: Long = SshStageDetector.DEFAULT_SILENCE_THRESHOLD_MILLIS,
 ) {
-    private val _uiState = MutableStateFlow(LiteSshUiState())
+    private val _consoleStreamState = MutableStateFlow(SshConsoleStreamState())
+    val consoleStreamState: StateFlow<SshConsoleStreamState> = _consoleStreamState.asStateFlow()
+    val consoleStreamHandle: SshConsoleStreamHandle = SshConsoleStreamHandle(consoleStreamState)
+
+    private val _globalBarState = MutableStateFlow(LiteSshGlobalBarState())
+    val globalBarState: StateFlow<LiteSshGlobalBarState> = _globalBarState.asStateFlow()
+
+    private val liveBufferAccessor = LiveBufferAccessor { _consoleStreamState.value.bufferSnapshot }
+
+    private val _uiState = MutableStateFlow(LiteSshUiState(liveBufferAccessor = liveBufferAccessor))
     val uiState: StateFlow<LiteSshUiState> = _uiState.asStateFlow()
 
     private val _completionPopupEvents = MutableSharedFlow<InAppMessagePopup>(extraBufferCapacity = 4)
@@ -73,6 +86,9 @@ class LiteSshSessionManager(
     private var elapsedTickerJob: Job? = null
     private var lastForegroundNotifyMillis: Long = 0L
     private var lastForegroundStatusLine: String = ""
+    private var runGenerationCounter: Long = 0L
+    @Volatile
+    private var latestOutputTimestampMillis: Long? = null
 
     init {
         externalScope.launch {
@@ -309,14 +325,17 @@ class LiteSshSessionManager(
         activeJob.cancel()
         foregroundServiceController.onSessionFinished()
 
-        val partialOutput = state.liveAnsiOutput
+        val partialOutput = state.resolvedLiveAnsiOutput
         _uiState.update {
             it.copy(
                 isRunning = false,
                 connectionPhase = SshConnectionPhase.CANCELLED,
+                liveAnsiOutput = partialOutput,
+                hasLiveOutputFlag = partialOutput.isNotBlank(),
                 statusMessage = "已断开 SSH 会话",
             )
         }
+        syncGlobalBarState()
 
         if (partialOutput.isNotBlank()) {
             val server = state.selectedServer
@@ -344,6 +363,7 @@ class LiteSshSessionManager(
      * Recomputes elapsed duration, output silence duration, and stage hints against [nowMillis].
      */
     fun refreshLiveProgress(nowMillis: Long = clock()) {
+        val currentSnapshot = _consoleStreamState.value.bufferSnapshot
         _uiState.update { state ->
             if (!state.isRunning) return@update state
             val elapsed = if (state.startedAtEpochMillis > 0L) {
@@ -351,21 +371,25 @@ class LiteSshSessionManager(
             } else {
                 state.elapsedMillis
             }
-            val progress = SshStageDetector.detect(
+            val effectiveLastOutput = latestOutputTimestampMillis ?: state.lastOutputEpochMillis
+            val progress = SshStageDetector.detectFromBuffer(
                 presetId = state.activePresetId ?: state.selectedPresetId,
                 command = state.activeCommand,
-                sanitizedOutput = state.liveAnsiOutput,
+                bufferSnapshot = currentSnapshot,
+                fallbackOutput = state.liveAnsiOutput,
                 isConnecting = state.connectionPhase == SshConnectionPhase.CONNECTING,
                 startedAtEpochMillis = state.startedAtEpochMillis,
-                lastOutputEpochMillis = state.lastOutputEpochMillis,
+                lastOutputEpochMillis = effectiveLastOutput,
                 nowEpochMillis = nowMillis,
                 silenceThresholdMillis = silenceThresholdMillis,
             )
             state.copy(
                 elapsedMillis = elapsed,
+                lastOutputEpochMillis = effectiveLastOutput,
                 liveProgress = progress,
             )
         }
+        syncGlobalBarState()
         syncForegroundNotificationIfNeeded(nowMillis)
     }
 
@@ -419,12 +443,17 @@ class LiteSshSessionManager(
     }
 
     fun clearSessionRuns() {
+        val stillRunning = _uiState.value.isRunning
+        if (!stillRunning) {
+            _consoleStreamState.value = SshConsoleStreamState()
+        }
         _uiState.update {
             it.copy(
                 sessionRuns = emptyList(),
                 selectedRunIdsForExport = emptySet(),
                 viewingRunId = null,
                 liveAnsiOutput = if (it.isRunning) it.liveAnsiOutput else "",
+                hasLiveOutputFlag = if (it.isRunning) it.hasLiveOutputFlag else false,
                 connectionPhase = if (it.isRunning) it.connectionPhase else SshConnectionPhase.IDLE,
                 exitCode = if (it.isRunning) it.exitCode else null,
                 errorMessage = null,
@@ -510,6 +539,8 @@ class LiteSshSessionManager(
         elapsedTickerJob?.cancel()
 
         val startedAt = clock()
+        val currentRunGeneration = ++runGenerationCounter
+        latestOutputTimestampMillis = null
         val autoRespondEnabled = _uiState.value.autoRespondPrompts
         val initialProgress = SshStageDetector.detect(
             presetId = preset.id,
@@ -525,6 +556,12 @@ class LiteSshSessionManager(
         lastForegroundNotifyMillis = 0L
         lastForegroundStatusLine = ""
 
+        _consoleStreamState.value = SshConsoleStreamState(
+            runGeneration = currentRunGeneration,
+            bufferSnapshot = SanitizedBufferSnapshot.EMPTY,
+            serverHost = server.host,
+        )
+
         _uiState.update {
             it.copy(
                 isRunning = true,
@@ -535,6 +572,8 @@ class LiteSshSessionManager(
                 activePresetName = preset.name,
                 activeCommand = command,
                 liveAnsiOutput = "",
+                hasLiveOutputFlag = false,
+                liveBufferAccessor = liveBufferAccessor,
                 startedAtEpochMillis = startedAt,
                 lastOutputEpochMillis = null,
                 elapsedMillis = 0L,
@@ -547,14 +586,39 @@ class LiteSshSessionManager(
                 pendingHostKeyMismatch = null,
             )
         }
+        syncGlobalBarState()
 
         syncForegroundNotificationIfNeeded(startedAt, force = true)
 
         if (enableElapsedTicker) {
             elapsedTickerJob = externalScope.launch {
                 while (isActive) {
-                    delay(ELAPSED_TICK_MS)
-                    refreshLiveProgress(clock())
+                    if (hasActiveUiObservers()) {
+                        delay(ELAPSED_TICK_MS)
+                        val now = clock()
+                        if (hasActiveUiObservers()) {
+                            refreshLiveProgress(now)
+                        } else {
+                            syncBackgroundForegroundNotificationOnly(now)
+                        }
+                    } else {
+                        // App UI is stopped / backgrounded: pause 500ms UI state churn and only
+                        // wake immediately if a UI collector re-attaches or every 2s for FGS notification.
+                        val observerReattached = withTimeoutOrNull(FOREGROUND_NOTIF_UPDATE_INTERVAL_MS) {
+                            merge(
+                                _uiState.subscriptionCount,
+                                _globalBarState.subscriptionCount,
+                                _consoleStreamState.subscriptionCount,
+                            ).first { it > 0 }
+                            true
+                        } ?: false
+                        val now = clock()
+                        if (observerReattached) {
+                            refreshLiveProgress(now)
+                        } else {
+                            syncBackgroundForegroundNotificationOnly(now)
+                        }
+                    }
                 }
             }
         }
@@ -577,6 +641,7 @@ class LiteSshSessionManager(
                     when (event) {
                         LiteSshExecutionEvent.Connecting -> {
                             _uiState.update { it.copy(connectionPhase = SshConnectionPhase.CONNECTING) }
+                            syncGlobalBarState()
                         }
                         is LiteSshExecutionEvent.HostKeyChecked -> {
                             val checkedServerId = event.serverId ?: server.id
@@ -605,12 +670,15 @@ class LiteSshSessionManager(
                         }
                         LiteSshExecutionEvent.Connected -> {
                             val now = clock()
+                            latestOutputTimestampMillis = now
                             vaultRepository.markServerConnected(server.id, now)
+                            val snap = _consoleStreamState.value.bufferSnapshot
                             _uiState.update { state ->
-                                val progress = SshStageDetector.detect(
+                                val progress = SshStageDetector.detectFromBuffer(
                                     presetId = preset.id,
                                     command = command,
-                                    sanitizedOutput = state.liveAnsiOutput,
+                                    bufferSnapshot = snap,
+                                    fallbackOutput = state.liveAnsiOutput,
                                     isConnecting = false,
                                     startedAtEpochMillis = startedAt,
                                     lastOutputEpochMillis = now,
@@ -623,30 +691,59 @@ class LiteSshSessionManager(
                                     liveProgress = progress,
                                 )
                             }
+                            syncGlobalBarState()
                             syncForegroundNotificationIfNeeded(now, force = true)
                         }
                         is LiteSshExecutionEvent.OutputUpdated -> {
                             val now = clock()
-                            _uiState.update { state ->
-                                val progress = SshStageDetector.detect(
-                                    presetId = preset.id,
-                                    command = command,
-                                    sanitizedOutput = event.sanitizedAnsiOutput,
-                                    isConnecting = false,
-                                    startedAtEpochMillis = startedAt,
-                                    lastOutputEpochMillis = now,
-                                    nowEpochMillis = now,
-                                    silenceThresholdMillis = silenceThresholdMillis,
-                                )
-                                state.copy(
-                                    connectionPhase = SshConnectionPhase.RUNNING,
-                                    liveAnsiOutput = event.sanitizedAnsiOutput,
-                                    lastOutputEpochMillis = now,
-                                    elapsedMillis = event.elapsedMillis,
-                                    liveProgress = progress,
-                                )
+                            latestOutputTimestampMillis = now
+                            _consoleStreamState.value = SshConsoleStreamState(
+                                runGeneration = currentRunGeneration,
+                                bufferSnapshot = event.bufferSnapshot,
+                                serverHost = server.host,
+                            )
+
+                            val progress = SshStageDetector.detectFromBuffer(
+                                presetId = preset.id,
+                                command = command,
+                                bufferSnapshot = event.bufferSnapshot,
+                                isConnecting = false,
+                                startedAtEpochMillis = startedAt,
+                                lastOutputEpochMillis = now,
+                                nowEpochMillis = now,
+                                silenceThresholdMillis = silenceThresholdMillis,
+                            )
+
+                            val cur = _uiState.value
+                            val nonEmpty = !event.bufferSnapshot.isEmpty
+                            val elapsedSecondChanged = (event.elapsedMillis / 1_000L) != (cur.elapsedMillis / 1_000L)
+                            val progressChanged =
+                                progress.currentStageLabel != cur.liveProgress.currentStageLabel ||
+                                    progress.stageDetailHint != cur.liveProgress.stageDetailHint ||
+                                    progress.isSilentLong != cur.liveProgress.isSilentLong
+                            val shouldPublishChromeUpdate =
+                                (nonEmpty && !cur.hasLiveOutputFlag) ||
+                                    cur.connectionPhase != SshConnectionPhase.RUNNING ||
+                                    elapsedSecondChanged ||
+                                    progressChanged
+
+                            if (shouldPublishChromeUpdate && (!enableElapsedTicker || hasActiveUiObservers() || !cur.hasLiveOutputFlag)) {
+                                _uiState.update { state ->
+                                    state.copy(
+                                        connectionPhase = SshConnectionPhase.RUNNING,
+                                        hasLiveOutputFlag = state.hasLiveOutputFlag || nonEmpty,
+                                        lastOutputEpochMillis = now,
+                                        elapsedMillis = event.elapsedMillis,
+                                        liveProgress = progress,
+                                    )
+                                }
+                                syncGlobalBarState()
                             }
-                            syncForegroundNotificationIfNeeded(now)
+                            syncForegroundNotificationIfNeeded(
+                                nowMillis = now,
+                                progressOverride = progress,
+                                elapsedMillisOverride = event.elapsedMillis,
+                            )
                         }
                         is LiteSshExecutionEvent.AutoResponded -> {
                             _uiState.update {
@@ -658,6 +755,11 @@ class LiteSshSessionManager(
                         }
                         is LiteSshExecutionEvent.Completed -> {
                             completedNormallyOrFailed = true
+                            _consoleStreamState.value = SshConsoleStreamState(
+                                runGeneration = currentRunGeneration,
+                                bufferSnapshot = event.bufferSnapshot,
+                                serverHost = server.host,
+                            )
                             val runStatus = if (event.exitCode == 0) {
                                 SshRunStatus.SUCCEEDED
                             } else {
@@ -689,6 +791,7 @@ class LiteSshSessionManager(
                                     isRunning = false,
                                     connectionPhase = SshConnectionPhase.COMPLETED,
                                     liveAnsiOutput = event.sanitizedAnsiOutput,
+                                    hasLiveOutputFlag = event.sanitizedAnsiOutput.isNotBlank(),
                                     elapsedMillis = event.elapsedMillis,
                                     exitCode = event.exitCode,
                                     errorMessage = errMsg,
@@ -699,6 +802,7 @@ class LiteSshSessionManager(
                                     },
                                 )
                             }
+                            syncGlobalBarState()
                             appendCompletedSessionRun(record, autoSelect = record.hasOutput)
                             if (record.hasOutput) {
                                 vaultRepository.saveRunRecord(record)
@@ -730,19 +834,23 @@ class LiteSshSessionManager(
                         ),
                     )
                 }
+                syncGlobalBarState()
             } catch (t: Throwable) {
                 val friendlyError = formatFriendlySshError(t)
                 val elapsed = (clock() - startedAt).coerceAtLeast(0L)
-                val partialOutput = _uiState.value.liveAnsiOutput
+                val partialOutput = _uiState.value.resolvedLiveAnsiOutput
                 _uiState.update {
                     it.copy(
                         isRunning = false,
                         connectionPhase = SshConnectionPhase.FAILED,
+                        liveAnsiOutput = partialOutput,
+                        hasLiveOutputFlag = partialOutput.isNotBlank(),
                         elapsedMillis = elapsed,
                         errorMessage = friendlyError,
                         statusMessage = friendlyError,
                     )
                 }
+                syncGlobalBarState()
                 if (!completedNormallyOrFailed) {
                     val failedRecord = SshExecutionRecord(
                         id = idGenerator(),
@@ -766,16 +874,59 @@ class LiteSshSessionManager(
                 elapsedTickerJob?.cancel()
                 elapsedTickerJob = null
                 executionJob = null
+                syncGlobalBarState()
                 foregroundServiceController.onSessionFinished()
             }
         }
     }
 
-    private fun syncForegroundNotificationIfNeeded(nowMillis: Long, force: Boolean = false) {
+    private fun hasActiveUiObservers(): Boolean =
+        _uiState.subscriptionCount.value > 0 ||
+            _globalBarState.subscriptionCount.value > 0 ||
+            _consoleStreamState.subscriptionCount.value > 0
+
+    private fun syncGlobalBarState(state: LiteSshUiState = _uiState.value) {
+        _globalBarState.value = state.toGlobalBarState()
+    }
+
+    private fun syncBackgroundForegroundNotificationOnly(nowMillis: Long) {
         val state = _uiState.value
         if (!state.isRunning) return
-        val progress = state.liveProgress
-        val clockStr = formatElapsedClock(state.elapsedMillis)
+        val elapsed = if (state.startedAtEpochMillis > 0L) {
+            (nowMillis - state.startedAtEpochMillis).coerceAtLeast(0L)
+        } else {
+            state.elapsedMillis
+        }
+        val effectiveLastOutput = latestOutputTimestampMillis ?: state.lastOutputEpochMillis
+        val progress = SshStageDetector.detectFromBuffer(
+            presetId = state.activePresetId ?: state.selectedPresetId,
+            command = state.activeCommand,
+            bufferSnapshot = _consoleStreamState.value.bufferSnapshot,
+            fallbackOutput = state.liveAnsiOutput,
+            isConnecting = state.connectionPhase == SshConnectionPhase.CONNECTING,
+            startedAtEpochMillis = state.startedAtEpochMillis,
+            lastOutputEpochMillis = effectiveLastOutput,
+            nowEpochMillis = nowMillis,
+            silenceThresholdMillis = silenceThresholdMillis,
+        )
+        syncForegroundNotificationIfNeeded(
+            nowMillis = nowMillis,
+            progressOverride = progress,
+            elapsedMillisOverride = elapsed,
+        )
+    }
+
+    private fun syncForegroundNotificationIfNeeded(
+        nowMillis: Long,
+        force: Boolean = false,
+        progressOverride: SshLiveProgressStatus? = null,
+        elapsedMillisOverride: Long? = null,
+    ) {
+        val state = _uiState.value
+        if (!state.isRunning) return
+        val progress = progressOverride ?: state.liveProgress
+        val elapsed = elapsedMillisOverride ?: state.elapsedMillis
+        val clockStr = formatElapsedClock(elapsed)
         val statusLine = if (progress.isSilentLong) {
             "${progress.silentRunningBannerText} · $clockStr"
         } else {

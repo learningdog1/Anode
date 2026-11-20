@@ -666,9 +666,24 @@ internal fun TcpPingLatencyChart(
     val lineColor = MaterialTheme.colorScheme.primary
     val avgLineColor = MaterialTheme.colorScheme.outlineVariant
 
+    val sparkPath = remember { Path() }
+    val avgDashEffect = remember { PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f) }
+    val barTopColor = remember(lineColor) { lineColor.copy(alpha = 0.78f) }
+    val barBottomColor = remember(lineColor) { lineColor.copy(alpha = 0.22f) }
+
     val maxRtt = remember(samples) {
-        val rawMax = samples.mapNotNull { if (it.success) it.rttMs else null }.maxOrNull() ?: 100.0
-        (rawMax * 1.22).coerceAtLeast(20.0)
+        var rawMax = 0.0
+        var found = false
+        for (i in samples.indices) {
+            val s = samples[i]
+            val rtt = s.rttMs
+            if (s.success && rtt != null && rtt > rawMax) {
+                rawMax = rtt
+                found = true
+            }
+        }
+        val base = if (found) rawMax else 100.0
+        (base * 1.22).coerceAtLeast(20.0)
     }
 
     Column(
@@ -723,18 +738,27 @@ internal fun TcpPingLatencyChart(
                     start = Offset(0f, avgY),
                     end = Offset(w, avgY),
                     strokeWidth = 1.2.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f),
+                    pathEffect = avgDashEffect,
                 )
             }
 
             val slots = maxOf(plannedCount, samples.size, 4)
             val slotWidth = w / slots.toFloat()
             val barWidth = (slotWidth * 0.58f).coerceIn(3.dp.toPx(), 18.dp.toPx())
-            val sparkPath = Path()
-            var hasSparkStart = false
-            val dotPoints = mutableListOf<Pair<Offset, Color>>()
+            val barCorner = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+            val failCorner = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+            val barGradient = Brush.verticalGradient(
+                colors = listOf(barTopColor, barBottomColor),
+                startY = 0f,
+                endY = h,
+            )
 
-            samples.forEachIndexed { index, sample ->
+            sparkPath.reset()
+            var hasSparkStart = false
+            var successDotCount = 0
+
+            for (index in samples.indices) {
+                val sample = samples[index]
                 val centerX = slotWidth * index + slotWidth / 2f
                 val leftX = centerX - barWidth / 2f
 
@@ -742,26 +766,20 @@ internal fun TcpPingLatencyChart(
                     val norm = (sample.rttMs / maxRtt).toFloat().coerceIn(0.04f, 1f)
                     val barHeight = h * norm
                     val topY = h - barHeight
-                    val barColor = lineColor
 
                     drawRoundRect(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(barColor.copy(alpha = 0.78f), barColor.copy(alpha = 0.22f)),
-                            startY = topY,
-                            endY = h,
-                        ),
+                        brush = barGradient,
                         topLeft = Offset(leftX, topY),
                         size = Size(barWidth, barHeight),
-                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                        cornerRadius = barCorner,
                     )
 
-                    val point = Offset(centerX, topY)
-                    dotPoints.add(point to barColor)
+                    successDotCount++
                     if (!hasSparkStart) {
-                        sparkPath.moveTo(point.x, point.y)
+                        sparkPath.moveTo(centerX, topY)
                         hasSparkStart = true
                     } else {
-                        sparkPath.lineTo(point.x, point.y)
+                        sparkPath.lineTo(centerX, topY)
                     }
                 } else {
                     // Timeout / dropped packet indicator bar
@@ -770,25 +788,32 @@ internal fun TcpPingLatencyChart(
                         color = poorColor.copy(alpha = 0.72f),
                         topLeft = Offset(leftX, h - failHeight),
                         size = Size(barWidth, failHeight),
-                        cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
+                        cornerRadius = failCorner,
                     )
                     hasSparkStart = false
                 }
             }
 
-            if (dotPoints.size >= 2) {
+            if (successDotCount >= 2) {
                 drawPath(
                     path = sparkPath,
                     color = lineColor.copy(alpha = 0.82f),
                     style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round),
                 )
             }
-            dotPoints.forEach { (pt, color) ->
-                drawCircle(
-                    color = color,
-                    radius = 2.6.dp.toPx(),
-                    center = pt,
-                )
+            val dotRadius = 2.6.dp.toPx()
+            for (index in samples.indices) {
+                val sample = samples[index]
+                if (sample.success && sample.rttMs != null) {
+                    val norm = (sample.rttMs / maxRtt).toFloat().coerceIn(0.04f, 1f)
+                    val topY = h * (1f - norm)
+                    val centerX = slotWidth * index + slotWidth / 2f
+                    drawCircle(
+                        color = lineColor,
+                        radius = dotRadius,
+                        center = Offset(centerX, topY),
+                    )
+                }
             }
         }
     }
@@ -1007,13 +1032,18 @@ internal fun MbpsArcGauge(
         }
     }
     val targetFraction = (mbps / scaleMax).toFloat().coerceIn(0f, 1f)
-    val animatedFraction by animateFloatAsState(
+    val animatedFractionState = animateFloatAsState(
         targetValue = targetFraction,
         animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
         label = "mbpsGaugeFraction",
     )
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val secondaryAccent = MaterialTheme.colorScheme.secondary
+    val sweepBrush = remember(accentColor, secondaryAccent) {
+        Brush.sweepGradient(
+            colors = listOf(accentColor, secondaryAccent, accentColor),
+        )
+    }
 
     Box(
         modifier = modifier.size(width = sizeDp, height = sizeDp * 0.78f),
@@ -1039,14 +1069,13 @@ internal fun MbpsArcGauge(
                 style = Stroke(width = strokePx, cap = StrokeCap.Round),
             )
 
-            // Active sweep gradient arc
-            if (animatedFraction > 0.005f) {
+            // Active sweep gradient arc (reads State inside DrawScope only -> 0 recompositions)
+            val fraction = animatedFractionState.value
+            if (fraction > 0.005f) {
                 drawArc(
-                    brush = Brush.sweepGradient(
-                        colors = listOf(accentColor, secondaryAccent, accentColor),
-                    ),
+                    brush = sweepBrush,
                     startAngle = 160f,
-                    sweepAngle = 220f * animatedFraction,
+                    sweepAngle = 220f * fraction,
                     useCenter = false,
                     topLeft = topLeft,
                     size = arcSize,

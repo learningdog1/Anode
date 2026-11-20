@@ -446,6 +446,7 @@ class DefaultAppContainer(
                 transport = com.nodeseek.app.data.ssh.JSchSshTransport(
                     vaultRepository = sshVaultRepository,
                 ),
+                processingDispatcher = Dispatchers.Default,
             ),
             externalScope = applicationScope,
             foregroundServiceController = com.nodeseek.app.ui.ssh.AndroidSshForegroundServiceController(

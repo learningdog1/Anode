@@ -19,6 +19,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -39,11 +40,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -99,11 +99,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -138,7 +139,13 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
@@ -182,7 +189,18 @@ fun LiteSshScreen(
         }
     }
 
-    val exportPayload = uiState.exportPreviewPost
+    val exportMeta = remember(
+        uiState.sessionRuns,
+        uiState.selectedRunIdsForExport,
+        uiState.viewingRunId,
+        uiState.hasLiveOutputFlag,
+        uiState.liveAnsiOutput,
+    ) {
+        uiState.computeExportSummaryMeta()
+    }
+    val resolveExportPayload: () -> SshFormattedPost? = remember(previewUiState, viewModel) {
+        { previewUiState?.exportPreviewPost ?: viewModel.buildExportPayload() }
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -198,17 +216,27 @@ fun LiteSshScreen(
             )
         },
         bottomBar = {
-            if (exportPayload != null) {
+            if (exportMeta != null) {
                 LiteSshExportDock(
-                    formattedPost = exportPayload,
+                    exportMeta = exportMeta,
                     maskServerIp = uiState.maskServerIp,
                     onPreview = viewModel::openExportPreviewSheet,
-                    onCopyMarkdown = { copyToClipboard(exportPayload.markdownContent, "已复制 Markdown 测评报告") },
+                    onCopyMarkdown = {
+                        resolveExportPayload()?.let { post ->
+                            copyToClipboard(post.markdownContent, "已复制 Markdown 测评报告")
+                        }
+                    },
                     onInsertToReply = onInsertToReply?.let { callback ->
-                        { callback(exportPayload.markdownContent) }
+                        {
+                            resolveExportPayload()?.let { post ->
+                                callback(post.markdownContent)
+                            }
+                        }
                     },
                     onPublishToComposer = {
-                        onPublishToComposer(exportPayload.suggestedTitle, exportPayload.markdownContent)
+                        resolveExportPayload()?.let { post ->
+                            onPublishToComposer(post.suggestedTitle, post.markdownContent)
+                        }
                     },
                 )
             }
@@ -222,7 +250,7 @@ fun LiteSshScreen(
                 start = 16.dp,
                 end = 16.dp,
                 top = 14.dp,
-                bottom = if (exportPayload != null) 28.dp else 32.dp,
+                bottom = if (exportMeta != null) 28.dp else 32.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
@@ -280,23 +308,34 @@ fun LiteSshScreen(
 
             // 4. High-Fidelity Dark ANSI Console
             item(key = "ansi_console") {
+                val viewedRun = uiState.viewingRun
+                val consoleHostForMask = viewedRun?.serverHost ?: uiState.activeServerHost ?: uiState.selectedServer?.host
+                val hasCopyableOutput = viewedRun?.hasOutput == true || uiState.hasLiveOutput
                 AnsiTerminalConsoleCard(
-                    displayedOutput = uiState.displayedConsoleOutput,
+                    consoleStreamHandle = if (previewUiState == null && viewedRun == null) {
+                        viewModel.consoleStreamHandle
+                    } else {
+                        null
+                    },
+                    staticSourceKey = viewedRun?.id ?: if (previewUiState != null) "preview" else "completed_live",
+                    staticAnsiOutput = viewedRun?.sanitizedAnsiOutput ?: uiState.liveAnsiOutput,
+                    serverHostForMask = consoleHostForMask,
+                    hasCopyableOutput = hasCopyableOutput,
                     connectionPhase = uiState.connectionPhase,
                     isRunning = uiState.isRunning,
-                    activeTitle = uiState.viewingRun?.let { "${it.serverAlias} · ${it.presetName}" }
+                    activeTitle = viewedRun?.let { "${it.serverAlias} · ${it.presetName}" }
                         ?: uiState.activePresetName?.let { preset ->
                             val alias = uiState.activeServerAlias ?: uiState.selectedServer?.displayName
                             if (alias != null) "$alias · $preset" else preset
                         }
                         ?: "ANSI 终端控制台",
-                    elapsedMillis = uiState.viewingRun?.durationMillis ?: uiState.elapsedMillis,
-                    exitCode = uiState.viewingRun?.exitCode ?: uiState.exitCode,
-                    errorMessage = if (uiState.viewingRun == null) uiState.errorMessage else uiState.viewingRun?.errorMessage,
-                    liveProgress = if (uiState.viewingRun == null) uiState.liveProgress else null,
-                    lastOutputEpochMillis = if (uiState.viewingRun == null) uiState.lastOutputEpochMillis else null,
+                    elapsedMillis = viewedRun?.durationMillis ?: uiState.elapsedMillis,
+                    exitCode = viewedRun?.exitCode ?: uiState.exitCode,
+                    errorMessage = if (viewedRun == null) uiState.errorMessage else viewedRun.errorMessage,
+                    liveProgress = if (viewedRun == null) uiState.liveProgress else null,
+                    lastOutputEpochMillis = if (viewedRun == null) uiState.lastOutputEpochMillis else null,
                     autoRespondPrompts = uiState.autoRespondPrompts,
-                    autoRespondCount = if (uiState.viewingRun == null) uiState.autoRespondCount else 0,
+                    autoRespondCount = if (viewedRun == null) uiState.autoRespondCount else 0,
                     maskServerIp = uiState.maskServerIp,
                     consoleFontScale = uiState.consoleFontScale,
                     autoScrollConsole = uiState.autoScrollConsole,
@@ -307,7 +346,8 @@ fun LiteSshScreen(
                     onResetZoom = viewModel::resetConsoleFontScale,
                     onToggleAutoScroll = viewModel::toggleAutoScrollConsole,
                     onCopyOutput = {
-                        val raw = uiState.displayedConsoleOutput
+                        val currentState = previewUiState ?: viewModel.uiState.value
+                        val raw = currentState.displayedConsoleOutput
                         if (raw.isNotBlank()) {
                             val plain = AnsiAndCodeFormatter.stripAnsiEscapes(raw)
                             copyToClipboard(plain, "已复制终端纯文本输出")
@@ -344,16 +384,28 @@ fun LiteSshScreen(
         )
     }
 
-    if (uiState.showExportPreviewSheet && exportPayload != null) {
-        SshExportPreviewBottomSheet(
-            formattedPost = exportPayload,
-            maskServerIp = uiState.maskServerIp,
-            onToggleMaskIp = viewModel::toggleMaskServerIp,
-            onCopyMarkdown = { md -> copyToClipboard(md, "已复制 Markdown 测评报告") },
-            onPublishToComposer = onPublishToComposer,
-            onInsertToReply = onInsertToReply,
-            onDismiss = viewModel::dismissExportPreviewSheet,
-        )
+    if (uiState.showExportPreviewSheet) {
+        val previewFormattedPost = remember(
+            uiState.sessionRuns,
+            uiState.selectedRunIdsForExport,
+            uiState.viewingRunId,
+            uiState.maskServerIp,
+            uiState.liveAnsiOutput,
+            uiState.elapsedMillis / 2_000L,
+        ) {
+            uiState.exportPreviewPost
+        }
+        if (previewFormattedPost != null) {
+            SshExportPreviewBottomSheet(
+                formattedPost = previewFormattedPost,
+                maskServerIp = uiState.maskServerIp,
+                onToggleMaskIp = viewModel::toggleMaskServerIp,
+                onCopyMarkdown = { md -> copyToClipboard(md, "已复制 Markdown 测评报告") },
+                onPublishToComposer = onPublishToComposer,
+                onInsertToReply = onInsertToReply,
+                onDismiss = viewModel::dismissExportPreviewSheet,
+            )
+        }
     }
 
     if (uiState.showHistorySheet) {
@@ -1054,7 +1106,11 @@ private fun SessionRunsCollectorStrip(
 
 @Composable
 private fun AnsiTerminalConsoleCard(
-    displayedOutput: String,
+    consoleStreamHandle: SshConsoleStreamHandle?,
+    staticSourceKey: String,
+    staticAnsiOutput: String,
+    serverHostForMask: String?,
+    hasCopyableOutput: Boolean,
     connectionPhase: SshConnectionPhase,
     isRunning: Boolean,
     activeTitle: String,
@@ -1078,39 +1134,6 @@ private fun AnsiTerminalConsoleCard(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val codeTypography = NodePulseThemeTokens.extraTypography
-    val verticalScroll = rememberScrollState()
-    val horizontalScroll = rememberScrollState()
-
-    // Pulsing green status LED while actively streaming
-    val pulseTransition = rememberInfiniteTransition(label = "sshLedPulse")
-    val runningLedAlpha by pulseTransition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 700, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "sshLedAlpha",
-    )
-
-    LaunchedEffect(displayedOutput.length, autoScrollConsole) {
-        if (autoScrollConsole && displayedOutput.isNotEmpty()) {
-            verticalScroll.scrollTo(verticalScroll.maxValue)
-        }
-    }
-
-    val styledOutput = remember(displayedOutput, ext.onCodeSurface) {
-        if (displayedOutput.isEmpty()) {
-            null
-        } else if (AnsiAndCodeFormatter.containsAnsiEscapes(displayedOutput)) {
-            AnsiAndCodeFormatter.parseAnsiTerminalText(
-                rawText = displayedOutput,
-                defaultForeground = ext.onCodeSurface,
-            )
-        } else {
-            androidx.compose.ui.text.AnnotatedString(displayedOutput)
-        }
-    }
 
     val statusColor = when (connectionPhase) {
         SshConnectionPhase.IDLE -> ext.onCodeMuted
@@ -1161,12 +1184,9 @@ private fun AnsiTerminalConsoleCard(
                     tint = ext.onCodeMuted,
                     modifier = Modifier.size(15.dp),
                 )
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .alpha(if (isRunning) runningLedAlpha else 1f)
-                        .clip(CircleShape)
-                        .background(statusColor),
+                ConsoleStatusLed(
+                    isRunning = isRunning,
+                    statusColor = statusColor,
                 )
                 Text(
                     text = activeTitle,
@@ -1343,7 +1363,7 @@ private fun AnsiTerminalConsoleCard(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color.White.copy(alpha = 0.08f))
-                    .clickable(enabled = displayedOutput.isNotBlank(), onClick = onCopyOutput)
+                    .clickable(enabled = hasCopyableOutput, onClick = onCopyOutput)
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1351,13 +1371,13 @@ private fun AnsiTerminalConsoleCard(
                 Icon(
                     imageVector = Icons.Rounded.ContentCopy,
                     contentDescription = null,
-                    tint = if (displayedOutput.isNotBlank()) ext.onCodeSurface else ext.onCodeMuted.copy(alpha = 0.45f),
+                    tint = if (hasCopyableOutput) ext.onCodeSurface else ext.onCodeMuted.copy(alpha = 0.45f),
                     modifier = Modifier.size(13.dp),
                 )
                 Text(
                     text = "复制输出",
                     style = codeTypography.microLabel,
-                    color = if (displayedOutput.isNotBlank()) ext.onCodeSurface else ext.onCodeMuted.copy(alpha = 0.45f),
+                    color = if (hasCopyableOutput) ext.onCodeSurface else ext.onCodeMuted.copy(alpha = 0.45f),
                 )
             }
         }
@@ -1467,59 +1487,274 @@ private fun AnsiTerminalConsoleCard(
             }
         }
 
-        // Terminal output viewport (horizontal + vertical scroll)
-        val scaledFontSize = (11.5f * consoleFontScale).sp
-        val scaledLineHeight = (16.5f * consoleFontScale).sp
+        // Virtualized per-line terminal viewport (only collects stream when visible in LazyColumn)
+        AnsiTerminalViewport(
+            consoleStreamHandle = consoleStreamHandle,
+            staticSourceKey = staticSourceKey,
+            staticAnsiOutput = staticAnsiOutput,
+            serverHostForMask = serverHostForMask,
+            maskServerIp = maskServerIp,
+            isRunning = isRunning,
+            consoleFontScale = consoleFontScale,
+            autoScrollConsole = autoScrollConsole,
+        )
+    }
+}
 
+/**
+ * Draw-phase-only pulsing LED indicator so 60–120fps alpha frames never recompose the console card,
+ * and no choreographer animation runs while idle.
+ */
+@Composable
+private fun ConsoleStatusLed(
+    isRunning: Boolean,
+    statusColor: Color,
+) {
+    if (isRunning) {
+        val pulseTransition = rememberInfiniteTransition(label = "sshLedPulse")
+        val runningLedAlphaState = pulseTransition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 700, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "sshLedAlpha",
+        )
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 240.dp, max = 420.dp)
-                .verticalScroll(verticalScroll)
-                .horizontalScroll(horizontalScroll)
-                .padding(horizontal = 12.dp, vertical = 12.dp),
-        ) {
-            if (styledOutput != null) {
-                SelectionContainer {
-                    Text(
-                        text = styledOutput,
-                        style = codeTypography.codeBody.copy(
-                            fontSize = scaledFontSize,
-                            lineHeight = scaledLineHeight,
-                        ),
-                        softWrap = false,
+                .size(7.dp)
+                .graphicsLayer { alpha = runningLedAlphaState.value }
+                .clip(CircleShape)
+                .background(statusColor),
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(statusColor),
+        )
+    }
+}
+
+private const val IMMEDIATE_PARSE_LINE_BUDGET = 120
+private const val QUICK_PREVIEW_TAIL_LINES = 48
+
+@Composable
+private fun AnsiTerminalViewport(
+    consoleStreamHandle: SshConsoleStreamHandle?,
+    staticSourceKey: String,
+    staticAnsiOutput: String,
+    serverHostForMask: String?,
+    maskServerIp: Boolean,
+    isRunning: Boolean,
+    consoleFontScale: Float,
+    autoScrollConsole: Boolean,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val codeTypography = NodePulseThemeTokens.extraTypography
+    val isInspection = LocalInspectionMode.current
+    val consoleListState = rememberLazyListState()
+    val horizontalScroll = rememberScrollState()
+    val liveConsoleBuffer = remember { SshTerminalConsoleBuffer() }
+
+    val streamState = consoleStreamHandle?.flow?.collectAsStateWithLifecycle()?.value
+    val effectiveHost = if (streamState != null && !streamState.isEmpty) {
+        streamState.serverHost ?: serverHostForMask
+    } else {
+        serverHostForMask
+    }
+
+    var asyncBackfillTag by remember { mutableStateOf("") }
+    var asyncBackfillLines by remember { mutableStateOf<List<RenderedTerminalLine>>(emptyList()) }
+
+    val renderedLines: List<RenderedTerminalLine> = when {
+        streamState != null && !streamState.isEmpty -> {
+            val uncachedWork = liveConsoleBuffer.estimatedUncachedWork(
+                runGeneration = streamState.runGeneration,
+                snapshot = streamState.bufferSnapshot,
+                maskIp = maskServerIp,
+                knownServerHost = effectiveHost,
+                defaultForeground = ext.onCodeSurface,
+            )
+            val targetTag = "live_${streamState.runGeneration}_${streamState.bufferSnapshot.version}_${maskServerIp}_$effectiveHost"
+            val offloadToBackground = !isInspection && uncachedWork > IMMEDIATE_PARSE_LINE_BUDGET
+
+            LaunchedEffect(offloadToBackground, targetTag, ext.onCodeSurface) {
+                if (offloadToBackground) {
+                    val full = withContext(Dispatchers.Default) {
+                        liveConsoleBuffer.renderSnapshot(
+                            runGeneration = streamState.runGeneration,
+                            snapshot = streamState.bufferSnapshot,
+                            maskIp = maskServerIp,
+                            knownServerHost = effectiveHost,
+                            defaultForeground = ext.onCodeSurface,
+                        )
+                    }
+                    asyncBackfillLines = full
+                    asyncBackfillTag = targetTag
+                }
+            }
+
+            if (!offloadToBackground) {
+                remember(
+                    streamState.runGeneration,
+                    streamState.bufferSnapshot.version,
+                    maskServerIp,
+                    effectiveHost,
+                    ext.onCodeSurface,
+                ) {
+                    liveConsoleBuffer.renderSnapshot(
+                        runGeneration = streamState.runGeneration,
+                        snapshot = streamState.bufferSnapshot,
+                        maskIp = maskServerIp,
+                        knownServerHost = effectiveHost,
+                        defaultForeground = ext.onCodeSurface,
                     )
                 }
+            } else if (asyncBackfillTag == targetTag && asyncBackfillLines.isNotEmpty()) {
+                asyncBackfillLines
             } else {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 36.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                remember(
+                    streamState.runGeneration,
+                    streamState.bufferSnapshot.version,
+                    maskServerIp,
+                    effectiveHost,
+                    ext.onCodeSurface,
                 ) {
-                    Text(
-                        text = if (isRunning) {
-                            "$ 正在建立 SSH 加密通道并分配 xterm-256color PTY..."
-                        } else {
-                            "$ 选择主机与预设脚本，点击「一键运行」即可实时查看高保真 ANSI 彩色输出"
-                        },
-                        style = codeTypography.codeBody.copy(fontSize = 12.sp, lineHeight = 18.sp),
-                        color = ext.onCodeMuted,
-                    )
-                    Text(
-                        text = "# 进度条 \\r 刷屏已自动折叠 · 公网 IP 默认自动打码 · 多脚本支持一键合并 :::: tabs",
-                        style = codeTypography.codeLabel.copy(fontSize = 11.sp),
-                        color = ext.onCodeMuted.copy(alpha = 0.72f),
+                    SshTerminalConsoleBuffer.renderQuickTailPreview(
+                        snapshot = streamState.bufferSnapshot,
+                        maskIp = maskServerIp,
+                        knownServerHost = effectiveHost,
+                        defaultForeground = ext.onCodeSurface,
+                        tailLines = QUICK_PREVIEW_TAIL_LINES,
                     )
                 }
             }
+        }
+
+        staticAnsiOutput.isNotEmpty() -> {
+            val isLargeStatic = !isInspection && staticAnsiOutput.length > 16_000
+            val staticTag = "static_${staticSourceKey}_${staticAnsiOutput.length}_${staticAnsiOutput.hashCode()}_${maskServerIp}_$effectiveHost"
+
+            LaunchedEffect(isLargeStatic, staticTag, ext.onCodeSurface) {
+                if (isLargeStatic) {
+                    val full = withContext(Dispatchers.Default) {
+                        SshTerminalConsoleBuffer.renderStaticTranscript(
+                            sourceKey = staticSourceKey,
+                            sanitizedAnsiText = staticAnsiOutput,
+                            maskIp = maskServerIp,
+                            knownServerHost = effectiveHost,
+                            defaultForeground = ext.onCodeSurface,
+                        )
+                    }
+                    asyncBackfillLines = full
+                    asyncBackfillTag = staticTag
+                }
+            }
+
+            if (!isLargeStatic) {
+                remember(staticSourceKey, staticAnsiOutput, maskServerIp, effectiveHost, ext.onCodeSurface) {
+                    SshTerminalConsoleBuffer.renderStaticTranscript(
+                        sourceKey = staticSourceKey,
+                        sanitizedAnsiText = staticAnsiOutput,
+                        maskIp = maskServerIp,
+                        knownServerHost = effectiveHost,
+                        defaultForeground = ext.onCodeSurface,
+                    )
+                }
+            } else if (asyncBackfillTag == staticTag && asyncBackfillLines.isNotEmpty()) {
+                asyncBackfillLines
+            } else {
+                remember(staticTag, ext.onCodeSurface) {
+                    val tailChars = staticAnsiOutput.takeLast(6_000)
+                    SshTerminalConsoleBuffer.renderStaticTranscript(
+                        sourceKey = "${staticSourceKey}_tail",
+                        sanitizedAnsiText = tailChars,
+                        maskIp = maskServerIp,
+                        knownServerHost = effectiveHost,
+                        defaultForeground = ext.onCodeSurface,
+                        maxLines = QUICK_PREVIEW_TAIL_LINES,
+                    )
+                }
+            }
+        }
+
+        else -> emptyList()
+    }
+
+    val lastLineId = renderedLines.lastOrNull()?.id ?: -1L
+    LaunchedEffect(renderedLines.size, lastLineId, autoScrollConsole) {
+        if (autoScrollConsole && !consoleListState.isScrollInProgress && renderedLines.isNotEmpty()) {
+            consoleListState.scrollToItem(renderedLines.lastIndex)
+        }
+    }
+
+    val lineTextStyle = remember(codeTypography.codeBody, consoleFontScale) {
+        codeTypography.codeBody.copy(
+            fontSize = (11.5f * consoleFontScale).sp,
+            lineHeight = (16.5f * consoleFontScale).sp,
+        )
+    }
+
+    if (renderedLines.isNotEmpty()) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val minRowWidth = maxWidth
+            LazyColumn(
+                state = consoleListState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 240.dp, max = 420.dp)
+                    .horizontalScroll(horizontalScroll),
+                contentPadding = PaddingValues(vertical = 12.dp),
+            ) {
+                items(
+                    items = renderedLines,
+                    key = { it.id },
+                    contentType = { "ansi_line" },
+                ) { line ->
+                    Text(
+                        text = line.styledText,
+                        style = lineTextStyle,
+                        softWrap = false,
+                        minLines = 1,
+                        modifier = Modifier
+                            .widthIn(min = minRowWidth)
+                            .padding(horizontal = 12.dp),
+                    )
+                }
+            }
+        }
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 240.dp)
+                .padding(horizontal = 12.dp, vertical = 48.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = if (isRunning) {
+                    "$ 正在建立 SSH 加密通道并分配 xterm-256color PTY..."
+                } else {
+                    "$ 选择主机与预设脚本，点击「一键运行」即可实时查看高保真 ANSI 彩色输出"
+                },
+                style = codeTypography.codeBody.copy(fontSize = 12.sp, lineHeight = 18.sp),
+                color = ext.onCodeMuted,
+            )
+            Text(
+                text = "# 进度条 \\r 刷屏已自动折叠 · 公网 IP 默认自动打码 · 多脚本支持一键合并 :::: tabs",
+                style = codeTypography.codeLabel.copy(fontSize = 11.sp),
+                color = ext.onCodeMuted.copy(alpha = 0.72f),
+            )
         }
     }
 }
 
 @Composable
 private fun LiteSshExportDock(
-    formattedPost: SshFormattedPost,
+    exportMeta: SshExportSummaryMeta,
     maskServerIp: Boolean,
     onPreview: () -> Unit,
     onCopyMarkdown: () -> Unit,
@@ -1540,8 +1775,8 @@ private fun LiteSshExportDock(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = if (formattedPost.usesTabsLayout) {
-                    "多标签测评已就绪（:::: tabs · ${formattedPost.runCount} 项）"
+                text = if (exportMeta.usesTabsLayout) {
+                    "多标签测评已就绪（:::: tabs · ${exportMeta.runCount} 项）"
                 } else {
                     "ANSI 测评代码块已就绪（```ansi）"
                 },
@@ -1616,11 +1851,16 @@ internal fun copyTextToClipboard(context: Context, text: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", text))
 }
 
+private val CLOCK_TIME_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)
+
 private fun formatClockTimeOfDay(epochMillis: Long): String {
     if (epochMillis <= 0L) return "--:--:--"
     return runCatching {
-        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-            .format(java.util.Date(epochMillis))
+        Instant.ofEpochMilli(epochMillis)
+            .atZone(ZoneId.systemDefault())
+            .toLocalTime()
+            .format(CLOCK_TIME_FORMATTER)
     }.getOrDefault("--:--:--")
 }
 
