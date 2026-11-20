@@ -7,7 +7,7 @@
 **Cool Mist Light & Slate Steel Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v2.1.1-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.2.0-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.10-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202025.02.00-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,14 +26,14 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v2.1.1`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.1.1-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v2.2.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.2.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v2.1.1`（`versionCode = 8`） |
+| **当前版本** | `v2.2.0`（`versionCode = 9`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 底部主栏直达隔离式 Seek 邮箱 (`seek.li`) 与页内密钥管理 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达监控 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 底部主栏直达隔离式 Seek 邮箱 (`seek.li`) 与页内密钥管理 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达监控 · 黑五大促专题页 · VPS 补货抢购监控 · 卖家交易信誉卡 · 哪吒/Komari 探针监控与 VPS 资产账本 · 手机端 TCPing / 原生 iperf3 / 原生 IP 鉴定测机 · 轻量 SSH 一键测评终端 · LET/LEB 海外情报聚合与中文机翻 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
@@ -178,7 +178,7 @@
 - **个人中心 (`PulseHubScreen`)**：
   - **个人信息 Hero 卡**：保留主题渐变光效与等级经验进度条，精简展示等级 / UID / TG 绑定状态与底部 4 列数据统计（`鸡腿` / `星尘` / `主题` / `评论`）；未登录时支持官方 WebView 安全登录或原生凭据登录。
   - **一行紧凑签到条 (`CompactCheckInCard`)**：单行展示今日签到名次、鸡腿收益及发帖/回帖/加腿额度进度，未签到时支持原地切换 `固定 +5` / `试试手气` 并一键签到，已签到直接查看「签到榜」。
-  - **设置式分组列表**：清晰划分为 **「消息」**（`通知` / `私信` / `关键词提醒`，各自独立角标计数）与 **「内容」**（`我的收藏` / `浏览记录` / `我的帖子`），点按即可直达独立二级页面。
+  - **设置式分组列表**：清晰划分为 **「消息」**（`通知` / `私信` / `关键词提醒`，各自独立角标计数）、**「内容」**（`我的收藏` / `浏览记录` / `我的帖子`）与 **「工具箱」**（`黑五大促专题` / `海外情报聚合` / `VPS 补货监控` / `我的服务器` / `手机端测机` / `轻量 SSH`），点按即可直达独立二级页面。
 - **签到榜 (`CheckInBoardScreen`)**：可视化前三甲领奖台、全站签到排名与自己的当日名次及手气收益。
 
 ---
@@ -250,7 +250,71 @@
 
 ---
 
-### 9. 个性化设置与设计系统 (`Settings & Design System`)
+### 9. VPS 玩家工具箱与黑五大促套件 (`VPS Toolbox & Promo Suite`)
+
+<div align="center">
+<table>
+  <tr>
+    <th width="50%">🔥 黑五 / 大促专题页与倒计时筛选</th>
+    <th width="50%">⚡ VPS 补货 / 抢购监控</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/24-black-friday-deals.png" width="275" alt="Black Friday Deals Hub" /></td>
+    <td align="center"><img src="docs/screenshots/25-restock-monitor.png" width="275" alt="VPS Restock Monitor" /></td>
+  </tr>
+</table>
+</div>
+
+<div align="center">
+<table>
+  <tr>
+    <th width="50%">🛡️ 交易前“查一查”卖家信誉卡</th>
+    <th width="50%">📡 我的服务器 · 哪吒/Komari 探针监控</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/26-seller-trust-card.png" width="275" alt="Seller Trust Card" /></td>
+    <td align="center"><img src="docs/screenshots/27-my-servers-probes.png" width="275" alt="My Servers Probe Telemetry" /></td>
+  </tr>
+</table>
+</div>
+
+<div align="center">
+<table>
+  <tr>
+    <th width="50%">📒 我的服务器 · 资产账本与一键出机</th>
+    <th width="50%">📶 手机端测机 · TCPing / 原生 iperf3 / IP 鉴定</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/28-my-servers-ledger.png" width="275" alt="My Servers Asset Ledger" /></td>
+    <td align="center"><img src="docs/screenshots/29-mobile-netbench.png" width="275" alt="Mobile NetBench" /></td>
+  </tr>
+</table>
+</div>
+
+<div align="center">
+<table>
+  <tr>
+    <th width="50%">💻 轻量 SSH · 一键脚本与 ANSI 终端</th>
+    <th width="50%">🌐 海外情报聚合 · LET/LEB 机翻与汇率折算</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/30-lite-ssh-ansi.png" width="275" alt="Lite SSH ANSI Runner" /></td>
+    <td align="center"><img src="docs/screenshots/31-overseas-intel.png" width="275" alt="Overseas Intel Aggregator" /></td>
+  </tr>
+</table>
+</div>
+
+- **黑五 / 大促专题页 (`DealsHubScreen`)**：实时黑五/网一倒计时（`11/27` 黑五正日 · `11/30` 网一），自动从优惠帖结构化提取价格、配置、机房线路、年付折算与优惠码，支持按 `≤ $20/年`、`香港 / 日本`、`CN2 GIA` 等条件一键筛选，并与补货监控联动蹲守。
+- **VPS 补货 / 抢购监控 (`RestockMonitorScreen`)**：自动识别 WHMCS / SolusVM / HostBill / VirtFusion 面板购买页（支持顶栏粘贴链接或帖子内长按商品链接加入监控），后台 `缺货 → 有货` 波次去重巡检并发送高优先级通知，点击直跳下单页，亦支持一键导入资产账本。
+- **交易前“查一查”卖家信誉卡 (`SellerTrustCardSheet`)**：在交易帖、私信与主页点击卖家头像一键弹出信誉卡，并发聚合注册时长、等级/鸡腿、历史交易帖数及站内 `曝光 / 骗子` 关联帖命中结果，支持私人标签与备注并在命中高危风险时给出红框预警。
+- **我的服务器：探针接入 + 资产账本 (`MyServersScreen`)**：同时接入哪吒探针 v0/v1 与 Komari 面板 API 查看主机实时在线状态、CPU/内存/硬盘、双向流量与掉线推送提醒；内置多币种续费资产账本与到期提醒，点击「不想续了 · 一键出机」直接联动估值器生成交易帖并跳入发帖页。
+- **手机端测机 (`MobileNetBenchScreen`)**：直接从手机当前网络执行实时 TCPing 波形探测与纯 Kotlin 原生 `iperf3` 吞吐测速（下载 `-R` / 上传 / 双向），并结合 GeoIP 与 RIR WHOIS/RDAP 鉴定原生 IP / 广播 IP，自动隐藏本机出口 IP 并一键生成回帖精简卡或完整测机表格 Markdown。
+- **轻量 SSH：一键跑测评脚本 (`LiteSshScreen`)**：内置 Android Keystore `AES-256-GCM` 加密主机保险库与 `TOFU` SHA-256 指纹校验，集成系统快检、YABS、NodeQuality、NextTrace、流媒体解锁与自定义非交互脚本；支持高保真流式 ANSI 彩色输出、默认服务器 IP 自动打码及多脚本自动合并 `:::: tabs` 一键发测评帖。
+- **海外情报聚合 (`OverseasIntelScreen`)**：实时抓取 LowEndTalk 与 LowEndBox 最新优惠帖，支持 `译 / 双语 / EN` 切换（在线机翻 + 自定义接口 + 离线 VPS 术语词典三层兜底）、按实时汇率折算外币为人民币，并可一键「加入补货监控」或「一键搬运发帖」。
+
+---
+
+### 10. 个性化设置与设计系统 (`Settings & Design System`)
 
 <div align="center">
 <table>
@@ -275,10 +339,10 @@ Anode 采用清晰的单向多层架构（`ui` → `domain` ← `data`），通�
 
 ```mermaid
 flowchart TD
-    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · explore · boards · topic · composer · hub · mail · radar · valuation · update"]
+    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · explore · boards · topic · composer · hub · mail · radar · valuation · deals · restock · trust · fleet · netbench · ssh · overseas · update"]
     NAV["Navigation Shell<br/>MainActivity · NavHost · UrlRouter · AppDestination"]
-    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · SeekMail · Radar · Valuation · Update"]
-    DATA["Data Layer<br/>Repositories · NodeSeekApiClient & SeekMailApiClient & GitHubReleaseClient (OkHttp) · Jsoup/RSS Parsers · Room DB · DataStore · Disk Cache"]
+    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · SeekMail · Radar · Valuation · Deals · Restock · Trust · Fleet · NetBench · Ssh · Overseas · Update"]
+    DATA["Data Layer<br/>Repositories · NodeSeekApiClient & SeekMailApiClient & GitHubReleaseClient (OkHttp) · Jsoup/RSS Parsers · JSch SSH · NetBench Sockets · Room DB · DataStore · Keystore · Disk Cache"]
 
     NAV --> UI
     UI --> DOMAIN
@@ -294,19 +358,33 @@ app/src/main/java/com/nodeseek/app/
 ├── navigation/                      # Kotlinx Serialization 类型安全导航、深度链接与外链路由
 ├── notifications/                   # 通知渠道、Android 13+ 权限诊断与点击意图路由
 ├── domain/
+│   ├── deals/                       # 黑五大促倒计时、优惠帖结构化抽取与筛选模型
+│   ├── fleet/                       # 哪吒/Komari 探针聚合、VPS 资产账本与一键出机发帖模型
 │   ├── mail/                        # SeekMail 模型、仓库接口与 VerificationCodeExtractor
 │   ├── model/                       # 社区帖子、账户、社交与设置不可变模型
+│   ├── netbench/                    # TCPing、纯 Kotlin iperf3 引擎与原生/广播 IP 鉴定模型
+│   ├── overseas/                    # LET/LEB 海外情报聚合与多级翻译领域契约
 │   ├── radar/                       # Pulse Radar 规则、提醒记录与定位解析器
 │   ├── repository/                  # 纯 Kotlin 领域仓库接口
+│   ├── restock/                     # 补货监控目标识别、状态变更去重与配置模型
+│   ├── ssh/                         # 轻量 SSH 预设脚本、TOFU 指纹校验与 :::: tabs 测评排版
+│   ├── trust/                       # 交易前卖家信誉聚合与站内曝光风控评估引擎
 │   ├── update/                      # GitHub Releases 更新模型、SemVer 比较器与管理器接口
 │   └── valuation/                   # BigDecimal VPS 剩余价值与过户交易估值引擎
 ├── data/
+│   ├── deals/                       # 黑五大促优惠提取、倒计时与筛选仓库实现
+│   ├── fleet/                       # 哪吒 v0/v1 / Komari 探针 API 客户端、资产持久化与巡检 Worker
 │   ├── local/                       # Room 数据库（离线收藏快照、阅读进度、雷达规则、版块）与 DataStore
 │   ├── mail/                        # 会话隔离 SeekMailApiClient、Jsoup HTML 消毒器与磁盘缓存
+│   ├── netbench/                    # 原生 TCP/HTTP 探测、iperf3 控制面与多源 GeoIP/RDAP 客户
 │   ├── network/                     # OkHttp 客户端、CSRF 存储、WebView Cookie 桥接与 Coil 工厂
+│   ├── overseas/                    # LowEndTalk / LowEndBox 抓取解析与三层翻译/汇率仓库
 │   ├── parser/                      # Jsoup window.__config__ 注水解析、RSS XML 与 HTML→Markdown
-│   ├── radar/                       # PulseRadarMonitor 前后台轮询与关键词/正则匹配引擎
+│   ├── radar/                       # PulseRadarMonitor WorkManager 巡检与关键词/正则匹配引擎
 │   ├── repository/                  # 各仓库实现与 DTO 映射层
+│   ├── restock/                     # 购买页面板识别探测、WorkManager 补货巡检与持久化存储
+│   ├── ssh/                         # Keystore AES-256-GCM 主机保险库与 JSch PTY 流式执行器
+│   ├── trust/                       # 卖家主页/历史主题/站内风控检索聚合与本地备注仓储
 │   ├── update/                      # Cookie 隔离 GitHubReleaseClient、APK 安装器与更新调度实现
 │   └── valuation/                   # Frankfurter 汇率仓库（含 24h 本地缓存与手动校准）
 └── ui/
@@ -316,12 +394,19 @@ app/src/main/java/com/nodeseek/app/
     ├── boards/                      # 独立全站统一搜索与版块过滤 Screen & ViewModel
     ├── topic/                       # 杂志级帖子阅读器、楼层滑块与快捷回复工作台
     ├── composer/                    # Markdown 发帖/改帖编辑器与 NodeImage 上传
-    ├── hub/                         # 个人中心（一行签到/设置式分组）、收藏与足迹、签到榜、收件箱、私信、用户空间与分组设置页
+    ├── hub/                         # 个人中心（一行签到/设置式分组/工具箱）、收藏与足迹、签到榜、收件箱、私信、用户空间与分组设置页
+    ├── deals/                       # 黑五 / 大促专题页与首页置顶横幅
+    ├── restock/                     # VPS 补货监控列表、快速探测与商品链接添加弹窗
+    ├── trust/                       # 卖家信誉卡 BottomSheet 与风险快捷徽章
+    ├── fleet/                       # 我的服务器（探针遥测、资产账本与一键出机估值弹窗）
+    ├── netbench/                    # 手机端测机主界面与长按快捷探测弹窗
+    ├── ssh/                         # 轻量 SSH 主机保险库、高保真 ANSI 控制台与测评导出面板
+    ├── overseas/                    # 海外情报聚合列表、双语卡片与翻译接口设置弹窗
     ├── mail/                        # SeekMailScreen（含页内 API Key 弹窗）、SeekMailViewModel 与隔离式 SeekMailWebView
     ├── radar/                       # PulseRadarScreen & ViewModel（规则管理、提醒流与追更追踪）
     ├── update/                      # AppUpdateDialog（更新提醒弹窗、日志渲染与下载安装进度）
     ├── valuation/                   # VpsValuationBottomSheet（实时遥测、汇率同步与 Markdown 导出）
-    └── preview/                     # Compose @Preview 组件设计图库
+    └── preview/                     # Compose @Preview 组件设计与全模块展示图库
 ```
 
 更多工程与协议细节请参阅 [`docs/design-spec.md`](docs/design-spec.md) 与 [`docs/nodeseek-protocol.md`](docs/nodeseek-protocol.md)。
@@ -358,8 +443,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.1.1-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v2.1.1-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.2.0-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v2.2.0-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 
@@ -374,6 +459,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中，绝不上传至任何第三方统计或中转服务器；外站图床与邮件接口均采用严格的 Cookie 隔离策略。
+- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与卖家本地备注额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。
