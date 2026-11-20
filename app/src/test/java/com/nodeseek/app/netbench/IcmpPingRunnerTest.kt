@@ -9,6 +9,7 @@ import com.nodeseek.app.data.netbench.PingExecutionEvent
 import com.nodeseek.app.data.netbench.PingProcessExecutor
 import com.nodeseek.app.data.netbench.PingProcessRequest
 import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
+import com.nodeseek.app.data.netbench.SystemPingProcessExecutor
 import com.nodeseek.app.domain.netbench.IcmpNetworkBindingMode
 import com.nodeseek.app.domain.netbench.IcmpPingConfig
 import com.nodeseek.app.domain.netbench.IpFamily
@@ -26,6 +27,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
@@ -396,6 +398,101 @@ class IcmpPingRunnerTest {
         val permResult = permRunner.run(IcmpPingConfig(target = "1.1.1.1", probeCount = 4)).toList().last()
         assertEquals(0, permResult.summary.sent)
         assertTrue(permResult.errorMessage!!.contains("TCPing"))
+    }
+
+    @Test
+    fun `filters emulator DUP wrong data byte overflow RTTs and caps waveform to planned count`() = runBlocking {
+        // Exact malformed iputils-s20121221 output pattern observed on Android emulator NAT
+        val emulatorOutput = listOf(
+            "PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.",
+            "64 bytes from 1.1.1.1: icmp_seq=0 ttl=255 time=242151963561072 ms (DUP!)",
+            "wrong data byte #16 should be 0x10 but was 0x36",
+            "64 bytes from 1.1.1.1: icmp_seq=1 ttl=255 time=20.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=2 ttl=255 time=976923069293943 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=3 ttl=255 time=30.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=4 ttl=255 time=40.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=5 ttl=255 time=25.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=6 ttl=255 time=35.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=7 ttl=255 time=22.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=8 ttl=255 time=28.0 ms",
+            "64 bytes from 1.1.1.1: icmp_seq=10 ttl=255 time=24.0 ms",
+            "--- 1.1.1.1 ping statistics ---",
+            "10 packets transmitted, 8 received, +2 duplicates, 20% packet loss, time 4514ms",
+            "rtt min/avg/max/mdev = 0.000/24215196356279.303/242151963561072.068/-6325746227839160.-365 ms, pipe 11",
+        )
+
+        // Pure parser checks
+        assertNull(IcmpPingParser.parseLine("64 bytes from 1.1.1.1: icmp_seq=0 ttl=255 time=242151963561072 ms (DUP!)"))
+        assertNull(IcmpPingParser.parseLine("wrong data byte #16 should be 0x10 but was 0x36"))
+        assertNull(
+            IcmpPingParser.parseRttStatsLine(
+                "rtt min/avg/max/mdev = 0.000/24215196356279.303/242151963561072.068/-6325746227839160.-365 ms, pipe 11",
+            ),
+        )
+
+        val executor = PingProcessExecutor {
+            flow {
+                emulatorOutput.forEach { emit(PingExecutionEvent.StdoutLine(it)) }
+                emit(PingExecutionEvent.Exited(1))
+            }
+        }
+        val runner = IcmpPingRunner(executor = executor, ioDispatcher = Dispatchers.IO)
+        val emissions = runner.run(IcmpPingConfig(target = "1.1.1.1", probeCount = 10)).toList()
+        val finalProgress = emissions.last()
+        val summary = finalProgress.summary
+
+        assertTrue(finalProgress.isFinished)
+        assertEquals("Waveform samples must not exceed 10 (no 11/10 overflow)", 10, summary.samples.size)
+        assertEquals(10, summary.sent)
+        assertEquals(8, summary.received)
+        assertEquals(20.0, summary.lossPercent, 0.001)
+        // Valid RTTs are [20, 30, 40, 25, 35, 22, 28, 24] -> min=20, max=40, avg=28.0
+        assertEquals(20.0, summary.minMs!!, 0.001)
+        assertEquals(28.0, summary.avgMs!!, 0.001)
+        assertEquals(40.0, summary.maxMs!!, 0.001)
+        assertTrue(summary.jitterMdevMs!! < 10.0)
+        // seq=2 had corrupted RTT (received, rttMs=null)
+        assertTrue(summary.samples[1].success)
+        assertNull(summary.samples[1].rttMs)
+        // seq=9 was genuinely lost (success=false)
+        assertFalse(summary.samples[8].success)
+    }
+
+    @Test
+    fun `system process executor and runner survive watchdog force-close and stream IOException cleanly`() = runBlocking {
+        // Real subprocess that outputs one packet then stalls past the 1s watchdog timeout
+        val events = SystemPingProcessExecutor.execute(
+            PingProcessRequest(
+                command = listOf("sh", "-c", "echo '64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=12.3 ms'; sleep 5"),
+                timeoutMs = 1_000L,
+            ),
+        ).toList()
+
+        assertTrue(events.any { it is PingExecutionEvent.StdoutLine && it.line.contains("12.3 ms") })
+        assertTrue(events.any { it is PingExecutionEvent.Exited })
+
+        // Runner also degrades cleanly if executor throws IOException mid-stream after receiving samples
+        val throwingExecutor = PingProcessExecutor {
+            flow {
+                emit(PingExecutionEvent.StdoutLine("64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=15.0 ms"))
+                throw IOException("read interrupted by close() on another thread")
+            }
+        }
+        val runner = IcmpPingRunner(executor = throwingExecutor, ioDispatcher = Dispatchers.IO)
+        val result = runner.run(IcmpPingConfig(target = "1.1.1.1", probeCount = 4)).toList().last()
+        assertTrue(result.isFinished)
+        assertEquals(15.0, result.summary.avgMs!!, 0.001)
+
+        // If executor throws IOException before any sample arrives, runner emits finished error rather than throwing
+        val immediateThrowExecutor = PingProcessExecutor {
+            flow {
+                throw IOException("read interrupted by close() on another thread")
+            }
+        }
+        val failRunner = IcmpPingRunner(executor = immediateThrowExecutor, ioDispatcher = Dispatchers.IO)
+        val failResult = failRunner.run(IcmpPingConfig(target = "1.1.1.1", probeCount = 4)).toList().last()
+        assertTrue(failResult.isFinished)
+        assertNotNull(failResult.errorMessage)
     }
 
     private fun fakeChannel(
