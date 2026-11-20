@@ -121,6 +121,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
@@ -174,8 +175,10 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -259,6 +262,9 @@ private fun rememberMarkdownImageSaveAction(): (String, String) -> Unit {
     }
 }
 
+private const val ASYNC_MARKDOWN_PARSE_THRESHOLD_CHARS = 32_000
+private const val QUICK_MARKDOWN_PREVIEW_CHARS = 12_000
+
 @Composable
 fun MarkdownRenderer(
     markdown: String,
@@ -274,7 +280,29 @@ fun MarkdownRenderer(
     onUrlClick: ((String) -> Unit)? = null,
     onUrlLongClick: ((String) -> Unit)? = null,
 ) {
-    val parsedDoc = remember(markdown) { parseNodeSeekMarkdownDocument(markdown) }
+    val isInspection = LocalInspectionMode.current
+    val offloadParse = !isInspection && markdown.length > ASYNC_MARKDOWN_PARSE_THRESHOLD_CHARS
+    var asyncParsedKey by remember { mutableStateOf("") }
+    var asyncParsedDoc by remember { mutableStateOf<ParsedMarkdownDocument?>(null) }
+
+    val targetParseKey = if (offloadParse) "${markdown.length}_${markdown.hashCode()}" else ""
+    LaunchedEffect(offloadParse, targetParseKey, markdown) {
+        if (offloadParse) {
+            val doc = withContext(Dispatchers.Default) {
+                parseNodeSeekMarkdownDocument(markdown)
+            }
+            asyncParsedDoc = doc
+            asyncParsedKey = targetParseKey
+        }
+    }
+
+    val parsedDoc = when {
+        !offloadParse -> remember(markdown) { parseNodeSeekMarkdownDocument(markdown) }
+        asyncParsedKey == targetParseKey && asyncParsedDoc != null -> asyncParsedDoc!!
+        else -> remember(targetParseKey) {
+            parseNodeSeekMarkdownDocument(markdown.take(QUICK_MARKDOWN_PREVIEW_CHARS))
+        }
+    }
     var lightboxImageState by remember { mutableStateOf<Pair<String, String>?>(null) }
     var actionSheetImage by remember { mutableStateOf<ImageActionTarget?>(null) }
     val uriHandler = LocalUriHandler.current
@@ -936,6 +964,9 @@ private fun computeFittedMonospaceScale(
     return scale
 }
 
+private const val ASYNC_CODE_PARSE_THRESHOLD_CHARS = 12_000
+private const val QUICK_CODE_PREVIEW_CHARS = 6_000
+
 @Composable
 fun PulseCodeBlockCard(
     language: String,
@@ -949,9 +980,13 @@ fun PulseCodeBlockCard(
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
+    val isInspection = LocalInspectionMode.current
     val textMeasurer = rememberTextMeasurer()
     val selectionEnabled = LocalMarkdownSelectionEnabled.current
     var copied by remember { mutableStateOf(false) }
+    var maxRenderedLines by remember(code) {
+        mutableIntStateOf(AnsiAndCodeFormatter.DEFAULT_INITIAL_MAX_CODE_LINES)
+    }
 
     LaunchedEffect(copied) {
         if (copied) {
@@ -971,15 +1006,58 @@ fun PulseCodeBlockCard(
     }
     val showHeaderChrome = !isTerminalReport
     var fitToWidth by remember(code, isTerminalReport) { mutableStateOf(isTerminalReport) }
-    val styledCode = remember(code, hasAnsi, isTerminalReport, ext.onCodeSurface) {
-        when {
-            hasAnsi -> AnsiAndCodeFormatter.parseAnsiTerminalText(code, defaultForeground = ext.onCodeSurface)
-            isTerminalReport -> buildAnnotatedString {
-                append(code)
-                addStyle(SpanStyle(color = ext.onCodeSurface), 0, code.length)
+
+    val offloadCodeParse = !isInspection && code.length > ASYNC_CODE_PARSE_THRESHOLD_CHARS
+    val codeCacheTag = if (offloadCodeParse) {
+        "${code.length}_${code.hashCode()}_${hasAnsi}_${isTerminalReport}_$maxRenderedLines"
+    } else {
+        ""
+    }
+    var asyncChunkTag by remember { mutableStateOf("") }
+    var asyncChunked by remember { mutableStateOf<AnsiAndCodeFormatter.ChunkedStyledCode?>(null) }
+
+    LaunchedEffect(offloadCodeParse, codeCacheTag, ext.onCodeSurface) {
+        if (offloadCodeParse) {
+            val built = withContext(Dispatchers.Default) {
+                AnsiAndCodeFormatter.buildStyledCodeChunks(
+                    code = code,
+                    hasAnsi = hasAnsi,
+                    isTerminalReport = isTerminalReport,
+                    defaultForeground = ext.onCodeSurface,
+                    linesPerChunk = AnsiAndCodeFormatter.DEFAULT_CODE_CHUNK_LINES,
+                    maxLines = maxRenderedLines,
+                )
             }
-            else -> AnsiAndCodeFormatter.highlightSourceCode(code, defaultForeground = ext.onCodeSurface)
+            asyncChunked = built
+            asyncChunkTag = codeCacheTag
         }
+    }
+
+    val chunkedCode = when {
+        !offloadCodeParse -> remember(code, hasAnsi, isTerminalReport, ext.onCodeSurface, maxRenderedLines) {
+            AnsiAndCodeFormatter.buildStyledCodeChunks(
+                code = code,
+                hasAnsi = hasAnsi,
+                isTerminalReport = isTerminalReport,
+                defaultForeground = ext.onCodeSurface,
+                linesPerChunk = AnsiAndCodeFormatter.DEFAULT_CODE_CHUNK_LINES,
+                maxLines = maxRenderedLines,
+            )
+        }
+        asyncChunkTag == codeCacheTag && asyncChunked != null -> asyncChunked!!
+        else -> remember(codeCacheTag, ext.onCodeSurface) {
+            AnsiAndCodeFormatter.buildStyledCodeChunks(
+                code = code.take(QUICK_CODE_PREVIEW_CHARS),
+                hasAnsi = hasAnsi,
+                isTerminalReport = isTerminalReport,
+                defaultForeground = ext.onCodeSurface,
+                linesPerChunk = AnsiAndCodeFormatter.DEFAULT_CODE_CHUNK_LINES,
+                maxLines = AnsiAndCodeFormatter.DEFAULT_CODE_CHUNK_LINES,
+            )
+        }
+    }
+    val measureAnnotatedSample = remember(chunkedCode.plainSampleForMeasure) {
+        AnnotatedString(chunkedCode.plainSampleForMeasure)
     }
     val headerLabel = remember(language, hasAnsi) {
         when {
@@ -1053,13 +1131,13 @@ fun PulseCodeBlockCard(
             } else {
                 0
             }
-            val fitScale = remember(styledCode, baseStyle, availableWidthPx, isTerminalReport) {
-                if (!isTerminalReport || availableWidthPx <= 0 || styledCode.isEmpty()) {
+            val fitScale = remember(measureAnnotatedSample, baseStyle, availableWidthPx, isTerminalReport) {
+                if (!isTerminalReport || availableWidthPx <= 0 || measureAnnotatedSample.isEmpty()) {
                     1f
                 } else {
                     computeFittedMonospaceScale(
                         textMeasurer = textMeasurer,
-                        styledText = styledCode,
+                        styledText = measureAnnotatedSample,
                         baseStyle = baseStyle,
                         availableWidthPx = availableWidthPx,
                     )
@@ -1222,17 +1300,46 @@ fun PulseCodeBlockCard(
                     )
                 }
 
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                         .padding(horizontal = horizontalPad, vertical = verticalPad),
                 ) {
-                    Text(
-                        text = styledCode,
-                        style = effectiveCodeStyle,
-                        softWrap = false,
-                    )
+                    chunkedCode.chunks.forEach { styledChunk ->
+                        Text(
+                            text = styledChunk,
+                            style = effectiveCodeStyle,
+                            softWrap = false,
+                        )
+                    }
+                    if (chunkedCode.hiddenLineCount > 0) {
+                        val canExpandMore = maxRenderedLines < AnsiAndCodeFormatter.HARD_MAX_RENDERED_CODE_LINES
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (canExpandMore) {
+                                "… 已折叠其余 ${chunkedCode.hiddenLineCount} 行，点击继续展开"
+                            } else {
+                                "… 已达预览上限（其余 ${chunkedCode.hiddenLineCount} 行可通过复制获取完整文本）"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF93C5FD),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.White.copy(alpha = 0.08f))
+                                .then(
+                                    if (canExpandMore) {
+                                        Modifier.clickable {
+                                            maxRenderedLines = (maxRenderedLines + 400)
+                                                .coerceAtMost(AnsiAndCodeFormatter.HARD_MAX_RENDERED_CODE_LINES)
+                                        }
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
                 }
             }
         }
@@ -4359,6 +4466,18 @@ internal fun tokenizeMarkdownInline(
 
     val n = text.length
     var i = 0
+    // Negative-lookup watermarks ensure O(N) total scan even on adversarial inputs with thousands
+    // of unmatched brackets, backticks, or emphasis delimiters.
+    var noMatchingBracketFrom = Int.MAX_VALUE
+    var noSingleTickFrom = Int.MAX_VALUE
+    var noTildeStrikeFrom = Int.MAX_VALUE
+    var noTripleStarFrom = Int.MAX_VALUE
+    var noTripleUnderscoreFrom = Int.MAX_VALUE
+    var noDoubleStarFrom = Int.MAX_VALUE
+    var noDoubleUnderscoreFrom = Int.MAX_VALUE
+    var noSingleStarFrom = Int.MAX_VALUE
+    var noSingleUnderscoreFrom = Int.MAX_VALUE
+
     while (i < n) {
         val c = text[i]
 
@@ -4373,7 +4492,13 @@ internal fun tokenizeMarkdownInline(
         if (c == '`') {
             var tickLen = 1
             while (i + tickLen < n && text[i + tickLen] == '`') tickLen++
-            val closeStart = findClosingBacktickRun(text, i + tickLen, tickLen)
+            val closeStart = if (tickLen == 1 && i >= noSingleTickFrom) {
+                -1
+            } else {
+                findClosingBacktickRun(text, i + tickLen, tickLen).also { found ->
+                    if (found == -1 && tickLen == 1) noSingleTickFrom = i
+                }
+            }
             if (closeStart != -1) {
                 flushPlain()
                 var code = text.substring(i + tickLen, closeStart).replace('\n', ' ')
@@ -4394,7 +4519,15 @@ internal fun tokenizeMarkdownInline(
         if ((c == '!' && i + 1 < n && text[i + 1] == '[') || c == '[') {
             val isImage = c == '!'
             val openBracketIdx = if (isImage) i + 1 else i
-            val closeBracketIdx = findMatchingBracket(text, openBracketIdx)
+            val closeBracketIdx = if (openBracketIdx >= noMatchingBracketFrom) {
+                -1
+            } else {
+                findMatchingBracket(text, openBracketIdx).also { found ->
+                    if (found == -1 && text.indexOf(']', startIndex = openBracketIdx + 1) == -1) {
+                        noMatchingBracketFrom = openBracketIdx
+                    }
+                }
+            }
             if (closeBracketIdx != -1) {
                 val rawLabel = text.substring(openBracketIdx + 1, closeBracketIdx)
                 val afterBracket = closeBracketIdx + 1
@@ -4478,9 +4611,10 @@ internal fun tokenizeMarkdownInline(
             }
         }
 
-        // 4. Inline HTML tags & <https://...> autolinks
-        if (c == '<') {
-            val remaining = text.substring(i)
+        // 4. Inline HTML tags & <https://...> autolinks (bounded window avoids O(N²) substring copies)
+        if (c == '<' && i + 1 < n && (text[i + 1].isLetter() || text[i + 1] == '/')) {
+            val htmlWindowEnd = (i + 4_096).coerceAtMost(n)
+            val remaining = text.substring(i, htmlWindowEnd)
 
             val brMatch = INLINE_BR_REGEX.find(remaining)
             if (brMatch != null) {
@@ -4632,7 +4766,13 @@ internal fun tokenizeMarkdownInline(
 
         // 7. Strikethrough ~~...~~
         if (c == '~' && i + 1 < n && text[i + 1] == '~') {
-            val closeIdx = findClosingDelimiter(text, i + 2, "~~", allowNewline = true)
+            val closeIdx = if (i >= noTildeStrikeFrom) {
+                -1
+            } else {
+                findClosingDelimiter(text, i + 2, "~~", allowNewline = true).also { found ->
+                    if (found == -1) noTildeStrikeFrom = i
+                }
+            }
             if (closeIdx != -1) {
                 flushPlain()
                 tokens += MdInlineToken.Styled(
@@ -4652,14 +4792,23 @@ internal fun tokenizeMarkdownInline(
             while (i + runLen < n && text[i + runLen] == delimiterChar) runLen++
 
             if (runLen >= 3 && (delimiterChar == '*' || !prevIsWord)) {
-                val delim = delimiterChar.toString().repeat(3)
-                val closeIdx = findClosingDelimiter(
-                    text = text,
-                    startIndex = i + 3,
-                    delimiter = delim,
-                    allowNewline = true,
-                    requireWordBoundaryEnd = delimiterChar == '_',
-                )
+                val noTripleFrom = if (delimiterChar == '*') noTripleStarFrom else noTripleUnderscoreFrom
+                val delim = if (delimiterChar == '*') "***" else "___"
+                val closeIdx = if (i >= noTripleFrom) {
+                    -1
+                } else {
+                    findClosingDelimiter(
+                        text = text,
+                        startIndex = i + 3,
+                        delimiter = delim,
+                        allowNewline = true,
+                        requireWordBoundaryEnd = delimiterChar == '_',
+                    ).also { found ->
+                        if (found == -1) {
+                            if (delimiterChar == '*') noTripleStarFrom = i else noTripleUnderscoreFrom = i
+                        }
+                    }
+                }
                 if (closeIdx != -1) {
                     flushPlain()
                     tokens += MdInlineToken.Styled(
@@ -4673,14 +4822,23 @@ internal fun tokenizeMarkdownInline(
             }
 
             if (runLen >= 2 && (delimiterChar == '*' || !prevIsWord)) {
-                val delim = delimiterChar.toString().repeat(2)
-                val closeIdx = findClosingDelimiter(
-                    text = text,
-                    startIndex = i + 2,
-                    delimiter = delim,
-                    allowNewline = true,
-                    requireWordBoundaryEnd = delimiterChar == '_',
-                )
+                val noDoubleFrom = if (delimiterChar == '*') noDoubleStarFrom else noDoubleUnderscoreFrom
+                val delim = if (delimiterChar == '*') "**" else "__"
+                val closeIdx = if (i >= noDoubleFrom) {
+                    -1
+                } else {
+                    findClosingDelimiter(
+                        text = text,
+                        startIndex = i + 2,
+                        delimiter = delim,
+                        allowNewline = true,
+                        requireWordBoundaryEnd = delimiterChar == '_',
+                    ).also { found ->
+                        if (found == -1) {
+                            if (delimiterChar == '*') noDoubleStarFrom = i else noDoubleUnderscoreFrom = i
+                        }
+                    }
+                }
                 if (closeIdx != -1) {
                     flushPlain()
                     tokens += MdInlineToken.Styled(
@@ -4695,7 +4853,16 @@ internal fun tokenizeMarkdownInline(
             if (runLen == 1 && (delimiterChar == '*' || !prevIsWord)) {
                 val nextOk = i + 1 < n && !text[i + 1].isWhitespace() && text[i + 1] != delimiterChar
                 if (nextOk) {
-                    val closeIdx = findClosingSingleEmphasis(text, i + 1, delimiterChar)
+                    val noSingleFrom = if (delimiterChar == '*') noSingleStarFrom else noSingleUnderscoreFrom
+                    val closeIdx = if (i >= noSingleFrom) {
+                        -1
+                    } else {
+                        findClosingSingleEmphasis(text, i + 1, delimiterChar).also { found ->
+                            if (found == -1 && text.indexOf('\n', startIndex = i + 1) == -1) {
+                                if (delimiterChar == '*') noSingleStarFrom = i else noSingleUnderscoreFrom = i
+                            }
+                        }
+                    }
                     if (closeIdx != -1) {
                         flushPlain()
                         tokens += MdInlineToken.Styled(
@@ -4721,19 +4888,25 @@ internal fun tokenizeMarkdownInline(
             }
         }
 
-        // 10. #floor reference
-        if (c == '#' && (i == 0 || isFloorBoundaryBefore(text[i - 1]))) {
-            val match = FLOOR_DIGITS_REGEX.find(text.substring(i + 1))
-            if (match != null) {
-                val afterIdx = i + 1 + match.value.length
-                val validAfter = afterIdx >= n || (!text[afterIdx].isLetterOrDigit() && text[afterIdx] != '_' && !(text[afterIdx] == '.' && afterIdx + 1 < n && text[afterIdx + 1].isDigit()))
-                val floor = match.value.toIntOrNull()
-                if (validAfter && floor != null && floor > 0) {
-                    flushPlain()
-                    tokens += MdInlineToken.FloorRef(floor)
-                    i = afterIdx
-                    continue
-                }
+        // 10. #floor reference (zero-allocation digit scan instead of substring + regex per '#')
+        if (c == '#' && i + 1 < n && text[i + 1] in '0'..'9' && (i == 0 || isFloorBoundaryBefore(text[i - 1]))) {
+            var afterIdx = i + 1
+            val maxDigitsEnd = (i + 6).coerceAtMost(n)
+            var floor = 0
+            while (afterIdx < maxDigitsEnd && text[afterIdx] in '0'..'9') {
+                floor = floor * 10 + (text[afterIdx] - '0')
+                afterIdx++
+            }
+            val validAfter = afterIdx >= n || (
+                !text[afterIdx].isLetterOrDigit() &&
+                    text[afterIdx] != '_' &&
+                    !(text[afterIdx] == '.' && afterIdx + 1 < n && text[afterIdx + 1].isDigit())
+                )
+            if (validAfter && floor > 0) {
+                flushPlain()
+                tokens += MdInlineToken.FloorRef(floor)
+                i = afterIdx
+                continue
             }
         }
 
@@ -5112,6 +5285,7 @@ internal data class MdTabItem(
 
 private object MarkdownDocumentCache {
     private const val MAX_ENTRIES = 256
+    private const val MAX_CACHEABLE_CHARS = 64_000
     private val lock = Any()
     private val map = object : LinkedHashMap<String, ParsedMarkdownDocument>(128, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ParsedMarkdownDocument>?): Boolean {
@@ -5120,6 +5294,9 @@ private object MarkdownDocumentCache {
     }
 
     fun getOrPut(markdown: String, compute: () -> ParsedMarkdownDocument): ParsedMarkdownDocument {
+        if (markdown.length > MAX_CACHEABLE_CHARS) {
+            return compute()
+        }
         synchronized(lock) {
             map[markdown]?.let { return it }
         }
@@ -5131,7 +5308,19 @@ private object MarkdownDocumentCache {
     }
 }
 
-private val HEADING_REGEX = Regex("""^(#{1,6})\s+(.+?)\s*#*$""")
+private fun parseAtxHeading(trimmed: String): MdBlock.Heading? {
+    if (trimmed.isEmpty() || trimmed[0] != '#') return null
+    var level = 0
+    while (level < trimmed.length && level < 6 && trimmed[level] == '#') level++
+    if (level !in 1..6 || level >= trimmed.length || !trimmed[level].isWhitespace()) return null
+    var start = level
+    while (start < trimmed.length && trimmed[start].isWhitespace()) start++
+    var end = trimmed.length
+    while (end > start && trimmed[end - 1] == '#') end--
+    while (end > start && trimmed[end - 1].isWhitespace()) end--
+    if (end <= start) return null
+    return MdBlock.Heading(level = level, text = trimmed.substring(start, end))
+}
 private val HTML_HEADING_SINGLE_LINE_REGEX = Regex("""^<h([1-6])\b[^>]*>(.*?)</h\1>\s*$""", RegexOption.IGNORE_CASE)
 private val HTML_HEADING_OPEN_REGEX = Regex("""^<h([1-6])\b[^>]*>(.*)$""", RegexOption.IGNORE_CASE)
 private val SETEXT_H1_REGEX = Regex("""^={2,}\s*$""")
@@ -5323,12 +5512,9 @@ private fun parseBlocksInternal(
         }
 
         // 5. ATX Heading `# ...` or HTML `<h1..h6>...</h1..h6>`
-        val headingMatch = HEADING_REGEX.matchEntire(trimmed)
-        if (headingMatch != null) {
-            result += MdBlock.Heading(
-                level = headingMatch.groupValues[1].length,
-                text = headingMatch.groupValues[2].trim(),
-            )
+        val atxHeading = parseAtxHeading(trimmed)
+        if (atxHeading != null) {
+            result += atxHeading
             i++
             continue
         }
@@ -5512,7 +5698,7 @@ private fun parseBlocksInternal(
                 curTrimmed.startsWith("::::tabs") ||
                 DETAILS_OPEN_REGEX.containsMatchIn(curTrimmed) ||
                 curTrimmed.startsWith(">") ||
-                HEADING_REGEX.matches(curTrimmed) ||
+                parseAtxHeading(curTrimmed) != null ||
                 HTML_HEADING_SINGLE_LINE_REGEX.matches(curTrimmed) ||
                 HTML_HEADING_OPEN_REGEX.matches(curTrimmed) ||
                 HR_REGEX.matches(curTrimmed) ||

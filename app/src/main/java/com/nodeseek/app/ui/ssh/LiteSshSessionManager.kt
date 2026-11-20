@@ -13,6 +13,7 @@ import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
+import com.nodeseek.app.domain.ssh.SshMergeLayout
 import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
 import com.nodeseek.app.domain.ssh.SshJumpHostConnectionException
 import com.nodeseek.app.domain.ssh.SshJumpHostCycleException
@@ -28,6 +29,7 @@ import com.nodeseek.app.domain.ssh.SshStageDetector
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -42,6 +44,7 @@ import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
@@ -439,6 +442,37 @@ class LiteSshSessionManager(
         }
     }
 
+    fun toggleCandidateRunForExport(record: SshExecutionRecord) {
+        _uiState.update { state ->
+            val inSession = state.sessionRuns.any { it.id == record.id }
+            val nextSession = if (inSession) state.sessionRuns else state.sessionRuns + record
+            val nextSelected = if (record.id in state.selectedRunIdsForExport) {
+                state.selectedRunIdsForExport - record.id
+            } else {
+                state.selectedRunIdsForExport + record.id
+            }
+            state.copy(
+                sessionRuns = nextSession,
+                selectedRunIdsForExport = nextSelected,
+            )
+        }
+    }
+
+    fun setSelectedRunsForExport(records: List<SshExecutionRecord>) {
+        _uiState.update { state ->
+            val existingIds = state.sessionRuns.map { it.id }.toSet()
+            val chronologicalNew = records
+                .filter { it.hasOutput && it.id !in existingIds }
+                .sortedBy { it.startedAtEpochMillis }
+            val nextSession = state.sessionRuns + chronologicalNew
+            val nextSelected = records.filter { it.hasOutput }.map { it.id }.toSet()
+            state.copy(
+                sessionRuns = nextSession,
+                selectedRunIdsForExport = nextSelected,
+            )
+        }
+    }
+
     fun removeSessionRun(runId: String) {
         _uiState.update { state ->
             val nextRuns = state.sessionRuns.filterNot { it.id == runId }
@@ -517,6 +551,10 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(showExportPreviewSheet = false) }
     }
 
+    fun setMergeLayout(layout: SshMergeLayout) {
+        _uiState.update { it.copy(mergeLayout = layout) }
+    }
+
     fun openHistorySheet() {
         _uiState.update { it.copy(showHistorySheet = true) }
     }
@@ -526,6 +564,22 @@ class LiteSshSessionManager(
     }
 
     fun buildExportPayload(): SshFormattedPost? = _uiState.value.exportPreviewPost
+
+    suspend fun buildExportPayloadAsync(): SshFormattedPost? {
+        val stateSnapshot = _uiState.value
+        return withContext(Dispatchers.Default) {
+            val runs = stateSnapshot.exportableRuns
+            if (runs.isEmpty()) {
+                null
+            } else {
+                com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter.format(
+                    runs = runs,
+                    maskIp = stateSnapshot.maskServerIp,
+                    mergeLayout = stateSnapshot.mergeLayout,
+                )
+            }
+        }
+    }
 
     fun consumeStatusMessage() {
         _uiState.update { it.copy(statusMessage = null) }

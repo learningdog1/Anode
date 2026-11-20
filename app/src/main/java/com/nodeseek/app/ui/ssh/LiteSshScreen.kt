@@ -190,18 +190,25 @@ fun LiteSshScreen(
         }
     }
 
+    val hasNonBlankLiveText = uiState.liveAnsiOutput.isNotEmpty()
     val exportMeta = remember(
         uiState.sessionRuns,
         uiState.selectedRunIdsForExport,
         uiState.viewingRunId,
         uiState.hasLiveOutputFlag,
-        uiState.liveAnsiOutput,
+        hasNonBlankLiveText,
+        uiState.mergeLayout,
     ) {
         uiState.computeExportSummaryMeta()
     }
-    val resolveExportPayload: () -> SshFormattedPost? = remember(previewUiState, viewModel) {
-        { previewUiState?.exportPreviewPost ?: viewModel.buildExportPayload() }
-    }
+    val asyncExportActions = rememberAsyncSshExportActions(
+        previewUiState = previewUiState,
+        viewModel = viewModel,
+        scope = scope,
+        onCopyText = copyToClipboard,
+        onInsertToReplyCallback = onInsertToReply,
+        onPublishToComposerCallback = onPublishToComposer,
+    )
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -222,23 +229,9 @@ fun LiteSshScreen(
                     exportMeta = exportMeta,
                     maskServerIp = uiState.maskServerIp,
                     onPreview = viewModel::openExportPreviewSheet,
-                    onCopyMarkdown = {
-                        resolveExportPayload()?.let { post ->
-                            copyToClipboard(post.markdownContent, "已复制 Markdown 测评报告")
-                        }
-                    },
-                    onInsertToReply = onInsertToReply?.let { callback ->
-                        {
-                            resolveExportPayload()?.let { post ->
-                                callback(post.markdownContent)
-                            }
-                        }
-                    },
-                    onPublishToComposer = {
-                        resolveExportPayload()?.let { post ->
-                            onPublishToComposer(post.suggestedTitle, post.markdownContent)
-                        }
-                    },
+                    onCopyMarkdown = asyncExportActions.onCopyMarkdown,
+                    onInsertToReply = asyncExportActions.onInsertToReply,
+                    onPublishToComposer = asyncExportActions.onPublishToComposer,
                 )
             }
         },
@@ -418,27 +411,18 @@ fun LiteSshScreen(
     }
 
     if (uiState.showExportPreviewSheet) {
-        val previewFormattedPost = remember(
-            uiState.sessionRuns,
-            uiState.selectedRunIdsForExport,
-            uiState.viewingRunId,
-            uiState.maskServerIp,
-            uiState.liveAnsiOutput,
-            uiState.elapsedMillis / 2_000L,
-        ) {
-            uiState.exportPreviewPost
-        }
-        if (previewFormattedPost != null) {
-            SshExportPreviewBottomSheet(
-                formattedPost = previewFormattedPost,
-                maskServerIp = uiState.maskServerIp,
-                onToggleMaskIp = viewModel::toggleMaskServerIp,
-                onCopyMarkdown = { md -> copyToClipboard(md, "已复制 Markdown 测评报告") },
-                onPublishToComposer = onPublishToComposer,
-                onInsertToReply = onInsertToReply,
-                onDismiss = viewModel::dismissExportPreviewSheet,
-            )
-        }
+        SshResultPublishSheet(
+            uiState = uiState,
+            onToggleMaskIp = viewModel::toggleMaskServerIp,
+            onSelectMergeLayout = viewModel::setMergeLayout,
+            onToggleCandidateRun = viewModel::toggleCandidateRunForExport,
+            onSelectCandidateRuns = viewModel::setSelectedRunsForExport,
+            onCopyMarkdown = { md -> copyToClipboard(md, "已复制 Markdown 测评报告") },
+            onCopyPlainText = { txt -> copyToClipboard(txt, "已复制 NodeQuality 官方纯文本报告") },
+            onPublishToComposer = onPublishToComposer,
+            onInsertToReply = onInsertToReply,
+            onDismiss = viewModel::dismissExportPreviewSheet,
+        )
     }
 
     if (uiState.showHistorySheet) {

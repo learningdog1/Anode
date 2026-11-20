@@ -45,6 +45,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +56,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,10 +65,14 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.ssh.SshServerVault
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
+import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
+import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import com.nodeseek.app.ui.components.AnsiAndCodeFormatter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -109,14 +116,28 @@ fun SshQuickInsertSheet(
         val idSet = selectedIds.toSet()
         exportableHistory.filter { it.id in idSet }
     }
-    val formattedPost = remember(selectedRuns, maskServerIp) {
-        if (selectedRuns.isEmpty()) {
+    val isInspection = LocalInspectionMode.current
+    var formattedPost by remember {
+        mutableStateOf<SshFormattedPost?>(
+            if (isInspection && selectedRuns.isNotEmpty()) {
+                SshBenchmarkPostFormatter.format(runs = selectedRuns, maskIp = maskServerIp)
+            } else {
+                null
+            },
+        )
+    }
+    LaunchedEffect(selectedRuns, maskServerIp, isInspection) {
+        formattedPost = if (selectedRuns.isEmpty()) {
             null
+        } else if (isInspection) {
+            SshBenchmarkPostFormatter.format(runs = selectedRuns, maskIp = maskServerIp)
         } else {
-            SshBenchmarkPostFormatter.format(
-                runs = selectedRuns,
-                maskIp = maskServerIp,
-            )
+            withContext(Dispatchers.Default) {
+                SshBenchmarkPostFormatter.format(
+                    runs = selectedRuns,
+                    maskIp = maskServerIp,
+                )
+            }
         }
     }
 
@@ -290,6 +311,7 @@ fun SshQuickInsertSheet(
 
                 PulseGradientDivider()
 
+                val currentFormattedPost = formattedPost
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -297,16 +319,16 @@ fun SshQuickInsertSheet(
                 ) {
                     Text(
                         text = when {
-                            formattedPost == null -> "请至少勾选 1 条记录"
-                            formattedPost.usesTabsLayout -> "已选 ${formattedPost.runCount} 项 · 将生成 :::: tabs"
-                            else -> "已选 1 项 · 将生成 ```ansi 代码块"
+                            currentFormattedPost == null -> "请至少勾选 1 条记录"
+                            currentFormattedPost.usesTabsLayout -> "已选 ${currentFormattedPost.runCount} 项 · 将生成 :::: tabs"
+                            else -> "已选 ${currentFormattedPost.runCount} 项 · 将生成 ```ansi 代码块"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (formattedPost != null) {
+                    if (currentFormattedPost != null) {
                         PulseAccentPill(
-                            text = if (formattedPost.usesTabsLayout) "多标签" else "ANSI",
+                            text = if (currentFormattedPost.usesTabsLayout) "多标签" else "ANSI",
                         )
                     }
                 }
@@ -316,9 +338,9 @@ fun SshQuickInsertSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
-                        enabled = formattedPost != null,
+                        enabled = currentFormattedPost != null,
                         onClick = {
-                            formattedPost?.let { copyTextToClipboard(context, it.markdownContent) }
+                            currentFormattedPost?.let { copyTextToClipboard(context, it.markdownContent) }
                         },
                     ) {
                         Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -328,9 +350,9 @@ fun SshQuickInsertSheet(
 
                     if (onPublishToComposer != null) {
                         FilledTonalButton(
-                            enabled = formattedPost != null,
+                            enabled = currentFormattedPost != null,
                             onClick = {
-                                formattedPost?.let { post ->
+                                currentFormattedPost?.let { post ->
                                     onPublishToComposer(post.suggestedTitle, post.markdownContent)
                                     onDismiss()
                                 }
@@ -341,9 +363,9 @@ fun SshQuickInsertSheet(
                     }
 
                     Button(
-                        enabled = formattedPost != null,
+                        enabled = currentFormattedPost != null,
                         onClick = {
-                            formattedPost?.let { post ->
+                            currentFormattedPost?.let { post ->
                                 onInsertMarkdown(post.markdownContent)
                                 onDismiss()
                             }
@@ -423,17 +445,24 @@ private fun QuickInsertRunRow(
         }
 
         if (expanded) {
-            val previewText = remember(run.sanitizedAnsiOutput, maskServerIp) {
-                val snippet = run.sanitizedAnsiOutput
-                    .lineSequence()
-                    .take(12)
-                    .joinToString("\n")
-                val masked = if (maskServerIp) {
-                    IpPrivacyMasker.mask(snippet, knownServerHost = run.serverHost)
-                } else {
-                    snippet
+            var previewText by remember(run.id, maskServerIp) {
+                mutableStateOf(AnnotatedString("正在加载预览…"))
+            }
+            LaunchedEffect(run.id, run.sanitizedAnsiOutput, maskServerIp, ext.onCodeSurface) {
+                previewText = withContext(Dispatchers.Default) {
+                    val tailSlice = run.sanitizedAnsiOutput.take(8_192)
+                    val snippet = SanitizedBufferSnapshot.fromSanitizedText(
+                        sanitizedText = tailSlice,
+                        maxLines = 12,
+                        maxLineChars = 240,
+                    ).fullAnsiText.trimEnd('\n', '\r')
+                    val masked = if (maskServerIp) {
+                        IpPrivacyMasker.mask(snippet, knownServerHost = run.serverHost)
+                    } else {
+                        snippet
+                    }
+                    AnsiAndCodeFormatter.parseAnsiTerminalText(masked, defaultForeground = ext.onCodeSurface)
                 }
-                AnsiAndCodeFormatter.parseAnsiTerminalText(masked, defaultForeground = ext.onCodeSurface)
             }
             Box(
                 modifier = Modifier
