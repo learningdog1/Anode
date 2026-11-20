@@ -384,7 +384,8 @@ enum class NetBenchMarkdownStyle(val label: String, val shortLabel: String) {
  */
 data class NetBenchMarkdownOptions(
     val style: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
-    val maskTargetIp: Boolean = false,
+    val maskTargetIp: Boolean = true,
+    val includeClientNetwork: Boolean = true,
     val timestampLabel: String? = null,
 )
 

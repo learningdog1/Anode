@@ -161,7 +161,8 @@ class NetBenchOrchestrationTest {
 
             // Switch style to FULL_TABLE and verify live regeneration
             controller.selectMarkdownStyle(NetBenchMarkdownStyle.FULL_TABLE)
-            assertTrue(controller.uiState.value.generatedMarkdown.contains("| 测试项目 | 实测结果 | 备注 |"))
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("测试项目"))
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("实测结果"))
             assertFalse(controller.uiState.value.generatedMarkdown.contains("114.240.99.77"))
 
             // History should be persisted

@@ -117,6 +117,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -139,6 +140,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -508,6 +510,7 @@ private fun MarkdownBlockStream(
             is MdBlock.Table -> GfmTableCard(
                 table = block,
                 referenceLinks = referenceLinks,
+                bodyStyle = bodyStyle,
                 textColor = textColor,
                 linkColor = linkColor,
                 inlineSignatureFooter = inlineSignatureFooter,
@@ -1793,13 +1796,92 @@ internal fun extractImageTableCardsOrNull(
     return extracted.takeIf { it.isNotEmpty() }
 }
 
+private class TableGridLayoutMetrics(
+    var colWidths: IntArray = IntArray(0),
+    var rowHeights: IntArray = IntArray(0),
+)
+
 /**
- * Horizontally scrollable GFM Pipe Table with aligned columns & zebra rows.
+ * Computes shared column pixel widths across all rows of a GFM pipe table:
+ * - Short label/metric columns stay single-line at their natural intrinsic width.
+ * - Tables narrower than [viewportWidthPx] expand proportionally to fill the card cleanly.
+ * - Tables slightly wider than [viewportWidthPx] wrap wide note/description columns down to
+ *   [minWrappableColPx] before falling back to smooth horizontal scrolling for multi-column grids.
+ */
+internal fun computeGfmTableColumnWidths(
+    intrinsicColMaxWidths: IntArray,
+    viewportWidthPx: Int,
+    minColPx: Int,
+    maxColPx: Int,
+    minWrappableColPx: Int,
+): IntArray {
+    val colCount = intrinsicColMaxWidths.size
+    if (colCount == 0) return IntArray(0)
+
+    val safeMin = minColPx.coerceAtLeast(1)
+    val safeMax = maxColPx.coerceAtLeast(safeMin)
+    val safeWrapFloor = minWrappableColPx.coerceIn(safeMin, safeMax)
+
+    val desired = IntArray(colCount) { c ->
+        intrinsicColMaxWidths[c].coerceIn(safeMin, safeMax)
+    }
+    if (viewportWidthPx <= 0) return desired
+
+    val totalDesired = desired.sum()
+    if (totalDesired == viewportWidthPx) return desired
+
+    if (totalDesired < viewportWidthPx) {
+        val extra = viewportWidthPx - totalDesired
+        val stretched = IntArray(colCount)
+        var allocated = 0
+        for (c in 0 until colCount) {
+            val add = if (c == colCount - 1) {
+                extra - allocated
+            } else {
+                ((extra.toLong() * desired[c]) / totalDesired.coerceAtLeast(1)).toInt()
+            }
+            stretched[c] = desired[c] + add
+            allocated += add
+        }
+        return stretched
+    }
+
+    // totalDesired > viewportWidthPx: check if wrapping only wide columns fits inside viewportWidthPx
+    val wrappableCols = (0 until colCount).filter { desired[it] > safeWrapFloor }
+    if (wrappableCols.isEmpty()) return desired
+
+    val fixedSum = (0 until colCount).filter { desired[it] <= safeWrapFloor }.sumOf { desired[it] }
+    val minFitTotal = fixedSum + wrappableCols.size * safeWrapFloor
+    if (minFitTotal <= viewportWidthPx) {
+        val result = desired.copyOf()
+        val extraAboveFloor = viewportWidthPx - minFitTotal
+        val totalExcessDemand = wrappableCols.sumOf { (desired[it] - safeWrapFloor).coerceAtLeast(1) }
+        var allocated = 0
+        wrappableCols.forEachIndexed { idx, col ->
+            val share = if (idx == wrappableCols.lastIndex) {
+                extraAboveFloor - allocated
+            } else {
+                val demand = (desired[col] - safeWrapFloor).coerceAtLeast(1)
+                ((extraAboveFloor.toLong() * demand) / totalExcessDemand.coerceAtLeast(1)).toInt()
+            }
+            result[col] = safeWrapFloor + share
+            allocated += share
+        }
+        return result
+    }
+
+    return desired
+}
+
+/**
+ * Horizontally scrollable GFM Pipe Table with unified multi-row column widths, aligned cells,
+ * vertical & horizontal architectural hairlines, and alternating zebra rows.
  */
 @Composable
 private fun GfmTableCard(
     table: MdBlock.Table,
     referenceLinks: Map<String, Pair<String, String?>>,
+    bodyStyle: TextStyle,
     textColor: Color,
     linkColor: Color,
     inlineSignatureFooter: Boolean,
@@ -1870,125 +1952,269 @@ private fun GfmTableCard(
 
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
+    val density = LocalDensity.current
     val colCount = maxOf(
         table.headers.size,
         table.rows.maxOfOrNull { it.size } ?: 0,
     )
     if (colCount == 0) return
 
+    val isCompactBody = bodyStyle.fontSize != TextUnit.Unspecified && bodyStyle.fontSize.value < 13.5f
+    val headerBaseStyle = if (isCompactBody) {
+        MaterialTheme.typography.labelMedium
+    } else {
+        MaterialTheme.typography.labelLarge
+    }
+    val cellBaseStyle = (if (isCompactBody) {
+        MaterialTheme.typography.bodySmall
+    } else {
+        MaterialTheme.typography.bodyMedium
+    }).withTabularNumbers()
+
+    val cellHorizPad = if (isCompactBody) 10.dp else 12.dp
+    val headerVertPad = if (isCompactBody) 8.5.dp else 10.dp
+    val dataVertPad = if (isCompactBody) 8.dp else 9.dp
+
     val headerBg = blendColor(
         source = MaterialTheme.colorScheme.surfaceContainerHigh,
         target = linkColor,
         fraction = if (isDark) 0.14f else 0.07f,
     )
+    val zebraRowBg = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.72f)
+    val headerBorderColor = ext.cardBorder.copy(alpha = 0.88f)
+    val rowBorderColor = ext.cardBorder.copy(alpha = 0.52f)
+    val colBorderColor = ext.cardBorder.copy(alpha = 0.40f)
 
-    Box(
+    val parsedDataCellImages: List<List<List<MdImageItem>?>> = remember(table.rows, colCount, referenceLinks) {
+        table.rows.map { row ->
+            List(colCount) { col ->
+                val rawCell = row.getOrElse(col) { "" }.trim()
+                parseStandaloneImageRowLine(rawCell, referenceLinks)
+                    ?.takeIf { imgs -> imgs.all { !isBadgeOrSmallGraphicUrl(it.imageUrl) } }
+            }
+        }
+    }
+
+    val gridMetrics = remember { TableGridLayoutMetrics() }
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
                 containerColor = ext.cardSurface,
                 elevation = PulseElevation.Subtle,
-            )
-            .horizontalScroll(rememberScrollState()),
+            ),
     ) {
-        Column {
-            // Header Row
-            Row(
-                modifier = Modifier.background(headerBg),
-            ) {
-                for (col in 0 until colCount) {
-                    val align = table.alignments.getOrElse(col) { TextAlign.Start }
-                    Box(
-                        modifier = Modifier
-                            .widthIn(min = 96.dp, max = 260.dp)
-                            .padding(horizontal = 13.dp, vertical = 10.dp),
-                    ) {
-                        RichInlineText(
-                            rawText = table.headers.getOrElse(col) { "" },
-                            referenceLinks = referenceLinks,
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontWeight = FontWeight.Bold,
-                                textAlign = align,
-                            ),
-                            color = textColor,
-                            linkColor = linkColor,
-                            underlineLinks = !inlineSignatureFooter,
-                            compactInlineSticker = inlineSignatureFooter,
-                            onMentionClick = onMentionClick,
-                            onFloorClick = onFloorClick,
-                            onUrlClick = onUrlClick,
-                            onInlineImageClick = onImageClick,
-                            onInlineImageLongClick = onImageLongClick,
+        val viewportWidthPx = constraints.maxWidth.takeIf { it != Constraints.Infinity } ?: 0
+        val minColPx = with(density) { (if (isCompactBody) 62.dp else 72.dp).roundToPx() }
+        val maxColPx = with(density) { (if (isCompactBody) 244.dp else 268.dp).roundToPx() }
+        val minWrappableColPx = with(density) { (if (isCompactBody) 124.dp else 140.dp).roundToPx() }
+        val imageCellMinPx = with(density) { 164.dp.roundToPx() }
+        val minRowHeightPx = with(density) { (if (isCompactBody) 32.dp else 36.dp).roundToPx() }
+        val totalRows = 1 + table.rows.size
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+        ) {
+            Layout(
+                modifier = Modifier.drawBehind {
+                    val colW = gridMetrics.colWidths
+                    val rowH = gridMetrics.rowHeights
+                    if (colW.isEmpty() || rowH.isEmpty()) return@drawBehind
+
+                    // 1. Header background
+                    val headerH = rowH[0].toFloat()
+                    drawRect(
+                        color = headerBg,
+                        topLeft = Offset.Zero,
+                        size = Size(width = size.width, height = headerH),
+                    )
+
+                    // 2. Alternating zebra row backgrounds + horizontal dividers
+                    var yCursor = headerH
+                    for (r in 1 until rowH.size) {
+                        val h = rowH[r].toFloat()
+                        if ((r - 1) % 2 == 1) {
+                            drawRect(
+                                color = zebraRowBg,
+                                topLeft = Offset(x = 0f, y = yCursor),
+                                size = Size(width = size.width, height = h),
+                            )
+                        }
+                        val strokePx = (if (r == 1) 0.9.dp else 0.7.dp).toPx()
+                        drawLine(
+                            color = if (r == 1) headerBorderColor else rowBorderColor,
+                            start = Offset(0f, yCursor),
+                            end = Offset(size.width, yCursor),
+                            strokeWidth = strokePx,
+                        )
+                        yCursor += h
+                    }
+
+                    // 3. Vertical column hairlines
+                    val vStrokePx = 0.65.dp.toPx()
+                    var xCursor = 0f
+                    for (c in 0 until colW.size - 1) {
+                        xCursor += colW[c].toFloat()
+                        drawLine(
+                            color = colBorderColor,
+                            start = Offset(xCursor, 0f),
+                            end = Offset(xCursor, size.height),
+                            strokeWidth = vStrokePx,
                         )
                     }
-                }
-            }
-
-            // Data Rows
-            table.rows.forEachIndexed { rowIdx, row ->
-                HorizontalDivider(
-                    thickness = 0.8.dp,
-                    color = ext.cardBorder.copy(alpha = if (rowIdx == 0) 0.85f else 0.5f),
-                )
-                val rowBg = if (rowIdx % 2 == 1) {
-                    MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.72f)
-                } else {
-                    ext.cardSurface
-                }
-                Row(modifier = Modifier.background(rowBg)) {
+                },
+                content = {
+                    // Row 0: Header cells
                     for (col in 0 until colCount) {
                         val align = table.alignments.getOrElse(col) { TextAlign.Start }
-                        val rawCell = row.getOrElse(col) { "" }
-                        val standaloneCellImages = remember(rawCell, referenceLinks) {
-                            parseStandaloneImageRowLine(rawCell.trim(), referenceLinks)
-                                ?.takeIf { imgs -> imgs.all { !isBadgeOrSmallGraphicUrl(it.imageUrl) } }
-                        }
                         Box(
-                            modifier = Modifier
-                                .widthIn(min = if (standaloneCellImages != null) 160.dp else 96.dp, max = 260.dp)
-                                .padding(horizontal = 13.dp, vertical = 9.dp),
+                            modifier = Modifier.padding(horizontal = cellHorizPad, vertical = headerVertPad),
                         ) {
-                            if (standaloneCellImages != null) {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    standaloneCellImages.forEach { img ->
-                                        PulseZoomableImageCard(
-                                            imageUrl = img.imageUrl,
-                                            altText = img.alt,
-                                            compactMode = false,
-                                            signatureFooterMode = inlineSignatureFooter,
-                                            onClick = {
-                                                if (!img.linkUrl.isNullOrBlank()) {
-                                                    onUrlClick(unwrapNodeSeekJumpUrl(img.linkUrl))
-                                                } else {
-                                                    onImageClick(img.imageUrl, img.alt)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                onImageLongClick(img.imageUrl, img.alt, img.linkUrl)
-                                            },
-                                        )
+                            RichInlineText(
+                                rawText = table.headers.getOrElse(col) { "" },
+                                referenceLinks = referenceLinks,
+                                style = headerBaseStyle.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = align,
+                                ),
+                                color = textColor,
+                                linkColor = linkColor,
+                                underlineLinks = !inlineSignatureFooter,
+                                compactInlineSticker = inlineSignatureFooter,
+                                onMentionClick = onMentionClick,
+                                onFloorClick = onFloorClick,
+                                onUrlClick = onUrlClick,
+                                onInlineImageClick = onImageClick,
+                                onInlineImageLongClick = onImageLongClick,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+
+                    // Rows 1..N: Data cells
+                    table.rows.forEachIndexed { rowIdx, row ->
+                        for (col in 0 until colCount) {
+                            val align = table.alignments.getOrElse(col) { TextAlign.Start }
+                            val rawCell = row.getOrElse(col) { "" }
+                            val standaloneCellImages = parsedDataCellImages.getOrNull(rowIdx)?.getOrNull(col)
+                            Box(
+                                modifier = Modifier.padding(horizontal = cellHorizPad, vertical = dataVertPad),
+                            ) {
+                                if (standaloneCellImages != null) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        standaloneCellImages.forEach { img ->
+                                            PulseZoomableImageCard(
+                                                imageUrl = img.imageUrl,
+                                                altText = img.alt,
+                                                compactMode = false,
+                                                signatureFooterMode = inlineSignatureFooter,
+                                                onClick = {
+                                                    if (!img.linkUrl.isNullOrBlank()) {
+                                                        onUrlClick(unwrapNodeSeekJumpUrl(img.linkUrl))
+                                                    } else {
+                                                        onImageClick(img.imageUrl, img.alt)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    onImageLongClick(img.imageUrl, img.alt, img.linkUrl)
+                                                },
+                                            )
+                                        }
                                     }
+                                } else {
+                                    RichInlineText(
+                                        rawText = rawCell,
+                                        referenceLinks = referenceLinks,
+                                        style = cellBaseStyle.copy(textAlign = align),
+                                        color = textColor,
+                                        linkColor = linkColor,
+                                        underlineLinks = !inlineSignatureFooter,
+                                        compactInlineSticker = inlineSignatureFooter,
+                                        onMentionClick = onMentionClick,
+                                        onFloorClick = onFloorClick,
+                                        onUrlClick = onUrlClick,
+                                        onInlineImageClick = onImageClick,
+                                        onInlineImageLongClick = onImageLongClick,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
                                 }
-                            } else {
-                                RichInlineText(
-                                    rawText = rawCell,
-                                    referenceLinks = referenceLinks,
-                                    style = MaterialTheme.typography.bodyMedium
-                                        .withTabularNumbers()
-                                        .copy(textAlign = align),
-                                    color = textColor,
-                                    linkColor = linkColor,
-                                    underlineLinks = !inlineSignatureFooter,
-                                    compactInlineSticker = inlineSignatureFooter,
-                                    onMentionClick = onMentionClick,
-                                    onFloorClick = onFloorClick,
-                                    onUrlClick = onUrlClick,
-                                    onInlineImageClick = onImageClick,
-                                    onInlineImageLongClick = onImageLongClick,
-                                )
                             }
                         }
+                    }
+                },
+            ) { measurables, _ ->
+                if (measurables.isEmpty()) {
+                    gridMetrics.colWidths = IntArray(0)
+                    gridMetrics.rowHeights = IntArray(0)
+                    return@Layout layout(0, 0) {}
+                }
+
+                val intrinsicMaxByCol = IntArray(colCount)
+                for (r in 0 until totalRows) {
+                    for (c in 0 until colCount) {
+                        val idx = r * colCount + c
+                        if (idx >= measurables.size) break
+                        val hasImg = r > 0 && parsedDataCellImages.getOrNull(r - 1)?.getOrNull(c) != null
+                        val naturalW = if (hasImg) {
+                            maxOf(imageCellMinPx, measurables[idx].maxIntrinsicWidth(Constraints.Infinity))
+                        } else {
+                            measurables[idx].maxIntrinsicWidth(Constraints.Infinity)
+                        }
+                        if (naturalW > intrinsicMaxByCol[c]) {
+                            intrinsicMaxByCol[c] = naturalW
+                        }
+                    }
+                }
+
+                val colWidths = computeGfmTableColumnWidths(
+                    intrinsicColMaxWidths = intrinsicMaxByCol,
+                    viewportWidthPx = viewportWidthPx,
+                    minColPx = minColPx,
+                    maxColPx = maxColPx,
+                    minWrappableColPx = minWrappableColPx,
+                )
+
+                val placeables = Array(measurables.size) { idx ->
+                    val col = idx % colCount
+                    measurables[idx].measure(Constraints.fixedWidth(colWidths[col]))
+                }
+
+                val rowHeights = IntArray(totalRows) { r ->
+                    var maxH = minRowHeightPx
+                    for (c in 0 until colCount) {
+                        val idx = r * colCount + c
+                        if (idx < placeables.size && placeables[idx].height > maxH) {
+                            maxH = placeables[idx].height
+                        }
+                    }
+                    maxH
+                }
+
+                gridMetrics.colWidths = colWidths
+                gridMetrics.rowHeights = rowHeights
+
+                val tableWidth = colWidths.sum()
+                val tableHeight = rowHeights.sum()
+
+                layout(tableWidth, tableHeight) {
+                    var y = 0
+                    for (r in 0 until totalRows) {
+                        val rowH = rowHeights[r]
+                        var x = 0
+                        for (c in 0 until colCount) {
+                            val idx = r * colCount + c
+                            if (idx < placeables.size) {
+                                val p = placeables[idx]
+                                val yOffset = y + ((rowH - p.height) / 2).coerceAtLeast(0)
+                                p.placeRelative(x = x, y = yOffset)
+                            }
+                            x += colWidths[c]
+                        }
+                        y += rowH
                     }
                 }
             }

@@ -605,4 +605,42 @@ class MarkdownParserTest {
 
         assertEquals(null to false, computeImageLayoutMeta(width = 0f, height = 100f, isSvgUrl = false))
     }
+
+    @Test
+    fun `computeGfmTableColumnWidths aligns columns stretches narrow tables and wraps wide note column to fit viewport`() {
+        // 1. Narrow table stretches proportionally to fill viewport exactly
+        val stretched = computeGfmTableColumnWidths(
+            intrinsicColMaxWidths = intArrayOf(80, 100, 120),
+            viewportWidthPx = 360,
+            minColPx = 64,
+            maxColPx = 260,
+            minWrappableColPx = 130,
+        )
+        assertEquals(360, stretched.sum())
+        assertTrue(stretched[0] >= 80 && stretched[1] >= 100 && stretched[2] >= 120)
+
+        // 2. 3-column benchmark report where col 0 & 1 are compact and col 2 (备注) is wide:
+        //    fits inside viewport without shrinking col 0 or col 1!
+        val fitted = computeGfmTableColumnWidths(
+            intrinsicColMaxWidths = intArrayOf(105, 115, 250),
+            viewportWidthPx = 360,
+            minColPx = 64,
+            maxColPx = 260,
+            minWrappableColPx = 130,
+        )
+        assertEquals(105, fitted[0])
+        assertEquals(115, fitted[1])
+        assertEquals(140, fitted[2])
+        assertEquals(360, fitted.sum())
+
+        // 3. Multi-column wide table exceeding wrap floor keeps columns readable for horizontal scroll
+        val scrollable = computeGfmTableColumnWidths(
+            intrinsicColMaxWidths = intArrayOf(120, 150, 180, 200),
+            viewportWidthPx = 360,
+            minColPx = 64,
+            maxColPx = 260,
+            minWrappableColPx = 130,
+        )
+        assertEquals(listOf(120, 150, 180, 200), scrollable.toList())
+    }
 }
