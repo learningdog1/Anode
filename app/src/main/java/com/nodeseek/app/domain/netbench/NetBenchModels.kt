@@ -85,6 +85,7 @@ data class TcpPingConfig(
     val timeoutMs: Int = DEFAULT_TIMEOUT_MS,
     val intervalMs: Long = DEFAULT_INTERVAL_MS,
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+    val useProxy: Boolean = false,
 ) {
     val normalizedProbeCount: Int
         get() = probeCount.coerceIn(MIN_PROBE_COUNT, MAX_PROBE_COUNT)
@@ -198,6 +199,7 @@ data class Iperf3Config(
     val chunkSizeBytes: Int = DEFAULT_CHUNK_SIZE,
     val connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+    val useProxy: Boolean = false,
 ) {
     val normalizedPort: Int get() = port.coerceIn(1, 65535)
     val normalizedDurationSec: Int get() = durationSec.coerceIn(1, 60)
@@ -326,6 +328,15 @@ enum class ClientCarrier(val label: String, val shortLabel: String) {
 }
 
 /**
+ * Route through which a local egress IP check was observed.
+ */
+enum class EgressRouteKind(val label: String) {
+    DIRECT("真实出口"),
+    PROXY_FALLBACK("代理出口（回退）"),
+    PROXY("代理出口"),
+}
+
+/**
  * Local client egress ISP info.
  *
  * SECURITY / PRIVACY: [rawIp] is held ONLY for local masked display and MUST NEVER be exported
@@ -342,7 +353,39 @@ data class ClientNetworkInfo(
     val maskedIp: String? = null,
     val rawIp: String? = null,
     val source: String? = null,
+    val routeKind: EgressRouteKind = EgressRouteKind.DIRECT,
+    val transportLabel: String? = null,
 )
+
+/**
+ * Combined real-underlying + proxy/VPN client egress snapshot for simultaneous dual-IP display
+ * and explicit fallback diagnostics when VPN blocks non-VPN socket binding.
+ */
+data class ClientEgressSnapshot(
+    val directNetwork: ClientNetworkInfo? = null,
+    val proxyNetwork: ClientNetworkInfo? = null,
+    val proxyDetected: Boolean = false,
+    val isVpnActive: Boolean = false,
+    val isSystemHttpProxyActive: Boolean = false,
+    val directBindFailed: Boolean = false,
+    val directBindFailureReason: DirectBindFailureReason? = null,
+    val directBindErrorDetail: String? = null,
+    val activeTransportLabel: String? = null,
+    val directTransportLabel: String? = null,
+    val networkFingerprint: String = "",
+) {
+    val effectiveDirectOrFallback: ClientNetworkInfo?
+        get() = directNetwork ?: proxyNetwork
+
+    val isShowingProxyFallback: Boolean
+        get() = proxyDetected && directNetwork == null && proxyNetwork != null
+
+    val hasDualExitIps: Boolean
+        get() = proxyDetected && directNetwork != null && proxyNetwork != null
+
+    fun activeNetworkForTest(useProxy: Boolean): ClientNetworkInfo? =
+        if (useProxy) proxyNetwork ?: directNetwork else effectiveDirectOrFallback
+}
 
 /**
  * Complete target IP intelligence & Native-vs-Broadcast report.
@@ -401,6 +444,8 @@ data class NetBenchReport(
     val ipIntelligence: IpIntelligenceReport? = null,
     val iperfDownloadResult: Iperf3Result? = null,
     val iperfUploadResult: Iperf3Result? = null,
+    val testedViaProxy: Boolean = false,
+    val proxyNetwork: ClientNetworkInfo? = null,
 ) {
     val hasAnyResult: Boolean
         get() = tcpPingSummary != null ||
