@@ -322,4 +322,44 @@ class NetBenchMarkdownFormatterTest {
             assertEquals("Table line width mismatch: $line", expectedWidth, NetBenchMarkdownFormatter.displayWidth(line))
         }
     }
+
+    @Test
+    fun `notes iperf3 parallel stream count only when greater than 1`() {
+        val base = sampleReport()
+
+        val singleReply = NetBenchMarkdownFormatter.format(
+            report = base,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertFalse("Single-stream report must not display -P flag", singleReply.contains("-P "))
+
+        val singleTable = NetBenchMarkdownFormatter.format(
+            report = base,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertFalse("Single-stream table must not display -P flag", singleTable.contains("-P "))
+
+        val multi = base.copy(
+            iperfDownloadResult = base.iperfDownloadResult!!.copy(parallelStreams = 4),
+            iperfUploadResult = base.iperfUploadResult!!.copy(parallelStreams = 4),
+        )
+
+        val multiReply = NetBenchMarkdownFormatter.format(
+            report = multi,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertTrue(multiReply.contains("**iperf3 测速 (-P 4)**"))
+
+        val multiTable = NetBenchMarkdownFormatter.format(
+            report = multi,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertTrue(multiTable.contains("-P 4 并发"))
+
+        val tableLines = multiTable.lines().filter { it.trimStart().startsWith("|") }
+        val expectedWidth = NetBenchMarkdownFormatter.displayWidth(tableLines.first())
+        for (line in tableLines) {
+            assertEquals("Table line width mismatch: $line", expectedWidth, NetBenchMarkdownFormatter.displayWidth(line))
+        }
+    }
 }

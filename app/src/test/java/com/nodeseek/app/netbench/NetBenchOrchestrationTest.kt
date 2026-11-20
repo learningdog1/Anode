@@ -6,6 +6,7 @@ import com.nodeseek.app.data.netbench.HttpLatencyRunner
 import com.nodeseek.app.data.netbench.IcmpPingRunner
 import com.nodeseek.app.data.netbench.IpIntelligenceClient
 import com.nodeseek.app.data.netbench.IpIntelligenceEndpoints
+import com.nodeseek.app.data.netbench.Iperf3ClientRunner
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchSocketChannel
@@ -41,17 +42,25 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketAddress
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.SocketFactory
+import kotlin.concurrent.thread
 
 class NetBenchOrchestrationTest {
 
@@ -477,6 +486,139 @@ class NetBenchOrchestrationTest {
             assertFalse(controller.uiState.value.enableIcmpPing)
         } finally {
             scope.cancel()
+        }
+    }
+
+    @Test
+    fun `session controller clamps and forwards iperf3 parallel streams to runner and markdown`() = runBlocking {
+        val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val receivedParamsJson = AtomicReference<String?>(null)
+        val acceptedDataSockets = AtomicInteger(0)
+        val serverError = AtomicReference<Throwable?>(null)
+
+        val serverThread = thread(isDaemon = true) {
+            try {
+                server.soTimeout = 6_000
+                val ctrlSocket = server.accept()
+                ctrlSocket.soTimeout = 6_000
+                val ctrlIn = DataInputStream(ctrlSocket.getInputStream())
+                val ctrlOut = DataOutputStream(ctrlSocket.getOutputStream())
+
+                val cookie = ByteArray(37)
+                ctrlIn.readFully(cookie)
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_PARAM_EXCHANGE.toInt())
+                ctrlOut.flush()
+                val paramLen = ctrlIn.readInt()
+                val paramBytes = ByteArray(paramLen)
+                ctrlIn.readFully(paramBytes)
+                receivedParamsJson.set(String(paramBytes, StandardCharsets.UTF_8))
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_CREATE_STREAMS.toInt())
+                ctrlOut.flush()
+                val dataSockets = mutableListOf<Socket>()
+                repeat(4) {
+                    val ds = server.accept()
+                    val dsCookie = ByteArray(37)
+                    DataInputStream(ds.getInputStream()).readFully(dsCookie)
+                    acceptedDataSockets.incrementAndGet()
+                    dataSockets += ds
+                }
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_START.toInt())
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_RUNNING.toInt())
+                ctrlOut.flush()
+
+                val chunk = ByteArray(65_536) { 0x33 }
+                dataSockets.forEach { ds ->
+                    ds.getOutputStream().write(chunk)
+                    ds.getOutputStream().flush()
+                }
+                assertEquals(Iperf3ClientRunner.STATE_TEST_END, ctrlIn.readByte())
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_EXCHANGE_RESULTS.toInt())
+                ctrlOut.flush()
+                val clientResLen = ctrlIn.readInt()
+                ctrlIn.readFully(ByteArray(clientResLen))
+
+                val serverResJson = """
+                    {
+                      "cpu_util_total": 1.0,
+                      "streams": [
+                        {"id": 1, "bytes": 65536, "retransmits": 0, "start_time": 0.0, "end_time": 1.0},
+                        {"id": 3, "bytes": 65536, "retransmits": 0, "start_time": 0.0, "end_time": 1.0},
+                        {"id": 4, "bytes": 65536, "retransmits": 0, "start_time": 0.0, "end_time": 1.0},
+                        {"id": 5, "bytes": 65536, "retransmits": 0, "start_time": 0.0, "end_time": 1.0}
+                      ]
+                    }
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ctrlOut.writeInt(serverResJson.size)
+                ctrlOut.write(serverResJson)
+                ctrlOut.flush()
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_DISPLAY_RESULTS.toInt())
+                ctrlOut.flush()
+                runCatching { ctrlIn.readByte() }
+                dataSockets.forEach { runCatching { it.close() } }
+                ctrlSocket.close()
+            } catch (t: Throwable) {
+                serverError.set(t)
+            } finally {
+                runCatching { server.close() }
+            }
+        }
+
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val historyStore = NetBenchHistoryStore(
+                historyFile = File(tempFolder.root, "iperf_p_${NetBenchHistoryStore.HISTORY_FILE_NAME}"),
+                ioDispatcher = Dispatchers.IO,
+            )
+            val resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO)
+            val controller = NetBenchSessionController(
+                scope = scope,
+                historyStore = historyStore,
+                targetResolver = resolver,
+                iperf3ClientRunner = Iperf3ClientRunner(resolver = resolver, ioDispatcher = Dispatchers.IO),
+            )
+
+            assertEquals(1, controller.uiState.value.iperfParallelStreams)
+            controller.updateIperfParallelStreams(0)
+            assertEquals(1, controller.uiState.value.iperfParallelStreams)
+            controller.updateIperfParallelStreams(99)
+            assertEquals(16, controller.uiState.value.iperfParallelStreams)
+            controller.updateIperfParallelStreams(4)
+            assertEquals(4, controller.uiState.value.iperfParallelStreams)
+
+            controller.toggleIcmpPing(false)
+            controller.toggleTcpPing(false)
+            controller.toggleIpCheck(false)
+            controller.toggleIperf3(true)
+            controller.dismissIperf3ServerPrompt()
+            controller.updateIperfPortText(server.localPort.toString())
+            controller.updateIperfDurationSec(1)
+            controller.updateTargetInput("127.0.0.1")
+            controller.startBenchmark()
+
+            var tries = 0
+            while (controller.uiState.value.activePhase != NetBenchPhase.COMPLETED && tries < 100) {
+                delay(50)
+                tries++
+            }
+
+            serverThread.join(1_500)
+            assertNull("Fake iperf3 server failed: ${serverError.get()}", serverError.get())
+
+            val finalState = controller.uiState.value
+            assertEquals(NetBenchPhase.COMPLETED, finalState.activePhase)
+            assertEquals(4, acceptedDataSockets.get())
+            assertTrue(receivedParamsJson.get().orEmpty().contains("\"parallel\":4"))
+            assertEquals(4, finalState.iperfDownloadProgress?.parallelStreams)
+            assertEquals(4, finalState.iperfDownloadProgress?.finalResult?.parallelStreams)
+            assertTrue(finalState.generatedMarkdown.contains("-P 4"))
+        } finally {
+            scope.cancel()
+            runCatching { server.close() }
         }
     }
 }

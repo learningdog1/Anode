@@ -75,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
@@ -239,6 +240,7 @@ fun MobileNetBenchScreen(
                         onToggleTestViaProxy = viewModel::toggleTestViaProxy,
                         onIperfPortChange = viewModel::updateIperfPortText,
                         onIperfDurationChange = viewModel::updateIperfDurationSec,
+                        onIperfParallelStreamsChange = viewModel::updateIperfParallelStreams,
                         onIperfModeChange = viewModel::updateIperfTestMode,
                         onOpenIperf3SshManager = { directSshControlTrigger++ },
                     )
@@ -553,6 +555,7 @@ private fun TestModulesConfigCard(
     onToggleTestViaProxy: (Boolean) -> Unit,
     onIperfPortChange: (String) -> Unit,
     onIperfDurationChange: (Int) -> Unit,
+    onIperfParallelStreamsChange: (Int) -> Unit,
     onIperfModeChange: (Iperf3TestMode) -> Unit,
     onOpenIperf3SshManager: () -> Unit = {},
 ) {
@@ -681,6 +684,28 @@ private fun TestModulesConfigCard(
                                     onClick = { onIperfDurationChange(sec) },
                                 )
                             }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "并行流 (-P)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Iperf3Config.PARALLEL_STREAM_PRESETS.forEach { streams ->
+                            NetBenchSelectableChip(
+                                label = "${streams}流",
+                                selected = uiState.iperfParallelStreams == streams,
+                                enabled = !uiState.isRunning,
+                                onClick = { onIperfParallelStreamsChange(streams) },
+                            )
                         }
                     }
                 }
