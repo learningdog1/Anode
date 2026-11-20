@@ -140,6 +140,7 @@ import com.nodeseek.app.ui.hub.UserProfileScreen
 import com.nodeseek.app.ui.mail.SeekMailScreen
 import com.nodeseek.app.ui.netbench.MobileNetBenchScreen
 import com.nodeseek.app.ui.overseas.EmbeddedOverseasOfferFeed
+import com.nodeseek.app.ui.overseas.OverseasIntelDetailScreen
 import com.nodeseek.app.ui.overseas.OverseasIntelScreen
 import com.nodeseek.app.ui.radar.PulseRadarScreen
 import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
@@ -1594,19 +1595,36 @@ fun NodePulseNavHost(
                 )
             }
 
-            // Feature 7: Overseas VPS Intelligence Aggregator (LET / LEB + CNY + Chinese Translation)
+            // Feature 7: Overseas VPS Promotions (LowEndTalk Monitor API + Detail + Repost)
             composable<OverseasIntelRoute> {
                 OverseasIntelScreen(
                     onBack = safePopBackStack,
                     repository = container.overseasIntelRepository,
-                    onAddRestockWatch = { orderUrl, title, priceLabel ->
-                        pendingRestockWatchRequest = RestockWatchPrefillRequest(
-                            url = orderUrl,
-                            title = title,
-                            priceHint = priceLabel,
-                            sourceTopicId = null,
-                        )
+                    onOpenOfferDetail = { offer ->
+                        navController.navigate(
+                            OverseasIntelDetailRoute(
+                                offerId = offer.id,
+                                initialTitle = offer.title,
+                                initialSourceUrl = offer.sourceLink,
+                            ),
+                        ) {
+                            launchSingleTop = true
+                        }
                     },
+                    onShareDealToForum = { suggestedTitle, markdownBody ->
+                        openComposerWithPrefill("info", suggestedTitle, markdownBody)
+                    },
+                )
+            }
+
+            composable<OverseasIntelDetailRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<OverseasIntelDetailRoute>()
+                OverseasIntelDetailScreen(
+                    offerId = route.offerId,
+                    initialTitle = route.initialTitle,
+                    initialSourceUrl = route.initialSourceUrl,
+                    onBack = safePopBackStack,
+                    repository = container.overseasIntelRepository,
                     onShareDealToForum = { suggestedTitle, markdownBody ->
                         openComposerWithPrefill("info", suggestedTitle, markdownBody)
                     },

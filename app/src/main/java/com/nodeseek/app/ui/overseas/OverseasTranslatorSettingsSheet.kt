@@ -80,6 +80,7 @@ fun OverseasTranslatorSettingsSheet(
     onTestConnection: (OverseasTranslationConfig) -> Unit,
     onClearCache: () -> Unit,
     onSave: (OverseasTranslationConfig, Boolean) -> Unit,
+    showTranslateDetailButton: Boolean = true,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val ext = NodePulseThemeTokens.extendedColors
@@ -136,12 +137,12 @@ fun OverseasTranslatorSettingsSheet(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "翻译引擎与显示配置",
+                        text = "详情翻译引擎配置",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "默认开箱即用，也可接入 OpenAI / DeepLX 提升 VPS 术语质量",
+                        text = "用于促销详情通知翻译，支持 Google GTX 与自定义 OpenAI / DeepLX",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -329,12 +330,12 @@ fun OverseasTranslatorSettingsSheet(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "刷新情报时自动翻译",
+                        text = "打开详情时自动附带译文",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "内容按哈希持久化缓存，已翻译过的帖子不会重复消耗额度",
+                        text = "内容按哈希持久化缓存，已翻译过的详情不会重复消耗额度",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -411,29 +412,42 @@ fun OverseasTranslatorSettingsSheet(
             }
 
             // Save actions
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                FilledTonalButton(
+            if (showTranslateDetailButton) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = {
+                            onSave(draftConfig, false)
+                            onDismiss()
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = CircleShape,
+                    ) {
+                        Text("保存配置")
+                    }
+                    Button(
+                        onClick = {
+                            onSave(draftConfig, true)
+                            onDismiss()
+                        },
+                        modifier = Modifier.weight(1.25f),
+                        shape = CircleShape,
+                    ) {
+                        Text("保存并翻译详情")
+                    }
+                }
+            } else {
+                Button(
                     onClick = {
                         onSave(draftConfig, false)
                         onDismiss()
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                     shape = CircleShape,
                 ) {
                     Text("保存配置")
-                }
-                Button(
-                    onClick = {
-                        onSave(draftConfig, true)
-                        onDismiss()
-                    },
-                    modifier = Modifier.weight(1.25f),
-                    shape = CircleShape,
-                ) {
-                    Text("保存并重译列表")
                 }
             }
         }

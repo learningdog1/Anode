@@ -1,115 +1,99 @@
 package com.nodeseek.app.domain.overseas
 
-import com.nodeseek.app.data.valuation.FxRatesState
-import com.nodeseek.app.domain.valuation.ValuationCurrency
-import java.math.RoundingMode
-
 /**
- * Generates a NodeSeek-ready Chinese intelligence post (`情报搬运帖`) with structured Markdown
- * spec/price table, converted CNY values, coupon codes, direct order links, and explicit source
- * attribution for [TopicComposerScreen].
+ * Generates a NodeSeek-ready forum post draft (`一键搬运发帖`) directly from [OverseasRepostContent]
+ * returned by `GET /api/v1/offers/{id}/repost` (main OP post information only, excluding comments).
  */
 object OverseasForumPostFormatter {
 
     fun format(
-        offer: OverseasDealOffer,
-        fxRatesState: FxRatesState? = null,
+        repost: OverseasRepostContent,
+        fallbackOffer: OverseasDealOffer? = null,
     ): SuggestedForumPost {
-        val chineseTitle = offer.translatedTitle
-            ?.takeIf { it.isNotBlank() }
-            ?: VpsGlossaryTranslator.translateTitleOffline(offer.originalTitle)
+        val preferredHeadline = repost.titleCn.trim()
+            .ifBlank { fallbackOffer?.title?.trim().orEmpty() }
+            .ifBlank { repost.title.trim() }
 
-        val priceTail = offer.primaryPrice?.let { price ->
-            " — ${price.rawText} (${price.formattedCny})"
-        }.orEmpty()
-
-        val promoPrefix = if (offer.isFlashOrBlackFriday) {
-            "[黑五/海外情报/${offer.source.shortLabel}]"
-        } else {
-            "[海外情报/${offer.source.shortLabel}]"
-        }
-
-        val suggestedTitle = "$promoPrefix ${chineseTitle.take(80)}$priceTail".trim()
+        val suggestedTitle = "[海外情报/LET] ${preferredHeadline.take(86)}".trim()
 
         val md = StringBuilder()
-        md.appendLine("## 🌐 海外 VPS 情报搬运（${offer.source.label}）")
-        md.appendLine()
-        md.appendLine("> **中文译题**：$chineseTitle")
-        if (!chineseTitle.equals(offer.originalTitle, ignoreCase = true)) {
-            md.appendLine("> **英文原题**：${offer.originalTitle}")
-        }
-        md.appendLine()
+        val originalTitle = repost.title.trim()
+            .ifBlank { fallbackOffer?.originalTitle?.trim().orEmpty() }
+        val merchantOrAuthor = repost.merchant.trim()
+            .ifBlank { repost.author.trim() }
+            .ifBlank { fallbackOffer?.merchant?.trim().orEmpty() }
+        val sourceUrl = repost.sourceLink.trim()
+            .ifBlank { fallbackOffer?.sourceLink?.trim().orEmpty() }
 
-        // Structured overview table
-        md.appendLine("| 项目 | 详情 |")
-        md.appendLine("| :--- | :--- |")
-        md.appendLine("| **情报来源** | ${offer.source.label} (`${offer.source.shortLabel}`) |")
-        if (offer.authorOrProvider.isNotBlank()) {
-            md.appendLine("| **商家 / 作者** | ${escapeTableCell(offer.authorOrProvider)} |")
+        if (originalTitle.isNotBlank() && !originalTitle.equals(preferredHeadline, ignoreCase = true)) {
+            md.appendLine("> **原帖标题**：$originalTitle")
         }
-        if (offer.specHighlights.isNotEmpty()) {
-            md.appendLine("| **配置与机房** | ${escapeTableCell(offer.specHighlights.joinToString(" · "))} |")
+        if (merchantOrAuthor.isNotBlank()) {
+            md.appendLine("> **商家 / 作者**：$merchantOrAuthor")
         }
-        if (offer.priceMatches.isNotEmpty()) {
-            val priceSummary = offer.priceMatches.take(4).joinToString(" / ") { tag ->
-                "**${tag.rawText}** (${tag.formattedCny})"
-            }
-            md.appendLine("| **价格折算** | $priceSummary |")
+        if (repost.publishedAtIso.isNotBlank()) {
+            md.appendLine("> **发布时间**：${repost.publishedAtIso.trim()}")
         }
-        if (offer.couponCodes.isNotEmpty()) {
-            val codes = offer.couponCodes.joinToString(" / ") { "`$it`" }
-            md.appendLine("| **优惠码** | $codes |")
-        }
-        if (offer.isOutOfStockHint) {
-            md.appendLine("| **库存提示** | ⚠️ 原帖提示可能缺货 / 已售罄，下单前请先确认 |")
-        }
-        md.appendLine()
-
-        // Translated summary
-        val summaryZh = offer.translatedSummary
-            ?.takeIf { it.isNotBlank() }
-            ?: VpsGlossaryTranslator.translateSummaryOffline(
-                englishSummary = offer.originalSummary,
-                specHighlights = offer.specHighlights,
-                priceMatches = offer.priceMatches,
-                couponCodes = offer.couponCodes,
-            )
-        if (summaryZh.isNotBlank()) {
-            md.appendLine("### 📋 优惠摘要")
-            md.appendLine()
-            md.appendLine(summaryZh.trim())
+        if (md.isNotEmpty()) {
             md.appendLine()
         }
 
-        // Direct order / cart links
-        if (offer.orderLinks.isNotEmpty()) {
-            md.appendLine("### 🛒 直达购买链接")
+        val mainBody = resolveMainPostMarkdown(repost)
+        if (mainBody.isNotBlank()) {
+            md.appendLine(mainBody)
             md.appendLine()
-            offer.orderLinks.take(5).forEachIndexed { index, url ->
-                md.appendLine("${index + 1}. [直达下单链接 ${index + 1}]($url)")
+        }
+
+        // Append any OP images or links not already referenced inside bodyMarkdown
+        val missingImages = repost.images.filter { img ->
+            img.url.isNotBlank() && !mainBody.contains(img.url)
+        }
+        if (missingImages.isNotEmpty()) {
+            missingImages.forEach { img ->
+                val alt = img.alt.trim().ifBlank { "促销配图" }
+                md.appendLine("![$alt](${img.url.trim()})")
             }
             md.appendLine()
         }
 
-        // Source attribution & FX reference disclaimer
+        val missingLinks = repost.links.filter { link ->
+            link.url.isNotBlank() && !mainBody.contains(link.url) && link.url != sourceUrl
+        }
+        if (missingLinks.isNotEmpty()) {
+            md.appendLine("### 相关链接")
+            md.appendLine()
+            missingLinks.forEachIndexed { idx, link ->
+                val label = link.text.trim().ifBlank { "链接 ${idx + 1}" }
+                md.appendLine("- [$label](${link.url.trim()})")
+            }
+            md.appendLine()
+        }
+
         md.appendLine("---")
-        md.appendLine("**来源致谢**：情报搬运自 [${offer.source.label} 原帖](${offer.sourceLink})，版权与最终条款归原帖作者及商家所有。")
-        if (fxRatesState != null) {
-            val usdRate = fxRatesState.rateFor(ValuationCurrency.USD).setScale(2, RoundingMode.HALF_UP)
-            val eurRate = fxRatesState.rateFor(ValuationCurrency.EUR).setScale(2, RoundingMode.HALF_UP)
-            val dateSuffix = fxRatesState.providerDate?.let { "（汇率日期 $it）" }.orEmpty()
-            md.appendLine("*参考汇率：1 USD ≈ ¥${usdRate.toPlainString()} · 1 EUR ≈ ¥${eurRate.toPlainString()}$dateSuffix，实际以发卡行入账为准。*")
+        if (sourceUrl.isNotBlank()) {
+            md.appendLine("**来源致谢**：情报搬运自 [LowEndTalk 原帖]($sourceUrl) 主楼发布内容（不含评论），最终条款归原帖作者及商家所有。")
         } else {
-            md.appendLine("*人民币价格按实时参考汇率折算，实际以发卡行入账为准。*")
+            md.appendLine("**来源致谢**：情报搬运自 LowEndTalk 原帖主楼发布内容（不含评论），最终条款归原帖作者及商家所有。")
         }
 
         return SuggestedForumPost(
             title = suggestedTitle,
             markdownBody = md.toString().trimEnd(),
-            suggestedCategorySlug = "info",
+            suggestedCategorySlug = repost.suggestedCategorySlug.ifBlank { "info" },
         )
     }
 
-    private fun escapeTableCell(value: String): String =
-        value.replace("|", "\\|").replace("\n", " ").trim()
+    private fun resolveMainPostMarkdown(repost: OverseasRepostContent): String {
+        val markdown = repost.bodyMarkdown.trim()
+        if (markdown.isNotBlank()) return markdown
+
+        val plain = repost.bodyText.trim()
+        if (plain.isNotBlank()) return plain
+
+        return repost.bodyHtml
+            .replace(Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("""</p>""", RegexOption.IGNORE_CASE), "\n\n")
+            .replace(Regex("""<[^>]+>"""), "")
+            .trim()
+    }
 }

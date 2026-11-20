@@ -5,20 +5,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
-import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
-import com.nodeseek.app.data.valuation.ExchangeRateRepository
-import com.nodeseek.app.data.valuation.FxRefreshOutcome
-import com.nodeseek.app.data.valuation.FxRatesState
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasForumPostFormatter
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
-import com.nodeseek.app.domain.overseas.OverseasSource
-import com.nodeseek.app.domain.overseas.OverseasSourceFilter
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
 import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.domain.overseas.SuggestedForumPost
-import com.nodeseek.app.domain.valuation.ValuationCurrency
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -29,38 +22,22 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.math.RoundingMode
 
 data class OverseasIntelUiState(
     val allOffers: List<OverseasDealOffer> = emptyList(),
     val filteredOffers: List<OverseasDealOffer> = emptyList(),
-    val selectedFilter: OverseasSourceFilter = OverseasSourceFilter.ALL,
     val searchQuery: String = "",
-    val displayMode: OverseasDisplayMode = OverseasDisplayMode.BILINGUAL,
-    val fxRatesState: FxRatesState = PreviewOverseasIntelRepository.buildDefaultFxState(),
     val translationConfig: OverseasTranslationConfig = OverseasTranslationConfig(),
     val syncStatus: OverseasSyncStatus = OverseasSyncStatus(),
-    val translatingOfferIds: Set<String> = emptySet(),
-    val sourceCounts: Map<OverseasSourceFilter, Int> = emptyMap(),
+    val repostingOfferIds: Set<String> = emptySet(),
     val isTestingTranslator: Boolean = false,
     val translatorTestFeedback: String? = null,
     val translatorTestSuccess: Boolean? = null,
-) {
-    val usdRateFormatted: String
-        get() = fxRatesState.rateFor(ValuationCurrency.USD)
-            .setScale(2, RoundingMode.HALF_UP)
-            .toPlainString()
-
-    val eurRateFormatted: String
-        get() = fxRatesState.rateFor(ValuationCurrency.EUR)
-            .setScale(2, RoundingMode.HALF_UP)
-            .toPlainString()
-}
+)
 
 private data class OverseasUiControls(
-    val selectedFilter: OverseasSourceFilter = OverseasSourceFilter.ALL,
     val searchQuery: String = "",
-    val translatingOfferIds: Set<String> = emptySet(),
+    val repostingOfferIds: Set<String> = emptySet(),
     val isTestingTranslator: Boolean = false,
     val translatorTestFeedback: String? = null,
     val translatorTestSuccess: Boolean? = null,
@@ -72,35 +49,28 @@ class OverseasIntelViewModel(
 ) : ViewModel() {
 
     private val controls = MutableStateFlow(OverseasUiControls())
+
     private val _snackbarMessages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val snackbarMessages: SharedFlow<String> = _snackbarMessages.asSharedFlow()
+
+    private val _repostDraftEvents = MutableSharedFlow<SuggestedForumPost>(extraBufferCapacity = 4)
+    val repostDraftEvents: SharedFlow<SuggestedForumPost> = _repostDraftEvents.asSharedFlow()
 
     val uiState: StateFlow<OverseasIntelUiState> = combine(
         repository.snapshot,
         controls,
     ) { snapshot, ctrl ->
-        val counts = mapOf(
-            OverseasSourceFilter.ALL to snapshot.offers.size,
-            OverseasSourceFilter.LET to snapshot.offers.count { it.source == OverseasSource.LET },
-            OverseasSourceFilter.LEB to snapshot.offers.count { it.source == OverseasSource.LEB },
-            OverseasSourceFilter.BLACK_FRIDAY_FLASH to snapshot.offers.count { it.isFlashOrBlackFriday },
-        )
         val filtered = filterOffers(
             offers = snapshot.offers,
-            filter = ctrl.selectedFilter,
             query = ctrl.searchQuery,
         )
         OverseasIntelUiState(
             allOffers = snapshot.offers,
             filteredOffers = filtered,
-            selectedFilter = ctrl.selectedFilter,
             searchQuery = ctrl.searchQuery,
-            displayMode = snapshot.translationConfig.displayMode,
-            fxRatesState = snapshot.fxRatesState,
             translationConfig = snapshot.translationConfig,
             syncStatus = snapshot.syncStatus,
-            translatingOfferIds = ctrl.translatingOfferIds,
-            sourceCounts = counts,
+            repostingOfferIds = ctrl.repostingOfferIds,
             isTestingTranslator = ctrl.isTestingTranslator,
             translatorTestFeedback = ctrl.translatorTestFeedback,
             translatorTestSuccess = ctrl.translatorTestSuccess,
@@ -111,8 +81,6 @@ class OverseasIntelViewModel(
         initialValue = OverseasIntelUiState(
             allOffers = repository.snapshot.value.offers,
             filteredOffers = repository.snapshot.value.offers,
-            displayMode = repository.snapshot.value.translationConfig.displayMode,
-            fxRatesState = repository.snapshot.value.fxRatesState,
             translationConfig = repository.snapshot.value.translationConfig,
             syncStatus = repository.snapshot.value.syncStatus,
         ),
@@ -123,24 +91,65 @@ class OverseasIntelViewModel(
             viewModelScope.launch {
                 val cached = repository.loadFromCache()
                 if (cached.isEmpty()) {
-                    repository.refresh(forceTranslate = false)
+                    repository.refresh()
                 } else {
-                    // Refresh silently in background if cache is older than 10 minutes
                     val lastSynced = repository.snapshot.value.syncStatus.lastSyncedEpochMillis
                     if (System.currentTimeMillis() - lastSynced > STALE_REFRESH_THRESHOLD_MS) {
-                        repository.refresh(forceTranslate = false)
+                        repository.refresh()
                     }
                 }
             }
         }
     }
 
-    fun selectFilter(filter: OverseasSourceFilter) {
-        controls.update { it.copy(selectedFilter = filter) }
-    }
-
     fun updateSearchQuery(query: String) {
         controls.update { it.copy(searchQuery = query) }
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            val result = repository.refresh()
+            result.onSuccess { offers ->
+                emitSnackbar("已同步 ${offers.size} 条海外促销情报")
+            }.onFailure { err ->
+                val hasCache = repository.snapshot.value.offers.isNotEmpty()
+                val reason = err.message?.takeIf { it.isNotBlank() } ?: "拉取海外情报失败，请检查网络"
+                emitSnackbar(if (hasCache) "$reason，已展示缓存内容" else reason)
+            }
+        }
+    }
+
+    fun loadNextPage() {
+        val state = uiState.value
+        if (state.searchQuery.isNotBlank()) return
+        if (state.syncStatus.isRefreshing || state.syncStatus.isLoadingMore || !state.syncStatus.hasMore) return
+        viewModelScope.launch {
+            repository.loadNextPage()
+                .onFailure { err ->
+                    emitSnackbar(err.message?.takeIf { it.isNotBlank() } ?: "加载下一页失败")
+                }
+        }
+    }
+
+    fun prepareRepostToForum(offer: OverseasDealOffer) {
+        if (offer.id in controls.value.repostingOfferIds) return
+        viewModelScope.launch {
+            controls.update { it.copy(repostingOfferIds = it.repostingOfferIds + offer.id) }
+            try {
+                val result = repository.getRepostContent(offerId = offer.id, forceRefresh = false)
+                result.onSuccess { repostContent ->
+                    val draft = OverseasForumPostFormatter.format(
+                        repost = repostContent,
+                        fallbackOffer = offer,
+                    )
+                    _repostDraftEvents.emit(draft)
+                }.onFailure { err ->
+                    emitSnackbar(err.message?.takeIf { it.isNotBlank() } ?: "获取主楼搬运内容失败，请稍后重试")
+                }
+            } finally {
+                controls.update { it.copy(repostingOfferIds = it.repostingOfferIds - offer.id) }
+            }
+        }
     }
 
     fun setDisplayMode(mode: OverseasDisplayMode) {
@@ -149,79 +158,10 @@ class OverseasIntelViewModel(
         }
     }
 
-    fun cycleDisplayMode() {
-        val next = when (uiState.value.displayMode) {
-            OverseasDisplayMode.CHINESE -> OverseasDisplayMode.BILINGUAL
-            OverseasDisplayMode.BILINGUAL -> OverseasDisplayMode.ORIGINAL
-            OverseasDisplayMode.ORIGINAL -> OverseasDisplayMode.CHINESE
-        }
-        setDisplayMode(next)
-    }
-
-    fun refresh(forceTranslate: Boolean = false) {
-        viewModelScope.launch {
-            val result = repository.refresh(forceTranslate = forceTranslate)
-            result.onSuccess { offers ->
-                val errors = repository.snapshot.value.syncStatus.sourceErrors
-                if (errors.isEmpty()) {
-                    emitSnackbar("已同步 ${offers.size} 条海外 VPS 情报")
-                } else {
-                    emitSnackbar("已同步 ${offers.size} 条情报（部分源异常，已自动兜底）")
-                }
-            }.onFailure { err ->
-                emitSnackbar(err.message?.takeIf { it.isNotBlank() } ?: "拉取海外情报失败，请检查网络")
-            }
-        }
-    }
-
-    fun refreshExchangeRates() {
-        viewModelScope.launch {
-            when (val outcome = repository.refreshExchangeRates()) {
-                is FxRefreshOutcome.Success -> {
-                    val usd = outcome.state.rateFor(ValuationCurrency.USD)
-                        .setScale(2, RoundingMode.HALF_UP)
-                        .toPlainString()
-                    emitSnackbar("实时汇率已更新：1 USD = ¥$usd")
-                }
-                is FxRefreshOutcome.Fallback -> {
-                    emitSnackbar(outcome.reason)
-                }
-            }
-        }
-    }
-
-    fun translateOffer(offerId: String, forceRefresh: Boolean = true) {
-        if (offerId in controls.value.translatingOfferIds) return
-        viewModelScope.launch {
-            controls.update { it.copy(translatingOfferIds = it.translatingOfferIds + offerId) }
-            try {
-                val updated = repository.translateOffer(offerId = offerId, forceRefresh = forceRefresh)
-                if (updated != null) {
-                    emitSnackbar("翻译完成（${updated.translationTier.label}）")
-                }
-            } finally {
-                controls.update { it.copy(translatingOfferIds = it.translatingOfferIds - offerId) }
-            }
-        }
-    }
-
-    fun translateAllLoaded(forceRefresh: Boolean = true) {
-        viewModelScope.launch {
-            repository.translateAllLoaded(forceRefresh = forceRefresh)
-            emitSnackbar("已完成当前列表翻译")
-        }
-    }
-
-    fun saveTranslationConfig(
-        config: OverseasTranslationConfig,
-        retranslateAfterSave: Boolean = false,
-    ) {
+    fun saveTranslationConfig(config: OverseasTranslationConfig) {
         viewModelScope.launch {
             repository.updateTranslationConfig(config)
-            emitSnackbar("翻译引擎配置已保存（${config.engineKind.label}）")
-            if (retranslateAfterSave) {
-                repository.translateAllLoaded(forceRefresh = true)
-            }
+            emitSnackbar("翻译配置已保存（${config.engineKind.label}）")
         }
     }
 
@@ -265,12 +205,6 @@ class OverseasIntelViewModel(
         }
     }
 
-    fun formatForForum(offer: OverseasDealOffer): SuggestedForumPost =
-        OverseasForumPostFormatter.format(
-            offer = offer,
-            fxRatesState = uiState.value.fxRatesState,
-        )
-
     fun notifyMessage(message: String) {
         emitSnackbar(message)
     }
@@ -284,29 +218,18 @@ class OverseasIntelViewModel(
 
         internal fun filterOffers(
             offers: List<OverseasDealOffer>,
-            filter: OverseasSourceFilter,
             query: String,
         ): List<OverseasDealOffer> {
-            val bySource = when (filter) {
-                OverseasSourceFilter.ALL -> offers
-                OverseasSourceFilter.LET -> offers.filter { it.source == OverseasSource.LET }
-                OverseasSourceFilter.LEB -> offers.filter { it.source == OverseasSource.LEB }
-                OverseasSourceFilter.BLACK_FRIDAY_FLASH -> offers.filter { it.isFlashOrBlackFriday }
-            }
             val trimmedQuery = query.trim()
-            if (trimmedQuery.isEmpty()) return bySource
+            if (trimmedQuery.isEmpty()) return offers
 
             val tokens = trimmedQuery.split(Regex("""\s+""")).filter { it.isNotBlank() }
-            return bySource.filter { offer ->
+            return offers.filter { offer ->
                 val haystack = buildString {
+                    append(offer.title).append(' ')
                     append(offer.originalTitle).append(' ')
-                    append(offer.translatedTitle.orEmpty()).append(' ')
-                    append(offer.originalSummary).append(' ')
-                    append(offer.translatedSummary.orEmpty()).append(' ')
-                    append(offer.authorOrProvider).append(' ')
-                    append(offer.specHighlights.joinToString(" ")).append(' ')
-                    append(offer.couponCodes.joinToString(" ")).append(' ')
-                    append(offer.priceMatches.joinToString(" ") { "${it.rawText} ${it.formattedCny}" })
+                    append(offer.summary).append(' ')
+                    append(offer.merchant)
                 }
                 tokens.all { token -> haystack.contains(token, ignoreCase = true) }
             }
@@ -324,14 +247,8 @@ class OverseasIntelViewModel(
                 ) as T
         }
 
-        fun factory(
-            context: Context,
-            exchangeRateRepository: ExchangeRateRepository = ExchangeRateRepository.forContext(context),
-        ): ViewModelProvider.Factory = factory(
-            repository = OverseasIntelRepositoryImpl(
-                context = context,
-                exchangeRateRepository = exchangeRateRepository,
-            ),
+        fun factory(context: Context): ViewModelProvider.Factory = factory(
+            repository = OverseasIntelRepositoryImpl(context = context),
         )
     }
 }
