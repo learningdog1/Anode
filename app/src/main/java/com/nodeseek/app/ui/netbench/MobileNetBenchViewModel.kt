@@ -81,6 +81,7 @@ data class MobileNetBenchUiState(
     val enableIperf3: Boolean = false,
     val iperfPortText: String = Iperf3Config.DEFAULT_PORT.toString(),
     val iperfDurationSec: Int = Iperf3Config.DEFAULT_DURATION_SEC,
+    val iperfParallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
     val iperfTestMode: Iperf3TestMode = Iperf3TestMode.DOWNLOAD,
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
     val maskTargetIpInReport: Boolean = true,
@@ -327,6 +328,17 @@ class NetBenchSessionController(
         _uiState.update { it.copy(iperfDurationSec = seconds.coerceIn(1, 30)) }
     }
 
+    fun updateIperfParallelStreams(streams: Int) {
+        _uiState.update {
+            it.copy(
+                iperfParallelStreams = streams.coerceIn(
+                    Iperf3Config.MIN_PARALLEL_STREAMS,
+                    Iperf3Config.MAX_PARALLEL_STREAMS,
+                ),
+            )
+        }
+    }
+
     fun updateIperfTestMode(mode: Iperf3TestMode) {
         _uiState.update { it.copy(iperfTestMode = mode) }
     }
@@ -562,6 +574,10 @@ class NetBenchSessionController(
                     val runUpload = snapshot.iperfTestMode == Iperf3TestMode.UPLOAD ||
                         snapshot.iperfTestMode == Iperf3TestMode.BOTH
 
+                    val streams = snapshot.iperfParallelStreams.coerceIn(
+                        Iperf3Config.MIN_PARALLEL_STREAMS,
+                        Iperf3Config.MAX_PARALLEL_STREAMS,
+                    )
                     if (runDownload) {
                         _uiState.update { it.copy(activePhase = NetBenchPhase.IPERF_DOWNLOAD) }
                         val dlConfig = Iperf3Config(
@@ -571,10 +587,15 @@ class NetBenchSessionController(
                             direction = Iperf3Direction.DOWNLOAD,
                             preferredFamily = snapshot.preferredFamily,
                             useProxy = snapshot.testViaProxy,
+                            parallelStreams = streams,
                         )
-                        iperf3ClientRunner.run(dlConfig).collect { progress ->
+                        iperf3ClientRunner.run(dlConfig, streams).collect { progress ->
+                            val enriched = progress.copy(
+                                parallelStreams = streams,
+                                finalResult = progress.finalResult?.copy(parallelStreams = streams),
+                            )
                             _uiState.update { state ->
-                                state.copy(iperfDownloadProgress = progress).withRegeneratedMarkdown()
+                                state.copy(iperfDownloadProgress = enriched).withRegeneratedMarkdown()
                             }
                         }
                     }
@@ -593,10 +614,15 @@ class NetBenchSessionController(
                             direction = Iperf3Direction.UPLOAD,
                             preferredFamily = snapshot.preferredFamily,
                             useProxy = snapshot.testViaProxy,
+                            parallelStreams = streams,
                         )
-                        iperf3ClientRunner.run(ulConfig).collect { progress ->
+                        iperf3ClientRunner.run(ulConfig, streams).collect { progress ->
+                            val enriched = progress.copy(
+                                parallelStreams = streams,
+                                finalResult = progress.finalResult?.copy(parallelStreams = streams),
+                            )
                             _uiState.update { state ->
-                                state.copy(iperfUploadProgress = progress).withRegeneratedMarkdown()
+                                state.copy(iperfUploadProgress = enriched).withRegeneratedMarkdown()
                             }
                         }
                     }
@@ -749,6 +775,7 @@ class MobileNetBenchViewModel(
     fun refreshClientEgress() = controller.refreshClientEgress()
     fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
     fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
+    fun updateIperfParallelStreams(streams: Int) = controller.updateIperfParallelStreams(streams)
     fun updateIperfTestMode(mode: Iperf3TestMode) = controller.updateIperfTestMode(mode)
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) = controller.selectMarkdownStyle(style)
     fun toggleMaskTargetIp(mask: Boolean) = controller.toggleMaskTargetIp(mask)

@@ -82,26 +82,35 @@ object NetBenchMarkdownFormatter {
             lines += "> - **HTTP 探测**：${formatHttpCompact(http)}"
         }
 
+        val iperfStreams = listOfNotNull(
+            report.iperfDownloadResult?.parallelStreams,
+            report.iperfUploadResult?.parallelStreams,
+        )
+        val unifiedStreams = iperfStreams.distinct().singleOrNull()?.takeIf { it > 1 }
+
         val iperfParts = buildList {
             report.iperfDownloadResult?.let { dl ->
+                val dirStreams = if (unifiedStreams == null && dl.parallelStreams > 1) " (-P ${dl.parallelStreams})" else ""
                 if (dl.success) {
-                    add("下载 **${formatMbps(dl.effectiveMbps)}**")
+                    add("下载$dirStreams **${formatMbps(dl.effectiveMbps)}**")
                 } else {
                     val reason = truncateByDisplayWidth(sanitizeInline(dl.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
-                    add("下载失败 ($reason)")
+                    add("下载$dirStreams 失败 ($reason)")
                 }
             }
             report.iperfUploadResult?.let { ul ->
+                val dirStreams = if (unifiedStreams == null && ul.parallelStreams > 1) " (-P ${ul.parallelStreams})" else ""
                 if (ul.success) {
-                    add("上传 **${formatMbps(ul.effectiveMbps)}**")
+                    add("上传$dirStreams **${formatMbps(ul.effectiveMbps)}**")
                 } else {
                     val reason = truncateByDisplayWidth(sanitizeInline(ul.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
-                    add("上传失败 ($reason)")
+                    add("上传$dirStreams 失败 ($reason)")
                 }
             }
         }
         if (iperfParts.isNotEmpty()) {
-            lines += "> - **iperf3 测速**：${iperfParts.joinToString(" ｜ ")}"
+            val streamSuffix = if (unifiedStreams != null) " (-P $unifiedStreams)" else ""
+            lines += "> - **iperf3 测速$streamSuffix**：${iperfParts.joinToString(" ｜ ")}"
         }
 
         report.ipIntelligence?.let { intel ->
@@ -188,8 +197,9 @@ object NetBenchMarkdownFormatter {
                     buildIperfTableNote(dl),
                 )
             } else {
+                val streamPrefix = if (dl.parallelStreams > 1) "-P ${dl.parallelStreams} 并发 · " else ""
                 val reason = truncateByDisplayWidth(
-                    sanitizeInline(dl.errorMessage ?: "连接失败"),
+                    streamPrefix + sanitizeInline(dl.errorMessage ?: "连接失败"),
                     MAX_NOTE_CELL_DISPLAY_WIDTH,
                 )
                 rows += listOf("iperf3 下载 (-R)", "测速失败", reason.ifBlank { EMPTY_CELL_PLACEHOLDER })
@@ -204,8 +214,9 @@ object NetBenchMarkdownFormatter {
                     buildIperfTableNote(ul),
                 )
             } else {
+                val streamPrefix = if (ul.parallelStreams > 1) "-P ${ul.parallelStreams} 并发 · " else ""
                 val reason = truncateByDisplayWidth(
-                    sanitizeInline(ul.errorMessage ?: "连接失败"),
+                    streamPrefix + sanitizeInline(ul.errorMessage ?: "连接失败"),
                     MAX_NOTE_CELL_DISPLAY_WIDTH,
                 )
                 rows += listOf("iperf3 上传", "测速失败", reason.ifBlank { EMPTY_CELL_PLACEHOLDER })
@@ -497,6 +508,9 @@ object NetBenchMarkdownFormatter {
 
     private fun buildIperfTableNote(result: Iperf3Result): String {
         val parts = mutableListOf<String>()
+        if (result.parallelStreams > 1) {
+            parts += "-P ${result.parallelStreams} 并发"
+        }
         parts += "耗时 ${formatSeconds(result.durationSec)}"
         parts += "传输 ${formatBytes(result.bytesTransferred)}"
         if (result.peakMbps > result.effectiveMbps * 1.05) {

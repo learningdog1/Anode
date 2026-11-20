@@ -293,16 +293,22 @@ data class Iperf3Config(
     val connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
     val useProxy: Boolean = false,
+    val parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
 ) {
     val normalizedPort: Int get() = port.coerceIn(1, 65535)
     val normalizedDurationSec: Int get() = durationSec.coerceIn(1, 60)
     val normalizedChunkSize: Int get() = chunkSizeBytes.coerceIn(4096, 1024 * 1024)
+    val normalizedParallelStreams: Int get() = parallelStreams.coerceIn(MIN_PARALLEL_STREAMS, MAX_PARALLEL_STREAMS)
 
     companion object {
         const val DEFAULT_PORT = 5201
         const val DEFAULT_DURATION_SEC = 5
         const val DEFAULT_CHUNK_SIZE = 131_072 // 128 KiB
         const val DEFAULT_CONNECT_TIMEOUT_MS = 4_000
+        const val DEFAULT_PARALLEL_STREAMS = 1
+        const val MIN_PARALLEL_STREAMS = 1
+        const val MAX_PARALLEL_STREAMS = 16
+        val PARALLEL_STREAM_PRESETS = listOf(1, 2, 4, 8)
     }
 }
 
@@ -350,6 +356,7 @@ data class Iperf3Result(
     val success: Boolean,
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
+    val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
 ) {
     /**
      * Best-available throughput value in Mbps (prefers measured client rate, falls back to server rate).
@@ -374,6 +381,7 @@ data class Iperf3Progress(
     val finalResult: Iperf3Result? = null,
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
+    val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
 ) {
     val progressFraction: Float
         get() = if (stage == Iperf3Stage.COMPLETED) {

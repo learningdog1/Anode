@@ -69,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
+import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.TcpPortPreset
@@ -466,6 +467,26 @@ fun NetBenchQuickBottomSheet(
                                     selected = uiState.iperfTestMode == mode,
                                     enabled = !uiState.isRunning,
                                     onClick = { controller.updateIperfTestMode(mode) },
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "并行流 -P",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Iperf3Config.PARALLEL_STREAM_PRESETS.forEach { streams ->
+                                NetBenchSelectableChip(
+                                    label = "${streams}流",
+                                    selected = uiState.iperfParallelStreams == streams,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { controller.updateIperfParallelStreams(streams) },
                                 )
                             }
                         }

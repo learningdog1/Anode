@@ -1264,6 +1264,14 @@ internal fun NetBenchIperf3Card(
 ) {
     if (downloadProgress == null && uploadProgress == null) return
 
+    val items = listOfNotNull(downloadProgress, uploadProgress)
+    val activeStreams = items.maxOfOrNull { it.parallelStreams } ?: 1
+    val headerSubtitle = if (activeStreams > 1) {
+        "纯 Kotlin TCP 协议 · 端口 $iperfPort · -P $activeStreams 并行流"
+    } else {
+        "纯 Kotlin TCP 协议 · 端口 $iperfPort"
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1273,12 +1281,10 @@ internal fun NetBenchIperf3Card(
     ) {
         PulseSectionHeader(
             title = "原生 iperf3 吞吐测速",
-            subtitle = "纯 Kotlin TCP 协议 · 端口 $iperfPort",
+            subtitle = headerSubtitle,
             icon = Icons.Rounded.Speed,
             accentColor = MaterialTheme.colorScheme.primary,
         )
-
-        val items = listOfNotNull(downloadProgress, uploadProgress)
         if (items.size == 2 && !compact) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
