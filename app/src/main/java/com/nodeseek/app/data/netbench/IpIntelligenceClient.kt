@@ -1,12 +1,17 @@
 package com.nodeseek.app.data.netbench
 
 import com.nodeseek.app.domain.netbench.ClientCarrier
+import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
+import com.nodeseek.app.domain.netbench.DirectBindFailureReason
+import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
+import com.nodeseek.app.domain.netbench.ProxyPresence
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +28,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -53,19 +59,34 @@ data class IpIntelligenceEndpoints(
         "ipinfo.io" to "https://ipinfo.io/json",
         "ipapi.co" to "https://ipapi.co/json/",
     ),
-)
+    val clientDirectUrls: List<Pair<String, String>> = clientSelfUrls,
+) {
+    companion object {
+        fun defaultProduction(): IpIntelligenceEndpoints = IpIntelligenceEndpoints(
+            clientDirectUrls = listOf(
+                "ipwho.is" to "https://ipwho.is/",
+                "ipinfo.io" to "https://ipinfo.io/json",
+                "ipapi.co" to "https://ipapi.co/json/",
+                "ipip.net" to "https://myip.ipip.net/json",
+            ),
+        )
+    }
+}
 
 /**
  * Multi-source IP intelligence & Native-vs-Broadcast classifier client.
  *
  * - Target GeoIP & ASN fallback chain: `ipwho.is` -> `ipinfo.io/widget` -> `ipapi.co`.
  * - Target RIR registration country fallback chain: RIPEstat WHOIS -> RDAP (RIPE/ARIN/APNIC).
- * - Local client egress carrier detection: `电信` / `联通` / `移动` / `广电` / `海外网络`.
+ * - Local client egress carrier detection: binds to the non-VPN underlying physical network
+ *   via [NetBenchNetworkBridge] when possible, and falls back to proxy egress with explicit
+ *   status metadata when restricted (e.g. non-bypassable or lockdown VPN).
  */
 class IpIntelligenceClient(
     private val httpClient: OkHttpClient = defaultHttpClient(),
-    private val endpoints: IpIntelligenceEndpoints = IpIntelligenceEndpoints(),
+    private val endpoints: IpIntelligenceEndpoints = IpIntelligenceEndpoints.defaultProduction(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
 ) {
 
     private val json = Json {
@@ -182,46 +203,224 @@ class IpIntelligenceClient(
         }
     }
 
+    private data class ChannelProbeOutcome(
+        val info: ClientNetworkInfo? = null,
+        val lastError: Throwable? = null,
+        val failureReason: DirectBindFailureReason? = null,
+    )
+
     /**
-     * Queries the user's own local egress carrier (电信/联通/移动/广电/海外网络) with fallback.
-     * Note: [ClientNetworkInfo.rawIp] is kept only for local masked display and never exported.
+     * Queries the user's local egress carrier. When a VPN or system proxy is active,
+     * binds to the underlying non-VPN network for the real egress IP and also queries the
+     * proxy egress IP concurrently, falling back cleanly if direct socket binding is blocked.
      */
-    suspend fun lookupLocalClientNetwork(): ClientNetworkInfo = withContext(ioDispatcher) {
-        for ((sourceName, url) in endpoints.clientSelfUrls) {
-            val body = fetchJsonText(url) ?: continue
-            val parsed = when (sourceName) {
-                "ipwho.is" -> parseIpWhoIs(body, sourceName)
-                "ipinfo.io" -> parseIpInfo(body, sourceName)
-                "ipapi.co" -> parseIpApi(body, sourceName)
-                else -> parseIpWhoIs(body, sourceName) ?: parseIpInfo(body, sourceName) ?: parseIpApi(body, sourceName)
-            }
-            if (parsed != null) {
-                val (carrier, displayName) = IpClassificationEngine.classifyClientCarrier(
-                    asn = parsed.asn,
-                    ispName = parsed.ispName,
-                    orgName = parsed.orgName,
-                    countryCode = parsed.countryCode,
+    suspend fun detectClientEgress(): ClientEgressSnapshot = withContext(ioDispatcher) {
+        val binding = networkBridge.inspectCurrentNetworks()
+        val plan = binding.plan
+
+        if (!plan.isProxyDetected) {
+            val directOutcome = if (plan.allDirectCandidates.isNotEmpty()) {
+                probeDirectCandidates(
+                    candidates = plan.allDirectCandidates.map { it.token },
+                    isVpnActive = false,
                 )
-                val ipFamily = NetBenchTargetParser.detectIpFamily(parsed.ip)
-                return@withContext ClientNetworkInfo(
-                    carrier = carrier,
-                    carrierDisplayName = displayName,
-                    ipFamily = ipFamily,
-                    countryCode = IpClassificationEngine.normalizeCountryCode(parsed.countryCode),
-                    regionName = parsed.regionName,
-                    asn = IpClassificationEngine.normalizeAsn(parsed.asn),
-                    ispName = parsed.ispName ?: parsed.orgName,
-                    maskedIp = NetBenchTargetParser.maskClientIpForDisplay(parsed.ip),
-                    rawIp = parsed.ip,
-                    source = parsed.source,
+            } else {
+                lookupOnChannelDetailed(
+                    channel = binding.proxyOrDefaultChannel,
+                    urls = endpoints.clientDirectUrls,
+                    routeKind = EgressRouteKind.DIRECT,
                 )
             }
+
+            return@withContext ClientEgressSnapshot(
+                directNetwork = directOutcome.info,
+                proxyNetwork = null,
+                proxyDetected = false,
+                isVpnActive = false,
+                isSystemHttpProxyActive = false,
+                directBindFailed = false,
+                activeTransportLabel = plan.activeTransportLabel,
+                directTransportLabel = directOutcome.info?.transportLabel ?: plan.directTransportLabel,
+                networkFingerprint = plan.networkFingerprint,
+            )
         }
 
-        ClientNetworkInfo(
+        coroutineScope {
+            val proxyDeferred = async {
+                lookupOnChannelDetailed(
+                    channel = binding.proxyOrDefaultChannel,
+                    urls = endpoints.clientSelfUrls,
+                    routeKind = EgressRouteKind.PROXY,
+                )
+            }
+            val directDeferred = async {
+                if (plan.allDirectCandidates.isEmpty()) {
+                    ChannelProbeOutcome(
+                        info = null,
+                        failureReason = DirectBindFailureReason.NO_UNDERLYING_NETWORK,
+                    )
+                } else {
+                    probeDirectCandidates(
+                        candidates = plan.allDirectCandidates.map { it.token },
+                        isVpnActive = plan.isVpnActive,
+                    )
+                }
+            }
+
+            val proxyOutcome = proxyDeferred.await()
+            val directOutcome = directDeferred.await()
+
+            val directSucceeded = directOutcome.info != null
+            val resolvedProxyInfo = if (!directSucceeded && proxyOutcome.info != null) {
+                proxyOutcome.info.copy(routeKind = EgressRouteKind.PROXY_FALLBACK)
+            } else {
+                proxyOutcome.info
+            }
+
+            val bindFailed = !directSucceeded
+            val failureReason = if (bindFailed) {
+                directOutcome.failureReason ?: NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = directOutcome.lastError,
+                    isVpnActive = plan.isVpnActive,
+                    hasDirectCandidate = plan.hasDirectCandidate,
+                )
+            } else {
+                null
+            }
+
+            ClientEgressSnapshot(
+                directNetwork = directOutcome.info,
+                proxyNetwork = resolvedProxyInfo,
+                proxyDetected = true,
+                isVpnActive = plan.isVpnActive,
+                isSystemHttpProxyActive = plan.proxyPresence == ProxyPresence.SYSTEM_HTTP_PROXY ||
+                    plan.proxyPresence == ProxyPresence.BOTH_VPN_AND_HTTP_PROXY,
+                directBindFailed = bindFailed,
+                directBindFailureReason = failureReason,
+                directBindErrorDetail = if (bindFailed) directOutcome.lastError?.message else null,
+                activeTransportLabel = plan.activeTransportLabel,
+                directTransportLabel = directOutcome.info?.transportLabel ?: plan.directTransportLabel,
+                networkFingerprint = plan.networkFingerprint,
+            )
+        }
+    }
+
+    /**
+     * Queries the user's own local egress carrier (电信/联通/移动/广电/海外网络) with fallback.
+     * Prefers the real underlying non-VPN network when available, falling back to proxy egress
+     * if direct binding fails.
+     * Note: [ClientNetworkInfo.rawIp] is kept only for local masked display and never exported.
+     */
+    suspend fun lookupLocalClientNetwork(): ClientNetworkInfo {
+        return detectClientEgress().effectiveDirectOrFallback ?: ClientNetworkInfo(
             carrier = ClientCarrier.UNKNOWN,
             carrierDisplayName = ClientCarrier.UNKNOWN.label,
         )
+    }
+
+    private suspend fun probeDirectCandidates(
+        candidates: List<NetBenchSocketChannel>,
+        isVpnActive: Boolean,
+    ): ChannelProbeOutcome {
+        var lastOutcome = ChannelProbeOutcome(
+            failureReason = DirectBindFailureReason.NO_UNDERLYING_NETWORK,
+        )
+        for (channel in candidates) {
+            val outcome = lookupOnChannelDetailed(
+                channel = channel,
+                urls = endpoints.clientDirectUrls,
+                routeKind = EgressRouteKind.DIRECT,
+            )
+            if (outcome.info != null) {
+                return outcome
+            }
+            val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                throwable = outcome.lastError,
+                isVpnActive = isVpnActive,
+                hasDirectCandidate = true,
+            )
+            lastOutcome = outcome.copy(failureReason = reason)
+            if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                // Lockdown / non-bypassable VPN applies to the whole UID; no other physical network can bypass.
+                break
+            }
+        }
+        return lastOutcome
+    }
+
+    private suspend fun lookupOnChannelDetailed(
+        channel: NetBenchSocketChannel,
+        urls: List<Pair<String, String>>,
+        routeKind: EgressRouteKind,
+    ): ChannelProbeOutcome {
+        val needsCustomClient = channel.isDirectPhysical || channel.bypassSystemHttpProxy
+        val tempPool = if (needsCustomClient) ConnectionPool(2, 15, TimeUnit.SECONDS) else null
+        val client = if (needsCustomClient) {
+            httpClient.newBuilder()
+                .bindToChannel(channel, tempPool)
+                .build()
+        } else {
+            httpClient
+        }
+
+        var lastError: Throwable? = null
+        try {
+            for ((sourceName, url) in urls) {
+                val fetchResult = fetchJsonTextWithError(client, url)
+                if (fetchResult.error != null) {
+                    lastError = fetchResult.error
+                    if (channel.isDirectPhysical &&
+                        NetBenchNetworkSelector.classifyDirectBindFailure(
+                            throwable = fetchResult.error,
+                            isVpnActive = true,
+                            hasDirectCandidate = true,
+                        ) == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED
+                    ) {
+                        return ChannelProbeOutcome(info = null, lastError = fetchResult.error)
+                    }
+                    continue
+                }
+                val body = fetchResult.body ?: continue
+                val parsed = when (sourceName) {
+                    "ipwho.is" -> parseIpWhoIs(body, sourceName)
+                    "ipinfo.io" -> parseIpInfo(body, sourceName)
+                    "ipapi.co" -> parseIpApi(body, sourceName)
+                    "ipip.net" -> parseMyIpIpip(body, sourceName)
+                    else -> parseIpWhoIs(body, sourceName)
+                        ?: parseIpInfo(body, sourceName)
+                        ?: parseIpApi(body, sourceName)
+                        ?: parseMyIpIpip(body, sourceName)
+                }
+                if (parsed != null) {
+                    val (carrier, displayName) = IpClassificationEngine.classifyClientCarrier(
+                        asn = parsed.asn,
+                        ispName = parsed.ispName,
+                        orgName = parsed.orgName,
+                        countryCode = parsed.countryCode,
+                    )
+                    val ipFamily = NetBenchTargetParser.detectIpFamily(parsed.ip)
+                    return ChannelProbeOutcome(
+                        info = ClientNetworkInfo(
+                            carrier = carrier,
+                            carrierDisplayName = displayName,
+                            ipFamily = ipFamily,
+                            countryCode = IpClassificationEngine.normalizeCountryCode(parsed.countryCode),
+                            regionName = parsed.regionName,
+                            asn = IpClassificationEngine.normalizeAsn(parsed.asn),
+                            ispName = parsed.ispName ?: parsed.orgName,
+                            maskedIp = NetBenchTargetParser.maskClientIpForDisplay(parsed.ip),
+                            rawIp = parsed.ip,
+                            source = parsed.source,
+                            routeKind = routeKind,
+                            transportLabel = channel.transportLabel,
+                        ),
+                    )
+                }
+            }
+            return ChannelProbeOutcome(info = null, lastError = lastError)
+        } finally {
+            tempPool?.evictAll()
+        }
     }
 
     private suspend fun fetchTargetGeoWithFallback(ip: String): GeoAsnSnapshot? {
@@ -472,7 +671,50 @@ class IpIntelligenceClient(
         }.getOrNull()
     }
 
-    private suspend fun fetchJsonText(url: String): String? {
+    private fun parseMyIpIpip(rawJson: String, source: String): GeoAsnSnapshot? {
+        return runCatching {
+            val root = json.parseToJsonElement(rawJson).jsonObject
+            val ret = root.str("ret")
+            if (ret != null && !ret.equals("ok", ignoreCase = true)) return null
+            val data = (root["data"] as? JsonObject) ?: return null
+            val ip = data.str("ip") ?: return null
+            val loc = data["location"]?.jsonArray.orEmpty().mapNotNull { el ->
+                el.jsonPrimitive.contentOrNull?.trim()
+            }
+            val countryRaw = loc.getOrNull(0)?.takeIf { it.isNotEmpty() }
+            val provinceRaw = loc.getOrNull(1)?.takeIf { it.isNotEmpty() }
+            val cityRaw = loc.getOrNull(2)?.takeIf { it.isNotEmpty() }
+            val ispRaw = loc.getOrNull(4)?.takeIf { it.isNotEmpty() }
+
+            val countryCode = IpClassificationEngine.countryCodeFromZhOrName(countryRaw, provinceRaw)
+            val regionName = listOfNotNull(
+                provinceRaw,
+                cityRaw?.takeIf { !it.equals(provinceRaw, ignoreCase = true) },
+            ).joinToString(" ").ifEmpty { null }
+
+            GeoAsnSnapshot(
+                ip = ip,
+                countryCode = countryCode,
+                countryName = countryRaw,
+                regionName = regionName,
+                cityName = cityRaw,
+                asn = null,
+                orgName = ispRaw,
+                ispName = ispRaw,
+                source = source,
+            )
+        }.getOrNull()
+    }
+
+    private data class JsonFetchOutcome(
+        val body: String? = null,
+        val error: Throwable? = null,
+    )
+
+    private suspend fun fetchJsonText(url: String): String? =
+        fetchJsonTextWithError(httpClient, url).body
+
+    private suspend fun fetchJsonTextWithError(client: OkHttpClient, url: String): JsonFetchOutcome {
         val builder = Request.Builder()
             .url(url)
             .get()
@@ -484,17 +726,17 @@ class IpIntelligenceClient(
         val request = builder.build()
 
         return try {
-            executeCancellable(request)
+            JsonFetchOutcome(body = executeCancellable(client, request))
         } catch (ce: CancellationException) {
             throw ce
-        } catch (_: Exception) {
-            null
+        } catch (t: Throwable) {
+            JsonFetchOutcome(error = t)
         }
     }
 
-    private suspend fun executeCancellable(request: Request): String? =
+    private suspend fun executeCancellable(client: OkHttpClient, request: Request): String? =
         suspendCancellableCoroutine { cont ->
-            val call = httpClient.newCall(request)
+            val call = client.newCall(request)
             cont.invokeOnCancellation {
                 runCatching { call.cancel() }
             }
