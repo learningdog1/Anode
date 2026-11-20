@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
@@ -85,6 +86,7 @@ import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
+import com.nodeseek.app.domain.netbench.IcmpPingProgress
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
@@ -595,7 +597,8 @@ internal fun NetBenchRecentTargetsStrip(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             entries.forEach { entry ->
-                val latencyColor = NetBenchTelemetryColors.forLatencyMs(entry.lastAvgMs)
+                val effectiveLatencyMs = entry.lastPingAvgMs ?: entry.lastAvgMs
+                val latencyColor = NetBenchTelemetryColors.forLatencyMs(effectiveLatencyMs)
                 Row(
                     modifier = Modifier
                         .clip(PulseArchitecturalShapes.MediumBadge)
@@ -622,7 +625,14 @@ internal fun NetBenchRecentTargetsStrip(
                             maxLines = 1,
                         )
                         val meta = buildList {
-                            entry.lastAvgMs?.let { add(NetBenchMarkdownFormatter.formatMs(it)) }
+                            when {
+                                entry.lastPingAvgMs != null && entry.lastAvgMs != null ->
+                                    add("Ping ${NetBenchMarkdownFormatter.formatMs(entry.lastPingAvgMs)} · TCP ${NetBenchMarkdownFormatter.formatMs(entry.lastAvgMs)}")
+                                entry.lastPingAvgMs != null ->
+                                    add("Ping ${NetBenchMarkdownFormatter.formatMs(entry.lastPingAvgMs)}")
+                                entry.lastAvgMs != null ->
+                                    add(NetBenchMarkdownFormatter.formatMs(entry.lastAvgMs))
+                            }
                             entry.lastOriginType?.takeIf { it != IpOriginType.UNKNOWN }?.let { add(it.badgeLabel) }
                             entry.lastRegionSummary?.let { add(it) }
                         }.joinToString(" · ")
@@ -630,7 +640,7 @@ internal fun NetBenchRecentTargetsStrip(
                             Text(
                                 text = meta,
                                 style = NodePulseThemeTokens.extraTypography.microLabel,
-                                color = if (entry.lastAvgMs != null) latencyColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (effectiveLatencyMs != null) latencyColor else MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                             )
                         }
@@ -652,11 +662,20 @@ internal fun NetBenchRecentTargetsStrip(
 }
 
 /**
- * Custom Canvas live TCPing latency bar chart + smooth trend sparkline + average reference line.
+ * Normalized sample point for shared RTT bar + trend sparkline visualization.
+ */
+internal data class LatencySamplePoint(
+    val seq: Int,
+    val success: Boolean,
+    val rttMs: Double?,
+)
+
+/**
+ * Custom Canvas live RTT latency bar chart + smooth trend sparkline + average reference line.
  */
 @Composable
-internal fun TcpPingLatencyChart(
-    samples: List<TcpPingSample>,
+internal fun LatencyWaveformChart(
+    samples: List<LatencySamplePoint>,
     plannedCount: Int,
     avgMs: Double?,
     modifier: Modifier = Modifier,
@@ -821,6 +840,69 @@ internal fun TcpPingLatencyChart(
 }
 
 /**
+ * Custom Canvas live TCPing latency bar chart + smooth trend sparkline + average reference line.
+ */
+@Composable
+internal fun TcpPingLatencyChart(
+    samples: List<TcpPingSample>,
+    plannedCount: Int,
+    avgMs: Double?,
+    modifier: Modifier = Modifier,
+    chartHeight: Dp = 112.dp,
+) {
+    val points = remember(samples) {
+        samples.map { LatencySamplePoint(seq = it.seq, success = it.success, rttMs = it.rttMs) }
+    }
+    LatencyWaveformChart(
+        samples = points,
+        plannedCount = plannedCount,
+        avgMs = avgMs,
+        modifier = modifier,
+        chartHeight = chartHeight,
+    )
+}
+
+/**
+ * Full ICMP Ping result card with KPI metric pills, live RTT chart, and binding diagnostics.
+ */
+@Composable
+internal fun NetBenchIcmpPingCard(
+    progress: IcmpPingProgress,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val summary = progress.summary
+    val points = remember(progress.samples) {
+        progress.samples.map { LatencySamplePoint(seq = it.seq, success = it.success, rttMs = it.rttMs) }
+    }
+    val subtitle = buildList {
+        add("ICMP")
+        summary.boundInterfaceName?.let { add("网卡 $it") }
+        add("${summary.received}/${summary.sent} 成功")
+    }.joinToString(" · ")
+
+    NetBenchLatencyResultCard(
+        title = "Ping 延迟探测",
+        subtitle = subtitle,
+        icon = Icons.Rounded.GraphicEq,
+        isFinished = progress.isFinished,
+        completedFraction = progress.completedFraction,
+        plannedCount = progress.totalPlanned,
+        sent = summary.sent,
+        avgMs = summary.avgMs,
+        minMs = summary.minMs,
+        maxMs = summary.maxMs,
+        jitterMdevMs = summary.jitterMdevMs,
+        lossPercent = summary.lossPercent,
+        samples = points,
+        warningNote = summary.networkBindingNote,
+        errorMessage = progress.errorMessage,
+        compact = compact,
+        modifier = modifier,
+    )
+}
+
+/**
  * Full TCPing result card with KPI metric pills and live RTT chart.
  */
 @Composable
@@ -831,105 +913,29 @@ internal fun NetBenchTcpPingCard(
     modifier: Modifier = Modifier,
 ) {
     val summary = progress.summary
-    val hasLoss = summary.lossPercent > 0.0
+    val points = remember(progress.samples) {
+        progress.samples.map { LatencySamplePoint(seq = it.seq, success = it.success, rttMs = it.rttMs) }
+    }
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard()
-            .padding(if (compact) 12.dp else 14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+    NetBenchLatencyResultCard(
+        title = "TCPing 延迟探测",
+        subtitle = "端口 ${progress.port} · ${summary.received}/${summary.sent} 成功",
+        icon = Icons.Rounded.NetworkCheck,
+        isFinished = progress.isFinished,
+        completedFraction = progress.completedFraction,
+        plannedCount = progress.totalPlanned,
+        sent = summary.sent,
+        avgMs = summary.avgMs,
+        minMs = summary.minMs,
+        maxMs = summary.maxMs,
+        jitterMdevMs = summary.jitterMdevMs,
+        lossPercent = summary.lossPercent,
+        samples = points,
+        warningNote = null,
+        errorMessage = progress.errorMessage,
+        compact = compact,
+        modifier = modifier,
     ) {
-        PulseSectionHeader(
-            title = "TCPing 延迟探测",
-            subtitle = "端口 ${progress.port} · ${summary.received}/${summary.sent} 成功",
-            icon = Icons.Rounded.NetworkCheck,
-            trailing = {
-                val statusText = when {
-                    !progress.isFinished -> "${(progress.completedFraction * 100).toInt()}%"
-                    summary.lossPercent <= 0.0 -> "0% 丢包"
-                    else -> "丢包 ${NetBenchMarkdownFormatter.formatPercent(summary.lossPercent)}"
-                }
-                PulseAccentPill(
-                    text = statusText,
-                    containerColor = if (hasLoss) {
-                        MaterialTheme.colorScheme.errorContainer
-                    } else {
-                        MaterialTheme.colorScheme.primaryContainer
-                    },
-                    contentColor = if (hasLoss) {
-                        MaterialTheme.colorScheme.onErrorContainer
-                    } else {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    },
-                )
-            },
-        )
-
-        if (!progress.isFinished) {
-            LinearProgressIndicator(
-                progress = { progress.completedFraction },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(CircleShape),
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-            )
-        }
-
-        // Single 4-column neutral telemetry strip
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .padding(vertical = 10.dp, horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            NetBenchTelemetryStatColumn(
-                label = "平均延迟",
-                value = summary.avgMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "超时",
-                valueColor = if (summary.avgMs == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
-            NetBenchTelemetryStatColumn(
-                label = "最小/最大",
-                value = if (summary.minMs != null && summary.maxMs != null) {
-                    "${String.format(Locale.US, "%.0f", summary.minMs)}/${String.format(Locale.US, "%.0f", summary.maxMs)} ms"
-                } else {
-                    "—"
-                },
-                valueColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
-            NetBenchTelemetryStatColumn(
-                label = "抖动",
-                value = summary.jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—",
-                valueColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
-            NetBenchTelemetryStatColumn(
-                label = "丢包率",
-                value = NetBenchMarkdownFormatter.formatPercent(summary.lossPercent),
-                valueColor = if (hasLoss) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        if (progress.samples.isNotEmpty()) {
-            TcpPingLatencyChart(
-                samples = progress.samples,
-                plannedCount = progress.totalPlanned,
-                avgMs = summary.avgMs,
-                chartHeight = if (compact) 86.dp else 114.dp,
-            )
-        }
-
-        if (!progress.errorMessage.isNullOrBlank()) {
-            NetBenchErrorCallout(message = progress.errorMessage)
-        }
-
         // Optional HTTP latency strip
         if (httpResult != null) {
             PulseGradientDivider()
@@ -977,6 +983,140 @@ internal fun NetBenchTcpPingCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NetBenchLatencyResultCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    isFinished: Boolean,
+    completedFraction: Float,
+    plannedCount: Int,
+    sent: Int,
+    avgMs: Double?,
+    minMs: Double?,
+    maxMs: Double?,
+    jitterMdevMs: Double?,
+    lossPercent: Double,
+    samples: List<LatencySamplePoint>,
+    warningNote: String?,
+    errorMessage: String?,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+    extraFooterContent: @Composable (() -> Unit)? = null,
+) {
+    val hasLoss = lossPercent > 0.0
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .pulseCard()
+            .padding(if (compact) 12.dp else 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PulseSectionHeader(
+            title = title,
+            subtitle = subtitle,
+            icon = icon,
+            trailing = {
+                val statusText = when {
+                    !isFinished -> "${(completedFraction * 100).toInt()}%"
+                    lossPercent <= 0.0 -> "0% 丢包"
+                    else -> "丢包 ${NetBenchMarkdownFormatter.formatPercent(lossPercent)}"
+                }
+                PulseAccentPill(
+                    text = statusText,
+                    containerColor = if (hasLoss) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.primaryContainer
+                    },
+                    contentColor = if (hasLoss) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    },
+                )
+            },
+        )
+
+        if (!isFinished) {
+            LinearProgressIndicator(
+                progress = { completedFraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(CircleShape),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            )
+        }
+
+        // Single 4-column neutral telemetry strip
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(vertical = 10.dp, horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val avgDisplay = when {
+                avgMs != null -> NetBenchMarkdownFormatter.formatMs(avgMs)
+                !isFinished -> "探测中"
+                sent == 0 -> "不可用"
+                else -> "超时"
+            }
+            NetBenchTelemetryStatColumn(
+                label = "平均延迟",
+                value = avgDisplay,
+                valueColor = if (avgMs == null && isFinished) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            NetBenchTelemetryStatColumn(
+                label = "最小/最大",
+                value = if (minMs != null && maxMs != null) {
+                    "${String.format(Locale.US, "%.0f", minMs)}/${String.format(Locale.US, "%.0f", maxMs)} ms"
+                } else {
+                    "—"
+                },
+                valueColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            NetBenchTelemetryStatColumn(
+                label = "抖动",
+                value = jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—",
+                valueColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            NetBenchTelemetryStatColumn(
+                label = "丢包率",
+                value = NetBenchMarkdownFormatter.formatPercent(lossPercent),
+                valueColor = if (hasLoss) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        if (samples.isNotEmpty()) {
+            LatencyWaveformChart(
+                samples = samples,
+                plannedCount = plannedCount,
+                avgMs = avgMs,
+                chartHeight = if (compact) 86.dp else 114.dp,
+            )
+        }
+
+        if (!warningNote.isNullOrBlank()) {
+            NetBenchWarningCallout(message = warningNote)
+        }
+
+        if (!errorMessage.isNullOrBlank()) {
+            NetBenchErrorCallout(message = errorMessage)
+        }
+
+        extraFooterContent?.invoke()
     }
 }
 
@@ -1697,6 +1837,44 @@ internal fun NetBenchMarkdownReportCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * Informational/warning callout box (e.g., ping subprocess network binding fallback notice).
+ */
+@Composable
+internal fun NetBenchWarningCallout(
+    message: String,
+    modifier: Modifier = Modifier,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(ext.drumstickContainer.copy(alpha = if (isDark) 0.28f else 0.55f))
+            .border(
+                width = 0.8.dp,
+                color = ext.onDrumstickContainer.copy(alpha = if (isDark) 0.42f else 0.30f),
+                shape = PulseArchitecturalShapes.SmallChip,
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.WarningAmber,
+            contentDescription = null,
+            tint = ext.onDrumstickContainer,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 

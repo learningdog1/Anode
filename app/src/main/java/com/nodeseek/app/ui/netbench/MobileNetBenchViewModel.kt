@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.HttpLatencyRunner
+import com.nodeseek.app.data.netbench.IcmpPingRunner
 import com.nodeseek.app.data.netbench.IpIntelligenceClient
 import com.nodeseek.app.data.netbench.Iperf3ClientRunner
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
@@ -17,6 +18,8 @@ import com.nodeseek.app.data.netbench.TcpPingRunner
 import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
+import com.nodeseek.app.domain.netbench.IcmpPingConfig
+import com.nodeseek.app.domain.netbench.IcmpPingProgress
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.Iperf3Config
@@ -54,6 +57,7 @@ import kotlinx.coroutines.launch
 enum class NetBenchPhase(val label: String) {
     IDLE("待命"),
     RESOLVING("正在解析目标地址…"),
+    ICMP_PING("正在进行 ICMP Ping 延迟探测…"),
     TCPING("正在进行 TCPing 延迟探测…"),
     HTTP_PROBE("正在探测 HTTP 延迟…"),
     IP_INTELLIGENCE("正在查询 IP 归属与原生/广播属性…"),
@@ -70,6 +74,7 @@ data class MobileNetBenchUiState(
     val tcpPortText: String = TcpPingConfig.DEFAULT_PORT.toString(),
     val probeCount: Int = TcpPingConfig.DEFAULT_PROBE_COUNT,
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+    val enableIcmpPing: Boolean = true,
     val enableTcpPing: Boolean = true,
     val enableHttpProbe: Boolean = false,
     val enableIpCheck: Boolean = true,
@@ -85,6 +90,7 @@ data class MobileNetBenchUiState(
     val activePhase: NetBenchPhase = NetBenchPhase.IDLE,
     val resolvedTarget: ResolvedTarget? = null,
     val clientNetwork: ClientNetworkInfo? = null,
+    val icmpPingProgress: IcmpPingProgress? = null,
     val tcpPingProgress: TcpPingProgress? = null,
     val httpLatencyResult: HttpLatencyResult? = null,
     val ipIntelligence: IpIntelligenceReport? = null,
@@ -104,14 +110,15 @@ data class MobileNetBenchUiState(
         get() = iperfPortText.trim().toIntOrNull()?.coerceIn(1, 65535) ?: Iperf3Config.DEFAULT_PORT
 
     val hasAnyResult: Boolean
-        get() = tcpPingProgress != null ||
+        get() = icmpPingProgress != null ||
+            tcpPingProgress != null ||
             httpLatencyResult != null ||
             ipIntelligence != null ||
             iperfDownloadProgress != null ||
             iperfUploadProgress != null
 
     val hasAnyModuleEnabled: Boolean
-        get() = enableTcpPing || enableHttpProbe || enableIpCheck || enableIperf3
+        get() = enableIcmpPing || enableTcpPing || enableHttpProbe || enableIpCheck || enableIperf3
 
     val canStart: Boolean
         get() = targetInput.isNotBlank() && hasAnyModuleEnabled && !isRunning
@@ -125,6 +132,7 @@ class NetBenchSessionController(
     private val historyStore: NetBenchHistoryStore,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
     private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
+    private val icmpPingRunner: IcmpPingRunner = IcmpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
     private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
@@ -272,6 +280,10 @@ class NetBenchSessionController(
         _uiState.update { it.copy(preferredFamily = family) }
     }
 
+    fun toggleIcmpPing(enabled: Boolean) {
+        _uiState.update { it.copy(enableIcmpPing = enabled) }
+    }
+
     fun toggleTcpPing(enabled: Boolean) {
         _uiState.update { it.copy(enableTcpPing = enabled) }
     }
@@ -376,6 +388,7 @@ class NetBenchSessionController(
             state.copy(
                 activePhase = NetBenchPhase.IDLE,
                 resolvedTarget = null,
+                icmpPingProgress = null,
                 tcpPingProgress = null,
                 httpLatencyResult = null,
                 ipIntelligence = null,
@@ -398,7 +411,7 @@ class NetBenchSessionController(
             return
         }
         if (!snapshot.hasAnyModuleEnabled) {
-            val msg = "请至少开启一项测机模块（TCPing / IP 鉴定 / iperf3）"
+            val msg = "请至少开启一项测机模块（Ping / TCPing / IP 鉴定 / iperf3）"
             _uiState.update { it.copy(errorMessage = msg) }
             _snackbarChannel.trySend(msg)
             return
@@ -414,6 +427,7 @@ class NetBenchSessionController(
                 activePhase = NetBenchPhase.RESOLVING,
                 tcpPortText = effectiveTcpPort.toString(),
                 resolvedTarget = null,
+                icmpPingProgress = null,
                 tcpPingProgress = null,
                 httpLatencyResult = null,
                 ipIntelligence = null,
@@ -462,7 +476,29 @@ class NetBenchSessionController(
                     state.copy(resolvedTarget = endpoint.resolvedTarget)
                 }
 
-                // Step 1: TCPing (runs before iperf3 so link saturation cannot skew RTT)
+                // Step 1a: ICMP Ping (runs before iperf3 so link saturation cannot skew RTT)
+                if (snapshot.enableIcmpPing) {
+                    _uiState.update { it.copy(activePhase = NetBenchPhase.ICMP_PING) }
+                    val icmpConfig = IcmpPingConfig(
+                        target = endpoint.resolvedTarget.resolvedIp,
+                        probeCount = snapshot.probeCount,
+                        timeoutMs = IcmpPingConfig.DEFAULT_TIMEOUT_MS,
+                        intervalMs = IcmpPingConfig.DEFAULT_INTERVAL_MS,
+                        preferredFamily = snapshot.preferredFamily,
+                        useProxy = snapshot.testViaProxy,
+                    )
+                    icmpPingRunner.run(icmpConfig).collect { progress ->
+                        val corrected = progress.copy(
+                            resolvedTarget = endpoint.resolvedTarget,
+                            summary = progress.summary.copy(resolvedTarget = endpoint.resolvedTarget),
+                        )
+                        _uiState.update { state ->
+                            state.copy(icmpPingProgress = corrected).withRegeneratedMarkdown()
+                        }
+                    }
+                }
+
+                // Step 1b: TCPing (runs before iperf3 so link saturation cannot skew RTT)
                 if (snapshot.enableTcpPing) {
                     _uiState.update { it.copy(activePhase = NetBenchPhase.TCPING) }
                     val tcpConfig = TcpPingConfig(
@@ -585,6 +621,8 @@ class NetBenchSessionController(
                         resolvedIp = endpoint.resolvedTarget.resolvedIp,
                         ipFamily = endpoint.resolvedTarget.ipFamily,
                         lastAvgMs = finalState.tcpPingProgress?.summary?.avgMs,
+                        lastPingAvgMs = finalState.icmpPingProgress?.summary?.avgMs,
+                        lastPingLossPercent = finalState.icmpPingProgress?.summary?.lossPercent,
                         lastOriginType = intel?.originType,
                         lastRegionSummary = regionSummary,
                         testedAtEpochMillis = System.currentTimeMillis(),
@@ -642,6 +680,7 @@ class NetBenchSessionController(
             resolvedTarget = resolvedTarget,
             tcpPort = effectiveTcpPort,
             clientNetwork = effectiveClientNet,
+            icmpPingSummary = icmpPingProgress?.summary,
             tcpPingSummary = tcpPingProgress?.summary,
             httpLatencyResult = httpLatencyResult,
             ipIntelligence = ipIntelligence,
@@ -669,6 +708,7 @@ class MobileNetBenchViewModel(
     historyStore: NetBenchHistoryStore,
     networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
     targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
+    icmpPingRunner: IcmpPingRunner = IcmpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
     iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
@@ -681,6 +721,7 @@ class MobileNetBenchViewModel(
         historyStore = historyStore,
         networkBridge = networkBridge,
         targetResolver = targetResolver,
+        icmpPingRunner = icmpPingRunner,
         tcpPingRunner = tcpPingRunner,
         httpLatencyRunner = httpLatencyRunner,
         iperf3ClientRunner = iperf3ClientRunner,
@@ -697,6 +738,7 @@ class MobileNetBenchViewModel(
     fun selectPresetPort(port: Int) = controller.selectPresetPort(port)
     fun updateProbeCount(count: Int) = controller.updateProbeCount(count)
     fun updatePreferredFamily(family: PreferredIpFamily) = controller.updatePreferredFamily(family)
+    fun toggleIcmpPing(enabled: Boolean) = controller.toggleIcmpPing(enabled)
     fun toggleTcpPing(enabled: Boolean) = controller.toggleTcpPing(enabled)
     fun toggleHttpProbe(enabled: Boolean) = controller.toggleHttpProbe(enabled)
     fun toggleIpCheck(enabled: Boolean) = controller.toggleIpCheck(enabled)

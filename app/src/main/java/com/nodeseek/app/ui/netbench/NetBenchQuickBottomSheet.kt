@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
@@ -236,7 +237,7 @@ fun NetBenchQuickBottomSheet(
                             val net = uiState.clientNetwork!!
                             "${net.carrierDisplayName} · ${net.ipFamily.label} · 隐藏本机 IP"
                         }
-                        else -> "TCPing · 原生 iperf3 · IP 原生/广播鉴定"
+                        else -> "Ping · TCPing · 原生 iperf3 · IP 原生/广播鉴定"
                     }
                     Text(
                         text = envSubtitle,
@@ -391,6 +392,13 @@ fun NetBenchQuickBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     NetBenchSelectableChip(
+                        label = "Ping",
+                        selected = uiState.enableIcmpPing,
+                        icon = Icons.Rounded.GraphicEq,
+                        enabled = !uiState.isRunning,
+                        onClick = { controller.toggleIcmpPing(!uiState.enableIcmpPing) },
+                    )
+                    NetBenchSelectableChip(
                         label = "TCPing",
                         selected = uiState.enableTcpPing,
                         icon = Icons.Rounded.NetworkCheck,
@@ -421,6 +429,12 @@ fun NetBenchQuickBottomSheet(
                         icon = Icons.Rounded.VpnLock,
                         enabled = !uiState.isRunning,
                         onClick = { controller.toggleTestViaProxy(!uiState.testViaProxy) },
+                    )
+                }
+
+                if (uiState.enableIcmpPing && uiState.clientEgress?.isVpnActive == true && !uiState.testViaProxy) {
+                    NetBenchWarningCallout(
+                        message = "提示：无法对 /system/bin/ping 子进程绑定底层网络，VPN 下 ICMP Ping 可能走默认路由，请结合 TCPing 参考。",
                     )
                 }
 
@@ -486,6 +500,13 @@ fun NetBenchQuickBottomSheet(
                     ResolvedTargetBanner(
                         resolved = resolved,
                         port = uiState.effectiveTcpPort,
+                    )
+                }
+
+                uiState.icmpPingProgress?.let { pingProgress ->
+                    NetBenchIcmpPingCard(
+                        progress = pingProgress,
+                        compact = true,
                     )
                 }
 
