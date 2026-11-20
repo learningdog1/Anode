@@ -420,4 +420,38 @@ class PulseRadarWorkerTest {
         ).build()
         assertEquals(ListenableWorker.Result.retry(), hostWorker.doWork())
     }
+
+    @Test
+    fun `worker returns retry if SystemJobService invokes doWork before Application container finishes initializing`() = runTest {
+        class ColdStartRaceAppContext : ContextWrapper(null), AppContainerHost {
+            lateinit var initializedContainer: AppContainer
+
+            override fun getApplicationContext(): Context = this
+
+            override val container: AppContainer
+                get() = initializedContainer
+        }
+
+        val appContext = ColdStartRaceAppContext()
+
+        // 1. Before Application.onCreate() assigns `initializedContainer`, WorkManager should retry cleanly.
+        val earlyWorker = TestListenableWorkerBuilder<PulseRadarWorker>(appContext).build()
+        assertEquals(ListenableWorker.Result.retry(), earlyWorker.doWork())
+
+        // 2. Once Application.onCreate() finishes wiring AppContainer, subsequent retry succeeds.
+        radarRepository.updatePollingSettings {
+            it.copy(
+                isEnabled = true,
+                keywordAlertsEnabled = false,
+                replyTrackingEnabled = false,
+                inboxPushEnabled = false,
+            )
+        }
+        val monitor = createMonitor(this)
+        val readyDelegate = TestContext(controllerProvider = { monitor })
+        appContext.initializedContainer = readyDelegate.container
+
+        val readyWorker = TestListenableWorkerBuilder<PulseRadarWorker>(appContext).build()
+        assertEquals(ListenableWorker.Result.success(), readyWorker.doWork())
+    }
 }
