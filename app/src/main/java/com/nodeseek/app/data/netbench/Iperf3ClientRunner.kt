@@ -9,6 +9,7 @@ import com.nodeseek.app.domain.netbench.Iperf3Stage
 import com.nodeseek.app.domain.netbench.ResolvedTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -18,7 +19,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -33,6 +33,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
@@ -44,9 +45,9 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Pure-Kotlin implementation of the native **iperf3 v3.x TCP client protocol** (no NDK/root binary).
@@ -56,9 +57,11 @@ import java.util.concurrent.atomic.AtomicReference
  * 2. Enter state loop reading 1-byte signed state codes from server:
  *    - [STATE_PARAM_EXCHANGE] (9): send 4-byte BE length + JSON test parameters (`"reverse":true`
  *      only in Download mode).
- *    - [STATE_CREATE_STREAMS] (10): open data TCP socket and send the same 37-byte cookie.
- *    - [STATE_TEST_START] (1) -> [STATE_TEST_RUNNING] (2): transfer 128 KiB chunks while emitting
- *      live [Iperf3Progress] every ~250ms, then signal [STATE_TEST_END] (4).
+ *    - [STATE_CREATE_STREAMS] (10): open `parallel` data TCP socket(s) and send the same 37-byte
+ *      cookie on each without locking `SO_RCVBUF`/`SO_SNDBUF` so OS TCP auto-tuning scales `rwnd`/`cwnd`.
+ *    - [STATE_TEST_START] (1) -> [STATE_TEST_RUNNING] (2): transfer 128 KiB chunks in a tight
+ *      blocking I/O loop while emitting live [Iperf3Progress] every ~250ms, then signal [STATE_TEST_END] (4)
+ *      (keeping reverse-mode receivers draining until [STATE_IPERF_DONE] so server writes never stall).
  *    - [STATE_EXCHANGE_RESULTS] (13): send client results JSON & parse server results JSON.
  *    - [STATE_DISPLAY_RESULTS] (14) -> send [STATE_IPERF_DONE] (16).
  * 3. Cleanly handles [STATE_ACCESS_DENIED] (-1), [STATE_SERVER_ERROR] (-2), timeouts, and refusal.
@@ -68,6 +71,8 @@ class Iperf3ClientRunner(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val progressIntervalMs: Long = DEFAULT_PROGRESS_INTERVAL_MS,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
+    private val defaultParallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
+    private val socketBufferBytes: Int? = null,
 ) {
 
     private val json = Json {
@@ -75,11 +80,19 @@ class Iperf3ClientRunner(
         isLenient = true
     }
 
-    fun run(config: Iperf3Config): Flow<Iperf3Progress> = flow {
+    fun run(config: Iperf3Config): Flow<Iperf3Progress> =
+        run(config = config, parallelStreams = defaultParallelStreams)
+
+    fun run(
+        config: Iperf3Config,
+        parallelStreams: Int,
+    ): Flow<Iperf3Progress> = flow {
         val direction = config.direction
         val durationSec = config.normalizedDurationSec
         val chunkSize = config.normalizedChunkSize
         val connectTimeoutMs = config.connectTimeoutMs.coerceIn(1_000, 15_000)
+        val streamsCount = parallelStreams.coerceIn(MIN_PARALLEL_STREAMS, MAX_PARALLEL_STREAMS)
+        val explicitSocketBuf = socketBufferBytes?.takeIf { it > 0 }
 
         emit(
             Iperf3Progress(
@@ -143,11 +156,16 @@ class Iperf3ClientRunner(
             emit(failedProgress(direction, port, resolvedTarget, durationSec, Iperf3ErrorKind.IO_ERROR, msg))
             return@flow
         }
-        val dataSocketRef = AtomicReference<Socket?>(null)
+
+        val dataSockets = CopyOnWriteArrayList<Socket>()
+        val stopTransferFlag = AtomicBoolean(false)
         val job = currentCoroutineContext()[Job]
         val cancelHandle = job?.invokeOnCompletion {
+            stopTransferFlag.set(true)
             runCatching { controlSocket.close() }
-            runCatching { dataSocketRef.get()?.close() }
+            for (sock in dataSockets) {
+                runCatching { sock.close() }
+            }
         }
 
         try {
@@ -156,280 +174,320 @@ class Iperf3ClientRunner(
             controlSocket.soTimeout = CONTROL_READ_TIMEOUT_MS
 
             val controlIn = DataInputStream(BufferedInputStream(controlSocket.getInputStream()))
-            val controlOut = DataOutputStream(controlSocket.getOutputStream())
+            val controlOut = DataOutputStream(BufferedOutputStream(controlSocket.getOutputStream()))
 
             // Handshake step 1: send 37-byte cookie on control stream
             controlOut.write(cookieBytes)
             controlOut.flush()
 
             var measuredBytes = 0L
+            var measuredPerStreamBytes = LongArray(streamsCount)
             var measuredElapsedSec = 0.0
             var peakMbps = 0.0
             val throughputHistory = mutableListOf<Double>()
             var serverStats: ParsedServerResults? = null
             var testExecuted = false
 
-            stateLoop@ while (true) {
-                currentCoroutineContext().ensureActive()
-                val rawState = controlIn.read()
-                if (rawState == -1) {
-                    if (testExecuted && serverStats != null) {
-                        val finalRes = buildSuccessResult(
-                            direction = direction,
-                            port = port,
-                            resolvedTarget = resolvedTarget,
-                            measuredElapsedSec = measuredElapsedSec,
-                            measuredBytes = measuredBytes,
-                            peakMbps = peakMbps,
-                            serverStats = serverStats,
-                        )
-                        emit(completedProgress(finalRes, durationSec, throughputHistory))
-                    } else {
-                        emit(
-                            failedProgress(
-                                direction = direction,
-                                port = port,
-                                resolvedTarget = resolvedTarget,
-                                durationSec = durationSec,
-                                kind = Iperf3ErrorKind.PROTOCOL_ERROR,
-                                message = "iperf3 服务端提前断开控制连接",
-                            ),
-                        )
+            coroutineScope {
+                val transferScope: CoroutineScope = this
+                val activeStreamJobs = mutableListOf<Job>()
+
+                fun closeDataStreams() {
+                    stopTransferFlag.set(true)
+                    for (sock in dataSockets) {
+                        runCatching { sock.close() }
                     }
-                    break@stateLoop
+                    for (streamJob in activeStreamJobs) {
+                        streamJob.cancel()
+                    }
                 }
 
-                when (val state = rawState.toByte()) {
-                    STATE_PARAM_EXCHANGE -> {
-                        emit(
-                            Iperf3Progress(
-                                direction = direction,
-                                stage = Iperf3Stage.PARAM_EXCHANGE,
-                                elapsedSec = 0.0,
-                                targetDurationSec = durationSec,
-                                bytesTransferred = 0L,
-                                instantMbps = 0.0,
-                                averageMbps = 0.0,
-                                peakMbps = 0.0,
-                            ),
-                        )
-                        val paramsJson = buildClientParamsJson(
-                            durationSec = durationSec,
-                            chunkSize = chunkSize,
-                            direction = direction,
-                        )
-                        writeFramedJson(controlOut, paramsJson)
-                    }
-
-                    STATE_CREATE_STREAMS -> {
-                        emit(
-                            Iperf3Progress(
-                                direction = direction,
-                                stage = Iperf3Stage.CREATE_STREAMS,
-                                elapsedSec = 0.0,
-                                targetDurationSec = durationSec,
-                                bytesTransferred = 0L,
-                                instantMbps = 0.0,
-                                averageMbps = 0.0,
-                                peakMbps = 0.0,
-                            ),
-                        )
-                        val dataSocket = activeChannel.createSocket()
-                        dataSocketRef.set(dataSocket)
-                        runCatching {
-                            dataSocket.sendBufferSize = SOCKET_BUFFER_BYTES
-                            dataSocket.receiveBufferSize = SOCKET_BUFFER_BYTES
-                        }
-                        dataSocket.connect(InetSocketAddress(endpoint.address, port), connectTimeoutMs)
-                        val dataOut = dataSocket.getOutputStream()
-                        dataOut.write(cookieBytes)
-                        dataOut.flush()
-                    }
-
-                    STATE_TEST_START -> {
-                        emit(
-                            Iperf3Progress(
-                                direction = direction,
-                                stage = Iperf3Stage.TEST_START,
-                                elapsedSec = 0.0,
-                                targetDurationSec = durationSec,
-                                bytesTransferred = 0L,
-                                instantMbps = 0.0,
-                                averageMbps = 0.0,
-                                peakMbps = 0.0,
-                            ),
-                        )
-                    }
-
-                    STATE_TEST_RUNNING -> {
-                        val dataSocket = dataSocketRef.get()
-                            ?: throw IOException("未能在测速开始前建立数据通道")
-                        testExecuted = true
-
-                        val transferSummary = runDataTransferLoop(
-                            direction = direction,
-                            durationSec = durationSec,
-                            chunkSize = chunkSize,
-                            dataSocket = dataSocket,
-                            controlIn = controlIn,
-                            controlOut = controlOut,
-                            onProgress = { progress ->
-                                if (progress.instantMbps > 0.0) {
-                                    throughputHistory.add(progress.instantMbps)
-                                    if (throughputHistory.size > MAX_HISTORY_SAMPLES) {
-                                        throughputHistory.removeAt(0)
-                                    }
-                                }
-                                peakMbps = maxOf(peakMbps, progress.peakMbps)
-                                emit(progress.copy(throughputHistoryMbps = throughputHistory.toList()))
-                            },
-                        )
-                        measuredBytes = transferSummary.bytesTransferred
-                        measuredElapsedSec = transferSummary.elapsedSec
-                        peakMbps = maxOf(peakMbps, transferSummary.peakMbps)
-
-                        if (transferSummary.sentTestEndByClient) {
-                            emit(
-                                Iperf3Progress(
-                                    direction = direction,
-                                    stage = Iperf3Stage.TEST_END,
-                                    elapsedSec = measuredElapsedSec,
-                                    targetDurationSec = durationSec,
-                                    bytesTransferred = measuredBytes,
-                                    instantMbps = 0.0,
-                                    averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
-                                    peakMbps = peakMbps,
-                                    throughputHistoryMbps = throughputHistory.toList(),
-                                ),
-                            )
-                        }
-                    }
-
-                    STATE_TEST_END -> {
-                        emit(
-                            Iperf3Progress(
-                                direction = direction,
-                                stage = Iperf3Stage.TEST_END,
-                                elapsedSec = measuredElapsedSec,
-                                targetDurationSec = durationSec,
-                                bytesTransferred = measuredBytes,
-                                instantMbps = 0.0,
-                                averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
-                                peakMbps = peakMbps,
-                                throughputHistoryMbps = throughputHistory.toList(),
-                            ),
-                        )
-                    }
-
-                    STATE_EXCHANGE_RESULTS -> {
-                        emit(
-                            Iperf3Progress(
-                                direction = direction,
-                                stage = Iperf3Stage.EXCHANGE_RESULTS,
-                                elapsedSec = measuredElapsedSec,
-                                targetDurationSec = durationSec,
-                                bytesTransferred = measuredBytes,
-                                instantMbps = 0.0,
-                                averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
-                                peakMbps = peakMbps,
-                                throughputHistoryMbps = throughputHistory.toList(),
-                            ),
-                        )
-                        val clientResultsJson = buildClientResultsJson(
-                            bytesTransferred = measuredBytes,
-                            elapsedSec = measuredElapsedSec,
-                        )
-                        writeFramedJson(controlOut, clientResultsJson)
-                        val serverPayload = readFramedJson(controlIn)
-                        serverStats = parseServerResults(serverPayload)
-                    }
-
-                    STATE_DISPLAY_RESULTS, STATE_IPERF_DONE -> {
-                        if (state == STATE_DISPLAY_RESULTS) {
-                            runCatching {
-                                controlOut.writeByte(STATE_IPERF_DONE.toInt())
-                                controlOut.flush()
-                            }
-                        }
-                        val finalRes = buildSuccessResult(
-                            direction = direction,
-                            port = port,
-                            resolvedTarget = resolvedTarget,
-                            measuredElapsedSec = measuredElapsedSec,
-                            measuredBytes = measuredBytes,
-                            peakMbps = peakMbps,
-                            serverStats = serverStats,
-                        )
-                        emit(completedProgress(finalRes, durationSec, throughputHistory))
-                        break@stateLoop
-                    }
-
-                    STATE_ACCESS_DENIED -> {
-                        emit(
-                            failedProgress(
-                                direction = direction,
-                                port = port,
-                                resolvedTarget = resolvedTarget,
-                                durationSec = durationSec,
-                                kind = Iperf3ErrorKind.ACCESS_DENIED,
-                                message = "服务器正忙，另一个测速正在进行，请稍后重试",
-                            ),
-                        )
-                        break@stateLoop
-                    }
-
-                    STATE_SERVER_ERROR -> {
-                        val errCode = readOptionalServerErrorCode(controlSocket, controlIn)
-                        val suffix = if (errCode != null && errCode != 0) " (错误码 $errCode)" else ""
-                        emit(
-                            failedProgress(
-                                direction = direction,
-                                port = port,
-                                resolvedTarget = resolvedTarget,
-                                durationSec = durationSec,
-                                kind = Iperf3ErrorKind.SERVER_ERROR,
-                                message = "iperf3 服务端返回错误$suffix，请确认服务端版本兼容或稍后重试",
-                            ),
-                        )
-                        break@stateLoop
-                    }
-
-                    STATE_SERVER_TERMINATE -> {
-                        emit(
-                            failedProgress(
-                                direction = direction,
-                                port = port,
-                                resolvedTarget = resolvedTarget,
-                                durationSec = durationSec,
-                                kind = Iperf3ErrorKind.SERVER_ERROR,
-                                message = "iperf3 服务端主动终止了本次测速连接",
-                            ),
-                        )
-                        break@stateLoop
-                    }
-
-                    else -> {
-                        // Valid iperf3 server control state codes are 1..16; anything outside (such as
-                        // ASCII 'H' from HTTP or 'S' from OpenSSH) means the port is not an iperf3 server.
-                        if (state < 1 || state > STATE_IPERF_DONE) {
-                            val nonIperfHint = if (state == 'H'.code.toByte() || state == 'S'.code.toByte()) {
-                                "目标端口 $port 返回了非 iperf3 协议响应（可能是 Web/SSH 服务），请确认端口填写正确且已在 VPS 开启 iperf3 -s -p $port"
-                            } else {
-                                "收到非标准 iperf3 服务端状态码 ($state)，请确认目标端口 $port 运行的是 iperf3 v3 服务端"
-                            }
-                            emit(
-                                failedProgress(
+                try {
+                    stateLoop@ while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val rawState = controlIn.read()
+                        if (rawState == -1) {
+                            if (testExecuted && serverStats != null) {
+                                val finalRes = buildSuccessResult(
                                     direction = direction,
                                     port = port,
                                     resolvedTarget = resolvedTarget,
-                                    durationSec = durationSec,
-                                    kind = Iperf3ErrorKind.PROTOCOL_ERROR,
-                                    message = nonIperfHint,
-                                ),
-                            )
+                                    measuredElapsedSec = measuredElapsedSec,
+                                    measuredBytes = measuredBytes,
+                                    peakMbps = peakMbps,
+                                    serverStats = serverStats,
+                                )
+                                emit(completedProgress(finalRes, durationSec, throughputHistory))
+                            } else {
+                                emit(
+                                    failedProgress(
+                                        direction = direction,
+                                        port = port,
+                                        resolvedTarget = resolvedTarget,
+                                        durationSec = durationSec,
+                                        kind = Iperf3ErrorKind.PROTOCOL_ERROR,
+                                        message = "iperf3 服务端提前断开控制连接",
+                                    ),
+                                )
+                            }
                             break@stateLoop
                         }
+
+                        when (val state = rawState.toByte()) {
+                            STATE_PARAM_EXCHANGE -> {
+                                emit(
+                                    Iperf3Progress(
+                                        direction = direction,
+                                        stage = Iperf3Stage.PARAM_EXCHANGE,
+                                        elapsedSec = 0.0,
+                                        targetDurationSec = durationSec,
+                                        bytesTransferred = 0L,
+                                        instantMbps = 0.0,
+                                        averageMbps = 0.0,
+                                        peakMbps = 0.0,
+                                    ),
+                                )
+                                val paramsJson = buildClientParamsJson(
+                                    durationSec = durationSec,
+                                    chunkSize = chunkSize,
+                                    direction = direction,
+                                    parallelStreams = streamsCount,
+                                    socketBufferBytes = explicitSocketBuf,
+                                )
+                                writeFramedJson(controlOut, paramsJson)
+                            }
+
+                            STATE_CREATE_STREAMS -> {
+                                emit(
+                                    Iperf3Progress(
+                                        direction = direction,
+                                        stage = Iperf3Stage.CREATE_STREAMS,
+                                        elapsedSec = 0.0,
+                                        targetDurationSec = durationSec,
+                                        bytesTransferred = 0L,
+                                        instantMbps = 0.0,
+                                        averageMbps = 0.0,
+                                        peakMbps = 0.0,
+                                    ),
+                                )
+                                val needed = (streamsCount - dataSockets.size).coerceAtLeast(0)
+                                repeat(needed) {
+                                    val dataSocket = activeChannel.createSocket()
+                                    dataSockets.add(dataSocket)
+                                    // Leave SO_RCVBUF / SO_SNDBUF untouched by default (matching official
+                                    // `iperf3` when `-w` is omitted). Explicitly setting a small SO_RCVBUF
+                                    // on Android/Linux sets SOCK_RCVBUF_LOCK, disabling kernel TCP receive
+                                    // buffer auto-tuning (`tcp_moderate_rcvbuf` / `tcp_rmem[2]`) and clamping
+                                    // TCP Window Scale (`wscale`) during SYN handshake.
+                                    if (explicitSocketBuf != null) {
+                                        runCatching {
+                                            dataSocket.sendBufferSize = explicitSocketBuf
+                                            dataSocket.receiveBufferSize = explicitSocketBuf
+                                        }
+                                    }
+                                    dataSocket.connect(InetSocketAddress(endpoint.address, port), connectTimeoutMs)
+                                    val dataOut = dataSocket.getOutputStream()
+                                    dataOut.write(cookieBytes)
+                                    dataOut.flush()
+                                }
+                            }
+
+                            STATE_TEST_START -> {
+                                emit(
+                                    Iperf3Progress(
+                                        direction = direction,
+                                        stage = Iperf3Stage.TEST_START,
+                                        elapsedSec = 0.0,
+                                        targetDurationSec = durationSec,
+                                        bytesTransferred = 0L,
+                                        instantMbps = 0.0,
+                                        averageMbps = 0.0,
+                                        peakMbps = 0.0,
+                                    ),
+                                )
+                            }
+
+                            STATE_TEST_RUNNING -> {
+                                if (testExecuted) continue@stateLoop
+                                if (dataSockets.isEmpty()) {
+                                    throw IOException("未能在测速开始前建立数据通道")
+                                }
+                                testExecuted = true
+
+                                val transferSummary = runDataTransferLoop(
+                                    transferScope = transferScope,
+                                    activeStreamJobs = activeStreamJobs,
+                                    stopTransferFlag = stopTransferFlag,
+                                    direction = direction,
+                                    durationSec = durationSec,
+                                    chunkSize = chunkSize,
+                                    dataSockets = dataSockets,
+                                    controlIn = controlIn,
+                                    controlOut = controlOut,
+                                    onProgress = { progress ->
+                                        if (progress.instantMbps > 0.0) {
+                                            throughputHistory.add(progress.instantMbps)
+                                            if (throughputHistory.size > MAX_HISTORY_SAMPLES) {
+                                                throughputHistory.removeAt(0)
+                                            }
+                                        }
+                                        peakMbps = maxOf(peakMbps, progress.peakMbps)
+                                        emit(progress.copy(throughputHistoryMbps = throughputHistory.toList()))
+                                    },
+                                )
+                                measuredBytes = transferSummary.bytesTransferred
+                                measuredPerStreamBytes = transferSummary.perStreamBytes
+                                measuredElapsedSec = transferSummary.elapsedSec
+                                peakMbps = maxOf(peakMbps, transferSummary.peakMbps)
+
+                                if (transferSummary.sentTestEndByClient) {
+                                    emit(
+                                        Iperf3Progress(
+                                            direction = direction,
+                                            stage = Iperf3Stage.TEST_END,
+                                            elapsedSec = measuredElapsedSec,
+                                            targetDurationSec = durationSec,
+                                            bytesTransferred = measuredBytes,
+                                            instantMbps = 0.0,
+                                            averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
+                                            peakMbps = peakMbps,
+                                            throughputHistoryMbps = throughputHistory.toList(),
+                                        ),
+                                    )
+                                }
+                            }
+
+                            STATE_TEST_END -> {
+                                emit(
+                                    Iperf3Progress(
+                                        direction = direction,
+                                        stage = Iperf3Stage.TEST_END,
+                                        elapsedSec = measuredElapsedSec,
+                                        targetDurationSec = durationSec,
+                                        bytesTransferred = measuredBytes,
+                                        instantMbps = 0.0,
+                                        averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
+                                        peakMbps = peakMbps,
+                                        throughputHistoryMbps = throughputHistory.toList(),
+                                    ),
+                                )
+                            }
+
+                            STATE_EXCHANGE_RESULTS -> {
+                                emit(
+                                    Iperf3Progress(
+                                        direction = direction,
+                                        stage = Iperf3Stage.EXCHANGE_RESULTS,
+                                        elapsedSec = measuredElapsedSec,
+                                        targetDurationSec = durationSec,
+                                        bytesTransferred = measuredBytes,
+                                        instantMbps = 0.0,
+                                        averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
+                                        peakMbps = peakMbps,
+                                        throughputHistoryMbps = throughputHistory.toList(),
+                                    ),
+                                )
+                                val clientResultsJson = buildClientResultsJson(
+                                    perStreamBytes = measuredPerStreamBytes,
+                                    elapsedSec = measuredElapsedSec,
+                                    direction = direction,
+                                )
+                                writeFramedJson(controlOut, clientResultsJson)
+                                val serverPayload = readFramedJson(controlIn)
+                                serverStats = parseServerResults(serverPayload)
+                            }
+
+                            STATE_DISPLAY_RESULTS, STATE_IPERF_DONE -> {
+                                if (state == STATE_DISPLAY_RESULTS) {
+                                    runCatching {
+                                        controlOut.writeByte(STATE_IPERF_DONE.toInt())
+                                        controlOut.flush()
+                                    }
+                                }
+                                closeDataStreams()
+                                val finalRes = buildSuccessResult(
+                                    direction = direction,
+                                    port = port,
+                                    resolvedTarget = resolvedTarget,
+                                    measuredElapsedSec = measuredElapsedSec,
+                                    measuredBytes = measuredBytes,
+                                    peakMbps = peakMbps,
+                                    serverStats = serverStats,
+                                )
+                                emit(completedProgress(finalRes, durationSec, throughputHistory))
+                                break@stateLoop
+                            }
+
+                            STATE_ACCESS_DENIED -> {
+                                emit(
+                                    failedProgress(
+                                        direction = direction,
+                                        port = port,
+                                        resolvedTarget = resolvedTarget,
+                                        durationSec = durationSec,
+                                        kind = Iperf3ErrorKind.ACCESS_DENIED,
+                                        message = "服务器正忙，另一个测速正在进行，请稍后重试",
+                                    ),
+                                )
+                                break@stateLoop
+                            }
+
+                            STATE_SERVER_ERROR -> {
+                                val errCode = readOptionalServerErrorCode(controlSocket, controlIn)
+                                val suffix = if (errCode != null && errCode != 0) " (错误码 $errCode)" else ""
+                                emit(
+                                    failedProgress(
+                                        direction = direction,
+                                        port = port,
+                                        resolvedTarget = resolvedTarget,
+                                        durationSec = durationSec,
+                                        kind = Iperf3ErrorKind.SERVER_ERROR,
+                                        message = "iperf3 服务端返回错误$suffix，请确认服务端版本兼容或稍后重试",
+                                    ),
+                                )
+                                break@stateLoop
+                            }
+
+                            STATE_SERVER_TERMINATE -> {
+                                emit(
+                                    failedProgress(
+                                        direction = direction,
+                                        port = port,
+                                        resolvedTarget = resolvedTarget,
+                                        durationSec = durationSec,
+                                        kind = Iperf3ErrorKind.SERVER_ERROR,
+                                        message = "iperf3 服务端主动终止了本次测速连接",
+                                    ),
+                                )
+                                break@stateLoop
+                            }
+
+                            else -> {
+                                // Valid iperf3 server control state codes are 1..16; anything outside (such as
+                                // ASCII 'H' from HTTP or 'S' from OpenSSH) means the port is not an iperf3 server.
+                                if (state < 1 || state > STATE_IPERF_DONE) {
+                                    val nonIperfHint = if (state == 'H'.code.toByte() || state == 'S'.code.toByte()) {
+                                        "目标端口 $port 返回了非 iperf3 协议响应（可能是 Web/SSH 服务），请确认端口填写正确且已在 VPS 开启 iperf3 -s -p $port"
+                                    } else {
+                                        "收到非标准 iperf3 服务端状态码 ($state)，请确认目标端口 $port 运行的是 iperf3 v3 服务端"
+                                    }
+                                    emit(
+                                        failedProgress(
+                                            direction = direction,
+                                            port = port,
+                                            resolvedTarget = resolvedTarget,
+                                            durationSec = durationSec,
+                                            kind = Iperf3ErrorKind.PROTOCOL_ERROR,
+                                            message = nonIperfHint,
+                                        ),
+                                    )
+                                    break@stateLoop
+                                }
+                            }
+                        }
                     }
+                } finally {
+                    closeDataStreams()
                 }
             }
         } catch (ce: CancellationException) {
@@ -499,81 +557,130 @@ class Iperf3ClientRunner(
                 ),
             )
         } finally {
+            stopTransferFlag.set(true)
             cancelHandle?.dispose()
-            runCatching { dataSocketRef.get()?.close() }
+            for (sock in dataSockets) {
+                runCatching { sock.close() }
+            }
             runCatching { controlSocket.close() }
         }
     }.flowOn(ioDispatcher)
 
-    private data class TransferLoopSummary(
+    private class TransferLoopSummary(
         val bytesTransferred: Long,
+        val perStreamBytes: LongArray,
         val elapsedSec: Double,
         val peakMbps: Double,
         val sentTestEndByClient: Boolean,
     )
 
     private suspend fun runDataTransferLoop(
+        transferScope: CoroutineScope,
+        activeStreamJobs: MutableList<Job>,
+        stopTransferFlag: AtomicBoolean,
         direction: Iperf3Direction,
         durationSec: Int,
         chunkSize: Int,
-        dataSocket: Socket,
+        dataSockets: List<Socket>,
         controlIn: DataInputStream,
         controlOut: DataOutputStream,
         onProgress: suspend (Iperf3Progress) -> Unit,
-    ): TransferLoopSummary = coroutineScope {
-        val totalBytes = AtomicLong(0L)
-        val stopRequested = AtomicBoolean(false)
-        val workerFinished = AtomicBoolean(false)
-        val workerEof = AtomicBoolean(false)
+    ): TransferLoopSummary {
+        val streamCount = dataSockets.size
+        val streamCounters = Array(streamCount) { AtomicLong(0L) }
+        val streamFinishNanos = Array(streamCount) { AtomicLong(0L) }
+        val streamFinished = Array(streamCount) { AtomicBoolean(false) }
+        val streamEof = Array(streamCount) { AtomicBoolean(false) }
+        val countingActive = AtomicBoolean(true)
+
+        // Pre-allocate transfer buffer(s) before starting the benchmark clock so allocation/zeroing
+        // does not eat into measured transfer time.
+        val sharedUploadPayload = if (direction == Iperf3Direction.UPLOAD) {
+            ByteArray(chunkSize) { idx -> ((idx * 31 + 17) and 0xFF).toByte() }
+        } else {
+            null
+        }
+        val downloadBuffers = if (direction == Iperf3Direction.DOWNLOAD) {
+            Array(streamCount) { ByteArray(chunkSize) }
+        } else {
+            emptyArray()
+        }
+
         val startNanos = System.nanoTime()
         val deadlineNanos = startNanos + durationSec * 1_000_000_000L
 
-        val workerJob = launch(ioDispatcher) {
-            try {
-                if (direction == Iperf3Direction.UPLOAD) {
-                    val payload = ByteArray(chunkSize) { idx -> ((idx * 31 + 17) and 0xFF).toByte() }
-                    val out = dataSocket.getOutputStream()
-                    while (!stopRequested.get() && isActive) {
-                        if (System.nanoTime() >= deadlineNanos) break
-                        out.write(payload)
-                        totalBytes.addAndGet(payload.size.toLong())
+        for (streamIdx in 0 until streamCount) {
+            val socket = dataSockets[streamIdx]
+            val counter = streamCounters[streamIdx]
+            val finishNanosRef = streamFinishNanos[streamIdx]
+            val finishedFlag = streamFinished[streamIdx]
+            val eofFlag = streamEof[streamIdx]
+
+            val workerJob = transferScope.launch(ioDispatcher) {
+                try {
+                    if (direction == Iperf3Direction.UPLOAD) {
+                        val payload = sharedUploadPayload!!
+                        val out = socket.getOutputStream()
+                        var localBytes = 0L
+                        while (countingActive.get() && !stopTransferFlag.get()) {
+                            out.write(payload)
+                            localBytes += payload.size
+                            counter.lazySet(localBytes)
+                        }
+                        runCatching { out.flush() }
+                    } else {
+                        // Keep SO_TIMEOUT = 0 (blocking recv): on Android (IoBridge.recvfrom) and
+                        // OpenJDK (NioSocketImpl), setting soTimeout > 0 forces an extra poll() syscall
+                        // or O_NONBLOCK timedRead on every single socket read.
+                        // Also keep draining after countingActive turns false until IPERF_DONE so the
+                        // remote `iperf3 -s` sender never stalls on a full TCP receive window.
+                        val buffer = downloadBuffers[streamIdx]
+                        val input = socket.getInputStream()
+                        var localBytes = 0L
+                        while (!stopTransferFlag.get()) {
+                            val read = input.read(buffer)
+                            if (read <= 0) {
+                                if (read == -1) {
+                                    eofFlag.set(true)
+                                }
+                                break
+                            }
+                            if (countingActive.get()) {
+                                localBytes += read
+                                counter.lazySet(localBytes)
+                            }
+                        }
                     }
-                    runCatching { out.flush() }
-                } else {
-                    dataSocket.soTimeout = DOWNLOAD_POLL_SO_TIMEOUT_MS
-                    val buffer = ByteArray(chunkSize)
-                    val input = dataSocket.getInputStream()
-                    while (!stopRequested.get() && isActive) {
-                        if (System.nanoTime() >= deadlineNanos) break
-                        val read = try {
-                            input.read(buffer)
-                        } catch (_: SocketTimeoutException) {
-                            0
-                        }
-                        if (read == -1) {
-                            workerEof.set(true)
-                            break
-                        }
-                        if (read > 0) {
-                            totalBytes.addAndGet(read.toLong())
-                        }
-                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: IOException) {
+                    // Expected when data socket closes at test completion or server stops transfer.
+                } finally {
+                    finishNanosRef.set(System.nanoTime())
+                    finishedFlag.set(true)
                 }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (_: IOException) {
-                // Socket may close when server finishes or stops transfer; control channel decides outcome.
-            } finally {
-                workerFinished.set(true)
             }
+            activeStreamJobs.add(workerJob)
         }
+
+        fun sumTransferredBytes(): Long {
+            var sum = 0L
+            for (counter in streamCounters) {
+                sum += counter.get()
+            }
+            return sum
+        }
+
+        fun allStreamsFinished(): Boolean = streamFinished.all { it.get() }
+        fun allStreamsEof(): Boolean = streamEof.all { it.get() }
 
         var lastReportNanos = startNanos
         var lastReportBytes = 0L
+        var lastInstantMbps = 0.0
         var peakMbps = 0.0
         val reportStepNanos = progressIntervalMs.coerceIn(50L, 1_000L) * 1_000_000L
 
-        while (!workerFinished.get()) {
+        while (!allStreamsFinished()) {
             currentCoroutineContext().ensureActive()
             val now = System.nanoTime()
             if (now >= deadlineNanos) {
@@ -584,12 +691,13 @@ class Iperf3ClientRunner(
                 break
             }
             if (now - lastReportNanos >= reportStepNanos) {
-                val curBytes = totalBytes.get()
+                val curBytes = sumTransferredBytes()
                 val deltaBytes = (curBytes - lastReportBytes).coerceAtLeast(0L)
                 val deltaSec = ((now - lastReportNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
                 val elapsedSec = ((now - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
                 val instantMbps = computeMbps(deltaBytes, deltaSec)
                 val avgMbps = computeMbps(curBytes, elapsedSec)
+                lastInstantMbps = instantMbps
                 peakMbps = maxOf(peakMbps, instantMbps, avgMbps)
 
                 onProgress(
@@ -607,53 +715,104 @@ class Iperf3ClientRunner(
                 lastReportNanos = now
                 lastReportBytes = curBytes
             }
-            delay(50L)
+
+            val afterReportNanos = System.nanoTime()
+            val remainingToDeadlineMs = ((deadlineNanos - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
+            val remainingToReportMs = ((reportStepNanos - (afterReportNanos - lastReportNanos) + 999_999L) / 1_000_000L)
+                .coerceAtLeast(1L)
+            delay(minOf(POLL_STEP_MS, remainingToDeadlineMs, remainingToReportMs))
         }
 
-        stopRequested.set(true)
-
-        // Wait briefly for worker to notice stopRequested without closing dataSocket yet, so
-        // real iperf3 -s receives TEST_END on the control channel before seeing a data EOF/reset.
-        val joinedEarly = withTimeoutOrNull(250L) {
-            workerJob.join()
-            true
-        } ?: false
-
-        // If download stream hit EOF cleanly, wait briefly to see if server already sent TEST_END/EXCHANGE_RESULTS.
-        if (workerEof.get() && runCatching { controlIn.available() == 0 }.getOrDefault(false)) {
-            delay(80L)
-        }
-
-        val serverAlreadySignaled = runCatching { controlIn.available() > 0 }.getOrDefault(false)
-        var sentTestEnd = false
-        if (!serverAlreadySignaled) {
-            controlOut.writeByte(STATE_TEST_END.toInt())
-            controlOut.flush()
-            sentTestEnd = true
-        }
-
-        val joined = if (joinedEarly) {
-            true
+        // Freeze measurement counters immediately before any join/control-channel round-trip so
+        // post-deadline teardown latency never inflates the elapsed-time denominator.
+        val endedBeforeDeadline = allStreamsFinished()
+        countingActive.set(false)
+        var snapshotNanos = if (endedBeforeDeadline) {
+            streamFinishNanos.maxOfOrNull { it.get() }?.takeIf { it > startNanos } ?: System.nanoTime()
         } else {
-            withTimeoutOrNull(300L) {
-                workerJob.join()
+            System.nanoTime()
+        }
+        var perStreamBytes = LongArray(streamCount) { idx -> streamCounters[idx].get() }
+
+        val sentTestEnd: Boolean
+        if (direction == Iperf3Direction.UPLOAD) {
+            // Let any in-flight write() complete cleanly before signaling TEST_END on control socket.
+            val joinedEarly = withTimeoutOrNull(250L) {
+                for (streamJob in activeStreamJobs) {
+                    streamJob.join()
+                }
                 true
             } ?: false
-        }
-        if (!joined) {
-            workerJob.cancel()
-            runCatching { dataSocket.close() }
-        } else if (direction == Iperf3Direction.UPLOAD) {
-            runCatching { dataSocket.shutdownOutput() }
+
+            if (joinedEarly) {
+                val updatedBytes = LongArray(streamCount) { idx -> streamCounters[idx].get() }
+                if (updatedBytes.sum() > perStreamBytes.sum()) {
+                    perStreamBytes = updatedBytes
+                    snapshotNanos = System.nanoTime()
+                }
+            }
+
+            val serverAlreadySignaled = runCatching { controlIn.available() > 0 }.getOrDefault(false)
+            if (!serverAlreadySignaled) {
+                controlOut.writeByte(STATE_TEST_END.toInt())
+                controlOut.flush()
+                sentTestEnd = true
+            } else {
+                sentTestEnd = false
+            }
+
+            val joined = if (joinedEarly) {
+                true
+            } else {
+                withTimeoutOrNull(300L) {
+                    for (streamJob in activeStreamJobs) {
+                        streamJob.join()
+                    }
+                    true
+                } ?: false
+            }
+            if (!joined) {
+                stopTransferFlag.set(true)
+                for (streamJob in activeStreamJobs) {
+                    streamJob.cancel()
+                }
+                for (sock in dataSockets) {
+                    runCatching { sock.close() }
+                }
+            } else {
+                for (sock in dataSockets) {
+                    runCatching { sock.shutdownOutput() }
+                }
+            }
+        } else {
+            // DOWNLOAD (-R): If server closed all data streams early, check briefly whether it also
+            // sent TEST_END / EXCHANGE_RESULTS; otherwise immediately send TEST_END while keeping
+            // activeStreamJobs draining in-flight bytes until IPERF_DONE.
+            if (allStreamsEof() && runCatching { controlIn.available() == 0 }.getOrDefault(false)) {
+                delay(50L)
+            }
+            val serverAlreadySignaled = runCatching { controlIn.available() > 0 }.getOrDefault(false)
+            if (!serverAlreadySignaled) {
+                controlOut.writeByte(STATE_TEST_END.toInt())
+                controlOut.flush()
+                sentTestEnd = true
+            } else {
+                sentTestEnd = false
+            }
         }
 
-        val endNanos = System.nanoTime()
-        val finalBytes = totalBytes.get()
-        val finalElapsedSec = ((endNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
+        val finalBytes = perStreamBytes.sum()
+        val finalElapsedSec = ((snapshotNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
         val finalAvgMbps = computeMbps(finalBytes, finalElapsedSec)
-        val tailDeltaBytes = (finalBytes - lastReportBytes).coerceAtLeast(0L)
-        val tailDeltaSec = ((endNanos - lastReportNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
-        val tailInstantMbps = computeMbps(tailDeltaBytes, tailDeltaSec)
+        val rawTailNanos = snapshotNanos - lastReportNanos
+        val tailInstantMbps = if (rawTailNanos >= MIN_TAIL_SAMPLE_NANOS) {
+            val tailDeltaBytes = (finalBytes - lastReportBytes).coerceAtLeast(0L)
+            computeMbps(tailDeltaBytes, rawTailNanos / 1_000_000_000.0)
+        } else if (lastInstantMbps > 0.0) {
+            lastInstantMbps
+        } else {
+            finalAvgMbps
+        }
         peakMbps = maxOf(peakMbps, finalAvgMbps, tailInstantMbps)
 
         onProgress(
@@ -669,8 +828,9 @@ class Iperf3ClientRunner(
             ),
         )
 
-        TransferLoopSummary(
+        return TransferLoopSummary(
             bytesTransferred = finalBytes,
+            perStreamBytes = perStreamBytes,
             elapsedSec = finalElapsedSec,
             peakMbps = peakMbps,
             sentTestEndByClient = sentTestEnd,
@@ -681,41 +841,54 @@ class Iperf3ClientRunner(
         durationSec: Int,
         chunkSize: Int,
         direction: Iperf3Direction,
+        parallelStreams: Int,
+        socketBufferBytes: Int?,
     ): String {
         val obj = buildJsonObject {
             put("tcp", true)
             put("omit", 0)
             put("time", durationSec)
-            put("parallel", 1)
+            put("num", 0)
+            put("blockcount", 0)
+            put("parallel", parallelStreams)
             put("len", chunkSize)
+            if (socketBufferBytes != null && socketBufferBytes > 0) {
+                put("window", socketBufferBytes)
+            }
             if (direction == Iperf3Direction.DOWNLOAD) {
                 put("reverse", true)
             }
+            put("pacing_timer", 1000)
             put("client_version", CLIENT_VERSION)
         }
         return obj.toString()
     }
 
     private fun buildClientResultsJson(
-        bytesTransferred: Long,
+        perStreamBytes: LongArray,
         elapsedSec: Double,
+        direction: Iperf3Direction,
     ): String {
+        val senderHasRetransmits = if (direction == Iperf3Direction.UPLOAD) 0 else -1
         val obj = buildJsonObject {
             put("cpu_util_total", 0.0)
             put("cpu_util_user", 0.0)
             put("cpu_util_system", 0.0)
-            put("sender_has_retransmits", 0)
-            put("congestion_used", "cubic")
+            put("sender_has_retransmits", senderHasRetransmits)
             putJsonArray("streams") {
-                addJsonObject {
-                    put("id", 1)
-                    put("bytes", bytesTransferred)
-                    put("retransmits", -1)
-                    put("jitter", 0.0)
-                    put("errors", 0)
-                    put("packets", 0)
-                    put("start_time", 0.0)
-                    put("end_time", elapsedSec)
+                for (idx in perStreamBytes.indices) {
+                    addJsonObject {
+                        put("id", streamProtocolId(idx))
+                        put("bytes", perStreamBytes[idx])
+                        put("retransmits", -1)
+                        put("jitter", 0.0)
+                        put("errors", 0)
+                        put("omitted_errors", 0)
+                        put("packets", 0)
+                        put("omitted_packets", 0)
+                        put("start_time", 0.0)
+                        put("end_time", elapsedSec)
+                    }
                 }
             }
         }
@@ -884,6 +1057,9 @@ class Iperf3ClientRunner(
         const val COOKIE_SIZE: Int = 37
         const val CLIENT_VERSION: String = "3.16"
         const val DEFAULT_PROGRESS_INTERVAL_MS: Long = 250L
+        const val DEFAULT_PARALLEL_STREAMS: Int = 1
+        const val MIN_PARALLEL_STREAMS: Int = 1
+        const val MAX_PARALLEL_STREAMS: Int = 16
 
         const val STATE_TEST_START: Byte = 1
         const val STATE_TEST_RUNNING: Byte = 2
@@ -901,12 +1077,18 @@ class Iperf3ClientRunner(
 
         private const val COOKIE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
         private const val CONTROL_READ_TIMEOUT_MS = 10_000
-        private const val DOWNLOAD_POLL_SO_TIMEOUT_MS = 250
-        private const val SOCKET_BUFFER_BYTES = 262_144
+        private const val POLL_STEP_MS = 50L
+        private const val MIN_TAIL_SAMPLE_NANOS = 50_000_000L
         private const val MAX_JSON_FRAME_BYTES = 4 * 1024 * 1024
         private const val MAX_HISTORY_SAMPLES = 120
 
         private val secureRandom = SecureRandom()
+
+        /**
+         * Official `iperf3` assigns stream IDs `1, 3, 4, 5, ...` (skipping reserved ID `2`).
+         */
+        internal fun streamProtocolId(streamIndex: Int): Int =
+            if (streamIndex <= 0) 1 else streamIndex + 2
 
         /**
          * Generates a standard iperf3 37-byte cookie: 36 chars from `[a-z2-7]` + trailing NUL (`0x00`).
