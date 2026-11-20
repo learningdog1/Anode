@@ -128,8 +128,21 @@ class JSchSshTransport(
                 channel.setPty(true)
                 channel.setPtyType(request.ptyType, request.ptyCols, request.ptyRows, 0, 0)
 
+                val remoteStdin = channel.outputStream
                 val reader = InputStreamReader(channel.inputStream, StandardCharsets.UTF_8)
                 channel.connect(request.connectTimeoutMillis)
+                coroutineContext[com.nodeseek.app.domain.ssh.SshStdinCallbackContext]?.onStdinReady?.invoke(
+                    com.nodeseek.app.domain.ssh.SshStdinWriter { input ->
+                        if (!closedFlag.get() && input.isNotEmpty()) {
+                            runCatching {
+                                synchronized(remoteStdin) {
+                                    remoteStdin.write(input.toByteArray(StandardCharsets.UTF_8))
+                                    remoteStdin.flush()
+                                }
+                            }
+                        }
+                    },
+                )
 
                 val buffer = CharArray(STREAM_READ_BUFFER_CHARS)
                 while (!closedFlag.get()) {

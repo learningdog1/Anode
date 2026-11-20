@@ -1,6 +1,7 @@
 package com.nodeseek.app.domain.ssh
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 
 /**
  * Immutable connection & PTY execution parameters passed to an [SshTransport].
@@ -50,6 +51,22 @@ class SshHostKeyMismatchException(
 )
 
 /**
+ * Sink for writing automated or interactive responses directly to the remote PTY stdin stream.
+ */
+fun interface SshStdinWriter {
+    fun write(input: String)
+}
+
+/**
+ * Coroutine context element propagating [onStdinReady] into 2-arg [SshTransport.execute] implementations.
+ */
+class SshStdinCallbackContext(
+    val onStdinReady: (SshStdinWriter) -> Unit,
+) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<SshStdinCallbackContext>
+}
+
+/**
  * Pluggable SSH execution transport.
  *
  * Production uses `JSchSshTransport` (`ChannelExec` with `xterm-256color` PTY);
@@ -60,4 +77,13 @@ interface SshTransport {
         request: SshConnectionRequest,
         command: String,
     ): Flow<SshStreamEvent>
+
+    fun execute(
+        request: SshConnectionRequest,
+        command: String,
+        onStdinReady: (SshStdinWriter) -> Unit,
+    ): Flow<SshStreamEvent> = execute(
+        request = request,
+        command = command,
+    ).flowOn(SshStdinCallbackContext(onStdinReady))
 }

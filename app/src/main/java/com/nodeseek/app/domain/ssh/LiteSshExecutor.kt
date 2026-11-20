@@ -2,9 +2,11 @@ package com.nodeseek.app.domain.ssh
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * High-level streaming updates emitted by [LiteSshExecutor] after applying [AnsiStreamSanitizer].
+ * High-level streaming updates emitted by [LiteSshExecutor] after applying [AnsiStreamSanitizer]
+ * and optional [SshPromptAutoResponder] fallback handling.
  */
 sealed interface LiteSshExecutionEvent {
     data object Connecting : LiteSshExecutionEvent
@@ -19,12 +21,15 @@ sealed interface LiteSshExecutionEvent {
         val sanitizedAnsiOutput: String,
         val elapsedMillis: Long,
     ) : LiteSshExecutionEvent
+    data class AutoResponded(
+        val decision: SshAutoRespondDecision,
+    ) : LiteSshExecutionEvent
 }
 
 /**
  * Coordinates streaming remote SSH command execution over an [SshTransport], feeding raw PTY
- * chunks incrementally through [AnsiStreamSanitizer] so consumers always receive clean,
- * progress-bar-collapsed, SGR-preserved terminal output.
+ * chunks incrementally through [AnsiStreamSanitizer] and optionally [SshPromptAutoResponder] so
+ * consumers receive clean SGR-preserved terminal output without hanging on `[y/N]` / `Enter` prompts.
  */
 class LiteSshExecutor(
     private val transport: SshTransport,
@@ -34,13 +39,20 @@ class LiteSshExecutor(
     fun runCommand(
         request: SshConnectionRequest,
         command: String,
+        autoRespondConfig: SshAutoRespondConfig = SshAutoRespondConfig(),
     ): Flow<LiteSshExecutionEvent> = flow {
         val startedAt = clock()
         val sanitizer = AnsiStreamSanitizer(maxLines = maxOutputLines)
+        val autoResponder = SshPromptAutoResponder(config = autoRespondConfig)
+        val stdinWriterRef = AtomicReference<SshStdinWriter?>(null)
         emit(LiteSshExecutionEvent.Connecting)
 
         var sawCompleted = false
-        transport.execute(request = request, command = command).collect { event ->
+        transport.execute(
+            request = request,
+            command = command,
+            onStdinReady = { writer -> stdinWriterRef.set(writer) },
+        ).collect { event ->
             when (event) {
                 is SshStreamEvent.HostKeyObserved -> {
                     emit(LiteSshExecutionEvent.HostKeyChecked(event.verification))
@@ -56,6 +68,11 @@ class LiteSshExecutor(
                             elapsedMillis = (clock() - startedAt).coerceAtLeast(0L),
                         ),
                     )
+                    val decision = autoResponder.onOutputChunk(event.rawText)
+                    if (decision != null) {
+                        stdinWriterRef.get()?.write(decision.response)
+                        emit(LiteSshExecutionEvent.AutoResponded(decision))
+                    }
                 }
                 is SshStreamEvent.Completed -> {
                     sawCompleted = true

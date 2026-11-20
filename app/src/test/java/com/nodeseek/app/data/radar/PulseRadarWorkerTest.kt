@@ -128,6 +128,7 @@ class PulseRadarWorkerTest {
                 override val fleetWorkScheduler: FleetWorkScheduler get() = error("unused")
                 override val netBenchHistoryStore: NetBenchHistoryStore get() = error("unused")
                 override val sshVaultRepository: SshVaultRepository get() = error("unused")
+                override val sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager get() = error("unused")
                 override val overseasIntelRepository: OverseasIntelRepository get() = error("unused")
             }
         }

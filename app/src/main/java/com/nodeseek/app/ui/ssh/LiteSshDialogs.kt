@@ -690,8 +690,8 @@ internal fun SshExportPreviewBottomSheet(
 }
 
 /**
- * Bottom sheet showing recent persisted SSH runs so users can reload previous runs into the
- * active export session.
+ * Bottom sheet showing recent persisted SSH runs grouped by machine remark name (`备注名称`),
+ * allowing users to reload single runs or an entire machine's run group into the active export session.
  */
 @Composable
 internal fun SshHistoryBottomSheet(
@@ -699,9 +699,18 @@ internal fun SshHistoryBottomSheet(
     onLoadToSession: (SshExecutionRecord) -> Unit,
     onDeleteRecord: (String) -> Unit,
     onDismiss: () -> Unit,
+    servers: List<SshServerProfile> = emptyList(),
+    onLoadGroupToSession: ((List<SshExecutionRecord>) -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val ext = NodePulseThemeTokens.extendedColors
+    val groupedRuns = remember(recentRuns, servers) {
+        com.nodeseek.app.domain.ssh.SshHistoryGrouping.groupRunsByServerRemark(
+            runs = recentRuns,
+            servers = servers,
+        )
+    }
+    var collapsedGroupKeys by rememberSaveable { mutableStateOf(emptyList<String>()) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -719,22 +728,34 @@ internal fun SshHistoryBottomSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.History,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = "最近本地测试记录（${recentRuns.size}）",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.History,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = "最近本地测试记录（${recentRuns.size}）",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                if (groupedRuns.isNotEmpty()) {
+                    PulseAccentPill(
+                        text = "${groupedRuns.size} 台主机",
+                        icon = Icons.Rounded.Dns,
+                    )
+                }
             }
 
-            if (recentRuns.isEmpty()) {
+            if (groupedRuns.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -742,7 +763,7 @@ internal fun SshHistoryBottomSheet(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "暂无历史测试记录，运行任意脚本后将自动保存",
+                        text = "暂无历史测试记录，运行任意脚本后将自动按机器备注分组保存",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -751,58 +772,143 @@ internal fun SshHistoryBottomSheet(
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 420.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                        .heightIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 2.dp),
                 ) {
-                    items(recentRuns, key = { it.id }) { run ->
-                        Row(
+                    items(groupedRuns, key = { "grp_${it.groupKey}" }) { group ->
+                        val isExpanded = group.groupKey !in collapsedGroupKeys
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .pulseCard(shape = RoundedCornerShape(14.dp))
-                                .clickable { onLoadToSession(run) }
+                                .pulseCard(shape = RoundedCornerShape(16.dp))
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Box(
+                            Row(
                                 modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)),
-                                contentAlignment = Alignment.Center,
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        collapsedGroupKeys = if (isExpanded) {
+                                            collapsedGroupKeys + group.groupKey
+                                        } else {
+                                            collapsedGroupKeys - group.groupKey
+                                        }
+                                    }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Terminal,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp),
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Dns,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(
+                                            text = group.serverAlias,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        PulseAccentPill(
+                                            text = "${group.runCount} 条",
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        )
+                                    }
+                                    Text(
+                                        text = "最近测试：${formatRunTimestamp(group.latestStartedAtEpochMillis)}",
+                                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (group.runCount >= 2 && onLoadGroupToSession != null) {
+                                    FilledTonalButton(
+                                        onClick = { onLoadGroupToSession(group.runs) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    ) {
+                                        Text("整组载入", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                                Text(
+                                    text = if (isExpanded) "收起" else "展开",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
                                 )
                             }
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                Text(
-                                    text = "${run.serverAlias} · ${run.presetName}",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    text = "${formatRunTimestamp(run.startedAtEpochMillis)} · 耗时 ${formatDurationShort(run.durationMillis)} · ${runStatusLabel(run.status, run.exitCode)}",
-                                    style = MaterialTheme.typography.bodySmall.withTabularNumbers(),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            IconButton(onClick = { onDeleteRecord(run.id) }) {
-                                Icon(
-                                    imageVector = Icons.Rounded.DeleteOutline,
-                                    contentDescription = "删除记录",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+
+                            if (isExpanded) {
+                                PulseGradientDivider()
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    group.runs.forEach { run ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(11.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.65f))
+                                                .clickable { onLoadToSession(run) }
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Terminal,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                            Column(
+                                                modifier = Modifier.weight(1f),
+                                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                            ) {
+                                                Text(
+                                                    text = run.presetName,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Text(
+                                                    text = "${formatRunTimestamp(run.startedAtEpochMillis)} · 耗时 ${formatDurationShort(run.durationMillis)} · ${runStatusLabel(run.status, run.exitCode)}",
+                                                    style = MaterialTheme.typography.bodySmall.withTabularNumbers(),
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { onDeleteRecord(run.id) },
+                                                modifier = Modifier.size(30.dp),
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.DeleteOutline,
+                                                    contentDescription = "删除记录",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(17.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

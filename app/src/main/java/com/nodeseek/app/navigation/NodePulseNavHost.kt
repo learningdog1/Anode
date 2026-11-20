@@ -321,6 +321,19 @@ fun NodePulseNavHost(
     val latestActiveDmPeerUid by rememberUpdatedState(activeDmPeerUid)
     val latestChallengeRequired by rememberUpdatedState(challengeRequired)
     val latestWebViewActive by rememberUpdatedState(activeWebViewRequest != null)
+    val sshSessionState by container.sshSessionManager.uiState.collectAsStateWithLifecycle()
+    val isOnLiteSshRoute = remember(currentBackStackEntry) {
+        currentBackStackEntry?.destination?.hasRoute<LiteSshRoute>() == true
+    }
+    val latestIsOnLiteSshRoute by rememberUpdatedState(isOnLiteSshRoute)
+
+    LaunchedEffect(container) {
+        container.sshSessionManager.completionPopupEvents.collect { popup ->
+            if (!latestIsOnLiteSshRoute) {
+                inAppPopupState.enqueue(popup)
+            }
+        }
+    }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -831,6 +844,11 @@ fun NodePulseNavHost(
                 NotificationTapTarget.OpenRadarAlerts -> {
                     isDetailPaneMaximized = false
                     openRadar(0)
+                }
+
+                NotificationTapTarget.OpenLiteSsh -> {
+                    isDetailPaneMaximized = false
+                    openLiteSsh()
                 }
             }
         }
@@ -1660,8 +1678,7 @@ fun NodePulseNavHost(
             composable<LiteSshRoute> {
                 val sshViewModel: LiteSshViewModel = viewModel(
                     factory = LiteSshViewModel.factory(
-                        vaultRepository = container.sshVaultRepository,
-                        executor = LiteSshExecutor(transport = JSchSshTransport()),
+                        sessionManager = container.sshSessionManager,
                     ),
                 )
                 LiteSshScreen(
@@ -1749,6 +1766,11 @@ fun NodePulseNavHost(
                         )
                     }
 
+                    NotificationTapTarget.OpenLiteSsh -> {
+                        isDetailPaneMaximized = false
+                        openLiteSsh()
+                    }
+
                     NotificationTapTarget.OpenRadarAlerts, null -> Unit
                 }
             },
@@ -1759,6 +1781,20 @@ fun NodePulseNavHost(
                     start = 14.dp,
                     end = 14.dp,
                     top = if (challengeRequired && !challengeBannerDismissed && activeWebViewRequest == null) 84.dp else 10.dp,
+                ),
+        )
+
+        com.nodeseek.app.ui.ssh.LiteSshRunningGlobalBar(
+            uiState = sshSessionState,
+            visible = !isOnLiteSshRoute && activeWebViewRequest == null,
+            onReturnToLiteSsh = openLiteSsh,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(
+                    start = 14.dp,
+                    end = 14.dp,
+                    bottom = if (adaptiveLayout.useNavigationRail) 16.dp else 88.dp,
                 ),
         )
 

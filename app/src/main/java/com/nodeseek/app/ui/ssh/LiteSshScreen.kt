@@ -292,10 +292,15 @@ fun LiteSshScreen(
                     elapsedMillis = uiState.viewingRun?.durationMillis ?: uiState.elapsedMillis,
                     exitCode = uiState.viewingRun?.exitCode ?: uiState.exitCode,
                     errorMessage = if (uiState.viewingRun == null) uiState.errorMessage else uiState.viewingRun?.errorMessage,
+                    liveProgress = if (uiState.viewingRun == null) uiState.liveProgress else null,
+                    lastOutputEpochMillis = if (uiState.viewingRun == null) uiState.lastOutputEpochMillis else null,
+                    autoRespondPrompts = uiState.autoRespondPrompts,
+                    autoRespondCount = if (uiState.viewingRun == null) uiState.autoRespondCount else 0,
                     maskServerIp = uiState.maskServerIp,
                     consoleFontScale = uiState.consoleFontScale,
                     autoScrollConsole = uiState.autoScrollConsole,
                     onToggleMaskIp = viewModel::toggleMaskServerIp,
+                    onToggleAutoRespondPrompts = viewModel::toggleAutoRespondPrompts,
                     onZoomOut = { viewModel.adjustConsoleFontScale(-0.10f) },
                     onZoomIn = { viewModel.adjustConsoleFontScale(0.10f) },
                     onResetZoom = viewModel::resetConsoleFontScale,
@@ -355,6 +360,8 @@ fun LiteSshScreen(
             onLoadToSession = viewModel::addHistoryRunToSession,
             onDeleteRecord = viewModel::deleteHistoryRun,
             onDismiss = viewModel::dismissHistorySheet,
+            servers = uiState.servers,
+            onLoadGroupToSession = viewModel::addHistoryServerGroupToSession,
         )
     }
 
@@ -696,7 +703,7 @@ private fun PresetCatalogSection(
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PulseSectionHeader(
             title = "一键测评脚本",
-            subtitle = "内置 5 套非交互 VPS 测机脚本，支持自定义扩展",
+            subtitle = "内置 ${allPresets.count { !it.isCustom }} 套免交互 VPS 测机脚本 · 支持离开页面后台运行",
             icon = Icons.Rounded.Bolt,
             trailing = {
                 TextButton(
@@ -1039,10 +1046,15 @@ private fun AnsiTerminalConsoleCard(
     elapsedMillis: Long,
     exitCode: Int?,
     errorMessage: String?,
+    liveProgress: com.nodeseek.app.domain.ssh.SshLiveProgressStatus?,
+    lastOutputEpochMillis: Long?,
+    autoRespondPrompts: Boolean,
+    autoRespondCount: Int,
     maskServerIp: Boolean,
     consoleFontScale: Float,
     autoScrollConsole: Boolean,
     onToggleMaskIp: (Boolean) -> Unit,
+    onToggleAutoRespondPrompts: (Boolean) -> Unit,
     onZoomOut: () -> Unit,
     onZoomIn: () -> Unit,
     onResetZoom: () -> Unit,
@@ -1216,6 +1228,35 @@ private fun AnsiTerminalConsoleCard(
                 )
             }
 
+            // Auto-respond interactive prompt fallback toggle (configurable)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (autoRespondPrompts) ObsidianPrimaryContainer.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.06f),
+                    )
+                    .clickable { onToggleAutoRespondPrompts(!autoRespondPrompts) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Bolt,
+                    contentDescription = null,
+                    tint = if (autoRespondPrompts) ObsidianOnPrimaryContainer else ext.onCodeMuted,
+                    modifier = Modifier.size(13.dp),
+                )
+                Text(
+                    text = when {
+                        autoRespondPrompts && autoRespondCount > 0 -> "自动应答: 开 ($autoRespondCount)"
+                        autoRespondPrompts -> "自动应答: 开"
+                        else -> "自动应答: 关"
+                    },
+                    style = codeTypography.microLabel,
+                    color = if (autoRespondPrompts) ObsidianOnPrimaryContainer else ext.onCodeMuted,
+                )
+            }
+
             // Font zoom controls
             Row(
                 modifier = Modifier
@@ -1303,6 +1344,87 @@ private fun AnsiTerminalConsoleCard(
                     style = codeTypography.microLabel,
                     color = if (displayedOutput.isNotBlank()) ext.onCodeSurface else ext.onCodeMuted.copy(alpha = 0.45f),
                 )
+            }
+        }
+
+        // Live stage, last-output timestamp & long-silence reassurance banner while running
+        if (isRunning && liveProgress != null) {
+            val silenceSeconds = (liveProgress.silenceMillis / 1000L).coerceAtLeast(0L)
+            val lastOutputText = remember(lastOutputEpochMillis, silenceSeconds) {
+                when {
+                    lastOutputEpochMillis == null -> "等待远程首包输出"
+                    silenceSeconds < 3L -> "刚刚 (${formatClockTimeOfDay(lastOutputEpochMillis)})"
+                    else -> "${silenceSeconds} 秒前 (${formatClockTimeOfDay(lastOutputEpochMillis)})"
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        if (liveProgress.isSilentLong) {
+                            ObsidianSecondary.copy(alpha = 0.14f)
+                        } else {
+                            ext.codeHeaderSurface.copy(alpha = 0.50f)
+                        },
+                    )
+                    .border(
+                        width = 0.6.dp,
+                        color = if (liveProgress.isSilentLong) {
+                            ObsidianSecondary.copy(alpha = 0.40f)
+                        } else {
+                            Color.White.copy(alpha = 0.06f)
+                        },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.6.dp,
+                            color = if (liveProgress.isSilentLong) ObsidianSecondary else ObsidianPrimary,
+                        )
+                        Text(
+                            text = "当前阶段：${liveProgress.currentStageLabel}",
+                            style = codeTypography.microLabel,
+                            color = ext.onCodeSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        text = "已运行 ${formatElapsedClock(elapsedMillis)} · 最近输出 $lastOutputText",
+                        style = codeTypography.microLabel.withTabularNumbers(),
+                        color = ext.onCodeMuted,
+                        maxLines = 1,
+                    )
+                }
+
+                if (liveProgress.isSilentLong) {
+                    Text(
+                        text = liveProgress.silentRunningBannerText,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ObsidianSecondary,
+                    )
+                    if (liveProgress.stageDetailHint.isNotBlank()) {
+                        Text(
+                            text = "${liveProgress.stageDetailHint}（已静默 ${silenceSeconds} 秒，离开页面亦可在后台继续运行）",
+                            style = codeTypography.microLabel,
+                            color = ext.onCodeMuted,
+                        )
+                    }
+                }
             }
         }
 
@@ -1477,6 +1599,14 @@ private fun LiteSshExportDock(
 internal fun copyTextToClipboard(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
     clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", text))
+}
+
+private fun formatClockTimeOfDay(epochMillis: Long): String {
+    if (epochMillis <= 0L) return "--:--:--"
+    return runCatching {
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+            .format(java.util.Date(epochMillis))
+    }.getOrDefault("--:--:--")
 }
 
 /**
