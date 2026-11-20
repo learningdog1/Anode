@@ -4,35 +4,27 @@ import android.content.Context
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewModelScope
+import com.nodeseek.app.NodePulseApp
 import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.data.ssh.SshServerVault
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyInfo
-import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
-import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
-import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
-import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
+import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultRepository
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
@@ -58,6 +50,7 @@ data class PendingHostKeyMismatchPrompt(
     val command: String,
     val expectedFingerprint: String,
     val actualHostKey: HostKeyInfo,
+    val mismatchServerId: String = serverId,
 )
 
 @Immutable
@@ -73,10 +66,17 @@ data class LiteSshUiState(
     val connectionPhase: SshConnectionPhase = SshConnectionPhase.IDLE,
     val activeServerAlias: String? = null,
     val activeServerHost: String? = null,
+    val activePresetId: String? = null,
     val activePresetName: String? = null,
     val activeCommand: String = "",
     val liveAnsiOutput: String = "",
+    val startedAtEpochMillis: Long = 0L,
+    val lastOutputEpochMillis: Long? = null,
     val elapsedMillis: Long = 0L,
+    val liveProgress: SshLiveProgressStatus = SshLiveProgressStatus(),
+    val autoRespondPrompts: Boolean = true,
+    val autoRespondCount: Int = 0,
+    val lastAutoRespondedPrompt: String? = null,
     val exitCode: Int? = null,
     val errorMessage: String? = null,
     val sessionRuns: List<SshExecutionRecord> = emptyList(),
@@ -162,7 +162,7 @@ data class LiteSshUiState(
                         sanitizedAnsiOutput = liveAnsiOutput,
                         exitCode = exitCode,
                         status = if (isRunning) SshRunStatus.RUNNING else SshRunStatus.SUCCEEDED,
-                        startedAtEpochMillis = 0L,
+                        startedAtEpochMillis = startedAtEpochMillis,
                         durationMillis = elapsedMillis,
                     ),
                 )
@@ -188,623 +188,120 @@ data class LiteSshUiState(
 }
 
 /**
- * ViewModel powering `LiteSshScreen`: manages the encrypted server vault, preset selection & flags,
- * live streaming SSH execution via [LiteSshExecutor], TOFU host key mismatch prompts, and
- * 1-click NodeSeek Markdown / `:::: tabs` report export.
+ * ViewModel powering `LiteSshScreen`.
+ *
+ * Delegates session state and SSH execution to the application-scoped [LiteSshSessionManager] so
+ * leaving `LiteSshScreen` (and clearing this ViewModel) never terminates an in-progress benchmark.
  */
 class LiteSshViewModel(
-    private val vaultRepository: SshVaultRepository,
-    private val executor: LiteSshExecutor,
-    private val clock: () -> Long = { System.currentTimeMillis() },
-    private val idGenerator: () -> String = { UUID.randomUUID().toString() },
-    private val enableElapsedTicker: Boolean = true,
+    val sessionManager: LiteSshSessionManager,
+    private val ownsSessionManagerScope: Boolean = false,
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(LiteSshUiState())
-    val uiState: StateFlow<LiteSshUiState> = _uiState.asStateFlow()
+    constructor(
+        vaultRepository: SshVaultRepository,
+        executor: LiteSshExecutor,
+        clock: () -> Long = { System.currentTimeMillis() },
+        idGenerator: () -> String = { UUID.randomUUID().toString() },
+        enableElapsedTicker: Boolean = true,
+    ) : this(
+        sessionManager = LiteSshSessionManager(
+            vaultRepository = vaultRepository,
+            executor = executor,
+            externalScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            foregroundServiceController = NoOpSshForegroundServiceController,
+            clock = clock,
+            idGenerator = idGenerator,
+            enableElapsedTicker = enableElapsedTicker,
+        ),
+        ownsSessionManagerScope = true,
+    )
 
-    private var executionJob: Job? = null
-    private var elapsedTickerJob: Job? = null
+    val uiState: StateFlow<LiteSshUiState>
+        get() = sessionManager.uiState
 
-    init {
-        viewModelScope.launch {
-            vaultRepository.serversFlow.collect { servers ->
-                _uiState.update { state ->
-                    val resolvedSelection = state.selectedServerId
-                        ?.takeIf { id -> servers.any { it.id == id } }
-                        ?: servers.firstOrNull()?.id
-                    state.copy(
-                        servers = servers,
-                        selectedServerId = resolvedSelection,
-                    )
-                }
-            }
-        }
-        viewModelScope.launch {
-            vaultRepository.customPresetsFlow.collect { presets ->
-                _uiState.update { state ->
-                    val allIds = state.builtInPresets.map { it.id }.toSet() + presets.map { it.id }
-                    val validSelectedPreset = if (state.selectedPresetId in allIds) {
-                        state.selectedPresetId
-                    } else {
-                        SshPresetCatalog.PRESET_QUICK_CHECK
-                    }
-                    state.copy(
-                        customPresets = presets,
-                        selectedPresetId = validSelectedPreset,
-                    )
-                }
-            }
-        }
-        viewModelScope.launch {
-            vaultRepository.recentRunsFlow.collect { runs ->
-                _uiState.update { it.copy(recentRuns = runs) }
-            }
-        }
-    }
+    fun selectServer(serverId: String) = sessionManager.selectServer(serverId)
+    fun openAddServerDialog() = sessionManager.openAddServerDialog()
+    fun openEditServerDialog(profile: SshServerProfile) = sessionManager.openEditServerDialog(profile)
+    fun dismissServerEditor() = sessionManager.dismissServerEditor()
+    fun saveServer(draft: SshServerDraft) = sessionManager.saveServer(draft)
+    fun deleteServer(serverId: String) = sessionManager.deleteServer(serverId)
 
-    fun selectServer(serverId: String) {
-        _uiState.update { it.copy(selectedServerId = serverId) }
-    }
+    fun selectPreset(presetId: String) = sessionManager.selectPreset(presetId)
+    fun togglePresetFlag(presetId: String, flagId: String) = sessionManager.togglePresetFlag(presetId, flagId)
+    fun toggleAutoRespondPrompts(enabled: Boolean) = sessionManager.toggleAutoRespondPrompts(enabled)
 
-    fun openAddServerDialog() {
-        _uiState.update { it.copy(showServerEditor = true, editingServer = null) }
-    }
-
-    fun openEditServerDialog(profile: SshServerProfile) {
-        _uiState.update { it.copy(showServerEditor = true, editingServer = profile) }
-    }
-
-    fun dismissServerEditor() {
-        _uiState.update { it.copy(showServerEditor = false, editingServer = null) }
-    }
-
-    fun saveServer(draft: SshServerDraft) {
-        viewModelScope.launch {
-            runCatching {
-                vaultRepository.saveServer(draft)
-            }.onSuccess { saved ->
-                _uiState.update {
-                    it.copy(
-                        selectedServerId = saved.id,
-                        showServerEditor = false,
-                        editingServer = null,
-                        statusMessage = "已加密保存主机「${saved.displayName}」",
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update {
-                    it.copy(statusMessage = err.message ?: "保存主机失败")
-                }
-            }
-        }
-    }
-
-    fun deleteServer(serverId: String) {
-        viewModelScope.launch {
-            vaultRepository.deleteServer(serverId)
-            _uiState.update { it.copy(statusMessage = "已从本地保险库删除主机") }
-        }
-    }
-
-    fun selectPreset(presetId: String) {
-        _uiState.update { state ->
-            state.copy(selectedPresetId = presetId)
-        }
-    }
-
-    fun togglePresetFlag(presetId: String, flagId: String) {
-        _uiState.update { state ->
-            val preset = state.allPresets.firstOrNull { it.id == presetId } ?: return@update state
-            val targetFlag = preset.flags.firstOrNull { it.id == flagId } ?: return@update state
-            val currentFlags = state.enabledFlagIdsByPreset[presetId] ?: preset.defaultEnabledFlagIds
-            val updatedFlags = currentFlags.toMutableSet()
-
-            if (flagId in updatedFlags) {
-                updatedFlags.remove(flagId)
-            } else {
-                val exclusiveGroup = targetFlag.exclusiveGroup
-                if (exclusiveGroup != null) {
-                    preset.flags
-                        .filter { it.exclusiveGroup == exclusiveGroup }
-                        .forEach { updatedFlags.remove(it.id) }
-                }
-                updatedFlags.add(flagId)
-            }
-
-            state.copy(
-                enabledFlagIdsByPreset = state.enabledFlagIdsByPreset + (presetId to updatedFlags),
-            )
-        }
-    }
-
-    fun openAddCustomPresetDialog() {
-        _uiState.update { it.copy(showCustomPresetEditor = true, editingCustomPreset = null) }
-    }
-
-    fun openEditCustomPresetDialog(preset: CustomSshPreset) {
-        _uiState.update { it.copy(showCustomPresetEditor = true, editingCustomPreset = preset) }
-    }
-
-    fun dismissCustomPresetEditor() {
-        _uiState.update { it.copy(showCustomPresetEditor = false, editingCustomPreset = null) }
-    }
-
+    fun openAddCustomPresetDialog() = sessionManager.openAddCustomPresetDialog()
+    fun openEditCustomPresetDialog(preset: CustomSshPreset) = sessionManager.openEditCustomPresetDialog(preset)
+    fun dismissCustomPresetEditor() = sessionManager.dismissCustomPresetEditor()
     fun saveCustomPreset(
         id: String?,
         name: String,
         tabTitle: String,
         description: String,
         command: String,
-    ) {
-        viewModelScope.launch {
-            runCatching {
-                vaultRepository.saveCustomPreset(
-                    CustomSshPreset(
-                        id = id.orEmpty(),
-                        name = name,
-                        tabTitle = tabTitle,
-                        description = description,
-                        command = command,
-                    ),
-                )
-            }.onSuccess { saved ->
-                _uiState.update {
-                    it.copy(
-                        selectedPresetId = saved.id,
-                        showCustomPresetEditor = false,
-                        editingCustomPreset = null,
-                        statusMessage = "已保存自定义脚本「${saved.name}」",
-                    )
-                }
-            }.onFailure { err ->
-                _uiState.update { it.copy(statusMessage = err.message ?: "保存自定义脚本失败") }
-            }
-        }
-    }
+    ) = sessionManager.saveCustomPreset(id, name, tabTitle, description, command)
+    fun deleteCustomPreset(presetId: String) = sessionManager.deleteCustomPreset(presetId)
 
-    fun deleteCustomPreset(presetId: String) {
-        viewModelScope.launch {
-            vaultRepository.deleteCustomPreset(presetId)
-            _uiState.update { it.copy(statusMessage = "已删除自定义脚本") }
-        }
-    }
+    fun runSelectedPreset() = sessionManager.runSelectedPreset()
+    fun confirmTrustChangedHostKey() = sessionManager.confirmTrustChangedHostKey()
+    fun dismissHostKeyMismatch() = sessionManager.dismissHostKeyMismatch()
+    fun cancelExecution() = sessionManager.cancelExecution()
 
-    /**
-     * Launches the currently selected preset against the currently selected server.
-     */
-    fun runSelectedPreset() {
-        val state = _uiState.value
-        val server = state.selectedServer
-        if (server == null) {
-            _uiState.update { it.copy(showServerEditor = true, statusMessage = "请先添加一台 VPS 主机") }
-            return
-        }
-        val preset = state.selectedPreset
-        val command = state.resolvedSelectedCommand
-        executePresetOnServer(
-            server = server,
-            preset = preset,
-            command = command,
-            allowHostKeyMismatchOverride = false,
-        )
-    }
+    fun toggleMaskServerIp(enabled: Boolean) = sessionManager.toggleMaskServerIp(enabled)
+    fun adjustConsoleFontScale(delta: Float) = sessionManager.adjustConsoleFontScale(delta)
+    fun resetConsoleFontScale() = sessionManager.resetConsoleFontScale()
+    fun toggleAutoScrollConsole(enabled: Boolean) = sessionManager.toggleAutoScrollConsole(enabled)
 
-    /**
-     * Explicit user confirmation after reviewing a TOFU host key change warning.
-     */
-    fun confirmTrustChangedHostKey() {
-        val prompt = _uiState.value.pendingHostKeyMismatch ?: return
-        val server = _uiState.value.servers.firstOrNull { it.id == prompt.serverId }
-        _uiState.update { it.copy(pendingHostKeyMismatch = null) }
-        if (server == null) return
+    fun viewRun(runId: String?) = sessionManager.viewRun(runId)
+    fun toggleRunForExport(runId: String) = sessionManager.toggleRunForExport(runId)
+    fun removeSessionRun(runId: String) = sessionManager.removeSessionRun(runId)
+    fun clearSessionRuns() = sessionManager.clearSessionRuns()
 
-        viewModelScope.launch {
-            vaultRepository.updateHostKeyFingerprint(
-                serverId = server.id,
-                fingerprintSha256 = prompt.actualHostKey.fingerprintSha256,
-                algorithm = prompt.actualHostKey.algorithm,
-            )
-            val refreshed = _uiState.value.servers.firstOrNull { it.id == server.id }
-                ?: server.copy(
-                    knownHostKeyFingerprint = prompt.actualHostKey.fingerprintSha256,
-                    knownHostKeyAlgorithm = prompt.actualHostKey.algorithm,
-                )
-            executePresetOnServer(
-                server = refreshed,
-                preset = prompt.preset,
-                command = prompt.command,
-                allowHostKeyMismatchOverride = true,
-            )
-        }
-    }
+    fun addHistoryRunToSession(record: SshExecutionRecord) = sessionManager.addHistoryRunToSession(record)
+    fun addHistoryServerGroupToSession(records: List<SshExecutionRecord>) =
+        sessionManager.addHistoryServerGroupToSession(records)
+    fun deleteHistoryRun(runId: String) = sessionManager.deleteHistoryRun(runId)
 
-    fun dismissHostKeyMismatch() {
-        _uiState.update {
-            it.copy(
-                pendingHostKeyMismatch = null,
-                connectionPhase = SshConnectionPhase.CANCELLED,
-                errorMessage = "已因主机密钥变更取消连接",
-            )
-        }
-    }
-
-    /**
-     * Immediately stops the active SSH script and disconnects the underlying session.
-     */
-    fun cancelExecution() {
-        val activeJob = executionJob ?: return
-        val state = _uiState.value
-        executionJob = null
-        elapsedTickerJob?.cancel()
-        elapsedTickerJob = null
-        activeJob.cancel()
-
-        val partialOutput = state.liveAnsiOutput
-        _uiState.update {
-            it.copy(
-                isRunning = false,
-                connectionPhase = SshConnectionPhase.CANCELLED,
-                statusMessage = "已断开 SSH 会话",
-            )
-        }
-
-        if (partialOutput.isNotBlank()) {
-            val server = state.selectedServer
-            val cancelledRecord = SshExecutionRecord(
-                id = idGenerator(),
-                serverId = server?.id.orEmpty(),
-                serverAlias = state.activeServerAlias ?: server?.displayName ?: "VPS",
-                serverHost = state.activeServerHost ?: server?.host.orEmpty(),
-                presetId = state.selectedPreset.id,
-                presetName = state.activePresetName ?: state.selectedPreset.name,
-                tabTitle = state.selectedPreset.tabTitle,
-                command = state.activeCommand,
-                sanitizedAnsiOutput = partialOutput,
-                exitCode = null,
-                status = SshRunStatus.CANCELLED,
-                startedAtEpochMillis = (clock() - state.elapsedMillis).coerceAtLeast(0L),
-                durationMillis = state.elapsedMillis,
-            )
-            appendCompletedSessionRun(cancelledRecord, autoSelect = false)
-        }
-    }
-
-    fun toggleMaskServerIp(enabled: Boolean) {
-        _uiState.update { it.copy(maskServerIp = enabled) }
-    }
-
-    fun adjustConsoleFontScale(delta: Float) {
-        _uiState.update { state ->
-            val next = (state.consoleFontScale + delta).coerceIn(
-                LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
-                LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
-            )
-            state.copy(consoleFontScale = next)
-        }
-    }
-
-    fun resetConsoleFontScale() {
-        _uiState.update { it.copy(consoleFontScale = LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE) }
-    }
-
-    fun toggleAutoScrollConsole(enabled: Boolean) {
-        _uiState.update { it.copy(autoScrollConsole = enabled) }
-    }
-
-    fun viewRun(runId: String?) {
-        _uiState.update { it.copy(viewingRunId = runId) }
-    }
-
-    fun toggleRunForExport(runId: String) {
-        _uiState.update { state ->
-            val next = if (runId in state.selectedRunIdsForExport) {
-                state.selectedRunIdsForExport - runId
-            } else {
-                state.selectedRunIdsForExport + runId
-            }
-            state.copy(selectedRunIdsForExport = next)
-        }
-    }
-
-    fun removeSessionRun(runId: String) {
-        _uiState.update { state ->
-            val nextRuns = state.sessionRuns.filterNot { it.id == runId }
-            val nextViewing = if (state.viewingRunId == runId) nextRuns.lastOrNull()?.id else state.viewingRunId
-            state.copy(
-                sessionRuns = nextRuns,
-                selectedRunIdsForExport = state.selectedRunIdsForExport - runId,
-                viewingRunId = nextViewing,
-            )
-        }
-    }
-
-    fun clearSessionRuns() {
-        _uiState.update {
-            it.copy(
-                sessionRuns = emptyList(),
-                selectedRunIdsForExport = emptySet(),
-                viewingRunId = null,
-                liveAnsiOutput = if (it.isRunning) it.liveAnsiOutput else "",
-                connectionPhase = if (it.isRunning) it.connectionPhase else SshConnectionPhase.IDLE,
-                exitCode = if (it.isRunning) it.exitCode else null,
-                errorMessage = null,
-            )
-        }
-    }
-
-    fun addHistoryRunToSession(record: SshExecutionRecord) {
-        _uiState.update { state ->
-            val alreadyInSession = state.sessionRuns.any { it.id == record.id }
-            val nextSession = if (alreadyInSession) state.sessionRuns else state.sessionRuns + record
-            state.copy(
-                sessionRuns = nextSession,
-                selectedRunIdsForExport = state.selectedRunIdsForExport + record.id,
-                viewingRunId = record.id,
-                showHistorySheet = false,
-                statusMessage = "已载入历史记录「${record.presetName}」",
-            )
-        }
-    }
-
-    fun deleteHistoryRun(runId: String) {
-        viewModelScope.launch {
-            vaultRepository.deleteRunRecord(runId)
-        }
-    }
-
-    fun openExportPreviewSheet() {
-        _uiState.update { it.copy(showExportPreviewSheet = true) }
-    }
-
-    fun dismissExportPreviewSheet() {
-        _uiState.update { it.copy(showExportPreviewSheet = false) }
-    }
-
-    fun openHistorySheet() {
-        _uiState.update { it.copy(showHistorySheet = true) }
-    }
-
-    fun dismissHistorySheet() {
-        _uiState.update { it.copy(showHistorySheet = false) }
-    }
-
-    fun buildExportPayload(): SshFormattedPost? = _uiState.value.exportPreviewPost
-
-    fun consumeStatusMessage() {
-        _uiState.update { it.copy(statusMessage = null) }
-    }
-
-    private fun executePresetOnServer(
-        server: SshServerProfile,
-        preset: SshScriptPreset,
-        command: String,
-        allowHostKeyMismatchOverride: Boolean,
-    ) {
-        executionJob?.cancel()
-        elapsedTickerJob?.cancel()
-
-        val startedAt = clock()
-        _uiState.update {
-            it.copy(
-                isRunning = true,
-                connectionPhase = SshConnectionPhase.CONNECTING,
-                activeServerAlias = server.displayName,
-                activeServerHost = server.host,
-                activePresetName = preset.name,
-                activeCommand = command,
-                liveAnsiOutput = "",
-                elapsedMillis = 0L,
-                exitCode = null,
-                errorMessage = null,
-                viewingRunId = null,
-                pendingHostKeyMismatch = null,
-            )
-        }
-
-        if (enableElapsedTicker) {
-            elapsedTickerJob = viewModelScope.launch {
-                while (isActive) {
-                    delay(ELAPSED_TICK_MS)
-                    val elapsed = (clock() - startedAt).coerceAtLeast(0L)
-                    _uiState.update { state ->
-                        if (state.isRunning) state.copy(elapsedMillis = elapsed) else state
-                    }
-                }
-            }
-        }
-
-        executionJob = viewModelScope.launch {
-            try {
-                val credentials = vaultRepository.decryptCredentials(server)
-                val request = SshConnectionRequest(
-                    host = server.host,
-                    port = server.port,
-                    username = server.username,
-                    authMethod = server.authMethod,
-                    secret = credentials.secret,
-                    passphrase = credentials.passphrase,
-                    expectedHostKeyFingerprint = server.knownHostKeyFingerprint,
-                    allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
-                )
-
-                executor.runCommand(request = request, command = command).collect { event ->
-                    when (event) {
-                        LiteSshExecutionEvent.Connecting -> {
-                            _uiState.update { it.copy(connectionPhase = SshConnectionPhase.CONNECTING) }
-                        }
-                        is LiteSshExecutionEvent.HostKeyChecked -> {
-                            when (val verification = event.verification) {
-                                is HostKeyVerificationResult.FirstUseTrust -> {
-                                    vaultRepository.updateHostKeyFingerprint(
-                                        serverId = server.id,
-                                        fingerprintSha256 = verification.hostKey.fingerprintSha256,
-                                        algorithm = verification.hostKey.algorithm,
-                                    )
-                                    _uiState.update {
-                                        it.copy(
-                                            statusMessage = "首次连接已信任并记录主机指纹 (${verification.hostKey.algorithm})",
-                                        )
-                                    }
-                                }
-                                is HostKeyVerificationResult.KeyChangedWarning -> {
-                                    vaultRepository.updateHostKeyFingerprint(
-                                        serverId = server.id,
-                                        fingerprintSha256 = verification.hostKey.fingerprintSha256,
-                                        algorithm = verification.hostKey.algorithm,
-                                    )
-                                }
-                                is HostKeyVerificationResult.Trusted -> Unit
-                            }
-                        }
-                        LiteSshExecutionEvent.Connected -> {
-                            vaultRepository.markServerConnected(server.id, clock())
-                            _uiState.update { it.copy(connectionPhase = SshConnectionPhase.RUNNING) }
-                        }
-                        is LiteSshExecutionEvent.OutputUpdated -> {
-                            _uiState.update {
-                                it.copy(
-                                    connectionPhase = SshConnectionPhase.RUNNING,
-                                    liveAnsiOutput = event.sanitizedAnsiOutput,
-                                    elapsedMillis = event.elapsedMillis,
-                                )
-                            }
-                        }
-                        is LiteSshExecutionEvent.Completed -> {
-                            val runStatus = if (event.exitCode == 0) {
-                                SshRunStatus.SUCCEEDED
-                            } else {
-                                SshRunStatus.FAILED
-                            }
-                            val record = SshExecutionRecord(
-                                id = idGenerator(),
-                                serverId = server.id,
-                                serverAlias = server.displayName,
-                                serverHost = server.host,
-                                presetId = preset.id,
-                                presetName = preset.name,
-                                tabTitle = preset.tabTitle,
-                                command = command,
-                                sanitizedAnsiOutput = event.sanitizedAnsiOutput,
-                                exitCode = event.exitCode,
-                                status = runStatus,
-                                startedAtEpochMillis = startedAt,
-                                durationMillis = event.elapsedMillis,
-                            )
-                            _uiState.update {
-                                it.copy(
-                                    isRunning = false,
-                                    connectionPhase = SshConnectionPhase.COMPLETED,
-                                    liveAnsiOutput = event.sanitizedAnsiOutput,
-                                    elapsedMillis = event.elapsedMillis,
-                                    exitCode = event.exitCode,
-                                    errorMessage = if (event.exitCode != 0) {
-                                        "脚本退出码为 ${event.exitCode}"
-                                    } else {
-                                        null
-                                    },
-                                )
-                            }
-                            appendCompletedSessionRun(record, autoSelect = record.hasOutput)
-                            if (record.hasOutput) {
-                                vaultRepository.saveRunRecord(record)
-                            }
-                        }
-                    }
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (mismatch: SshHostKeyMismatchException) {
-                _uiState.update {
-                    it.copy(
-                        isRunning = false,
-                        connectionPhase = SshConnectionPhase.FAILED,
-                        errorMessage = "检测到主机密钥变更，已阻断连接",
-                        pendingHostKeyMismatch = PendingHostKeyMismatchPrompt(
-                            serverId = server.id,
-                            serverAlias = server.displayName,
-                            preset = preset,
-                            command = command,
-                            expectedFingerprint = mismatch.expectedFingerprint,
-                            actualHostKey = mismatch.actualHostKey,
-                        ),
-                    )
-                }
-            } catch (t: Throwable) {
-                val friendlyError = formatFriendlySshError(t)
-                val elapsed = (clock() - startedAt).coerceAtLeast(0L)
-                _uiState.update {
-                    it.copy(
-                        isRunning = false,
-                        connectionPhase = SshConnectionPhase.FAILED,
-                        elapsedMillis = elapsed,
-                        errorMessage = friendlyError,
-                        statusMessage = friendlyError,
-                    )
-                }
-            } finally {
-                elapsedTickerJob?.cancel()
-                elapsedTickerJob = null
-                executionJob = null
-            }
-        }
-    }
-
-    private fun appendCompletedSessionRun(
-        record: SshExecutionRecord,
-        autoSelect: Boolean,
-    ) {
-        _uiState.update { state ->
-            val updatedRuns = state.sessionRuns + record
-            val updatedSelection = if (autoSelect) {
-                state.selectedRunIdsForExport + record.id
-            } else {
-                state.selectedRunIdsForExport
-            }
-            state.copy(
-                sessionRuns = updatedRuns,
-                selectedRunIdsForExport = updatedSelection,
-                viewingRunId = record.id,
-            )
-        }
-    }
-
-    private fun formatFriendlySshError(t: Throwable): String {
-        val raw = t.message?.trim().orEmpty()
-        return when {
-            raw.contains("Auth fail", ignoreCase = true) ||
-                raw.contains("Auth cancel", ignoreCase = true) ->
-                "SSH 认证失败：请检查用户名、密码或私钥（及私钥口令）"
-            raw.contains("timeout", ignoreCase = true) ||
-                raw.contains("timed out", ignoreCase = true) ->
-                "连接超时：请检查服务器地址、端口及防火墙设置"
-            raw.contains("Connection refused", ignoreCase = true) ->
-                "连接被拒绝：请确认目标主机的 SSH 服务端口已开放"
-            raw.contains("UnknownHostException", ignoreCase = true) ||
-                raw.contains("Unable to resolve host", ignoreCase = true) ->
-                "无法解析主机域名，请检查服务器地址或网络连接"
-            raw.contains("invalid privatekey", ignoreCase = true) ->
-                "私钥格式无效或私钥密码错误，请确认粘贴完整的 PEM / OpenSSH 私钥"
-            raw.isNotEmpty() -> "SSH 执行异常：$raw"
-            else -> "SSH 连接失败，请稍后重试"
-        }
-    }
+    fun openExportPreviewSheet() = sessionManager.openExportPreviewSheet()
+    fun dismissExportPreviewSheet() = sessionManager.dismissExportPreviewSheet()
+    fun openHistorySheet() = sessionManager.openHistorySheet()
+    fun dismissHistorySheet() = sessionManager.dismissHistorySheet()
+    fun buildExportPayload(): SshFormattedPost? = sessionManager.buildExportPayload()
+    fun consumeStatusMessage() = sessionManager.consumeStatusMessage()
 
     override fun onCleared() {
-        executionJob?.cancel()
-        elapsedTickerJob?.cancel()
+        // Only cancel scope when constructed via standalone test convenience constructor;
+        // production AppContainer sessionManager continues running in background!
+        if (ownsSessionManagerScope) {
+            sessionManager.disposeOwnedScopeForTests()
+        }
         super.onCleared()
     }
 
     companion object {
-        private const val ELAPSED_TICK_MS: Long = 500L
-
         fun factory(context: Context): ViewModelProvider.Factory {
             val appContext = context.applicationContext ?: context
+            val sharedManager = (appContext as? NodePulseApp)?.container?.sshSessionManager
+            if (sharedManager != null) {
+                return factory(sessionManager = sharedManager)
+            }
             return factory(
                 vaultRepository = SshServerVault.getDefault(appContext),
                 executor = LiteSshExecutor(transport = JSchSshTransport()),
             )
+        }
+
+        fun factory(
+            sessionManager: LiteSshSessionManager,
+        ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return LiteSshViewModel(
+                    sessionManager = sessionManager,
+                    ownsSessionManagerScope = false,
+                ) as T
+            }
         }
 
         fun factory(

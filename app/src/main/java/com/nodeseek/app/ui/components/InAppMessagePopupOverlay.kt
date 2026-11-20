@@ -39,6 +39,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Mail
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -243,6 +244,30 @@ private fun rememberPopupSemanticStyle(
                     badgeLabel = "新私信",
                     icon = Icons.Rounded.Mail,
                     actionLabel = "去聊天",
+                )
+            }
+
+            InAppMessageKind.SSH_BENCHMARK_COMPLETED -> if (isDark) {
+                PopupSemanticStyle(
+                    accentColor = ObsidianSecondary,
+                    secondaryAccentColor = Color(0xFF34D399),
+                    badgeContainerColor = Color(0xFF08392D),
+                    badgeContentColor = Color(0xFFA7F3D0),
+                    badgeBorderColor = ObsidianSecondary.copy(alpha = 0.45f),
+                    badgeLabel = "测机完成",
+                    icon = Icons.Rounded.Terminal,
+                    actionLabel = "看报告",
+                )
+            } else {
+                PopupSemanticStyle(
+                    accentColor = PaperSecondary,
+                    secondaryAccentColor = Color(0xFF10B981),
+                    badgeContainerColor = Color(0xFFD1FAE5),
+                    badgeContentColor = Color(0xFF065F46),
+                    badgeBorderColor = PaperSecondary.copy(alpha = 0.26f),
+                    badgeLabel = "测机完成",
+                    icon = Icons.Rounded.Terminal,
+                    actionLabel = "看报告",
                 )
             }
         }
@@ -520,6 +545,9 @@ private fun InAppMessagePopupCard(
 
             InAppMessageKind.DIRECT_MESSAGE ->
                 popup.previewText.takeIf { it.isNotBlank() } ?: "发来一条新私信，点击进入聊天"
+
+            InAppMessageKind.SSH_BENCHMARK_COMPLETED ->
+                popup.previewText.takeIf { it.isNotBlank() } ?: "测机完成，点击返回测机界面查看报告"
         }
     }
 

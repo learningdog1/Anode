@@ -58,6 +58,7 @@ interface AppContainer {
     val fleetWorkScheduler: FleetWorkScheduler
     val netBenchHistoryStore: NetBenchHistoryStore
     val sshVaultRepository: SshVaultRepository
+    val sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager
     val overseasIntelRepository: OverseasIntelRepository
 }
 

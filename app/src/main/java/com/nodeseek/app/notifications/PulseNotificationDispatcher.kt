@@ -17,6 +17,8 @@ import com.nodeseek.app.R
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.radar.LocalAlertRecord
 import com.nodeseek.app.domain.radar.NotificationTapTarget
+import com.nodeseek.app.domain.ssh.SshExecutionRecord
+import com.nodeseek.app.domain.ssh.SshRunStatus
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -60,6 +62,21 @@ open class PulseNotificationDispatcher(
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "收到新的社区私信时通知"
+            },
+            NotificationChannel(
+                CHANNEL_SSH_BENCHMARK_ONGOING,
+                "SSH 后台测机保活",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "SSH 一键测机在后台持续运行时的进度状态通知"
+                setShowBadge(false)
+            },
+            NotificationChannel(
+                CHANNEL_SSH_BENCHMARK_RESULT,
+                "SSH 测机完成提醒",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "当后台 SSH 测评脚本运行结束时通知"
             },
         )
         manager.createNotificationChannels(channels)
@@ -290,6 +307,85 @@ open class PulseNotificationDispatcher(
         notifySafely(notificationId, notification)
     }
 
+    open fun buildSshBenchmarkOngoingNotification(
+        serverAlias: String,
+        presetName: String,
+        statusLine: String,
+        stopPendingIntent: PendingIntent? = null,
+    ): android.app.Notification {
+        ensureChannels()
+        val tapIntent = createTapPendingIntent(
+            target = NotificationTapTarget.OpenLiteSsh,
+            requestCode = ID_SSH_ONGOING,
+        )
+        val cleanAlias = serverAlias.ifBlank { "VPS" }
+        val cleanPreset = presetName.ifBlank { "测机脚本" }
+        val builder = NotificationCompat.Builder(appContext, CHANNEL_SSH_BENCHMARK_ONGOING)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle("正在测机 · $cleanAlias ($cleanPreset)")
+            .setContentText(statusLine)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$statusLine\n点击返回轻量 SSH 测机控制台"))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setProgress(0, 0, true)
+            .setContentIntent(tapIntent)
+        if (stopPendingIntent != null) {
+            builder.addAction(0, "停止测机", stopPendingIntent)
+        }
+        return builder.build()
+    }
+
+    open fun postSshBenchmarkCompletedNotification(
+        record: SshExecutionRecord,
+        errorDetail: String? = null,
+    ) {
+        if (!canPostNotification()) return
+        ensureChannels()
+
+        val notificationId = notificationIdForKey("ssh:${record.id}", BASE_ID_SSH_RESULT)
+        val cleanAlias = record.serverAlias.ifBlank { record.serverHost.ifBlank { "VPS" } }
+        val durationSec = (record.durationMillis / 1000L).coerceAtLeast(0L)
+        val durationLabel = if (durationSec >= 60L) {
+            "${durationSec / 60L}分${durationSec % 60L}秒"
+        } else {
+            "${durationSec}秒"
+        }
+        val title = when (record.status) {
+            SshRunStatus.SUCCEEDED -> "测机完成 · $cleanAlias"
+            SshRunStatus.FAILED -> "测机完成（异常退出）· $cleanAlias"
+            SshRunStatus.CANCELLED -> "测机已停止 · $cleanAlias"
+            SshRunStatus.RUNNING -> "测机进行中 · $cleanAlias"
+        }
+        val summary = when (record.status) {
+            SshRunStatus.SUCCEEDED -> "「${record.presetName}」已完成（耗时 $durationLabel），点击查看报告"
+            SshRunStatus.FAILED -> {
+                val reason = errorDetail?.takeIf { it.isNotBlank() }
+                    ?: record.errorMessage?.takeIf { it.isNotBlank() }
+                    ?: record.exitCode?.let { "退出码 $it" }
+                    ?: "执行失败"
+                "「${record.presetName}」结束（$reason · 耗时 $durationLabel）"
+            }
+            SshRunStatus.CANCELLED -> "「${record.presetName}」已手动停止"
+            SshRunStatus.RUNNING -> "「${record.presetName}」正在运行"
+        }
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_SSH_BENCHMARK_RESULT)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(summary)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$summary\n点击打开轻量 SSH 查看完整 ANSI 输出或一键发布测评帖"))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setAutoCancel(true)
+            .setContentIntent(createTapPendingIntent(NotificationTapTarget.OpenLiteSsh, notificationId))
+            .build()
+
+        notifySafely(notificationId, notification)
+    }
+
     private fun canPostNotification(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -333,6 +429,8 @@ open class PulseNotificationDispatcher(
         const val CHANNEL_TRACKED_REPLIES = "pulse_tracked_replies"
         const val CHANNEL_FORUM_INTERACTIONS = "pulse_forum_interactions"
         const val CHANNEL_DIRECT_MESSAGES = "pulse_direct_messages"
+        const val CHANNEL_SSH_BENCHMARK_ONGOING = "pulse_ssh_benchmark_ongoing"
+        const val CHANNEL_SSH_BENCHMARK_RESULT = "pulse_ssh_benchmark_result"
 
         private const val PREFS_NAME = "nodepulse_notification_prefs"
         private const val KEY_POST_NOTIF_REQUESTED_ONCE = "post_notifications_requested_once"
@@ -353,11 +451,14 @@ open class PulseNotificationDispatcher(
         private const val KIND_TOPIC = "topic"
         private const val KIND_DM = "dm"
         private const val KIND_ALERTS = "radar_alerts"
+        private const val KIND_LITE_SSH = "lite_ssh"
 
         private const val BASE_ID_KEYWORD = 10_000
         private const val BASE_ID_TRACKED = 20_000
         private const val BASE_ID_INTERACTION = 30_000
         private const val BASE_ID_DM = 40_000
+        private const val BASE_ID_SSH_RESULT = 50_000
+        const val ID_SSH_ONGOING = 59_100
 
         internal fun notificationIdForKey(key: String, baseOffset: Int): Int {
             val masked = key.hashCode() and 0x00FF_FFFF
@@ -398,6 +499,10 @@ open class PulseNotificationDispatcher(
                     NotificationTapTarget.OpenRadarAlerts -> {
                         putExtra(EXTRA_TARGET_KIND, KIND_ALERTS)
                     }
+
+                    NotificationTapTarget.OpenLiteSsh -> {
+                        putExtra(EXTRA_TARGET_KIND, KIND_LITE_SSH)
+                    }
                 }
             }
         }
@@ -430,6 +535,7 @@ open class PulseNotificationDispatcher(
                 }
 
                 KIND_ALERTS -> NotificationTapTarget.OpenRadarAlerts
+                KIND_LITE_SSH -> NotificationTapTarget.OpenLiteSsh
                 else -> null
             }
         }
@@ -484,6 +590,7 @@ open class PulseNotificationDispatcher(
                 }
 
                 NotificationTapTarget.OpenRadarAlerts -> "nodepulse://radar/alerts"
+                NotificationTapTarget.OpenLiteSsh -> "nodepulse://radar/lite_ssh"
             }
         }
 
@@ -530,6 +637,7 @@ open class PulseNotificationDispatcher(
                 }
 
                 "alerts" -> NotificationTapTarget.OpenRadarAlerts
+                "lite_ssh" -> NotificationTapTarget.OpenLiteSsh
                 else -> null
             }
         }

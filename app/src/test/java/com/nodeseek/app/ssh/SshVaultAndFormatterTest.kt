@@ -172,27 +172,37 @@ class SshVaultAndFormatterTest {
 
     @Test
     fun `SshPresetCatalog builds non-interactive commands with configurable flags`() {
-        assertEquals(5, SshPresetCatalog.builtInPresets.size)
+        assertEquals(7, SshPresetCatalog.builtInPresets.size)
 
         val yabs = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_YABS)!!
         val defaultCmd = yabs.buildCommand()
         assertTrue(defaultCmd.startsWith(SshPresetCatalog.HEADLESS_ENV_PREFIX))
         assertTrue(defaultCmd.contains("https://yabs.sh"))
+        assertTrue(defaultCmd.contains("stdbuf -oL -eL"))
         assertTrue(defaultCmd.contains("-5"))
 
         val fastYabsCmd = yabs.buildCommand(setOf("yabs_gb5", "yabs_skip_fio", "yabs_skip_iperf"))
         assertTrue(fastYabsCmd.contains("-5 -f -i"))
 
+        val ecs = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_ECS)!!
+        assertTrue(ecs.buildCommand().contains("noninteractive=true"))
+        assertTrue(ecs.buildCommand().contains("-menu=false"))
+
+        val bench = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_BENCH)!!
+        assertTrue(bench.buildCommand().contains("https://bench.sh"))
+
         val nq = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_NODE_QUALITY)!!
         assertTrue(nq.buildCommand().contains("https://run.NodeQuality.com"))
-        assertTrue(nq.buildCommand().contains("-n"))
+        assertTrue(nq.buildCommand().contains("printf '%s\\ny\\n%s\\ny\\n'"))
+        assertFalse(nq.buildCommand().contains("run.NodeQuality.com) -n"))
 
         val nextTrace = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_NEXT_TRACE)!!
         assertTrue(nextTrace.buildCommand(setOf("nt_tcp")).contains("nexttrace --fast-trace --tcp"))
 
         val media = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_MEDIA_UNLOCK)!!
         assertTrue(media.buildCommand().contains("-M 4"))
-        assertTrue(media.buildCommand(setOf("media_v6")).contains("-M 6"))
+        assertTrue(media.buildCommand().contains("-R 0"))
+        assertTrue(media.buildCommand(setOf("media_v6", "media_region_all")).contains("-M 6 -R 66"))
     }
 
     @Test

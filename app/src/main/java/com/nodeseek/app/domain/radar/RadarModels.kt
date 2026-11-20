@@ -128,12 +128,15 @@ sealed interface NotificationTapTarget {
     ) : NotificationTapTarget
 
     data object OpenRadarAlerts : NotificationTapTarget
+
+    data object OpenLiteSsh : NotificationTapTarget
 }
 
 enum class InAppMessageKind {
     REPLY,
     MENTION,
     DIRECT_MESSAGE,
+    SSH_BENCHMARK_COMPLETED,
 }
 
 data class InAppMessagePopup(
@@ -280,7 +283,9 @@ object InboxTargetResolver {
                 val notificationKind = when (popup.kind) {
                     InAppMessageKind.REPLY -> NotificationKind.REPLIES
                     InAppMessageKind.MENTION -> NotificationKind.MENTIONS
-                    InAppMessageKind.DIRECT_MESSAGE -> null
+                    InAppMessageKind.DIRECT_MESSAGE,
+                    InAppMessageKind.SSH_BENCHMARK_COMPLETED,
+                    -> null
                 }
                 NotificationTapTarget.OpenTopic(
                     topicId = popup.topicId,
@@ -303,6 +308,8 @@ object InboxTargetResolver {
                 )
             }
         }
+
+        InAppMessageKind.SSH_BENCHMARK_COMPLETED -> NotificationTapTarget.OpenLiteSsh
     }
 
     private fun normalizeCandidateUrl(rawUrl: String): String? {

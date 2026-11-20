@@ -723,6 +723,19 @@ internal class PreviewAppContainer(
         override suspend fun clearRunRecords() = Unit
     }
 
+    override val sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager by lazy {
+        com.nodeseek.app.ui.ssh.LiteSshSessionManager(
+            vaultRepository = sshVaultRepository,
+            executor = com.nodeseek.app.domain.ssh.LiteSshExecutor(
+                transport = com.nodeseek.app.data.ssh.JSchSshTransport(),
+            ),
+            externalScope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate,
+            ),
+            enableElapsedTicker = false,
+        )
+    }
+
     override val overseasIntelRepository: OverseasIntelRepository = PreviewOverseasIntelRepository()
 }
 

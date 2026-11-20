@@ -3,13 +3,18 @@ package com.nodeseek.app.domain.ssh
 /**
  * Curated catalog of non-interactive VPS benchmark & diagnostic scripts tailored for
  * headless PTY execution on NodeSeek-popular Linux servers.
+ *
+ * Every built-in preset has been audited against its official upstream repository to ensure
+ * zero blocking interactive prompts (`read` / TUI menus / region pickers) and line-buffered
+ * streaming where supported.
  */
 object SshPresetCatalog {
-    const val HEADLESS_ENV_PREFIX: String =
-        "export TERM=xterm-256color DEBIAN_FRONTEND=noninteractive"
+    const val HEADLESS_ENV_PREFIX: String = SshCommandRewriter.HEADLESS_ENV_PREFIX
 
     const val PRESET_QUICK_CHECK = "quick_check"
+    const val PRESET_ECS = "ecs"
     const val PRESET_YABS = "yabs"
+    const val PRESET_BENCH = "bench_sh"
     const val PRESET_NODE_QUALITY = "nodequality"
     const val PRESET_NEXT_TRACE = "nexttrace"
     const val PRESET_MEDIA_UNLOCK = "media_unlock"
@@ -48,13 +53,63 @@ object SshPresetCatalog {
             commandTemplate = QUICK_CHECK_SCRIPT,
         ),
         SshScriptPreset(
+            id = PRESET_ECS,
+            name = "融合怪 (GoECS) 全能体检",
+            tabTitle = "融合怪测评",
+            category = SshPresetCategory.BENCHMARK,
+            description = "oneclickvirt/ecs 全套硬件、IP 安全、流媒体、邮件端口、三网回程与测速无人值守综合测评",
+            estimatedDurationLabel = "~4-8 分钟",
+            // Upstream oneclickvirt/ecs: noninteractive=true skips goecs.sh mirror/env prompts;
+            // -menu=false is required by goecs.go to bypass the interactive TUI menu.
+            // Uses if/elif/else so a non-zero exit code from goecs never triggers a duplicate run.
+            commandTemplate = "export noninteractive=true && (curl -fsSL https://cdn.spiritlhl.net/https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh || curl -fsSL https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh) && chmod +x goecs.sh && ./goecs.sh install && if command -v goecs >/dev/null 2>&1; then goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; elif [ -x ./goecs ]; then ./goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; else /root/goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; fi",
+            flags = listOf(
+                SshPresetFlag(
+                    id = "ecs_no_speed",
+                    label = "跳过三网测速 (-speed=false)",
+                    flag = "-speed=false",
+                    description = "跳过上下行带宽压测，节省流量并缩短耗时",
+                    enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "ecs_no_unlock",
+                    label = "跳过流媒体 (-ut=false)",
+                    flag = "-ut=false",
+                    description = "跳过跨国流媒体平台解锁探测",
+                    enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "ecs_no_nt3",
+                    label = "跳过三网路由 (-nt3=false)",
+                    flag = "-nt3=false",
+                    description = "跳过详细三网回程跳点追踪（保留简要回程线路）",
+                    enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "ecs_disk_dd",
+                    label = "轻量 DD 磁盘 (-diskm dd)",
+                    flag = "-diskm dd",
+                    description = "使用 DD 代替 fio 测试磁盘，减轻小鸡 IO 负担",
+                    enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "ecs_lang_en",
+                    label = "英文输出 (-l en)",
+                    flag = "-l en",
+                    description = "切换英文报告输出",
+                    enabledByDefault = false,
+                ),
+            ),
+        ),
+        SshScriptPreset(
             id = PRESET_YABS,
             name = "YABS 综合跑分",
             tabTitle = "YABS 跑分",
             category = SshPresetCategory.BENCHMARK,
             description = "Yet-Another-Bench-Script 经典硬盘 fio、iperf3 网络与 Geekbench CPU 综合测试",
             estimatedDurationLabel = "~2-5 分钟",
-            commandTemplate = "curl -sL https://yabs.sh | bash -s -- ${SshScriptPreset.FLAGS_PLACEHOLDER}",
+            // Uses stdbuf -oL -eL when available to reduce stdio block buffering during piped execution
+            commandTemplate = "curl -sL https://yabs.sh | ${SshCommandRewriter.STDBUF_INLINE_HELPER} bash -s -- ${SshScriptPreset.FLAGS_PLACEHOLDER}",
             flags = listOf(
                 SshPresetFlag(
                     id = "yabs_gb5",
@@ -86,23 +141,64 @@ object SshPresetCatalog {
                     description = "跳过国际网络测速，节省流量",
                     enabledByDefault = false,
                 ),
+                SshPresetFlag(
+                    id = "yabs_reduce_net",
+                    label = "精简测速节点 (-r)",
+                    flag = "-r",
+                    description = "仅测试 3 个核心 iperf3 节点，减少耗时与流量消耗",
+                    enabledByDefault = false,
+                ),
             ),
+        ),
+        SshScriptPreset(
+            id = PRESET_BENCH,
+            name = "Bench.sh 磁盘与全球测速",
+            tabTitle = "Bench.sh",
+            category = SshPresetCategory.BENCHMARK,
+            description = "秋水逸冰经典脚本，自动采集系统硬件参数、三次 DD 顺序磁盘读写与全球多节点带宽",
+            estimatedDurationLabel = "~2-4 分钟",
+            commandTemplate = "curl -Lso- https://bench.sh | ${SshCommandRewriter.STDBUF_INLINE_HELPER} bash",
         ),
         SshScriptPreset(
             id = PRESET_NODE_QUALITY,
             name = "NodeQuality (NQ) 质量体检",
             tabTitle = "NodeQuality",
             category = SshPresetCategory.BENCHMARK,
-            description = "NodeSeek 社区主流 VPS 体检脚本，一键检测基础硬件、IP 质量、流媒体与三网回程",
+            description = "NodeSeek 社区主流无痕沙箱体检脚本，一键检测基础硬件、IP 质量、流媒体与三网回程",
             estimatedDurationLabel = "~3-6 分钟",
-            commandTemplate = "bash <(curl -sL https://run.NodeQuality.com) -n ${SshScriptPreset.FLAGS_PLACEHOLDER}",
+            // Upstream LloydAsp/NodeQuality: getopts only accepts "D:d:46Ee", while ask_question()
+            // reads 4 stdin lines: HQ [y/f/v/n], IQ [y/n], NQ [y/l/n], BT [y/n].
+            commandTemplate = "NQ_HQ=y; NQ_NQ=y; NQ_ARGS=''; for a in ${SshScriptPreset.FLAGS_PLACEHOLDER}; do case \"${'$'}a\" in -f) NQ_HQ=f;; -l) NQ_NQ=l;; -4|-6|-E) NQ_ARGS=\"${'$'}NQ_ARGS ${'$'}a\";; esac; done; printf '%s\\ny\\n%s\\ny\\n' \"${'$'}NQ_HQ\" \"${'$'}NQ_NQ\" | bash <(curl -sL https://run.NodeQuality.com) ${'$'}NQ_ARGS",
             flags = listOf(
                 SshPresetFlag(
                     id = "nq_low_load",
-                    label = "低负载模式 (-l)",
+                    label = "低流量模式 (-l)",
                     flag = "-l",
-                    description = "适合小内存 / 低配 VPS，减少并发压力",
+                    description = "网络质量阶段自动应答 l（低流量测速模式），节省 VPS 流量",
                     enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "nq_fast_hw",
+                    label = "快速硬件模式 (-f)",
+                    flag = "-f",
+                    description = "硬件测试阶段自动应答 f（快速模式），缩短跑分等待",
+                    enabledByDefault = false,
+                ),
+                SshPresetFlag(
+                    id = "nq_ipv4",
+                    label = "仅 IPv4 (-4)",
+                    flag = "-4",
+                    description = "仅通过 IPv4 执行 IP 质量与回程检测",
+                    enabledByDefault = false,
+                    exclusiveGroup = "nq_ip",
+                ),
+                SshPresetFlag(
+                    id = "nq_ipv6",
+                    label = "仅 IPv6 (-6)",
+                    flag = "-6",
+                    description = "仅通过 IPv6 执行 IP 质量与回程检测",
+                    enabledByDefault = false,
+                    exclusiveGroup = "nq_ip",
                 ),
             ),
         ),
@@ -111,9 +207,10 @@ object SshPresetCatalog {
             name = "NextTrace 三网回程路由",
             tabTitle = "NextTrace 回程",
             category = SshPresetCategory.NETWORK,
-            description = "自动检测或安装 NextTrace，快速追踪电信 / 联通 / 移动三网回程路由与节点 ASN",
+            description = "自动检测或无交互安装 NextTrace，快速追踪电信 / 联通 / 移动三网回程路由与节点 ASN",
             estimatedDurationLabel = "~20-45 秒",
-            commandTemplate = "(command -v nexttrace >/dev/null 2>&1 || curl -sL nxtrace.org/nt | bash) && nexttrace --fast-trace ${SshScriptPreset.FLAGS_PLACEHOLDER}",
+            // Upstream nxtrace/NTrace-core: --fast-trace prompts twice on stdin (1=IPv4/2=IPv6, 1..8=ISP scope)
+            commandTemplate = "export PATH=\"${'$'}PATH:/usr/local/bin:${'$'}HOME/.local/bin\"; (command -v nexttrace >/dev/null 2>&1 || curl -fsSL https://nxtrace.org/nt | bash) && printf '%s\\n1\\n' \"$(case \" ${SshScriptPreset.FLAGS_PLACEHOLDER} \" in *\" --ipv6 \"*) echo 2;; *) echo 1;; esac)\" | nexttrace --fast-trace ${SshScriptPreset.FLAGS_PLACEHOLDER}",
             flags = listOf(
                 SshPresetFlag(
                     id = "nt_tcp",
@@ -126,7 +223,7 @@ object SshPresetCatalog {
                     id = "nt_ipv4",
                     label = "仅 IPv4 (--ipv4)",
                     flag = "--ipv4",
-                    description = "仅执行 IPv4 三网回程追踪",
+                    description = "执行 IPv4 三网回程追踪",
                     enabledByDefault = false,
                     exclusiveGroup = "nt_ip",
                 ),
@@ -134,7 +231,7 @@ object SshPresetCatalog {
                     id = "nt_ipv6",
                     label = "仅 IPv6 (--ipv6)",
                     flag = "--ipv6",
-                    description = "仅执行 IPv6 三网回程追踪",
+                    description = "执行 IPv6 三网回程追踪",
                     enabledByDefault = false,
                     exclusiveGroup = "nt_ip",
                 ),
@@ -147,7 +244,9 @@ object SshPresetCatalog {
             category = SshPresetCategory.UNLOCK,
             description = "非交互快速检测 Netflix / Disney+ / YouTube / ChatGPT / Claude / TikTok 等地区解锁状态",
             estimatedDurationLabel = "~30-60 秒",
-            commandTemplate = "bash <(curl -L -s https://raw.githubusercontent.com/lmc999/RegionRestrictionCheck/main/check.sh) ${SshScriptPreset.FLAGS_PLACEHOLDER}",
+            // Upstream lmc999/RegionRestrictionCheck: -R <region> skips interactive inputOptions();
+            // printf '\n' provides an extra stdin guard if all region flags are deselected.
+            commandTemplate = "printf '\\n' | bash <(curl -L -s https://raw.githubusercontent.com/lmc999/RegionRestrictionCheck/main/check.sh) ${SshScriptPreset.FLAGS_PLACEHOLDER}",
             flags = listOf(
                 SshPresetFlag(
                     id = "media_v4",
@@ -165,6 +264,29 @@ object SshPresetCatalog {
                     enabledByDefault = false,
                     exclusiveGroup = "media_ip",
                 ),
+                SshPresetFlag(
+                    id = "media_region_global",
+                    label = "跨国平台 + AI (-R 0)",
+                    flag = "-R 0",
+                    description = "直测 Netflix / Disney+ / YouTube / TikTok / ChatGPT / Claude 等跨国平台，速度最快",
+                    enabledByDefault = true,
+                    exclusiveGroup = "media_region",
+                ),
+                SshPresetFlag(
+                    id = "media_region_all",
+                    label = "全区域全部平台 (-R 66)",
+                    flag = "-R 66",
+                    description = "覆盖台港澳日韩欧美等全部地区流媒体，耗时较长",
+                    enabledByDefault = false,
+                    exclusiveGroup = "media_region",
+                ),
+                SshPresetFlag(
+                    id = "media_lang_en",
+                    label = "英文报告 (-E en)",
+                    flag = "-E en",
+                    description = "使用英文界面输出检测结果",
+                    enabledByDefault = false,
+                ),
             ),
         ),
     )
@@ -175,18 +297,9 @@ object SshPresetCatalog {
         builtInPresets + customPresets.map { it.toScriptPreset() }
 
     /**
-     * Ensures headless non-interactive environment variables (`TERM=xterm-256color`,
-     * `DEBIAN_FRONTEND=noninteractive`) are exported before executing any command.
+     * Ensures headless non-interactive environment variables and known-script non-interactive
+     * flags/stdin pipes are applied before executing any built-in or custom command.
      */
-    fun wrapHeadlessCommand(rawCommand: String): String {
-        val trimmed = rawCommand.trim()
-        if (trimmed.isEmpty()) return ""
-        return if (trimmed.contains("TERM=xterm-256color") &&
-            trimmed.contains("DEBIAN_FRONTEND=noninteractive")
-        ) {
-            trimmed
-        } else {
-            "$HEADLESS_ENV_PREFIX; $trimmed"
-        }
-    }
+    fun wrapHeadlessCommand(rawCommand: String): String =
+        SshCommandRewriter.rewriteToNonInteractive(rawCommand)
 }

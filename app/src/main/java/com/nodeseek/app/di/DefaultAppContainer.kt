@@ -439,6 +439,26 @@ class DefaultAppContainer(
         SshServerVault.getDefault(appContext)
     }
 
+    override val sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager by lazy {
+        com.nodeseek.app.ui.ssh.LiteSshSessionManager(
+            vaultRepository = sshVaultRepository,
+            executor = com.nodeseek.app.domain.ssh.LiteSshExecutor(
+                transport = com.nodeseek.app.data.ssh.JSchSshTransport(),
+            ),
+            externalScope = applicationScope,
+            foregroundServiceController = com.nodeseek.app.ui.ssh.AndroidSshForegroundServiceController(
+                context = appContext,
+                notificationDispatcher = notificationDispatcher,
+            ),
+            onBenchmarkCompleted = { record, errorDetail ->
+                notificationDispatcher.postSshBenchmarkCompletedNotification(
+                    record = record,
+                    errorDetail = errorDetail,
+                )
+            },
+        )
+    }
+
     fun startBackgroundFeatureSchedulers() {
         restockNotificationHelper.ensureChannel()
         fleetAlertNotifier.ensureChannels()
