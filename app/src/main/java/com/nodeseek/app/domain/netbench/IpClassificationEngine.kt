@@ -267,13 +267,13 @@ object IpClassificationEngine {
 
         // Fallback keyword matching for Chinese carriers
         when {
-            "china telecom" in combined || "chinanet" in combined || "电信" in combined || "chinatelecom" in combined ->
+            "china telecom" in combined || "chinanet" in combined || "电信" in combined || "chinatelecom" in combined || "ctnet" in combined ->
                 return ClientCarrier.CHINA_TELECOM to ClientCarrier.CHINA_TELECOM.label
-            "china unicom" in combined || "china169" in combined || "cncgroup" in combined || "联通" in combined ->
+            "china unicom" in combined || "china169" in combined || "cncgroup" in combined || "联通" in combined || "chinaunicom" in combined ->
                 return ClientCarrier.CHINA_UNICOM to ClientCarrier.CHINA_UNICOM.label
-            "china mobile" in combined || "cmnet" in combined || "cmcc" in combined || "移动" in combined ->
+            "china mobile" in combined || "cmnet" in combined || "cmcc" in combined || "移动" in combined || "chinamobile" in combined ->
                 return ClientCarrier.CHINA_MOBILE to ClientCarrier.CHINA_MOBILE.label
-            "china broadcasting" in combined || "broadnet" in combined || "广电" in combined ->
+            "china broadcasting" in combined || "broadnet" in combined || "广电" in combined || "chinabroadnet" in combined ->
                 return ClientCarrier.CHINA_BROADNET to ClientCarrier.CHINA_BROADNET.label
             "cernet" in combined || "教育网" in combined ->
                 return ClientCarrier.CHINA_EDUCATION to ClientCarrier.CHINA_EDUCATION.label
@@ -294,6 +294,31 @@ object IpClassificationEngine {
     fun countryNameZh(countryCode: String?): String? {
         val norm = normalizeCountryCode(countryCode) ?: return null
         return COUNTRY_NAMES_ZH[norm]
+    }
+
+    /**
+     * Resolves a two-letter ISO country code or Chinese/English country name (e.g. `"中国"`, `"香港"`, `"日本"`)
+     * into a normalized ISO-3166 alpha-2 code.
+     */
+    fun countryCodeFromZhOrName(raw: String?, regionHint: String? = null): String? {
+        val clean = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val region = regionHint?.trim().orEmpty()
+        if (clean == "中国" || clean.equals("China", ignoreCase = true)) {
+            return when {
+                region.contains("香港") || region.equals("Hong Kong", ignoreCase = true) -> "HK"
+                region.contains("台湾") || region.equals("Taiwan", ignoreCase = true) -> "TW"
+                region.contains("澳门") || region.equals("Macau", ignoreCase = true) || region.equals("Macao", ignoreCase = true) -> "MO"
+                else -> "CN"
+            }
+        }
+        if (clean.contains("香港")) return "HK"
+        if (clean.contains("台湾")) return "TW"
+        if (clean.contains("澳门")) return "MO"
+        normalizeCountryCode(clean)?.let { return it }
+        COUNTRY_NAMES_ZH.entries.firstOrNull { (_, zh) ->
+            zh.equals(clean, ignoreCase = true)
+        }?.let { return it.key }
+        return null
     }
 
     fun countryFlagEmoji(countryCode: String?): String {

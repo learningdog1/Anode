@@ -2,10 +2,18 @@ package com.nodeseek.app.netbench
 
 import com.nodeseek.app.data.netbench.IpIntelligenceClient
 import com.nodeseek.app.data.netbench.IpIntelligenceEndpoints
+import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
+import com.nodeseek.app.data.netbench.NetBenchSocketChannel
+import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.domain.netbench.ClientCarrier
+import com.nodeseek.app.domain.netbench.DirectBindFailureReason
+import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
+import com.nodeseek.app.domain.netbench.NetBenchTransportKind
+import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -16,9 +24,18 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.SocketAddress
+import java.net.SocketException
+import java.util.concurrent.atomic.AtomicInteger
+import javax.net.SocketFactory
 
 class IpIntelligenceClientTest {
 
@@ -343,5 +360,304 @@ class IpIntelligenceClientTest {
         val overseas = buildClient().lookupLocalClientNetwork()
         assertEquals(ClientCarrier.OVERSEAS, overseas.carrier)
         assertTrue(overseas.carrierDisplayName.startsWith("海外网络"))
+    }
+
+    @Test
+    fun `detectClientEgress binds real underlying network via socketFactory and dns and exposes both real and proxy IPs`() = runBlocking {
+        val directServer = MockWebServer()
+        directServer.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "success": true,
+                      "ip": "114.240.88.123",
+                      "country_code": "CN",
+                      "region": "Beijing",
+                      "connection": {"asn": 4134, "isp": "ChinaNet", "org": "China Telecom"}
+                    }
+                    """.trimIndent(),
+                )
+        }
+        directServer.start()
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "success": true,
+                      "ip": "45.76.200.10",
+                      "country_code": "JP",
+                      "region": "Tokyo",
+                      "connection": {"asn": 20473, "isp": "The Constant Company", "org": "Vultr"}
+                    }
+                    """.trimIndent(),
+                )
+        }
+
+        val directDnsCalls = AtomicInteger(0)
+        val directSocketCalls = AtomicInteger(0)
+
+        val directChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = object : SocketFactory() {
+                override fun createSocket(): Socket {
+                    directSocketCalls.incrementAndGet()
+                    return object : Socket() {
+                        override fun connect(endpoint: SocketAddress?, timeout: Int) {
+                            val inet = endpoint as? InetSocketAddress
+                            val redirected = if (inet != null && inet.port == server.port) {
+                                InetSocketAddress(InetAddress.getByName("127.0.0.1"), directServer.port)
+                            } else {
+                                endpoint
+                            }
+                            super.connect(redirected, timeout)
+                        }
+                    }
+                }
+                override fun createSocket(host: String?, port: Int) = error("unused")
+                override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int) = error("unused")
+                override fun createSocket(host: InetAddress?, port: Int) = error("unused")
+                override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int) = error("unused")
+            }
+
+            override fun createSocket(): Socket = socketFactory.createSocket()
+
+            override fun resolveAllByName(hostname: String): List<InetAddress> {
+                directDnsCalls.incrementAndGet()
+                return listOf(InetAddress.getByName("127.0.0.1"))
+            }
+        }
+
+        val proxyChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-200"
+            override val transportLabel: String = "VPN 代理"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(proxyChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(directChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, isForeground = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, directChannel, proxyChannel)
+            }
+        }
+
+        try {
+            val client = IpIntelligenceClient(
+                httpClient = OkHttpClient(),
+                endpoints = IpIntelligenceEndpoints(
+                    clientSelfUrls = listOf("ipwho.is" to "http://localhost:${server.port}/self"),
+                ),
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+            )
+
+            val snapshot = client.detectClientEgress()
+
+            assertTrue(snapshot.proxyDetected)
+            assertTrue(snapshot.isVpnActive)
+            assertTrue(snapshot.hasDualExitIps)
+            assertFalse(snapshot.isShowingProxyFallback)
+            assertFalse(snapshot.directBindFailed)
+
+            assertTrue("Expected direct channel DNS to be called", directDnsCalls.get() > 0)
+            assertTrue("Expected direct channel socketFactory to be called", directSocketCalls.get() > 0)
+
+            assertNotNull(snapshot.directNetwork)
+            assertEquals(ClientCarrier.CHINA_TELECOM, snapshot.directNetwork!!.carrier)
+            assertEquals("114.240.88.123", snapshot.directNetwork!!.rawIp)
+            assertEquals("114.240.*.*", snapshot.directNetwork!!.maskedIp)
+            assertEquals(EgressRouteKind.DIRECT, snapshot.directNetwork!!.routeKind)
+            assertEquals("Wi-Fi", snapshot.directNetwork!!.transportLabel)
+
+            assertNotNull(snapshot.proxyNetwork)
+            assertEquals(ClientCarrier.OVERSEAS, snapshot.proxyNetwork!!.carrier)
+            assertEquals("45.76.200.10", snapshot.proxyNetwork!!.rawIp)
+            assertEquals(EgressRouteKind.PROXY, snapshot.proxyNetwork!!.routeKind)
+
+            // lookupLocalClientNetwork should prefer the real underlying ISP network
+            val primary = client.lookupLocalClientNetwork()
+            assertEquals(ClientCarrier.CHINA_TELECOM, primary.carrier)
+        } finally {
+            directServer.shutdown()
+        }
+    }
+
+    @Test
+    fun `detectClientEgress falls back to proxy exit IP with diagnostic when VPN denies bypass`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "success": true,
+                      "ip": "45.76.200.10",
+                      "country_code": "JP",
+                      "region": "Tokyo",
+                      "connection": {"asn": 20473, "isp": "The Constant Company", "org": "Vultr"}
+                    }
+                    """.trimIndent(),
+                )
+        }
+
+        val blockedDirectChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = object : SocketFactory() {
+                override fun createSocket(): Socket {
+                    throw SocketException("bind failed: EPERM (Operation not permitted)")
+                }
+                override fun createSocket(host: String?, port: Int) = error("unused")
+                override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int) = error("unused")
+                override fun createSocket(host: InetAddress?, port: Int) = error("unused")
+                override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int) = error("unused")
+            }
+
+            override fun createSocket(): Socket = socketFactory.createSocket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val proxyChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-200"
+            override val transportLabel: String = "VPN 代理"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(proxyChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(blockedDirectChannel, "wifi-101", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, blockedDirectChannel, proxyChannel)
+            }
+        }
+
+        val client = IpIntelligenceClient(
+            httpClient = OkHttpClient(),
+            endpoints = IpIntelligenceEndpoints(
+                clientSelfUrls = listOf("ipwho.is" to server.url("/self").toString()),
+            ),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = bridge,
+        )
+
+        val snapshot = client.detectClientEgress()
+
+        assertTrue(snapshot.proxyDetected)
+        assertTrue(snapshot.directBindFailed)
+        assertTrue(snapshot.isShowingProxyFallback)
+        assertFalse(snapshot.hasDualExitIps)
+        assertNull(snapshot.directNetwork)
+        assertEquals(DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED, snapshot.directBindFailureReason)
+        assertNotNull(snapshot.proxyNetwork)
+        assertEquals(EgressRouteKind.PROXY_FALLBACK, snapshot.proxyNetwork!!.routeKind)
+        assertEquals(ClientCarrier.OVERSEAS, snapshot.proxyNetwork!!.carrier)
+    }
+
+    @Test
+    fun `parses domestic ipip json fallback and fails over across multiple direct candidates`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/self-ipwhois" -> MockResponse().setResponseCode(500)
+                "/self-ipip" -> MockResponse().setResponseCode(200).setBody(
+                    """{"ret":"ok","data":{"ip":"58.16.14.220","location":["中国","贵州","贵阳","","联通"]}}""",
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val failingWifi = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-broken"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = object : SocketFactory() {
+                override fun createSocket(): Socket = throw SocketException("Network is unreachable (ENETUNREACH)")
+                override fun createSocket(host: String?, port: Int) = error("unused")
+                override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int) = error("unused")
+                override fun createSocket(host: InetAddress?, port: Int) = error("unused")
+                override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int) = error("unused")
+            }
+            override fun createSocket(): Socket = socketFactory.createSocket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val workingCellular = object : NetBenchSocketChannel {
+            override val networkId: String = "cell-5g"
+            override val transportLabel: String = "蜂窝移动"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(failingWifi, "wifi-broken", isVpn = false, hasInternet = true, isValidated = true, isForeground = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                        NetworkDescriptor(workingCellular, "cell-5g", isVpn = false, hasInternet = true, isValidated = true, isForeground = false, transports = setOf(NetBenchTransportKind.CELLULAR)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, failingWifi, workingCellular)
+            }
+        }
+
+        val base = server.url("/").toString().trimEnd('/')
+        val client = IpIntelligenceClient(
+            httpClient = OkHttpClient(),
+            endpoints = IpIntelligenceEndpoints(
+                clientSelfUrls = listOf("ipwho.is" to "$base/self-ipwhois"),
+                clientDirectUrls = listOf(
+                    "ipwho.is" to "$base/self-ipwhois",
+                    "ipip.net" to "$base/self-ipip",
+                ),
+            ),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = bridge,
+        )
+
+        val snapshot = client.detectClientEgress()
+        assertNotNull(snapshot.directNetwork)
+        assertEquals(ClientCarrier.CHINA_UNICOM, snapshot.directNetwork!!.carrier)
+        assertEquals("CN", snapshot.directNetwork!!.countryCode)
+        assertEquals("贵州 贵阳", snapshot.directNetwork!!.regionName)
+        assertEquals("58.16.*.*", snapshot.directNetwork!!.maskedIp)
+        assertEquals("蜂窝移动", snapshot.directNetwork!!.transportLabel)
     }
 }

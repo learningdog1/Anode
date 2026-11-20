@@ -1,7 +1,9 @@
 package com.nodeseek.app.data.netbench
 
+import com.nodeseek.app.domain.netbench.DirectBindFailureReason
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IpFamily
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.ParsedTarget
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
@@ -22,6 +24,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okhttp3.Call
+import okhttp3.ConnectionPool
 import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.OkHttpClient
@@ -34,7 +37,6 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
-import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
@@ -66,15 +68,19 @@ data class ResolvedEndpoint(
 
 /**
  * Resolves IPv4, bracketed/raw IPv6, domain names, and pasted URLs on [ioDispatcher].
+ * When [useProxy] is false, resolves hostnames through the non-VPN underlying physical network
+ * via [networkBridge] so Clash/v2rayNG Fake-IP DNS does not pollute direct probes.
  */
 class NetBenchTargetResolver(
     private val dnsResolver: NetBenchDnsResolver = SystemNetBenchDnsResolver,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
 ) {
     suspend fun resolve(
         rawTarget: String,
         defaultPort: Int,
         preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+        useProxy: Boolean = false,
     ): Result<ResolvedEndpoint> = withContext(ioDispatcher) {
         val parsed = NetBenchTargetParser.parse(rawTarget)
             ?: return@withContext Result.failure(IllegalArgumentException("目标格式无效，请输入有效的 IPv4、IPv6 或域名"))
@@ -85,8 +91,10 @@ class NetBenchTargetResolver(
         try {
             val addresses = if (parsed.isLiteralIp) {
                 listOf(InetAddress.getByName(parsed.host))
-            } else {
+            } else if (dnsResolver !== SystemNetBenchDnsResolver) {
                 dnsResolver.resolveAll(parsed.host)
+            } else {
+                resolveViaNetworkBridge(parsed.host, useProxy)
             }
             if (addresses.isEmpty()) {
                 return@withContext Result.failure(UnknownHostException("域名未返回任何解析记录"))
@@ -129,9 +137,66 @@ class NetBenchTargetResolver(
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: UnknownHostException) {
-            Result.failure(UnknownHostException("DNS 解析失败：无法解析 ${parsed.host}"))
+            Result.failure(UnknownHostException(e.message ?: "DNS 解析失败：无法解析 ${parsed.host}"))
         } catch (e: IOException) {
             Result.failure(IOException("解析目标失败：${e.message ?: e.javaClass.simpleName}", e))
+        }
+    }
+
+    private fun resolveViaNetworkBridge(host: String, useProxy: Boolean): List<InetAddress> {
+        val binding = networkBridge.inspectCurrentNetworks()
+        val plan = binding.plan
+        if (useProxy) {
+            return try {
+                binding.proxyOrDefaultChannel.resolveAllByName(host)
+            } catch (_: UnknownHostException) {
+                throw UnknownHostException("DNS 解析失败：无法解析 $host")
+            }
+        }
+
+        val directCandidates = plan.allDirectCandidates.map { it.token }
+        if (directCandidates.isEmpty()) {
+            if (plan.isVpnActive) {
+                throw UnknownHostException(
+                    "检测到代理/VPN，但未找到可用的非 VPN 底层网络；可开启「经由代理测试」",
+                )
+            }
+            return try {
+                binding.proxyOrDefaultChannel.resolveAllByName(host)
+            } catch (_: UnknownHostException) {
+                throw UnknownHostException("DNS 解析失败：无法解析 $host")
+            }
+        }
+
+        var lastError: Throwable? = null
+        for (channel in directCandidates) {
+            try {
+                val resolved = channel.resolveAllByName(host)
+                if (resolved.isNotEmpty()) return resolved
+            } catch (t: Throwable) {
+                lastError = t
+                val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = t,
+                    isVpnActive = plan.isVpnActive,
+                    hasDirectCandidate = true,
+                )
+                if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                    throw UnknownHostException(
+                        "${reason.userHint}；请开启「经由代理测试」或在 VPN 设置中放行本应用",
+                    )
+                }
+            }
+        }
+
+        val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+            throwable = lastError,
+            isVpnActive = plan.isVpnActive,
+            hasDirectCandidate = true,
+        )
+        throw if (plan.isVpnActive && reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+            UnknownHostException("${reason.userHint}；请开启「经由代理测试」")
+        } else {
+            UnknownHostException("底层网络 DNS 解析失败：无法解析 $host")
         }
     }
 
@@ -158,13 +223,32 @@ fun interface TcpProbeConnector {
     suspend fun connectAndMeasureMs(address: InetAddress, port: Int, timeoutMs: Int): Double
 }
 
-object SocketTcpProbeConnector : TcpProbeConnector {
+/**
+ * Extended connector capable of binding TCP sockets to a specific [NetBenchSocketChannel].
+ */
+interface BoundTcpProbeConnector : TcpProbeConnector {
+    suspend fun connectAndMeasureMs(
+        address: InetAddress,
+        port: Int,
+        timeoutMs: Int,
+        channel: NetBenchSocketChannel,
+    ): Double
+}
+
+object SocketTcpProbeConnector : BoundTcpProbeConnector {
     override suspend fun connectAndMeasureMs(
         address: InetAddress,
         port: Int,
         timeoutMs: Int,
+    ): Double = connectAndMeasureMs(address, port, timeoutMs, SystemDefaultNetworkChannel)
+
+    override suspend fun connectAndMeasureMs(
+        address: InetAddress,
+        port: Int,
+        timeoutMs: Int,
+        channel: NetBenchSocketChannel,
     ): Double {
-        val socket = Socket()
+        val socket = channel.createSocket()
         val job = currentCoroutineContext()[Job]
         val cancelHandle = job?.invokeOnCompletion {
             runCatching { socket.close() }
@@ -189,6 +273,7 @@ class TcpPingRunner(
     private val resolver: NetBenchTargetResolver = NetBenchTargetResolver(),
     private val connector: TcpProbeConnector = SocketTcpProbeConnector,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
 ) {
 
     fun run(config: TcpPingConfig): Flow<TcpPingProgress> = flow {
@@ -200,6 +285,7 @@ class TcpPingRunner(
             rawTarget = config.target,
             defaultPort = config.normalizedPort,
             preferredFamily = config.preferredFamily,
+            useProxy = config.useProxy,
         )
 
         val endpoint = resolvedResult.getOrElse { error ->
@@ -232,48 +318,52 @@ class TcpPingRunner(
             return@flow
         }
 
+        val initialSelection = networkBridge.inspectCurrentNetworks().selectChannel(config.useProxy)
+        var activeChannel: NetBenchSocketChannel = when (initialSelection) {
+            is ChannelSelectionResult.Selected -> initialSelection.channel
+            is ChannelSelectionResult.Blocked -> {
+                val msg = initialSelection.message
+                val failedSummary = TcpPingSummary(
+                    resolvedTarget = endpoint.resolvedTarget,
+                    port = endpoint.effectivePort,
+                    sent = 0,
+                    received = 0,
+                    lossPercent = 100.0,
+                    minMs = null,
+                    avgMs = null,
+                    maxMs = null,
+                    jitterMdevMs = null,
+                    samples = emptyList(),
+                    errorMessage = msg,
+                )
+                emit(
+                    TcpPingProgress(
+                        resolvedTarget = endpoint.resolvedTarget,
+                        port = endpoint.effectivePort,
+                        totalPlanned = plannedCount,
+                        latestSample = null,
+                        samples = emptyList(),
+                        summary = failedSummary,
+                        isFinished = true,
+                        errorMessage = msg,
+                    ),
+                )
+                return@flow
+            }
+        }
+
         val samples = mutableListOf<TcpPingSample>()
         for (seq in 1..plannedCount) {
             currentCoroutineContext().ensureActive()
 
-            val sample = try {
-                val rttMs = connector.connectAndMeasureMs(
-                    address = endpoint.address,
-                    port = endpoint.effectivePort,
-                    timeoutMs = timeoutMs,
-                )
-                TcpPingSample(
-                    seq = seq,
-                    success = true,
-                    rttMs = rttMs,
-                )
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (e: SocketTimeoutException) {
-                TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = "连接超时 (${timeoutMs}ms)",
-                )
-            } catch (e: ConnectException) {
-                TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = "端口拒绝连接",
-                )
-            } catch (e: NoRouteToHostException) {
-                TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = "目标主机不可达",
-                )
-            } catch (e: IOException) {
-                TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = e.message ?: "网络 I/O 异常",
-                )
-            }
+            val sample = executeSingleProbe(
+                seq = seq,
+                endpoint = endpoint,
+                timeoutMs = timeoutMs,
+                useProxy = config.useProxy,
+                activeChannel = activeChannel,
+                onChannelSwitched = { nextChannel -> activeChannel = nextChannel },
+            )
 
             samples.add(sample)
             val snapshot = samples.toList()
@@ -304,6 +394,136 @@ class TcpPingRunner(
             }
         }
     }.flowOn(ioDispatcher)
+
+    private suspend fun executeSingleProbe(
+        seq: Int,
+        endpoint: ResolvedEndpoint,
+        timeoutMs: Int,
+        useProxy: Boolean,
+        activeChannel: NetBenchSocketChannel,
+        onChannelSwitched: (NetBenchSocketChannel) -> Unit,
+    ): TcpPingSample {
+        var currentChannel = activeChannel
+        for (attempt in 0..1) {
+            try {
+                val rttMs = if (connector is BoundTcpProbeConnector) {
+                    connector.connectAndMeasureMs(
+                        address = endpoint.address,
+                        port = endpoint.effectivePort,
+                        timeoutMs = timeoutMs,
+                        channel = currentChannel,
+                    )
+                } else {
+                    connector.connectAndMeasureMs(
+                        address = endpoint.address,
+                        port = endpoint.effectivePort,
+                        timeoutMs = timeoutMs,
+                    )
+                }
+                return TcpPingSample(
+                    seq = seq,
+                    success = true,
+                    rttMs = rttMs,
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: SocketTimeoutException) {
+                return TcpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = "连接超时 (${timeoutMs}ms)",
+                )
+            } catch (e: ConnectException) {
+                if (!useProxy && connector is BoundTcpProbeConnector && attempt == 0) {
+                    val refreshed = networkBridge.inspectCurrentNetworks()
+                    val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                        throwable = e,
+                        isVpnActive = refreshed.plan.isVpnActive,
+                        hasDirectCandidate = refreshed.plan.hasDirectCandidate,
+                    )
+                    if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                        return TcpPingSample(
+                            seq = seq,
+                            success = false,
+                            errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                        )
+                    }
+                    val nextChannel = refreshed.directChannel
+                    if (reason == DirectBindFailureReason.NETWORK_CHANGED_OR_LOST &&
+                        nextChannel != null &&
+                        nextChannel.networkId != currentChannel.networkId
+                    ) {
+                        currentChannel = nextChannel
+                        onChannelSwitched(nextChannel)
+                        continue
+                    }
+                }
+                return TcpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = "端口拒绝连接",
+                )
+            } catch (e: NoRouteToHostException) {
+                return TcpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = "目标主机不可达",
+                )
+            } catch (e: SecurityException) {
+                val refreshed = networkBridge.inspectCurrentNetworks()
+                val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = e,
+                    isVpnActive = refreshed.plan.isVpnActive,
+                    hasDirectCandidate = refreshed.plan.hasDirectCandidate,
+                )
+                return TcpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = if (!useProxy && refreshed.plan.isVpnActive) {
+                        "${reason.userHint}；请开启「经由代理测试」"
+                    } else {
+                        e.message ?: "底层网络权限受限"
+                    },
+                )
+            } catch (e: IOException) {
+                if (!useProxy && connector is BoundTcpProbeConnector) {
+                    val refreshed = networkBridge.inspectCurrentNetworks()
+                    val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                        throwable = e,
+                        isVpnActive = refreshed.plan.isVpnActive,
+                        hasDirectCandidate = refreshed.plan.hasDirectCandidate,
+                    )
+                    if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                        return TcpPingSample(
+                            seq = seq,
+                            success = false,
+                            errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                        )
+                    }
+                    val nextChannel = refreshed.directChannel
+                    if (attempt == 0 &&
+                        reason == DirectBindFailureReason.NETWORK_CHANGED_OR_LOST &&
+                        nextChannel != null &&
+                        nextChannel.networkId != currentChannel.networkId
+                    ) {
+                        currentChannel = nextChannel
+                        onChannelSwitched(nextChannel)
+                        continue
+                    }
+                }
+                return TcpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = e.message ?: "网络 I/O 异常",
+                )
+            }
+        }
+        return TcpPingSample(
+            seq = seq,
+            success = false,
+            errorMessage = "网络 I/O 异常",
+        )
+    }
 
     companion object {
         /**
@@ -372,11 +592,13 @@ class TcpPingRunner(
 class HttpLatencyRunner(
     private val baseHttpClient: OkHttpClient = defaultHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
 ) {
     suspend fun probe(
         rawTarget: String,
         port: Int = 443,
         timeoutMs: Int = 5_000,
+        useProxy: Boolean = false,
     ): HttpLatencyResult = withContext(ioDispatcher) {
         val parsed = NetBenchTargetParser.parse(rawTarget)
             ?: return@withContext HttpLatencyResult(
@@ -394,9 +616,35 @@ class HttpLatencyRunner(
         val omitPort = (scheme == "http" && effectivePort == 80) || (scheme == "https" && effectivePort == 443)
         val url = if (omitPort) "$scheme://$hostFormatted/" else "$scheme://$hostFormatted:$effectivePort/"
 
-        executeRequest(url, method = "HEAD", timeoutMs = timeoutMs).let { headResult ->
+        val binding = networkBridge.inspectCurrentNetworks()
+        val channel = when (val selection = binding.selectChannel(useProxy)) {
+            is ChannelSelectionResult.Selected -> selection.channel
+            is ChannelSelectionResult.Blocked -> {
+                return@withContext HttpLatencyResult(
+                    url = url,
+                    success = false,
+                    errorMessage = selection.message,
+                )
+            }
+        }
+
+        executeRequest(
+            url = url,
+            method = "HEAD",
+            timeoutMs = timeoutMs,
+            channel = channel,
+            binding = binding,
+            useProxy = useProxy,
+        ).let { headResult ->
             if (headResult.statusCode == 405) {
-                executeRequest(url, method = "GET", timeoutMs = timeoutMs)
+                executeRequest(
+                    url = url,
+                    method = "GET",
+                    timeoutMs = timeoutMs,
+                    channel = channel,
+                    binding = binding,
+                    useProxy = useProxy,
+                )
             } else {
                 headResult
             }
@@ -407,6 +655,9 @@ class HttpLatencyRunner(
         url: String,
         method: String,
         timeoutMs: Int,
+        channel: NetBenchSocketChannel,
+        binding: ResolvedNetworkBinding,
+        useProxy: Boolean,
     ): HttpLatencyResult {
         var callStartNanos = 0L
         var tlsStartNanos = 0L
@@ -431,12 +682,15 @@ class HttpLatencyRunner(
             }
         }
 
+        val needsCustomChannel = channel.isDirectPhysical || channel.bypassSystemHttpProxy
+        val tempPool = if (needsCustomChannel) ConnectionPool(1, 5, TimeUnit.SECONDS) else null
         val client = baseHttpClient.newBuilder()
             .eventListener(listener)
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .callTimeout((timeoutMs * 2L).coerceAtMost(12_000L), TimeUnit.MILLISECONDS)
             .followRedirects(false)
+            .bindToChannel(channel, tempPool)
             .build()
 
         val request = Request.Builder()
@@ -476,12 +730,20 @@ class HttpLatencyRunner(
             throw ce
         } catch (e: SocketTimeoutException) {
             HttpLatencyResult(url = url, success = false, errorMessage = "HTTP 请求超时")
+        } catch (e: SecurityException) {
+            HttpLatencyResult(
+                url = url,
+                success = false,
+                errorMessage = binding.formatBindOrIoError(e, useProxy, "HTTP 权限受限"),
+            )
         } catch (e: IOException) {
             HttpLatencyResult(
                 url = url,
                 success = false,
-                errorMessage = e.message?.take(80) ?: "HTTP 连接失败",
+                errorMessage = binding.formatBindOrIoError(e, useProxy, e.message?.take(80) ?: "HTTP 连接失败"),
             )
+        } finally {
+            tempPool?.evictAll()
         }
     }
 

@@ -195,7 +195,12 @@ object NetBenchMarkdownFormatter {
         val family = client?.ipFamily?.takeIf { it != IpFamily.UNKNOWN }
             ?: report.resolvedTarget?.ipFamily?.takeIf { it != IpFamily.UNKNOWN }
             ?: IpFamily.IPV4
-        return "$carrierText · ${family.label}"
+        val base = "$carrierText · ${family.label}"
+        return when {
+            report.testedViaProxy -> "$base · 经由代理"
+            client?.routeKind == EgressRouteKind.PROXY_FALLBACK -> "$base · 代理出口(直连受限)"
+            else -> base
+        }
     }
 
     private fun buildTargetDisplay(report: NetBenchReport, maskTargetIp: Boolean): String {
@@ -284,18 +289,25 @@ object NetBenchMarkdownFormatter {
      * (unless the user intentionally benchmarked that exact IP as the target).
      */
     private fun scrubClientIpIfNeeded(markdown: String, report: NetBenchReport): String {
-        val clientRawIp = report.clientNetwork?.rawIp?.trim()?.takeIf { it.isNotEmpty() } ?: return markdown
         val targetIp = report.resolvedTarget?.resolvedIp?.trim()
-        if (clientRawIp.equals(targetIp, ignoreCase = true) ||
-            clientRawIp.equals(report.targetInput.trim(), ignoreCase = true)
-        ) {
-            return markdown
+        val rawTargetInput = report.targetInput.trim()
+        val sensitiveIps = listOfNotNull(
+            report.clientNetwork?.rawIp?.trim(),
+            report.proxyNetwork?.rawIp?.trim(),
+        ).filter { it.isNotEmpty() }.distinct()
+
+        var sanitized = markdown
+        for (clientRawIp in sensitiveIps) {
+            if (clientRawIp.equals(targetIp, ignoreCase = true) ||
+                clientRawIp.equals(rawTargetInput, ignoreCase = true)
+            ) {
+                continue
+            }
+            if (sanitized.contains(clientRawIp, ignoreCase = true)) {
+                sanitized = sanitized.replace(clientRawIp, "[已隐藏本机IP]", ignoreCase = true)
+            }
         }
-        return if (markdown.contains(clientRawIp, ignoreCase = true)) {
-            markdown.replace(clientRawIp, "[已隐藏本机IP]", ignoreCase = true)
-        } else {
-            markdown
-        }
+        return sanitized
     }
 
     fun formatMs(ms: Double): String = String.format(Locale.US, "%.1f ms", ms)

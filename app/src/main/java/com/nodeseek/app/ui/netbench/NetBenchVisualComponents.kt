@@ -41,13 +41,16 @@ import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -77,7 +80,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
+import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
 import com.nodeseek.app.domain.netbench.IpFamily
@@ -267,6 +272,266 @@ internal fun ResolvedTargetBanner(
             text = resolved.ipFamily.label,
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
             contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Displays the device's real underlying egress IP vs proxy/VPN egress IP simultaneously,
+ * plus an explicit fallback banner when VPN prevents binding to the underlying physical network.
+ */
+@Composable
+internal fun NetBenchClientEgressBanner(
+    egress: ClientEgressSnapshot?,
+    fallbackNetwork: ClientNetworkInfo?,
+    testViaProxy: Boolean,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    onEnableProxyTest: (() -> Unit)? = null,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val direct = egress?.directNetwork
+    val proxy = egress?.proxyNetwork
+    val fallbackSingle = fallbackNetwork?.takeIf { egress == null }
+
+    if (egress == null && fallbackSingle == null && !isRefreshing) return
+
+    val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
+    val isFallbackWarning = egress?.isShowingProxyFallback == true
+
+    val bgColor = when {
+        isFallbackWarning -> ext.drumstickContainer.copy(alpha = if (isDark) 0.28f else 0.52f)
+        else -> MaterialTheme.colorScheme.surfaceContainerLow
+    }
+    val borderColor = when {
+        isFallbackWarning -> ext.onDrumstickContainer.copy(alpha = if (isDark) 0.42f else 0.30f)
+        else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.MediumBadge)
+            .background(bgColor)
+            .border(width = 0.8.dp, color = borderColor, shape = PulseArchitecturalShapes.MediumBadge)
+            .padding(horizontal = 10.dp, vertical = if (compact) 7.dp else 9.dp),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 6.dp),
+    ) {
+        if (egress == null && fallbackSingle == null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(13.dp),
+                    strokeWidth = 1.8.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = "正在检测本机真实出口 IP 与代理状态…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@Column
+        }
+
+        if (isFallbackWarning) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.WarningAmber,
+                    contentDescription = null,
+                    tint = ext.onDrumstickContainer,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = "检测到代理/VPN，以下为代理出口 IP",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ext.onDrumstickContainer,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                )
+                EgressRefreshPill(isRefreshing = isRefreshing, onRefresh = onRefresh)
+            }
+            egress.directBindFailureReason?.let { reason ->
+                Text(
+                    text = reason.userHint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            proxy?.let { proxyInfo ->
+                EgressIpSummaryRow(
+                    badgeText = "代理出口 IP",
+                    info = proxyInfo,
+                    transportFallback = egress.activeTransportLabel,
+                    badgeBg = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    badgeFg = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (!testViaProxy && onEnableProxyTest != null && !compact) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    NetBenchSelectableChip(
+                        label = "切换为「经由代理测试」",
+                        selected = false,
+                        icon = Icons.Rounded.VpnLock,
+                        onClick = onEnableProxyTest,
+                    )
+                }
+            }
+        } else if (egress?.proxyDetected == true) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Security,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    text = if (egress.isVpnActive) "检测到代理/VPN" else "检测到系统代理",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                PulseAccentPill(
+                    text = if (testViaProxy) "经由代理测试" else "直连底层网络",
+                    containerColor = if (testViaProxy) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.primaryContainer
+                    },
+                    contentColor = if (testViaProxy) {
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    },
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                EgressRefreshPill(isRefreshing = isRefreshing, onRefresh = onRefresh)
+            }
+            direct?.let { directInfo ->
+                EgressIpSummaryRow(
+                    badgeText = "真实出口 IP",
+                    info = directInfo,
+                    transportFallback = egress.directTransportLabel,
+                    badgeBg = MaterialTheme.colorScheme.primaryContainer,
+                    badgeFg = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+            proxy?.let { proxyInfo ->
+                EgressIpSummaryRow(
+                    badgeText = "代理出口 IP",
+                    info = proxyInfo,
+                    transportFallback = egress.activeTransportLabel,
+                    badgeBg = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    badgeFg = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            val net = direct ?: fallbackSingle
+            if (net != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        EgressIpSummaryRow(
+                            badgeText = if (net.routeKind == EgressRouteKind.PROXY_FALLBACK) "代理出口 IP" else "真实出口 IP",
+                            info = net,
+                            transportFallback = egress?.directTransportLabel,
+                            badgeBg = MaterialTheme.colorScheme.primaryContainer,
+                            badgeFg = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    EgressRefreshPill(isRefreshing = isRefreshing, onRefresh = onRefresh)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EgressRefreshPill(
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .clickable(enabled = !isRefreshing, onClick = onRefresh)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        if (isRefreshing) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(11.dp),
+                strokeWidth = 1.6.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Rounded.Refresh,
+                contentDescription = "刷新出口 IP",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+        Text(
+            text = if (isRefreshing) "检测中" else "刷新",
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+@Composable
+private fun EgressIpSummaryRow(
+    badgeText: String,
+    info: ClientNetworkInfo,
+    transportFallback: String?,
+    badgeBg: Color,
+    badgeFg: Color,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        PulseAccentPill(
+            text = badgeText,
+            containerColor = badgeBg,
+            contentColor = badgeFg,
+        )
+        val details = buildList {
+            add("${info.carrierDisplayName} · ${info.ipFamily.label}")
+            info.maskedIp?.let { add(it) }
+            info.asn?.let { add(it) }
+            val transport = info.transportLabel ?: transportFallback
+            transport?.let { add(it) }
+        }.joinToString(" · ")
+        Text(
+            text = details,
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -980,6 +1245,7 @@ internal fun NetBenchIpIntelligenceCard(
     clientNetwork: ClientNetworkInfo?,
     compact: Boolean = false,
     modifier: Modifier = Modifier,
+    clientEgress: ClientEgressSnapshot? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val locationText = IpClassificationEngine.formatLocationSummary(
@@ -1106,7 +1372,7 @@ internal fun NetBenchIpIntelligenceCard(
         }
 
         // Local client egress privacy strip
-        if (clientNetwork != null) {
+        if (clientNetwork != null || clientEgress != null) {
             PulseGradientDivider()
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1116,19 +1382,46 @@ internal fun NetBenchIpIntelligenceCard(
                 Icon(
                     imageVector = Icons.Rounded.Security,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = if (clientEgress?.isShowingProxyFallback == true) {
+                        ext.onDrumstickContainer
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
                     modifier = Modifier.size(14.dp),
                 )
                 val clientText = buildString {
-                    append("本机出口：${clientNetwork.carrierDisplayName} · ${clientNetwork.ipFamily.label}")
-                    clientNetwork.maskedIp?.let { append(" ($it)") }
+                    when {
+                        clientEgress?.isShowingProxyFallback == true -> {
+                            val proxy = clientEgress.proxyNetwork
+                            append("检测到代理/VPN，以下为代理出口 IP")
+                            if (proxy != null) {
+                                append("：${proxy.carrierDisplayName} · ${proxy.ipFamily.label}")
+                                proxy.maskedIp?.let { append(" ($it)") }
+                            }
+                        }
+                        clientEgress?.hasDualExitIps == true -> {
+                            val direct = clientEgress.directNetwork!!
+                            val proxy = clientEgress.proxyNetwork!!
+                            append("真实出口：${direct.carrierDisplayName} · ${direct.ipFamily.label}")
+                            direct.maskedIp?.let { append(" ($it)") }
+                            append("\n代理出口：${proxy.carrierDisplayName} · ${proxy.ipFamily.label}")
+                            proxy.maskedIp?.let { append(" ($it)") }
+                        }
+                        else -> {
+                            val net = clientEgress?.directNetwork ?: clientNetwork
+                            if (net != null) {
+                                append("本机出口：${net.carrierDisplayName} · ${net.ipFamily.label}")
+                                net.maskedIp?.let { append(" ($it)") }
+                            }
+                        }
+                    }
                     append(" · 生成报告已自动隐藏本机 IP")
                 }
                 Text(
                     text = clientText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
