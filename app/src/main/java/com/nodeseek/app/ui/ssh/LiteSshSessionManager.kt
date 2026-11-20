@@ -5,6 +5,7 @@ import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
+import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
@@ -17,6 +18,7 @@ import com.nodeseek.app.domain.ssh.SshJumpHostCycleException
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
+import com.nodeseek.app.domain.ssh.SshPresetCategory
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
@@ -287,6 +289,13 @@ class LiteSshSessionManager(
                 allowHostKeyMismatchOverride = true,
                 mismatchOverrideServerId = prompt.mismatchServerId,
             )
+            attachIperf3PostRunWatcherIfNeeded(
+                presetId = prompt.preset.id,
+                server = refreshed,
+                port = Iperf3RemoteServerCommands.validatePort(_uiState.value.iperf3ServerPortText)
+                    ?: Iperf3RemoteServerCommands.DEFAULT_PORT,
+                autoOpenFirewall = _uiState.value.iperf3AutoOpenFirewall,
+            )
         }
     }
 
@@ -491,6 +500,278 @@ class LiteSshSessionManager(
 
     fun consumeStatusMessage() {
         _uiState.update { it.copy(statusMessage = null) }
+    }
+
+    fun openIperf3ServerDialog(
+        preferredHost: String? = null,
+        preferredPort: Int? = null,
+    ) {
+        _uiState.update { state ->
+            val cleanHost = preferredHost?.trim()?.takeIf { it.isNotEmpty() }
+            val matchedServerId = cleanHost?.let { targetHost ->
+                state.servers.firstOrNull { srv ->
+                    srv.host.trim().equals(targetHost, ignoreCase = true)
+                }?.id
+            }
+            val nextPortText = preferredPort
+                ?.takeIf(Iperf3RemoteServerCommands::isValidPort)
+                ?.toString()
+                ?: state.iperf3ServerPortText
+            state.copy(
+                selectedServerId = matchedServerId ?: state.selectedServerId,
+                iperf3ServerPortText = nextPortText,
+                showIperf3ServerDialog = true,
+            )
+        }
+    }
+
+    fun dismissIperf3ServerDialog() {
+        _uiState.update { it.copy(showIperf3ServerDialog = false) }
+    }
+
+    fun updateIperf3ServerPortText(portText: String) {
+        val digits = portText.filter { it.isDigit() }.take(5)
+        _uiState.update { it.copy(iperf3ServerPortText = digits) }
+    }
+
+    fun toggleIperf3AutoOpenFirewall(enabled: Boolean) {
+        _uiState.update { it.copy(iperf3AutoOpenFirewall = enabled) }
+    }
+
+    fun startIperf3Server(
+        portOverride: Int? = null,
+        autoOpenFirewallOverride: Boolean? = null,
+    ) {
+        val state = _uiState.value
+        val server = state.selectedServer
+        if (server == null) {
+            _uiState.update {
+                it.copy(
+                    showIperf3ServerDialog = false,
+                    showServerEditor = true,
+                    statusMessage = "请先添加一台 VPS 主机",
+                )
+            }
+            return
+        }
+        val port = portOverride ?: Iperf3RemoteServerCommands.validatePort(state.iperf3ServerPortText)
+        if (port == null || !Iperf3RemoteServerCommands.isValidPort(port)) {
+            _uiState.update {
+                it.copy(statusMessage = "iperf3 端口必须在 1 ~ 65535 之间")
+            }
+            return
+        }
+        val openFw = autoOpenFirewallOverride ?: state.iperf3AutoOpenFirewall
+        val command = Iperf3RemoteServerCommands.buildCheckAndStartScript(
+            port = port,
+            autoOpenFirewall = openFw,
+        )
+        val preset = SshScriptPreset(
+            id = Iperf3RemoteServerCommands.PRESET_ID_START,
+            name = "开启 iperf3 服务端 ($port)",
+            tabTitle = "iperf3 服务端",
+            category = SshPresetCategory.NETWORK,
+            description = "检测安装状态并在后台守护启动 iperf3 -s -p $port",
+            estimatedDurationLabel = "~3 秒",
+            commandTemplate = command,
+        )
+        _uiState.update {
+            it.copy(
+                iperf3ServerPortText = port.toString(),
+                iperf3AutoOpenFirewall = openFw,
+                showIperf3ServerDialog = false,
+                pendingIperf3InstallPrompt = null,
+            )
+        }
+        executePresetOnServer(
+            server = server,
+            preset = preset,
+            command = command,
+            allowHostKeyMismatchOverride = false,
+        )
+        attachIperf3PostRunWatcherIfNeeded(
+            presetId = preset.id,
+            server = server,
+            port = port,
+            autoOpenFirewall = openFw,
+        )
+    }
+
+    fun confirmInstallAndStartIperf3Server() {
+        val state = _uiState.value
+        val prompt = state.pendingIperf3InstallPrompt ?: return
+        val server = state.servers.firstOrNull { it.id == prompt.serverId } ?: state.selectedServer
+        _uiState.update { it.copy(pendingIperf3InstallPrompt = null) }
+        if (server == null) return
+
+        val command = Iperf3RemoteServerCommands.buildInstallAndStartScript(
+            distro = prompt.probe.distroFamily,
+            isRoot = prompt.probe.isRoot,
+            hasDnf = prompt.probe.hasDnf,
+            port = prompt.port,
+            autoOpenFirewall = prompt.autoOpenFirewall,
+        )
+        val preset = SshScriptPreset(
+            id = Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
+            name = "安装并开启 iperf3 (${prompt.port})",
+            tabTitle = "iperf3 安装与启动",
+            category = SshPresetCategory.NETWORK,
+            description = "自动安装 iperf3 (${prompt.probe.distroFamily.displayLabel}) 并启动后台服务端",
+            estimatedDurationLabel = "~15-45 秒",
+            commandTemplate = command,
+        )
+        executePresetOnServer(
+            server = server,
+            preset = preset,
+            command = command,
+            allowHostKeyMismatchOverride = false,
+        )
+        attachIperf3PostRunWatcherIfNeeded(
+            presetId = preset.id,
+            server = server,
+            port = prompt.port,
+            autoOpenFirewall = prompt.autoOpenFirewall,
+        )
+    }
+
+    fun dismissIperf3InstallPrompt() {
+        _uiState.update { it.copy(pendingIperf3InstallPrompt = null) }
+    }
+
+    fun stopIperf3Server(portOverride: Int? = null) {
+        val state = _uiState.value
+        val server = state.selectedServer
+        if (server == null) {
+            _uiState.update {
+                it.copy(
+                    showIperf3ServerDialog = false,
+                    showServerEditor = true,
+                    statusMessage = "请先添加一台 VPS 主机",
+                )
+            }
+            return
+        }
+        val port = portOverride ?: Iperf3RemoteServerCommands.validatePort(state.iperf3ServerPortText)
+        if (port == null || !Iperf3RemoteServerCommands.isValidPort(port)) {
+            _uiState.update {
+                it.copy(statusMessage = "iperf3 端口必须在 1 ~ 65535 之间")
+            }
+            return
+        }
+        val command = Iperf3RemoteServerCommands.buildStopScript(port = port)
+        val preset = SshScriptPreset(
+            id = Iperf3RemoteServerCommands.PRESET_ID_STOP,
+            name = "停止 iperf3 服务端 ($port)",
+            tabTitle = "停止 iperf3",
+            category = SshPresetCategory.NETWORK,
+            description = "停止 VPS 上运行中的 iperf3 服务端进程",
+            estimatedDurationLabel = "~2 秒",
+            commandTemplate = command,
+        )
+        _uiState.update {
+            it.copy(
+                iperf3ServerPortText = port.toString(),
+                showIperf3ServerDialog = false,
+            )
+        }
+        executePresetOnServer(
+            server = server,
+            preset = preset,
+            command = command,
+            allowHostKeyMismatchOverride = false,
+        )
+        attachIperf3PostRunWatcherIfNeeded(
+            presetId = preset.id,
+            server = server,
+            port = port,
+            autoOpenFirewall = state.iperf3AutoOpenFirewall,
+        )
+    }
+
+    private fun attachIperf3PostRunWatcherIfNeeded(
+        presetId: String,
+        server: SshServerProfile,
+        port: Int,
+        autoOpenFirewall: Boolean,
+    ) {
+        val servicePresetIds = setOf(
+            Iperf3RemoteServerCommands.PRESET_ID_START,
+            Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
+            Iperf3RemoteServerCommands.PRESET_ID_STOP,
+        )
+        if (presetId !in servicePresetIds) return
+        val jobToWatch = executionJob ?: return
+
+        externalScope.launch {
+            jobToWatch.join()
+            val finished = _uiState.value
+            val latestServiceRun = finished.sessionRuns.lastOrNull { it.presetId == presetId }
+            val serviceRunId = latestServiceRun?.id
+
+            if (presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
+                finished.exitCode == Iperf3RemoteServerCommands.EXIT_CODE_NOT_INSTALLED
+            ) {
+                val output = latestServiceRun?.sanitizedAnsiOutput ?: finished.rawConsoleOutput
+                val parsed = Iperf3RemoteServerCommands.parseMissingProbeOutput(output)
+                if (parsed != null) {
+                    _uiState.update { s ->
+                        s.copy(
+                            sessionRuns = if (serviceRunId != null) {
+                                s.sessionRuns.filterNot { it.id == serviceRunId }
+                            } else {
+                                s.sessionRuns
+                            },
+                            selectedRunIdsForExport = if (serviceRunId != null) {
+                                s.selectedRunIdsForExport - serviceRunId
+                            } else {
+                                s.selectedRunIdsForExport
+                            },
+                            viewingRunId = if (s.viewingRunId == serviceRunId) {
+                                s.sessionRuns.lastOrNull { it.id != serviceRunId }?.id
+                            } else {
+                                s.viewingRunId
+                            },
+                            errorMessage = null,
+                            statusMessage = "未检测到 iperf3（${parsed.osRelease.displayTitle}），可一键自动安装",
+                            pendingIperf3InstallPrompt = PendingIperf3InstallPrompt(
+                                serverId = server.id,
+                                serverAlias = server.displayName,
+                                port = port,
+                                autoOpenFirewall = autoOpenFirewall,
+                                probe = parsed,
+                            ),
+                        )
+                    }
+                    if (serviceRunId != null) {
+                        vaultRepository.deleteRunRecord(serviceRunId)
+                    }
+                    return@launch
+                }
+            }
+
+            // Uncheck service utility runs from review export by default so benchmark exports stay clean
+            if (serviceRunId != null) {
+                _uiState.update { s ->
+                    val customStatus = when {
+                        presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
+                            finished.exitCode == Iperf3RemoteServerCommands.EXIT_CODE_PORT_CONFLICT ->
+                            "端口 $port 已被其他进程占用，请更换端口后重试"
+                        presetId in setOf(
+                            Iperf3RemoteServerCommands.PRESET_ID_START,
+                            Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
+                        ) && finished.exitCode == 0 ->
+                            "已在「${server.displayName}」开启 iperf3 服务端（端口 $port）"
+                        presetId == Iperf3RemoteServerCommands.PRESET_ID_STOP && finished.exitCode == 0 ->
+                            "已执行停止「${server.displayName}」的 iperf3 服务端（端口 $port）"
+                        else -> s.statusMessage
+                    }
+                    s.copy(
+                        selectedRunIdsForExport = s.selectedRunIdsForExport - serviceRunId,
+                        statusMessage = customStatus,
+                    )
+                }
+            }
+        }
     }
 
     internal fun disposeOwnedScopeForTests() {

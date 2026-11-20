@@ -68,6 +68,7 @@ import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Preview
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material.icons.rounded.Terminal
@@ -250,6 +251,7 @@ fun LiteSshScreen(
                     selectedServer = uiState.selectedServer,
                     isRunning = uiState.isRunning,
                     elapsedMillis = uiState.elapsedMillis,
+                    iperf3PortLabel = uiState.iperf3ServerPortText.ifBlank { "5201" },
                     onSelectPreset = viewModel::selectPreset,
                     onToggleFlag = { flagId ->
                         viewModel.togglePresetFlag(uiState.selectedPreset.id, flagId)
@@ -259,6 +261,8 @@ fun LiteSshScreen(
                     onDeleteCustomPreset = { pendingDeleteCustomPreset = it },
                     onRunPreset = viewModel::runSelectedPreset,
                     onStopExecution = viewModel::cancelExecution,
+                    onOpenIperf3ServerManager = { viewModel.openIperf3ServerDialog() },
+                    onQuickStopIperf3Server = { viewModel.stopIperf3Server() },
                 )
             }
 
@@ -341,6 +345,35 @@ fun LiteSshScreen(
             prompt = prompt,
             onDismiss = viewModel::dismissHostKeyMismatch,
             onTrustAndContinue = viewModel::confirmTrustChangedHostKey,
+        )
+    }
+
+    if (uiState.showIperf3ServerDialog) {
+        Iperf3ServerControlDialog(
+            servers = uiState.servers,
+            selectedServer = uiState.selectedServer,
+            portText = uiState.iperf3ServerPortText,
+            autoOpenFirewall = uiState.iperf3AutoOpenFirewall,
+            isRunning = uiState.isRunning,
+            onSelectServer = viewModel::selectServer,
+            onAddServer = {
+                viewModel.dismissIperf3ServerDialog()
+                viewModel.openAddServerDialog()
+            },
+            onPortTextChange = viewModel::updateIperf3ServerPortText,
+            onToggleAutoOpenFirewall = viewModel::toggleIperf3AutoOpenFirewall,
+            onStartServer = { viewModel.startIperf3Server() },
+            onStopServer = { viewModel.stopIperf3Server() },
+            onCopyCommand = { cmd -> copyToClipboard(cmd, "已复制防火墙放行命令") },
+            onDismiss = viewModel::dismissIperf3ServerDialog,
+        )
+    }
+
+    uiState.pendingIperf3InstallPrompt?.let { prompt ->
+        Iperf3InstallConfirmDialog(
+            prompt = prompt,
+            onConfirmInstallAndStart = viewModel::confirmInstallAndStartIperf3Server,
+            onDismiss = viewModel::dismissIperf3InstallPrompt,
         )
     }
 
@@ -705,6 +738,7 @@ private fun PresetCatalogSection(
     selectedServer: SshServerProfile?,
     isRunning: Boolean,
     elapsedMillis: Long,
+    iperf3PortLabel: String = "5201",
     onSelectPreset: (String) -> Unit,
     onToggleFlag: (String) -> Unit,
     onAddCustomPreset: () -> Unit,
@@ -712,6 +746,8 @@ private fun PresetCatalogSection(
     onDeleteCustomPreset: (CustomSshPreset) -> Unit,
     onRunPreset: () -> Unit,
     onStopExecution: () -> Unit,
+    onOpenIperf3ServerManager: () -> Unit = {},
+    onQuickStopIperf3Server: () -> Unit = {},
 ) {
     var showCommandPreview by rememberSaveable { mutableStateOf(false) }
 
@@ -731,6 +767,77 @@ private fun PresetCatalogSection(
                 }
             },
         )
+
+        // 1-Click VPS iperf3 Server Utility Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
+                .clickable(enabled = !isRunning, onClick = onOpenIperf3ServerManager)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Speed,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "一键开启 VPS 的 iperf3 服务端",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    PulseAccentPill(
+                        text = ":$iperf3PortLabel",
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    text = "自动检测/安装 iperf3 · 后台守护启动 · 防火墙指引与一键停止",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (selectedServer != null) {
+                OutlinedButton(
+                    onClick = onQuickStopIperf3Server,
+                    enabled = !isRunning,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text("停止", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            FilledTonalButton(
+                onClick = onOpenIperf3ServerManager,
+                enabled = !isRunning,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+            ) {
+                Text("配置/开启", style = MaterialTheme.typography.labelSmall)
+            }
+        }
 
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),

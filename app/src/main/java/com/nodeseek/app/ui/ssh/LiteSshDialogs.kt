@@ -31,27 +31,34 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PostAdd
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +87,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nodeseek.app.domain.ssh.CustomSshPreset
+import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
@@ -1096,4 +1104,430 @@ internal fun runStatusLabel(status: SshRunStatus, exitCode: Int?): String = when
     SshRunStatus.SUCCEEDED -> "成功 (0)"
     SshRunStatus.FAILED -> if (exitCode != null) "退出码 $exitCode" else "失败"
     SshRunStatus.CANCELLED -> "已中断"
+}
+
+/**
+ * 1-click VPS `iperf3` server management dialog (`开启 iperf3 服务端` / `停止 iperf3` / 防火墙指引):
+ * - Custom port input (default `5201`, validated `1..65535`)
+ * - Server selector across saved SSH Vault servers (or quick jump to add a new server)
+ * - Optional automatic firewall rule opening (`ufw` / `firewalld` / `iptables`) + copyable command reference
+ */
+@Composable
+fun Iperf3ServerControlDialog(
+    servers: List<SshServerProfile>,
+    selectedServer: SshServerProfile?,
+    portText: String,
+    autoOpenFirewall: Boolean,
+    isRunning: Boolean,
+    onSelectServer: (String) -> Unit,
+    onAddServer: () -> Unit,
+    onPortTextChange: (String) -> Unit,
+    onToggleAutoOpenFirewall: (Boolean) -> Unit,
+    onStartServer: () -> Unit,
+    onStopServer: () -> Unit,
+    onCopyCommand: ((String) -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val validPort = Iperf3RemoteServerCommands.validatePort(portText)
+    val portInvalid = portText.isNotBlank() && validPort == null
+    val effectivePortForPreview = validPort ?: Iperf3RemoteServerCommands.DEFAULT_PORT
+    val isSelectedRoot = selectedServer?.username?.trim()?.equals("root", ignoreCase = true) == true
+    val firewallHints = remember(effectivePortForPreview, isSelectedRoot) {
+        Iperf3RemoteServerCommands.buildFirewallHintCommands(
+            port = effectivePortForPreview,
+            isRoot = isSelectedRoot,
+        )
+    }
+    var serverMenuExpanded by remember { mutableStateOf(false) }
+    var showFirewallCommands by rememberSaveable { mutableStateOf(false) }
+
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        title = "VPS iperf3 服务端管理",
+        message = "执行前自动检测 iperf3 是否安装及端口占用，支持后台守护启动（-s -p PORT -D / nohup）与一键停止。",
+        icon = Icons.Rounded.Speed,
+        tone = PulseDialogTone.PRIMARY,
+        confirmText = if (selectedServer == null) "先添加 VPS 主机" else "检测并开启服务端",
+        confirmEnabled = !isRunning && (selectedServer == null || validPort != null),
+        onConfirm = {
+            if (selectedServer == null) {
+                onAddServer()
+            } else if (validPort != null) {
+                onStartServer()
+            }
+        },
+        dismissText = "关闭",
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 460.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Target VPS selector
+            if (servers.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f))
+                        .clickable(onClick = onAddServer)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "本地保险库暂无 SSH 主机",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "点击添加目标 VPS 的 SSH 信息即可一键安装/开启 iperf3",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    val shape = RoundedCornerShape(12.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(shape)
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), shape)
+                            .clickable(enabled = servers.size > 1) { serverMenuExpanded = true }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Dns,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "目标 VPS 主机",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = selectedServer?.let { "${it.displayName} (${it.displayAddress})" } ?: "请选择主机",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (servers.size > 1) {
+                            Icon(
+                                imageVector = if (serverMenuExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = "切换主机",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+
+                    PulseDropdownMenu(
+                        expanded = serverMenuExpanded,
+                        onDismissRequest = { serverMenuExpanded = false },
+                        minWidth = 240.dp,
+                        maxWidth = 310.dp,
+                    ) {
+                        servers.forEach { srv ->
+                            PulseDropdownMenuItem(
+                                text = srv.displayName,
+                                subtitle = srv.displayAddress,
+                                icon = Icons.Rounded.Dns,
+                                selected = srv.id == selectedServer?.id,
+                                onClick = {
+                                    onSelectServer(srv.id)
+                                    serverMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Custom Port input + quick presets
+            OutlinedTextField(
+                value = portText,
+                onValueChange = onPortTextChange,
+                label = { Text("iperf3 监听端口（1 ~ 65535）") },
+                placeholder = { Text("默认 5201") },
+                isError = portInvalid || portText.isBlank(),
+                supportingText = {
+                    if (portInvalid || portText.isBlank()) {
+                        Text("请输入 1 ~ 65535 之间的有效端口号")
+                    } else {
+                        Text("后台启动命令：iperf3 -s -p $validPort -D")
+                    }
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                listOf(5201 to "5201 默认", 5202 to "5202", 15201 to "15201").forEach { (presetPort, label) ->
+                    FilterChip(
+                        selected = validPort == presetPort,
+                        onClick = { onPortTextChange(presetPort.toString()) },
+                        label = { Text(label, style = MaterialTheme.typography.labelMedium.withTabularNumbers()) },
+                    )
+                }
+            }
+
+            // Firewall optional auto-open toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pulseCard(shape = RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Security,
+                        contentDescription = null,
+                        tint = if (autoOpenFirewall) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column {
+                        Text(
+                            text = "自动放行系统防火墙",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        Text(
+                            text = "启用 ufw / firewalld / iptables 时自动放行 TCP 端口",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Switch(
+                    checked = autoOpenFirewall,
+                    onCheckedChange = onToggleAutoOpenFirewall,
+                )
+            }
+
+            // Collapsible firewall command reference
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { showFirewallCommands = !showFirewallCommands }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "查看防火墙放行命令（ufw / firewalld / iptables）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Icon(
+                    imageVector = if (showFirewallCommands) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            if (showFirewallCommands) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(PulseArchitecturalShapes.CodeBlock)
+                        .background(ext.codeSurface)
+                        .border(0.8.dp, ext.codeBorder, PulseArchitecturalShapes.CodeBlock)
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(
+                        "UFW (Debian/Ubuntu)" to firewallHints.ufwCommand,
+                        "Firewalld (CentOS/RHEL/Fedora)" to firewallHints.firewalldCommand,
+                        "iptables (通用)" to firewallHints.iptablesCommand,
+                    ).forEach { (title, cmd) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ext.onCodeMuted,
+                                )
+                                Text(
+                                    text = cmd,
+                                    style = NodePulseThemeTokens.extraTypography.codeLabel.copy(fontSize = 11.sp),
+                                    color = ext.onCodeSurface,
+                                )
+                            }
+                            if (onCopyCommand != null) {
+                                IconButton(
+                                    onClick = { onCopyCommand(cmd) },
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ContentCopy,
+                                        contentDescription = "复制放行命令",
+                                        tint = ext.onCodeSurface,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = "提示：阿里云 / 腾讯云 / AWS / Oracle Cloud 等还需在云控制台「安全组」放行 TCP $effectivePortForPreview。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ext.onCodeMuted,
+                    )
+                }
+            }
+
+            // Stop iperf3 button
+            if (selectedServer != null) {
+                OutlinedButton(
+                    onClick = onStopServer,
+                    enabled = !isRunning && validPort != null,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Stop,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("停止「${selectedServer.displayName}」上的 iperf3 服务端")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Confirmation dialog presented when `iperf3` is not yet installed on the target VPS, showing
+ * the detected `/etc/os-release` distribution and exact package-manager command (`root` or `sudo`).
+ */
+@Composable
+fun Iperf3InstallConfirmDialog(
+    prompt: PendingIperf3InstallPrompt,
+    onConfirmInstallAndStart: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val privLabel = when {
+        prompt.probe.isRoot -> "root 账户直装"
+        prompt.probe.hasSudo -> "非 root 账户（自动通过 sudo 提权）"
+        else -> "非 root 账户（未检测到 sudo，可能因权限不足失败）"
+    }
+
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        title = "未安装 iperf3，是否一键安装？",
+        message = "检测到「${prompt.serverAlias}」尚未安装 iperf3。已根据 /etc/os-release 自动适配安装脚本，安装完成后将立即在后台启动端口 ${prompt.port}。",
+        icon = Icons.Rounded.Download,
+        tone = PulseDialogTone.PRIMARY,
+        confirmText = "一键安装并启动",
+        onConfirm = onConfirmInstallAndStart,
+        dismissText = "取消",
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pulseCard(shape = RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = "识别发行版：${prompt.probe.osRelease.displayTitle}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "包管理器：${prompt.probe.distroFamily.displayLabel} (${prompt.probe.distroFamily.packageManagerLabel}) · $privLabel",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (!prompt.probe.isRoot && !prompt.probe.hasSudo) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.errorContainer)
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.WarningAmber,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text(
+                        text = "当前非 root 且未检测到 sudo，建议改用 root 账号连接后再安装。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PulseArchitecturalShapes.CodeBlock)
+                    .background(ext.codeSurface)
+                    .border(0.8.dp, ext.codeBorder, PulseArchitecturalShapes.CodeBlock)
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "将执行的安装命令",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ext.onCodeMuted,
+                )
+                Text(
+                    text = prompt.probe.installCommand,
+                    style = NodePulseThemeTokens.extraTypography.codeLabel.copy(fontSize = 11.sp),
+                    color = ext.onCodeSurface,
+                )
+            }
+        }
+    }
 }

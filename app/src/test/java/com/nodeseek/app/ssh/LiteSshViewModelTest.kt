@@ -5,6 +5,8 @@ import com.nodeseek.app.domain.ssh.HostKeyInfo
 import com.nodeseek.app.domain.ssh.HostKeyTrustPolicy
 import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
 import com.nodeseek.app.domain.ssh.InMemoryTestCipher
+import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
+import com.nodeseek.app.domain.ssh.LinuxDistroFamily
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
@@ -260,5 +262,90 @@ class LiteSshViewModelTest {
         assertFalse(viewModel.uiState.value.isRunning)
         assertEquals(SshConnectionPhase.CANCELLED, viewModel.uiState.value.connectionPhase)
         assertTrue(viewModel.uiState.value.displayedConsoleOutput.contains("Partial benchmark line..."))
+    }
+
+    @Test
+    fun `iperf3 server manager prompts on missing binary installs via distro command starts daemon and stops cleanly`() = runTest {
+        val vault = createVault()
+        vault.saveServer(
+            SshServerDraft(
+                alias = "Rocky9 Node",
+                host = "198.51.100.77",
+                port = 22,
+                username = "ubuntu",
+                authMethod = SshAuthMethod.PASSWORD,
+                secret = "pw",
+            ),
+        )
+
+        val executedCommands = mutableListOf<String>()
+        var installed = false
+
+        val mockTransport = object : SshTransport {
+            override fun execute(request: SshConnectionRequest, command: String): Flow<SshStreamEvent> = flow {
+                executedCommands += command
+                emit(SshStreamEvent.Connected)
+                when {
+                    !installed && command.contains(Iperf3RemoteServerCommands.MISSING_MARKER_PREFIX) -> {
+                        emit(
+                            SshStreamEvent.OutputChunk(
+                                "⚠ 未检测到 iperf3 命令（系统：Rocky Linux 9.4）\n" +
+                                    "__ANODE_IPERF3_MISSING__|id=rocky|id_like=rhel centos fedora|pretty=Rocky Linux 9.4|is_root=0|has_dnf=1|has_sudo=1\n",
+                            ),
+                        )
+                        emit(SshStreamEvent.Completed(exitCode = Iperf3RemoteServerCommands.EXIT_CODE_NOT_INSTALLED))
+                    }
+                    command.contains("dnf install -y iperf3") -> {
+                        installed = true
+                        emit(SshStreamEvent.OutputChunk("✓ iperf3 安装完成\n✓ iperf3 服务端已在后台守护运行（TCP/UDP 端口 15201）\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                    command.contains("已停止 VPS 上的 iperf3 服务端") -> {
+                        emit(SshStreamEvent.OutputChunk("✓ 已停止 VPS 上的 iperf3 服务端（端口 15201）\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                    else -> {
+                        emit(SshStreamEvent.OutputChunk("OK\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                }
+            }
+        }
+
+        val viewModel = LiteSshViewModel(
+            vaultRepository = vault,
+            executor = LiteSshExecutor(transport = mockTransport),
+            enableElapsedTicker = false,
+        )
+
+        // 1. Open dialog pre-matched to host & custom port 15201
+        viewModel.openIperf3ServerDialog(preferredHost = "198.51.100.77", preferredPort = 15201)
+        assertTrue(viewModel.uiState.value.showIperf3ServerDialog)
+        assertEquals("15201", viewModel.uiState.value.iperf3ServerPortText)
+
+        // 2. Attempt start -> detects missing iperf3 and exposes PendingIperf3InstallPrompt
+        viewModel.toggleIperf3AutoOpenFirewall(true)
+        viewModel.startIperf3Server()
+
+        val prompt = viewModel.uiState.value.pendingIperf3InstallPrompt
+        assertNotNull(prompt)
+        assertEquals(15201, prompt!!.port)
+        assertTrue(prompt.autoOpenFirewall)
+        assertEquals(LinuxDistroFamily.CENTOS_RHEL, prompt.probe.distroFamily)
+        assertTrue(prompt.probe.installCommand.contains("sudo dnf install -y iperf3"))
+        assertTrue(prompt.probe.installCommand.contains("epel-release"))
+
+        // 3. Confirm 1-click install & start -> installs and starts daemon on port 15201
+        viewModel.confirmInstallAndStartIperf3Server()
+        assertNull(viewModel.uiState.value.pendingIperf3InstallPrompt)
+        assertTrue(installed)
+        assertTrue(executedCommands.last().contains("PORT=15201"))
+        // Service utility run should not be auto-checked for NodeSeek benchmark export
+        assertTrue(viewModel.uiState.value.selectedRunIdsForExport.isEmpty())
+
+        // 4. Stop iperf3 server
+        viewModel.stopIperf3Server()
+        assertTrue(executedCommands.last().contains("PORT=15201"))
+        assertTrue(executedCommands.last().contains("pkill"))
     }
 }

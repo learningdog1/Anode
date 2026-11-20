@@ -10,6 +10,8 @@ import com.nodeseek.app.data.ssh.SshServerVault
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyInfo
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
+import com.nodeseek.app.domain.ssh.Iperf3MissingProbeResult
+import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
@@ -53,6 +55,18 @@ data class PendingHostKeyMismatchPrompt(
     val mismatchServerId: String = serverId,
 )
 
+/**
+ * Confirmation prompt presented when `iperf3` is not yet installed on the target VPS.
+ */
+@Immutable
+data class PendingIperf3InstallPrompt(
+    val serverId: String,
+    val serverAlias: String,
+    val port: Int,
+    val autoOpenFirewall: Boolean,
+    val probe: Iperf3MissingProbeResult,
+)
+
 @Immutable
 data class LiteSshUiState(
     val servers: List<SshServerProfile> = emptyList(),
@@ -94,6 +108,10 @@ data class LiteSshUiState(
     val showExportPreviewSheet: Boolean = false,
     val showHistorySheet: Boolean = false,
     val statusMessage: String? = null,
+    val showIperf3ServerDialog: Boolean = false,
+    val iperf3ServerPortText: String = Iperf3RemoteServerCommands.DEFAULT_PORT.toString(),
+    val iperf3AutoOpenFirewall: Boolean = false,
+    val pendingIperf3InstallPrompt: PendingIperf3InstallPrompt? = null,
 ) {
     val allPresets: List<SshScriptPreset>
         get() = builtInPresets + customPresets.map { it.toScriptPreset() }
@@ -269,6 +287,17 @@ class LiteSshViewModel(
     fun dismissHistorySheet() = sessionManager.dismissHistorySheet()
     fun buildExportPayload(): SshFormattedPost? = sessionManager.buildExportPayload()
     fun consumeStatusMessage() = sessionManager.consumeStatusMessage()
+
+    fun openIperf3ServerDialog(preferredHost: String? = null, preferredPort: Int? = null) =
+        sessionManager.openIperf3ServerDialog(preferredHost = preferredHost, preferredPort = preferredPort)
+    fun dismissIperf3ServerDialog() = sessionManager.dismissIperf3ServerDialog()
+    fun updateIperf3ServerPortText(portText: String) = sessionManager.updateIperf3ServerPortText(portText)
+    fun toggleIperf3AutoOpenFirewall(enabled: Boolean) = sessionManager.toggleIperf3AutoOpenFirewall(enabled)
+    fun startIperf3Server(portOverride: Int? = null, autoOpenFirewallOverride: Boolean? = null) =
+        sessionManager.startIperf3Server(portOverride = portOverride, autoOpenFirewallOverride = autoOpenFirewallOverride)
+    fun stopIperf3Server(portOverride: Int? = null) = sessionManager.stopIperf3Server(portOverride = portOverride)
+    fun confirmInstallAndStartIperf3Server() = sessionManager.confirmInstallAndStartIperf3Server()
+    fun dismissIperf3InstallPrompt() = sessionManager.dismissIperf3InstallPrompt()
 
     override fun onCleared() {
         // Only cancel scope when constructed via standalone test convenience constructor;
