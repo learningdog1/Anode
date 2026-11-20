@@ -10,6 +10,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -78,7 +79,7 @@ class RadarWorkScheduler internal constructor(
     ) {
         synchronized(observerLock) {
             observerJob?.cancel()
-            observerJob = scope.launch {
+            val job = scope.launch(start = CoroutineStart.LAZY) {
                 pollingSettingsFlow
                     .map { settings -> settings to toScheduleSignature(settings) }
                     .distinctUntilChanged { old, new -> old.second == new.second }
@@ -86,6 +87,8 @@ class RadarWorkScheduler internal constructor(
                         sync(settings)
                     }
             }
+            observerJob = job
+            job.start()
         }
     }
 

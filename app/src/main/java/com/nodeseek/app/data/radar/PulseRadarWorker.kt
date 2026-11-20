@@ -44,6 +44,10 @@ class PulseRadarWorker internal constructor(
             runner()
         } catch (c: CancellationException) {
             throw c
+        } catch (_: UninitializedPropertyAccessException) {
+            // SystemJobService / WorkManager can invoke doWork() during ContentProvider startup
+            // before Application.onCreate() finishes initializing AppContainer; retry cleanly later.
+            return Result.retry()
         } catch (t: Throwable) {
             return if (PulseRadarMonitor.isTransientNetworkFailure(t)) {
                 Result.retry()

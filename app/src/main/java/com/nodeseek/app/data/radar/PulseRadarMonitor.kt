@@ -35,6 +35,7 @@ import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
@@ -166,13 +167,15 @@ class PulseRadarMonitor(
         synchronized(lifecycleLock) {
             isStarted = true
             if (settingsObserverJob?.isActive != true) {
-                settingsObserverJob = scope.launch {
+                val observer = scope.launch(start = CoroutineStart.LAZY) {
                     radarRepository.pollingSettingsFlow
                         .drop(1)
                         .collect {
                             wakeSignal.trySend(Unit)
                         }
                 }
+                settingsObserverJob = observer
+                observer.start()
             }
             if (_runtimeStatus.value.isRunningInForeground || pendingManualTrigger.get()) {
                 launchForegroundLoopLocked()
@@ -226,14 +229,30 @@ class PulseRadarMonitor(
         if (monitorJob?.isActive == true) return
         // Drain any stale non-manual wakeups before entering the fresh loop.
         wakeSignal.tryReceive()
-        lateinit var launched: Job
-        launched = scope.launch {
-            runForegroundPollingLoop(selfJob = launched)
+        // Publish `monitorJob` under `lifecycleLock` via `CoroutineStart.LAZY` BEFORE starting, and
+        // obtain `selfJob` from `currentCoroutineContext()[Job]` instead of a captured `lateinit var`:
+        // when `scope` uses an eager multi-threaded dispatcher (`Dispatchers.IO` warmed up by cold-start
+        // WorkManager / SystemJobService) or an immediate/unconfined dispatcher, `scope.launch` can begin
+        // executing the coroutine body before returning to assign a local `lateinit var` or `monitorJob`.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val selfJob = currentCoroutineContext()[Job]
+            try {
+                runForegroundPollingLoop(selfJob = selfJob)
+            } finally {
+                if (selfJob != null) {
+                    synchronized(lifecycleLock) {
+                        if (monitorJob === selfJob) {
+                            monitorJob = null
+                        }
+                    }
+                }
+            }
         }
-        monitorJob = launched
+        monitorJob = job
+        job.start()
     }
 
-    private suspend fun runForegroundPollingLoop(selfJob: Job) {
+    private suspend fun runForegroundPollingLoop(selfJob: Job?) {
         var lastSkippedCheckAtMillis = 0L
         var hasPerformedStartupPoll = _runtimeStatus.value.lastCheckEpochMillis > 0L
 
@@ -246,7 +265,7 @@ class PulseRadarMonitor(
 
             val shouldExitToBackground = synchronized(lifecycleLock) {
                 if (!_runtimeStatus.value.isRunningInForeground && !pendingManualTrigger.get()) {
-                    if (monitorJob === selfJob) {
+                    if (selfJob != null && monitorJob === selfJob) {
                         monitorJob = null
                     }
                     true
