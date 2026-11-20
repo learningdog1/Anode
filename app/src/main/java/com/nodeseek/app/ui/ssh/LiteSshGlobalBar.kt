@@ -34,21 +34,58 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+
+/**
+ * Minimal, second-bucketed slice of SSH session telemetry observed by [LiteSshRunningGlobalBarHost]
+ * so high-frequency PTY output never triggers root `NodePulseNavHost` recompositions.
+ */
+@Immutable
+data class LiteSshGlobalBarState(
+    val isRunning: Boolean = false,
+    val serverAlias: String = "VPS",
+    val presetName: String = "",
+    val currentStageLabel: String = "",
+    val silentRunningBannerText: String = "",
+    val isSilentLong: Boolean = false,
+    val elapsedSeconds: Long = 0L,
+)
+
+/**
+ * Self-contained host that collects [LiteSshSessionManager.globalBarState] inside a leaf composable
+ * scope (and pauses collection completely when hidden or when the Activity is stopped).
+ */
+@Composable
+fun LiteSshRunningGlobalBarHost(
+    sessionManager: LiteSshSessionManager,
+    visible: Boolean,
+    onReturnToLiteSsh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    val barState = sessionManager.globalBarState.collectAsStateWithLifecycle().value
+    LiteSshRunningGlobalBar(
+        barState = barState,
+        visible = true,
+        onReturnToLiteSsh = onReturnToLiteSsh,
+        modifier = modifier,
+    )
+}
 
 /**
  * Global floating status capsule displayed across the app whenever a background SSH benchmark
@@ -63,8 +100,23 @@ fun LiteSshRunningGlobalBar(
     onReturnToLiteSsh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    LiteSshRunningGlobalBar(
+        barState = uiState.toGlobalBarState(),
+        visible = visible,
+        onReturnToLiteSsh = onReturnToLiteSsh,
+        modifier = modifier,
+    )
+}
+
+@Composable
+fun LiteSshRunningGlobalBar(
+    barState: LiteSshGlobalBarState,
+    visible: Boolean,
+    onReturnToLiteSsh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     AnimatedVisibility(
-        visible = visible && uiState.isRunning,
+        visible = visible && barState.isRunning,
         enter = expandVertically() + fadeIn(),
         exit = shrinkVertically() + fadeOut(),
         modifier = modifier,
@@ -72,7 +124,7 @@ fun LiteSshRunningGlobalBar(
         val ext = NodePulseThemeTokens.extendedColors
         val isDark = NodePulseThemeTokens.isDark
         val pulse = rememberInfiniteTransition(label = "globalSshRunPulse")
-        val dotAlpha by pulse.animateFloat(
+        val dotAlphaState = pulse.animateFloat(
             initialValue = 0.35f,
             targetValue = 1.0f,
             animationSpec = infiniteRepeatable(
@@ -82,16 +134,11 @@ fun LiteSshRunningGlobalBar(
             label = "globalSshDotAlpha",
         )
 
-        val serverAlias = uiState.activeServerAlias
-            ?: uiState.selectedServer?.displayName
-            ?: "VPS"
-        val presetName = uiState.activePresetName ?: uiState.selectedPreset.name
-        val progress = uiState.liveProgress
-        val elapsedClock = formatElapsedClock(uiState.elapsedMillis)
-        val subtitleText = if (progress.isSilentLong) {
-            "${progress.silentRunningBannerText} · $elapsedClock"
+        val elapsedClock = formatElapsedClock(barState.elapsedSeconds * 1_000L)
+        val subtitleText = if (barState.isSilentLong) {
+            "${barState.silentRunningBannerText} · $elapsedClock"
         } else {
-            "${progress.currentStageLabel} · 已运行 $elapsedClock"
+            "${barState.currentStageLabel} · 已运行 $elapsedClock"
         }
 
         Row(
@@ -139,12 +186,12 @@ fun LiteSshRunningGlobalBar(
                     Box(
                         modifier = Modifier
                             .size(7.dp)
-                            .alpha(dotAlpha)
+                            .graphicsLayer { alpha = dotAlphaState.value }
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primary),
                     )
                     Text(
-                        text = "后台测机中 · $serverAlias · $presetName",
+                        text = "后台测机中 · ${barState.serverAlias} · ${barState.presetName}",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -155,7 +202,7 @@ fun LiteSshRunningGlobalBar(
                 Text(
                     text = subtitleText,
                     style = MaterialTheme.typography.bodySmall.withTabularNumbers(),
-                    color = if (progress.isSilentLong) {
+                    color = if (barState.isSilentLong) {
                         MaterialTheme.colorScheme.tertiary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
