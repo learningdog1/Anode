@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is required by design: restock monitoring targets arbitrary user-supplied
+  merchant URLs (many VPS storefronts are plain http://) and the FlareSolverr anti-CF
+  service typically runs on a LAN address like http://192.168.1.10:8191.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

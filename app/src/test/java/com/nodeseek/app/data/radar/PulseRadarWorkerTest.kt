@@ -17,6 +17,7 @@ import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.di.AppContainer
@@ -120,6 +121,7 @@ class PulseRadarWorkerTest {
                 override val restockRepository: RestockRepository get() = error("unused")
                 override val restockMonitorController: RestockMonitorController get() = error("unused")
                 override val restockNotificationHelper: RestockNotificationHelper get() = error("unused")
+                override val flareSolverrClient: FlareSolverrClient get() = error("unused")
                 override val dealsRepository: DealsRepository get() = error("unused")
                 override val sellerTrustRepository: SellerTrustRepository get() = error("unused")
                 override val fleetRepository: FleetRepository get() = error("unused")

@@ -119,6 +119,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.MerchantLinkDetector
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.domain.restock.RestockEventRecord
@@ -147,6 +148,7 @@ import kotlinx.coroutines.launch
 import java.net.URI
 
 private val BACKGROUND_INTERVAL_OPTIONS = listOf(15, 30, 60, 120)
+private val FLARE_SOLVERR_TIMEOUT_OPTIONS_MS = listOf(30_000, 60_000, 90_000)
 
 /**
  * Full-featured VPS Restock & Flash-Sale Monitor screen with:
@@ -162,6 +164,7 @@ fun RestockMonitorScreen(
     repository: RestockRepository,
     monitorController: RestockMonitorController,
     notificationHelper: RestockNotificationHelper,
+    flareSolverrClient: FlareSolverrClient,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     initialTab: Int = 0,
@@ -176,10 +179,12 @@ fun RestockMonitorScreen(
             repository = repository,
             monitorController = monitorController,
             notificationHelper = notificationHelper,
+            flareSolverrClient = flareSolverrClient,
         ),
     )
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
+    val isTestingFlareSolverr by viewModel.isTestingFlareSolverr.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -440,6 +445,7 @@ fun RestockMonitorScreen(
         RestockMonitorSettingsBottomSheet(
             settings = uiState.settings,
             hasNotificationPermission = uiState.hasNotificationPermission,
+            isTestingFlareSolverr = isTestingFlareSolverr,
             onDismiss = { showSettingsSheet = false },
             onToggleMaster = viewModel::setMonitorEnabled,
             onToggleUrgentNotifications = viewModel::setUrgentNotificationsEnabled,
@@ -447,6 +453,10 @@ fun RestockMonitorScreen(
             onSelectBackgroundInterval = viewModel::setBackgroundInterval,
             onToggleWifiOnly = viewModel::setWifiOnlyInBackground,
             onToggleRequireBatteryNotLow = viewModel::setRequireBatteryNotLow,
+            onToggleFlareSolverr = viewModel::setFlareSolverrEnabled,
+            onFlareSolverrBaseUrlChange = viewModel::setFlareSolverrBaseUrl,
+            onSelectFlareSolverrTimeout = viewModel::setFlareSolverrMaxTimeout,
+            onTestFlareSolverr = viewModel::testFlareSolverrConnection,
             onRequestNotificationPermission = requestNotificationPermission,
         )
     }
@@ -1562,6 +1572,7 @@ private fun RestockEventHistoryCard(
 private fun RestockMonitorSettingsBottomSheet(
     settings: RestockMonitorSettings,
     hasNotificationPermission: Boolean,
+    isTestingFlareSolverr: Boolean,
     onDismiss: () -> Unit,
     onToggleMaster: (Boolean) -> Unit,
     onToggleUrgentNotifications: (Boolean) -> Unit,
@@ -1569,6 +1580,10 @@ private fun RestockMonitorSettingsBottomSheet(
     onSelectBackgroundInterval: (Int) -> Unit,
     onToggleWifiOnly: (Boolean) -> Unit,
     onToggleRequireBatteryNotLow: (Boolean) -> Unit,
+    onToggleFlareSolverr: (Boolean) -> Unit,
+    onFlareSolverrBaseUrlChange: (String) -> Unit,
+    onSelectFlareSolverrTimeout: (Int) -> Unit,
+    onTestFlareSolverr: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1677,6 +1692,71 @@ private fun RestockMonitorSettingsBottomSheet(
                 checked = settings.requireBatteryNotLowInBackground,
                 onCheckedChange = onToggleRequireBatteryNotLow,
             )
+
+            PulseGradientDivider()
+
+            SettingSwitchRow(
+                title = "Cloudflare 盾自动突破（FlareSolverr）",
+                subtitle = "商家页触发 CF 人机验证时改由自建 FlareSolverr 解盾后抓取，前台轮询与后台巡检均生效",
+                checked = settings.flareSolverr.enabled,
+                onCheckedChange = onToggleFlareSolverr,
+            )
+
+            if (settings.flareSolverr.enabled) {
+                OutlinedTextField(
+                    value = settings.flareSolverr.baseUrl,
+                    onValueChange = onFlareSolverrBaseUrlChange,
+                    singleLine = true,
+                    label = { Text("FlareSolverr 服务地址") },
+                    placeholder = { Text("http://192.168.1.10:8191") },
+                    supportingText = {
+                        Text("部署在 NAS / VPS 上的 FlareSolverr 实例，默认端口 8191")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "解盾超时预算（${settings.flareSolverr.maxTimeoutMillis / 1000} 秒）",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "挑战页较慢时调大；每次解盾都会在服务端启动真实浏览器页签",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        FLARE_SOLVERR_TIMEOUT_OPTIONS_MS.forEach { millis ->
+                            FilterChip(
+                                selected = settings.flareSolverr.maxTimeoutMillis == millis,
+                                onClick = { onSelectFlareSolverrTimeout(millis) },
+                                label = { Text("${millis / 1000}s") },
+                            )
+                        }
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onTestFlareSolverr,
+                    enabled = !isTestingFlareSolverr,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (isTestingFlareSolverr) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("正在连接…")
+                    } else {
+                        Text("测试连接")
+                    }
+                }
+            }
         }
     }
 }

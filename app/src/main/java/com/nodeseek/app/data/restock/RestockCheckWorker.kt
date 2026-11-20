@@ -68,10 +68,14 @@ class RestockCheckWorker internal constructor(
         }
 
         // Cold-start resilient standalone fallback using the same JSON store file.
+        val standaloneRepository = RestockRepositoryImpl(app)
         val standaloneController = RestockMonitorControllerImpl(
             appContext = app,
-            repository = RestockRepositoryImpl(app),
-            analyzer = StockPageAnalyzer(),
+            repository = standaloneRepository,
+            analyzer = StockPageAnalyzer(
+                flareSolverrClient = FlareSolverrClient(),
+                settingsProvider = { standaloneRepository.getSettingsSnapshot() },
+            ),
             notificationHelper = RestockNotificationHelper(app),
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
         )

@@ -1,7 +1,9 @@
 package com.nodeseek.app.data.restock
 
 import com.nodeseek.app.data.network.UserAgentProvider
+import com.nodeseek.app.domain.restock.FlareSolverrConfig
 import com.nodeseek.app.domain.restock.MerchantPanelType
+import com.nodeseek.app.domain.restock.RestockMonitorSettings
 import com.nodeseek.app.domain.restock.RestockStockStatus
 import com.nodeseek.app.domain.restock.StockAnalysisResult
 import kotlinx.coroutines.CancellationException
@@ -15,18 +17,28 @@ import org.jsoup.nodes.Element
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
  * Fetches and inspects VPS merchant product pages (WHMCS, SolusVM, HostBill, VirtFusion,
  * and generic Chinese/English storefronts) using OkHttp + Jsoup to determine stock status,
  * billing panel type, product title, and price hint.
+ *
+ * When a merchant page is protected by a Cloudflare challenge and a self-hosted
+ * FlareSolverr service is configured via [settingsProvider], the solved HTML returned
+ * by the service is analyzed instead of failing the check. Hosts that have served a
+ * challenge once skip the doomed direct fetch on subsequent polls ([cfProtectedHosts]).
  */
 class StockPageAnalyzer(
     private val httpClient: OkHttpClient = createDefaultHttpClient(),
     private val userAgentProvider: () -> String = { UserAgentProvider.DEFAULT_ANDROID_USER_AGENT },
     private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val flareSolverrClient: FlareSolverrClient? = null,
+    private val settingsProvider: (suspend () -> RestockMonitorSettings)? = null,
 ) {
+
+    private val cfProtectedHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     suspend fun analyzeUrl(
         rawUrl: String,
@@ -50,6 +62,25 @@ class StockPageAnalyzer(
                 errorMessage = "请输入有效的 http:// 或 https:// 商品链接",
                 isTransientNetworkError = false,
                 checkedAtEpochMillis = checkedAt,
+            )
+        }
+
+        val flareSolverrConfig = currentFlareSolverrConfigOrNull()
+        val targetHost = runCatching { URI(resolvedUrl).host?.lowercase()?.trim() }.getOrNull().orEmpty()
+
+        // Hosts that previously served a CF challenge go straight to FlareSolverr: the direct
+        // OkHttp fetch is doomed and typically burns ~5s waiting on the challenge page.
+        if (flareSolverrConfig != null && targetHost.isNotEmpty() && targetHost in cfProtectedHosts) {
+            return@withContext analyzeViaFlareSolverr(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedUrl,
+                targetUrl = resolvedUrl,
+                httpStatusCode = 0,
+                panelType = initialPanel,
+                checkedAt = checkedAt,
+                customInStockKeyword = customInStockKeyword,
+                customOutOfStockKeyword = customOutOfStockKeyword,
+                flareSolverrConfig = flareSolverrConfig,
             )
         }
 
@@ -87,6 +118,22 @@ class StockPageAnalyzer(
                 val rawBody = readBoundedBody(response)
 
                 if (isCloudflareChallenge(statusCode, cfMitigated, rawBody)) {
+                    if (targetHost.isNotEmpty()) {
+                        cfProtectedHosts.add(targetHost)
+                    }
+                    if (flareSolverrConfig != null) {
+                        return@withContext analyzeViaFlareSolverr(
+                            rawUrl = rawUrl,
+                            resolvedOrderUrl = resolvedUrl,
+                            targetUrl = finalUrl,
+                            httpStatusCode = statusCode,
+                            panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
+                            checkedAt = checkedAt,
+                            customInStockKeyword = customInStockKeyword,
+                            customOutOfStockKeyword = customOutOfStockKeyword,
+                            flareSolverrConfig = flareSolverrConfig,
+                        )
+                    }
                     return@withContext StockAnalysisResult(
                         rawUrl = rawUrl,
                         resolvedOrderUrl = resolvedUrl,
@@ -95,7 +142,7 @@ class StockPageAnalyzer(
                         panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
                         stockStatus = RestockStockStatus.CHECK_ERROR,
                         matchedSignal = "触发 Cloudflare 安全验证",
-                        errorMessage = "站点触发 Cloudflare 验证 (HTTP $statusCode)，建议浏览器打开确认",
+                        errorMessage = "站点触发 Cloudflare 验证 (HTTP $statusCode)，可在补货设置中配置 FlareSolverr 自动突破",
                         isTransientNetworkError = false,
                         checkedAtEpochMillis = checkedAt,
                     )
@@ -245,6 +292,86 @@ class StockPageAnalyzer(
             isTransientNetworkError = false,
             checkedAtEpochMillis = checkedAtEpochMillis,
         )
+    }
+
+    /**
+     * FlareSolverr fallback path for Cloudflare-protected merchant pages: delegates the
+     * fetch to the user's self-hosted service and reuses the deterministic [analyzeHtml]
+     * on the solved HTML (no on-device `cf_clearance` re-use, so UA/IP binding is moot).
+     */
+    private suspend fun analyzeViaFlareSolverr(
+        rawUrl: String,
+        resolvedOrderUrl: String,
+        targetUrl: String,
+        httpStatusCode: Int,
+        panelType: MerchantPanelType,
+        checkedAt: Long,
+        customInStockKeyword: String,
+        customOutOfStockKeyword: String,
+        flareSolverrConfig: FlareSolverrConfig,
+    ): StockAnalysisResult {
+        val client = flareSolverrClient
+            ?: return cfChallengeErrorResult(rawUrl, resolvedOrderUrl, targetUrl, httpStatusCode, panelType, checkedAt, failure = null)
+
+        return when (val outcome = client.requestGet(flareSolverrConfig, targetUrl)) {
+            is FlareSolverrOutcome.Solved -> {
+                val analysis = analyzeHtml(
+                    rawUrl = rawUrl,
+                    resolvedOrderUrl = resolvedOrderUrl,
+                    finalUrl = outcome.finalUrl.ifBlank { targetUrl },
+                    html = outcome.html,
+                    httpStatusCode = 200,
+                    customInStockKeyword = customInStockKeyword,
+                    customOutOfStockKeyword = customOutOfStockKeyword,
+                    checkedAtEpochMillis = checkedAt,
+                )
+                analysis.copy(
+                    matchedSignal = "CF 盾已突破（FlareSolverr）· ${analysis.matchedSignal}",
+                    usedFlareSolverr = true,
+                )
+            }
+            is FlareSolverrOutcome.Failure -> cfChallengeErrorResult(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedOrderUrl,
+                targetUrl = targetUrl,
+                httpStatusCode = httpStatusCode,
+                panelType = panelType,
+                checkedAt = checkedAt,
+                failure = outcome,
+            )
+        }
+    }
+
+    private fun cfChallengeErrorResult(
+        rawUrl: String,
+        resolvedOrderUrl: String,
+        targetUrl: String,
+        httpStatusCode: Int,
+        panelType: MerchantPanelType,
+        checkedAt: Long,
+        failure: FlareSolverrOutcome.Failure?,
+    ): StockAnalysisResult = StockAnalysisResult(
+        rawUrl = rawUrl,
+        resolvedOrderUrl = resolvedOrderUrl,
+        finalUrl = targetUrl,
+        httpStatusCode = httpStatusCode,
+        panelType = panelType,
+        stockStatus = RestockStockStatus.CHECK_ERROR,
+        matchedSignal = "触发 Cloudflare 安全验证",
+        errorMessage = if (failure != null) {
+            "Cloudflare 验证突破失败：${failure.reason}"
+        } else {
+            "站点触发 Cloudflare 验证，可在补货设置中配置 FlareSolverr 自动突破"
+        },
+        isTransientNetworkError = failure?.isTransient ?: false,
+        checkedAtEpochMillis = checkedAt,
+    )
+
+    private suspend fun currentFlareSolverrConfigOrNull(): FlareSolverrConfig? {
+        val provider = settingsProvider ?: return null
+        if (flareSolverrClient == null) return null
+        val config = runCatching { provider().flareSolverr }.getOrNull() ?: return null
+        return config.takeIf { it.isConfigured }?.normalized()
     }
 
     private data class StockEvaluation(

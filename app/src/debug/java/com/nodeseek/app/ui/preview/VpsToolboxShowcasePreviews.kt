@@ -306,6 +306,7 @@ fun Showcase02RestockMonitor() {
             repository = container.restockRepository,
             monitorController = container.restockMonitorController,
             notificationHelper = container.restockNotificationHelper,
+            flareSolverrClient = container.flareSolverrClient,
             onBack = {},
             onOpenTopic = {},
             onImportToServerLedger = {},

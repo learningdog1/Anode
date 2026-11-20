@@ -86,6 +86,48 @@ data class RestockEventRecord(
 )
 
 /**
+ * Self-hosted FlareSolverr endpoint used to auto-solve Cloudflare challenges on
+ * monitored merchant pages. The app acts as a pure client: solved HTML comes back
+ * from the service, so `cf_clearance` UA/IP binding never applies on-device.
+ */
+@Immutable
+@Serializable
+data class FlareSolverrConfig(
+    val enabled: Boolean = false,
+    val baseUrl: String = "",
+    val maxTimeoutMillis: Int = DEFAULT_MAX_TIMEOUT_MILLIS,
+) {
+    val isConfigured: Boolean
+        get() = enabled && normalizedBaseUrl.isNotBlank()
+
+    /** Trims and guarantees an http(s) scheme so [java.net.URI] parsing always works. */
+    val normalizedBaseUrl: String
+        get() {
+            val trimmed = baseUrl.trim()
+            if (trimmed.isBlank()) return ""
+            val withScheme = if (trimmed.startsWith("http://", true) ||
+                trimmed.startsWith("https://", true)
+            ) {
+                trimmed
+            } else {
+                "http://$trimmed"
+            }
+            return withScheme.trimEnd('/')
+        }
+
+    fun normalized(): FlareSolverrConfig = copy(
+        baseUrl = normalizedBaseUrl,
+        maxTimeoutMillis = maxTimeoutMillis.coerceIn(MIN_MAX_TIMEOUT_MILLIS, MAX_MAX_TIMEOUT_MILLIS),
+    )
+
+    companion object {
+        const val MIN_MAX_TIMEOUT_MILLIS = 15_000
+        const val MAX_MAX_TIMEOUT_MILLIS = 120_000
+        const val DEFAULT_MAX_TIMEOUT_MILLIS = 60_000
+    }
+}
+
+/**
  * Global monitor and WorkManager background polling configuration.
  */
 @Immutable
@@ -97,6 +139,7 @@ data class RestockMonitorSettings(
     val wifiOnlyInBackground: Boolean = false,
     val requireBatteryNotLowInBackground: Boolean = false,
     val urgentNotificationsEnabled: Boolean = true,
+    val flareSolverr: FlareSolverrConfig = FlareSolverrConfig(),
 ) {
     fun normalized(): RestockMonitorSettings = copy(
         defaultPollIntervalMinutes = RestockWatchItem.clampPollInterval(defaultPollIntervalMinutes),
@@ -104,6 +147,7 @@ data class RestockMonitorSettings(
             MIN_BACKGROUND_INTERVAL_MINUTES,
             MAX_BACKGROUND_INTERVAL_MINUTES,
         ),
+        flareSolverr = flareSolverr.normalized(),
     )
 
     companion object {
@@ -128,6 +172,7 @@ data class StockAnalysisResult(
     val matchedSignal: String = "",
     val errorMessage: String? = null,
     val isTransientNetworkError: Boolean = false,
+    val usedFlareSolverr: Boolean = false,
     val checkedAtEpochMillis: Long = System.currentTimeMillis(),
 )
 

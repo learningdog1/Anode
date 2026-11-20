@@ -3,6 +3,7 @@ package com.nodeseek.app.di
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.domain.backup.BackupManager
@@ -50,6 +51,7 @@ interface AppContainer {
     val restockRepository: RestockRepository
     val restockMonitorController: RestockMonitorController
     val restockNotificationHelper: RestockNotificationHelper
+    val flareSolverrClient: FlareSolverrClient
     val dealsRepository: DealsRepository
     val sellerTrustRepository: SellerTrustRepository
     val fleetRepository: FleetRepository

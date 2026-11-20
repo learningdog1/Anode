@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.MerchantLinkDetector
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.domain.restock.MerchantPanelType
@@ -20,6 +21,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -48,6 +50,7 @@ class RestockMonitorViewModel(
     private val repository: RestockRepository,
     private val monitorController: RestockMonitorController,
     private val notificationHelper: RestockNotificationHelper,
+    private val flareSolverrClient: FlareSolverrClient,
 ) : ViewModel() {
 
     private val _quickUrlInput = MutableStateFlow("")
@@ -56,7 +59,11 @@ class RestockMonitorViewModel(
     private val _hasNotificationPermission = MutableStateFlow(
         runCatching { notificationHelper.hasPostNotificationsPermission() }.getOrDefault(true),
     )
+    private val _isTestingFlareSolverr = MutableStateFlow(false)
     private val _snackbarChannel = Channel<String>(Channel.BUFFERED)
+
+    /** Kept outside [uiState] (its `combine` is already at the 5-flow limit). */
+    val isTestingFlareSolverr: StateFlow<Boolean> = _isTestingFlareSolverr.asStateFlow()
 
     val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
 
@@ -386,6 +393,48 @@ class RestockMonitorViewModel(
         }
     }
 
+    fun setFlareSolverrEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.updateSettings { it.copy(flareSolverr = it.flareSolverr.copy(enabled = enabled)) }
+        }
+    }
+
+    fun setFlareSolverrBaseUrl(baseUrl: String) {
+        viewModelScope.launch {
+            repository.updateSettings { it.copy(flareSolverr = it.flareSolverr.copy(baseUrl = baseUrl.trim())) }
+        }
+    }
+
+    fun setFlareSolverrMaxTimeout(timeoutMillis: Int) {
+        viewModelScope.launch {
+            repository.updateSettings { it.copy(flareSolverr = it.flareSolverr.copy(maxTimeoutMillis = timeoutMillis)) }
+        }
+    }
+
+    fun testFlareSolverrConnection() {
+        if (_isTestingFlareSolverr.value) return
+        viewModelScope.launch {
+            val config = repository.getSettingsSnapshot().flareSolverr
+            if (config.baseUrl.isBlank()) {
+                _snackbarChannel.trySend("请先填写 FlareSolverr 服务地址")
+                return@launch
+            }
+            _isTestingFlareSolverr.value = true
+            try {
+                val reachable = flareSolverrClient.ping(config)
+                _snackbarChannel.trySend(
+                    if (reachable) {
+                        "FlareSolverr 连接成功，CF 盾自动突破已就绪"
+                    } else {
+                        "FlareSolverr 连接失败，请检查服务地址与运行状态"
+                    },
+                )
+            } finally {
+                _isTestingFlareSolverr.value = false
+            }
+        }
+    }
+
     private fun deriveFallbackTitle(url: String): String {
         val host = runCatching { URI(url).host }.getOrNull()?.removePrefix("www.").orEmpty()
         return if (host.isNotBlank()) "$host VPS" else "VPS 商品监控"
@@ -396,6 +445,7 @@ class RestockMonitorViewModel(
             repository: RestockRepository,
             monitorController: RestockMonitorController,
             notificationHelper: RestockNotificationHelper,
+            flareSolverrClient: FlareSolverrClient,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -403,6 +453,7 @@ class RestockMonitorViewModel(
                     repository = repository,
                     monitorController = monitorController,
                     notificationHelper = notificationHelper,
+                    flareSolverrClient = flareSolverrClient,
                 ) as T
             }
         }

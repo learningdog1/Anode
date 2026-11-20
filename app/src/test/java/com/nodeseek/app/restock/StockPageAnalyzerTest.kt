@@ -1,7 +1,10 @@
 package com.nodeseek.app.restock
 
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.StockPageAnalyzer
+import com.nodeseek.app.domain.restock.FlareSolverrConfig
 import com.nodeseek.app.domain.restock.MerchantPanelType
+import com.nodeseek.app.domain.restock.RestockMonitorSettings
 import com.nodeseek.app.domain.restock.RestockStockStatus
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
@@ -368,7 +371,7 @@ class StockPageAnalyzerTest {
         assertEquals(RestockStockStatus.OUT_OF_STOCK, redirected.stockStatus)
         assertTrue(redirected.finalUrl.contains("outofstock"))
 
-        // 2. Cloudflare challenge -> CHECK_ERROR (non-transient)
+        // 2. Cloudflare challenge -> CHECK_ERROR (non-transient, with FlareSolverr setup hint)
         server.enqueue(
             MockResponse()
                 .setResponseCode(403)
@@ -379,6 +382,7 @@ class StockPageAnalyzerTest {
         assertEquals(RestockStockStatus.CHECK_ERROR, cf.stockStatus)
         assertFalse(cf.isTransientNetworkError)
         assertNotNull(cf.errorMessage)
+        assertTrue(cf.errorMessage!!.contains("FlareSolverr"))
 
         // 3. HTTP 503 -> CHECK_ERROR (transient)
         server.enqueue(MockResponse().setResponseCode(503).setBody("Service Unavailable"))
@@ -391,5 +395,140 @@ class StockPageAnalyzerTest {
         val disconnected = analyzer.analyzeUrl(server.url("/cart.php?a=add&pid=102").toString())
         assertEquals(RestockStockStatus.CHECK_ERROR, disconnected.stockStatus)
         assertTrue(disconnected.isTransientNetworkError)
+    }
+
+    private fun flareSolverrAnalyzer(flareServer: MockWebServer): StockPageAnalyzer =
+        StockPageAnalyzer(
+            httpClient = OkHttpClient.Builder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build(),
+            clockMillis = { 1_760_000_000_000L },
+            flareSolverrClient = FlareSolverrClient(),
+            settingsProvider = {
+                RestockMonitorSettings(
+                    flareSolverr = FlareSolverrConfig(
+                        enabled = true,
+                        baseUrl = flareServer.url("/").toString().trimEnd('/'),
+                    ),
+                )
+            },
+        )
+
+    private fun flareSolverrOkBody(html: String, finalUrl: String): String =
+        """{"status":"ok","message":"Challenge solved!","solution":{"url":"$finalUrl","status":200,"userAgent":"Mozilla/5.0 CF","response":"$html"}}"""
+
+    private val solvedInStockHtml = """
+        <html><head><title>CF Shop</title></head><body>
+          <div id=order-standard_cart>
+            <form id=frmConfigureProduct action=cart.php?a=confproduct method=post>
+              <div class=product-info><p class=product-title>2 GB KVM VPS CF Special</p></div>
+              <select name=billingcycle id=inputBillingcycle>
+                <option value=annually selected>9.99 USD Annually</option>
+              </select>
+              <button type=submit id=btnCompleteProductConfig class=btn-primary>Continue</button>
+            </form>
+          </div>
+        </body></html>
+    """.trimIndent()
+
+    @Test
+    fun `analyzeUrl solves Cloudflare challenge via FlareSolverr and analyzes the solved html`() = runTest {
+        val flareServer = MockWebServer()
+        flareServer.start()
+        val fsAnalyzer = flareSolverrAnalyzer(flareServer)
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><title>Just a moment...</title></html>"),
+        )
+        flareServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                flareSolverrOkBody(solvedInStockHtml, server.url("/cart.php?a=add&pid=118").toString()),
+            ),
+        )
+
+        val result = fsAnalyzer.analyzeUrl(server.url("/cart.php?a=add&pid=118").toString())
+
+        assertEquals(RestockStockStatus.IN_STOCK, result.stockStatus)
+        assertTrue(result.usedFlareSolverr)
+        assertTrue(result.matchedSignal.startsWith("CF 盾已突破（FlareSolverr）"))
+        assertEquals("2 GB KVM VPS CF Special", result.detectedTitle)
+
+        val flareRequest = flareServer.takeRequest()
+        assertEquals("/v1", flareRequest.path)
+        assertTrue(flareRequest.body.readUtf8().contains("\"cmd\":\"request.get\""))
+        flareServer.shutdown()
+    }
+
+    @Test
+    fun `analyzeUrl learns Cloudflare hosts and routes subsequent checks straight to FlareSolverr`() = runTest {
+        val flareServer = MockWebServer()
+        flareServer.start()
+        val fsAnalyzer = flareSolverrAnalyzer(flareServer)
+        val watchedUrl = server.url("/cart.php?a=add&pid=201").toString()
+
+        // 1st check: direct fetch eats the challenge, FlareSolverr solves it (OOS page)
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><title>Just a moment...</title></html>"),
+        )
+        flareServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                flareSolverrOkBody(
+                    "<html><body><main><h1>Flash Deal</h1><p>Out of Stock - please check back later</p></main></body></html>",
+                    watchedUrl,
+                ),
+            ),
+        )
+        val first = fsAnalyzer.analyzeUrl(watchedUrl)
+        assertEquals(RestockStockStatus.OUT_OF_STOCK, first.stockStatus)
+        assertTrue(first.usedFlareSolverr)
+
+        // 2nd check on the same host: merchant server must NOT be hit again
+        flareServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                flareSolverrOkBody(solvedInStockHtml, watchedUrl),
+            ),
+        )
+        val second = fsAnalyzer.analyzeUrl(watchedUrl)
+        assertTrue(second.usedFlareSolverr)
+        assertEquals(RestockStockStatus.IN_STOCK, second.stockStatus)
+
+        assertEquals(1, server.requestCount)
+        assertEquals(2, flareServer.requestCount)
+        flareServer.shutdown()
+    }
+
+    @Test
+    fun `analyzeUrl surfaces FlareSolverr failure reason when the challenge stays unsolved`() = runTest {
+        val flareServer = MockWebServer()
+        flareServer.start()
+        val fsAnalyzer = flareSolverrAnalyzer(flareServer)
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><title>Just a moment...</title></html>"),
+        )
+        flareServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"status":"error","message":"Captcha detected"}""",
+            ),
+        )
+
+        val result = fsAnalyzer.analyzeUrl(server.url("/cart.php?a=add&pid=300").toString())
+
+        assertEquals(RestockStockStatus.CHECK_ERROR, result.stockStatus)
+        assertFalse(result.usedFlareSolverr)
+        assertNotNull(result.errorMessage)
+        assertTrue(result.errorMessage!!.contains("Captcha detected"))
+        assertFalse(result.isTransientNetworkError)
+        flareServer.shutdown()
     }
 }

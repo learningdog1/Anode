@@ -1533,6 +1533,7 @@ fun NodePulseNavHost(
                     repository = container.restockRepository,
                     monitorController = container.restockMonitorController,
                     notificationHelper = container.restockNotificationHelper,
+                    flareSolverrClient = container.flareSolverrClient,
                     onBack = safePopBackStack,
                     initialTab = route.initialTab,
                     initialUrl = route.initialUrl,

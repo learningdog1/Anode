@@ -40,6 +40,7 @@ import com.nodeseek.app.data.repository.NodeImageHostRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.UserRepositoryImpl
+import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.RestockCheckWorker
 import com.nodeseek.app.data.restock.RestockMonitorControllerImpl
 import com.nodeseek.app.data.restock.RestockNotificationHelper
@@ -376,8 +377,15 @@ class DefaultAppContainer(
         RestockRepositoryImpl(appContext)
     }
 
+    override val flareSolverrClient: FlareSolverrClient by lazy {
+        FlareSolverrClient()
+    }
+
     val stockPageAnalyzer: StockPageAnalyzer by lazy {
-        StockPageAnalyzer()
+        StockPageAnalyzer(
+            flareSolverrClient = flareSolverrClient,
+            settingsProvider = { restockRepository.getSettingsSnapshot() },
+        )
     }
 
     override val restockMonitorController: RestockMonitorController by lazy {
