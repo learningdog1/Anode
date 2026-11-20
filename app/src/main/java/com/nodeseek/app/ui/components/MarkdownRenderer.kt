@@ -1846,7 +1846,40 @@ internal fun computeGfmTableColumnWidths(
         return stretched
     }
 
-    // totalDesired > viewportWidthPx: check if wrapping only wide columns fits inside viewportWidthPx
+    // For 2-column and 3-column tables on mobile viewports, fit 100% inside viewportWidthPx
+    // so the rightmost column wraps cleanly instead of clipping at the card edge.
+    if (colCount <= 3 && viewportWidthPx >= colCount * safeMin) {
+        val fairShare = viewportWidthPx / colCount
+        val compactCols = (0 until colCount).filter { desired[it] <= fairShare }
+        val flexCols = (0 until colCount).filter { desired[it] > fairShare }
+        if (flexCols.isNotEmpty()) {
+            val result = desired.copyOf()
+            val fixedSum = compactCols.sumOf { desired[it] }
+            val remaining = (viewportWidthPx - fixedSum).coerceAtLeast(flexCols.size * safeMin)
+            val totalDemand = flexCols.sumOf { desired[it].coerceAtLeast(1) }
+            var allocated = 0
+            flexCols.forEachIndexed { idx, col ->
+                val width = if (idx == flexCols.lastIndex) {
+                    (remaining - allocated).coerceAtLeast(safeMin)
+                } else {
+                    ((remaining.toLong() * desired[col]) / totalDemand.coerceAtLeast(1))
+                        .toInt()
+                        .coerceAtLeast(safeMin)
+                }
+                result[col] = width
+                allocated += width
+            }
+            // Trim last flex column if safeMin clamping slightly exceeded remaining
+            val diff = result.sum() - viewportWidthPx
+            if (diff > 0) {
+                val widestCol = flexCols.maxBy { result[it] }
+                result[widestCol] = (result[widestCol] - diff).coerceAtLeast(safeMin)
+            }
+            return result
+        }
+    }
+
+    // totalDesired > viewportWidthPx (4+ columns): check if wrapping wide columns above floor fits
     val wrappableCols = (0 until colCount).filter { desired[it] > safeWrapFloor }
     if (wrappableCols.isEmpty()) return desired
 
@@ -1971,9 +2004,9 @@ private fun GfmTableCard(
         MaterialTheme.typography.bodyMedium
     }).withTabularNumbers()
 
-    val cellHorizPad = if (isCompactBody) 10.dp else 12.dp
-    val headerVertPad = if (isCompactBody) 8.5.dp else 10.dp
-    val dataVertPad = if (isCompactBody) 8.dp else 9.dp
+    val cellHorizPad = if (isCompactBody) 8.5.dp else 11.dp
+    val headerVertPad = if (isCompactBody) 8.dp else 9.5.dp
+    val dataVertPad = if (isCompactBody) 7.5.dp else 8.5.dp
 
     val headerBg = blendColor(
         source = MaterialTheme.colorScheme.surfaceContainerHigh,

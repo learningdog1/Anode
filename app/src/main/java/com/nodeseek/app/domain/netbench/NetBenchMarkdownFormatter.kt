@@ -29,8 +29,9 @@ object NetBenchMarkdownFormatter {
     private val DEFAULT_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
 
     private val MULTI_WHITESPACE_REGEX = Regex("""\s+""")
+    private val DBA_SPLIT_REGEX = Regex("""(?i)\bdba\s+(.+)$""")
     private val CORPORATE_SUFFIX_REGEX = Regex(
-        """(?i)(?:,\s*|\s+)(?:llc|inc\.?|ltd\.?|limited|corp\.?|corporation|gmbh|co\.?,?\s*ltd\.?|holdings?(?:\s+corporation)?|dba\s+.+)$""",
+        """(?i)(?:,\s*|\s+)(?:llc|inc\.?|ltd\.?|limited|corp\.?|corporation|gmbh|co\.?,?\s*ltd\.?|holdings?(?:\s+corporation)?)+$""",
     )
 
     fun format(
@@ -125,12 +126,13 @@ object NetBenchMarkdownFormatter {
 
         report.tcpPingSummary?.let { tcp ->
             if (tcp.hasValidLatency) {
-                val main = "**${formatMs(tcp.avgMs!!)}** (丢包 ${formatPercent(tcp.lossPercent)})"
+                val main = "**${formatMs(tcp.avgMs!!)}**"
+                val minStr = String.format(Locale.US, "%.1f", tcp.minMs!!)
+                val maxStr = String.format(Locale.US, "%.1f ms", tcp.maxMs!!)
                 val note = listOf(
-                    "最小 ${formatMs(tcp.minMs!!)}",
-                    "最大 ${formatMs(tcp.maxMs!!)}",
+                    "丢包 ${formatPercent(tcp.lossPercent)}",
                     "抖动 ${formatMs(tcp.jitterMdevMs ?: 0.0)}",
-                    "${tcp.received}/${tcp.sent} 包",
+                    "范围 $minStr~$maxStr (${tcp.received}/${tcp.sent})",
                 ).joinToString(" · ")
                 rows += listOf("TCPing 延迟", main, note)
             } else {
@@ -418,12 +420,15 @@ object NetBenchMarkdownFormatter {
     }
 
     private fun compactOrgName(rawOrg: String?): String? {
-        val cleaned = rawOrg
-            ?.let(::sanitizeInline)
-            ?.replace(CORPORATE_SUFFIX_REGEX, "")
-            ?.trim(' ', ',', '.')
-            ?.takeIf { it.isNotEmpty() }
-            ?: return null
+        var cleaned = rawOrg?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() } ?: return null
+        val dbaMatch = DBA_SPLIT_REGEX.find(cleaned)
+        if (dbaMatch != null) {
+            cleaned = dbaMatch.groupValues[1].trim()
+        }
+        cleaned = cleaned
+            .replace(CORPORATE_SUFFIX_REGEX, "")
+            .trim(' ', ',', '.')
+        if (cleaned.isEmpty()) return null
         return truncateByDisplayWidth(cleaned, MAX_ORG_DISPLAY_WIDTH)
     }
 

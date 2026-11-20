@@ -796,26 +796,16 @@ private fun PresetCatalogSection(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = "一键开启 VPS 的 iperf3 服务端",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    PulseAccentPill(
-                        text = ":$iperf3PortLabel",
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
                 Text(
-                    text = "自动检测/安装 iperf3 · 后台守护启动 · 防火墙指引与一键停止",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "一键开启 VPS iperf3 服务端",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "端口 $iperf3PortLabel · 自动检测/安装 · 守护启动",
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
