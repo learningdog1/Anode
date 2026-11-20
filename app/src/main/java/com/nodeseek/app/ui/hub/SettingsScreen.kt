@@ -377,14 +377,12 @@ class SettingsViewModel(
     }
 }
 
-@Suppress("UNUSED_PARAMETER")
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenUserProfile: ((uid: Long, usernameHint: String) -> Unit)? = null,
     onOpenRadar: (initialTab: Int) -> Unit = {},
-    onOpenSeekMail: () -> Unit = {},
     previewUiState: SettingsUiState? = null,
     previewRadarPollingSettings: RadarPollingSettings? = null,
     previewRadarUnreadCount: Int? = null,

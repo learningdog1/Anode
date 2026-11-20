@@ -88,11 +88,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.LocalAppContainer
-import com.nodeseek.app.domain.deals.PromoDealCardModel
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.TopicSummary
-import com.nodeseek.app.ui.deals.BlackFridayPromoBanner
 import com.nodeseek.app.ui.components.CollapsiblePinnedTicker
 import com.nodeseek.app.ui.components.PinnedTickerTopic
 import com.nodeseek.app.ui.components.PulseDropdownMenu
@@ -144,7 +142,6 @@ fun ExploreScreen(
     onOpenBoardsTab: () -> Unit = {},
     modifier: Modifier = Modifier,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
-    onOpenDealsHub: () -> Unit = {},
     onRequestWebViewAuth: (() -> Unit)? = null,
     externalCategorySlug: String? = null,
     scrollToTopTrigger: Int = 0,
@@ -161,15 +158,6 @@ fun ExploreScreen(
         )
     ),
 ) {
-    val appContainer = LocalAppContainer.current
-    val dealsSnapshot by appContainer.dealsRepository.dealsState.collectAsStateWithLifecycle()
-    val dealsCountHint = dealsSnapshot.deals.size.takeIf { it > 0 }
-    val lowestDealPriceHint = remember(dealsSnapshot.deals) {
-        dealsSnapshot.deals
-            .mapNotNull { it.annualizedUsd }
-            .minOrNull()
-            ?.let { "$${PromoDealCardModel.formatCompactDecimal(it)}/年" }
-    }
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
@@ -465,9 +453,6 @@ fun ExploreScreen(
                 onBookmarkToggle = viewModel::toggleBookmark,
                 onOpenTopic = onOpenTopic,
                 onOpenAuthorProfile = onOpenAuthorProfile,
-                onOpenDealsHub = onOpenDealsHub,
-                dealsCountHint = dealsCountHint,
-                lowestDealPriceHint = lowestDealPriceHint,
                 onTriggerWebViewAuth = triggerWebViewAuth,
                 onSwitchToFullWebFeed = viewModel::disablePreferRssAndRefresh,
             )
@@ -689,9 +674,6 @@ private fun ExploreBoardFeedPage(
     onBookmarkToggle: (TopicSummary) -> Unit,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit,
-    onOpenDealsHub: () -> Unit,
-    dealsCountHint: Int?,
-    lowestDealPriceHint: String?,
     onTriggerWebViewAuth: () -> Unit,
     onSwitchToFullWebFeed: () -> Unit,
 ) {
@@ -806,22 +788,6 @@ private fun ExploreBoardFeedPage(
                 bottom = bottomContentPadding + 12.dp,
             ),
         ) {
-            // Flagship Black Friday / Major Promo Hub Banner (All feed + Deal/Trade/Info boards)
-            if (board.slug.isBlank() ||
-                board.slug.equals("info", ignoreCase = true) ||
-                board.slug.equals("trade", ignoreCase = true) ||
-                board.slug.equals("promotion", ignoreCase = true)
-            ) {
-                item(key = "black_friday_promo_banner_${board.slug}") {
-                    BlackFridayPromoBanner(
-                        onClick = onOpenDealsHub,
-                        dealCountHint = dealsCountHint,
-                        lowestPriceHint = lowestDealPriceHint,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
-                    )
-                }
-            }
-
             // Compact Collapsible Pinned Ticker (Page 1)
             if (slice.pinnedTopics.isNotEmpty() && slice.sort != FeedSort.CURATED) {
                 item(key = "pinned_ticker_${board.slug}") {

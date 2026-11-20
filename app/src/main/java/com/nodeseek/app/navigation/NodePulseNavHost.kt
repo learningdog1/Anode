@@ -125,13 +125,14 @@ import com.nodeseek.app.ui.components.PulseNavTab
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.WebViewSessionSheet
 import com.nodeseek.app.ui.components.rememberInAppMessagePopupState
+import com.nodeseek.app.ui.activity.ActivityScreen
 import com.nodeseek.app.ui.composer.TopicComposerScreen
-import com.nodeseek.app.ui.deals.DealsHubScreen
 import com.nodeseek.app.ui.explore.ExploreScreen
 import com.nodeseek.app.ui.fleet.MyServersScreen
 import com.nodeseek.app.ui.fleet.MyServersTab
 import com.nodeseek.app.ui.hub.CheckInBoardScreen
 import com.nodeseek.app.ui.hub.DirectMessageScreen
+import com.nodeseek.app.ui.hub.FeatureHubScreen
 import com.nodeseek.app.ui.hub.HubCollectionScreen
 import com.nodeseek.app.ui.hub.InboxScreen
 import com.nodeseek.app.ui.hub.PulseHubScreen
@@ -139,7 +140,6 @@ import com.nodeseek.app.ui.hub.SettingsScreen
 import com.nodeseek.app.ui.hub.UserProfileScreen
 import com.nodeseek.app.ui.mail.SeekMailScreen
 import com.nodeseek.app.ui.netbench.MobileNetBenchScreen
-import com.nodeseek.app.ui.overseas.EmbeddedOverseasOfferFeed
 import com.nodeseek.app.ui.overseas.OverseasIntelScreen
 import com.nodeseek.app.ui.radar.PulseRadarScreen
 import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
@@ -257,7 +257,7 @@ fun NodePulseRootShell(
 
 /**
  * End-to-end Compose Navigation host connecting the 3-tab Floating Pill Dock shell
- * (`ExploreScreen`, `SeekMailScreen`, `PulseHubScreen`) with all child routes and a
+ * (`ExploreScreen`, `FeatureHubScreen`, `PulseHubScreen`) with all child routes and a
  * centralized first-party `WebViewSessionSheet`.
  */
 @Composable
@@ -289,8 +289,7 @@ fun NodePulseNavHost(
     var selectedTab by rememberSaveable { mutableStateOf(PulseNavTab.EXPLORE) }
     var fabExpanded by rememberSaveable { mutableStateOf(true) }
     var exploreScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
-    var mailReselectTrigger by rememberSaveable { mutableIntStateOf(0) }
-    var isSeekMailDetailOpen by rememberSaveable { mutableStateOf(false) }
+    var featureHubScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
     var pendingExploreCategorySlug by rememberSaveable { mutableStateOf<String?>(null) }
     var lastSelectedCategorySlug by rememberSaveable { mutableStateOf("") }
 
@@ -444,11 +443,8 @@ fun NodePulseNavHost(
         }
     }
 
-    // Reset mail detail & detail maximize flags whenever switching tabs
+    // Reset detail maximize flag whenever switching away from Explore tab
     LaunchedEffect(selectedTab) {
-        if (selectedTab != PulseNavTab.SEEK_MAIL) {
-            isSeekMailDetailOpen = false
-        }
         if (selectedTab != PulseNavTab.EXPLORE && isDetailPaneMaximized) {
             isDetailPaneMaximized = false
         }
@@ -523,14 +519,6 @@ fun NodePulseNavHost(
         }
     }
 
-    // Clear one-shot mail reselect trigger after SeekMailScreen consumes it
-    LaunchedEffect(selectedTab, mailReselectTrigger) {
-        if (selectedTab == PulseNavTab.SEEK_MAIL && mailReselectTrigger > 0) {
-            delay(150)
-            mailReselectTrigger = 0
-        }
-    }
-
     val openWebViewAuth: (url: String, requireSignedIn: Boolean) -> Unit = remember {
         { rawUrl, requireSignedIn ->
             val trimmed = rawUrl.trim()
@@ -598,8 +586,7 @@ fun NodePulseNavHost(
                     }
 
                     latestIsDualPane &&
-                        currentKind == DualPaneDestinationKind.EXPLORE_OTHER_TAB &&
-                        latestSelectedTab != PulseNavTab.SEEK_MAIL -> {
+                        currentKind == DualPaneDestinationKind.EXPLORE_OTHER_TAB -> {
                         selectedTab = PulseNavTab.EXPLORE
                         isDetailPaneMaximized = false
                         selectedPaneTopic = SelectedPaneTopic(
@@ -709,12 +696,10 @@ fun NodePulseNavHost(
             }
         }
 
-    val openDealsHub: (initialTab: Int) -> Unit = remember(navController) {
-        { initialTab ->
+    val openActivity: () -> Unit = remember(navController) {
+        {
             isDetailPaneMaximized = false
-            navController.navigate(
-                DealsHubRoute(initialTab = initialTab.coerceIn(0, 2)),
-            ) {
+            navController.navigate(ActivityRoute) {
                 launchSingleTop = true
             }
         }
@@ -917,7 +902,7 @@ fun NodePulseNavHost(
     val navBottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val dockedBottomPadding = 92.dp + navBottomInset
     val exploreBottomPadding = if (adaptiveLayout.useNavigationRail) navBottomInset + 8.dp else dockedBottomPadding
-    val seekMailBottomPadding = if (adaptiveLayout.useNavigationRail) 0.dp else dockedBottomPadding
+    val featureHubBottomPadding = if (adaptiveLayout.useNavigationRail) 0.dp else dockedBottomPadding
     val pulseHubBottomPadding = if (adaptiveLayout.useNavigationRail) 0.dp else dockedBottomPadding
     val searchBottomPadding = 24.dp + navBottomInset
 
@@ -965,13 +950,13 @@ fun NodePulseNavHost(
                 )
             },
         ) {
-            // Root 3-tab container preserving scroll & ViewModel state across Explore / Seek Mail / Pulse Hub
+            // Root 3-tab container preserving scroll & ViewModel state across Explore / Feature Hub / Pulse Hub
             composable<ExploreRoute> { backStackEntry ->
                 val refreshTrigger by backStackEntry.savedStateHandle
                     .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
                     .collectAsStateWithLifecycle()
 
-                // Placed before tab content so child BackHandlers (e.g. Seek Mail detail, dual-pane detail) run first
+                // Placed before tab content so child BackHandlers (e.g. dual-pane detail) run first
                 BackHandler(enabled = selectedTab != PulseNavTab.EXPLORE) {
                     selectedTab = PulseNavTab.EXPLORE
                     fabExpanded = true
@@ -991,8 +976,8 @@ fun NodePulseNavHost(
                             exploreScrollToTopTrigger += 1
                             fabExpanded = true
                         }
-                        PulseNavTab.SEEK_MAIL -> {
-                            mailReselectTrigger += 1
+                        PulseNavTab.FEATURE_HUB -> {
+                            featureHubScrollToTopTrigger += 1
                         }
                         PulseNavTab.PULSE_HUB -> {
                             appScope.launch {
@@ -1088,7 +1073,6 @@ fun NodePulseNavHost(
                                                 },
                                                 onOpenBoardsTab = {},
                                                 onOpenAuthorProfile = navigateToUser,
-                                                onOpenDealsHub = { openDealsHub(0) },
                                                 onRequestWebViewAuth = {
                                                     openWebViewAuth(SIGN_IN_URL, session == null)
                                                 },
@@ -1108,19 +1092,18 @@ fun NodePulseNavHost(
                                         }
                                     }
 
-                                    PulseNavTab.SEEK_MAIL -> {
-                                        SeekMailScreen(
-                                            onBack = { selectedTab = PulseNavTab.EXPLORE },
-                                            onOpenSettings = {
-                                                navController.navigate(SettingsRoute) {
-                                                    launchSingleTop = true
-                                                }
-                                            },
-                                            showBackButton = false,
-                                            bottomContentPadding = seekMailBottomPadding,
-                                            reselectTrigger = mailReselectTrigger,
-                                            onMailDetailOpenChanged = { isSeekMailDetailOpen = it },
-                                            container = container,
+                                    PulseNavTab.FEATURE_HUB -> {
+                                        FeatureHubScreen(
+                                            onOpenSeekMail = { openSeekMail(0L, 0L) },
+                                            onOpenActivity = openActivity,
+                                            onOpenOverseasIntel = openOverseasIntel,
+                                            onOpenRestockMonitor = { openRestockMonitor("", "", 0) },
+                                            onOpenMyServers = { openMyServers(0, "", "", "") },
+                                            onOpenNetBench = { openMobileNetBench("") },
+                                            onOpenLiteSsh = openLiteSsh,
+                                            contentBottomPadding = featureHubBottomPadding,
+                                            scrollToTopTrigger = featureHubScrollToTopTrigger,
+                                            onScrollToTopConsumed = { featureHubScrollToTopTrigger = 0 },
                                         )
                                     }
 
@@ -1139,7 +1122,6 @@ fun NodePulseNavHost(
                                                 }
                                             },
                                             onOpenRadar = openRadar,
-                                            onOpenSeekMail = { openSeekMail(0L, 0L) },
                                             onOpenBookmarks = {
                                                 navController.navigate(HubCollectionRoute(initialTab = 0)) {
                                                     launchSingleTop = true
@@ -1150,12 +1132,6 @@ fun NodePulseNavHost(
                                                     launchSingleTop = true
                                                 }
                                             },
-                                            onOpenDealsHub = { openDealsHub(0) },
-                                            onOpenOverseasIntel = openOverseasIntel,
-                                            onOpenRestockMonitor = { openRestockMonitor("", "", 0) },
-                                            onOpenMyServers = { openMyServers(0, "", "", "") },
-                                            onOpenNetBench = { openMobileNetBench("") },
-                                            onOpenLiteSsh = openLiteSsh,
                                             onOpenSettings = {
                                                 navController.navigate(SettingsRoute) {
                                                     launchSingleTop = true
@@ -1200,23 +1176,17 @@ fun NodePulseNavHost(
                     Box(modifier = Modifier.fillMaxSize()) {
                         movableTabContent(renderTabContent)
 
-                        AnimatedVisibility(
-                            visible = !(selectedTab == PulseNavTab.SEEK_MAIL && isSeekMailDetailOpen),
-                            enter = fadeIn() + expandVertically(),
-                            exit = fadeOut() + shrinkVertically(),
+                        PulseBottomDockOverlay(
+                            selectedTab = selectedTab,
+                            onSelectTab = onTabSelected,
+                            onReselectTab = onTabReselected,
+                            onFabClick = onComposeFabClick,
+                            showFab = selectedTab == PulseNavTab.EXPLORE,
+                            fabExpanded = fabExpanded,
+                            unreadNotificationCount = hubUnreadCount,
+                            hasPendingCheckIn = hasPendingCheckIn,
                             modifier = Modifier.align(Alignment.BottomCenter),
-                        ) {
-                            PulseBottomDockOverlay(
-                                selectedTab = selectedTab,
-                                onSelectTab = onTabSelected,
-                                onReselectTab = onTabReselected,
-                                onFabClick = onComposeFabClick,
-                                showFab = selectedTab == PulseNavTab.EXPLORE,
-                                fabExpanded = fabExpanded,
-                                unreadNotificationCount = hubUnreadCount,
-                                hasPendingCheckIn = hasPendingCheckIn,
-                            )
-                        }
+                        )
                     }
                 }
             }
@@ -1473,7 +1443,6 @@ fun NodePulseNavHost(
                     onBack = safePopBackStack,
                     onOpenUserProfile = navigateToUser,
                     onOpenRadar = openRadar,
-                    onOpenSeekMail = { openSeekMail(0L, 0L) },
                 )
             }
 
@@ -1504,7 +1473,6 @@ fun NodePulseNavHost(
                         initialTab = route.initialTab,
                         onBack = safePopBackStack,
                         onOpenTopic = openTopic,
-                        onOpenRestockMonitor = { openRestockMonitor("", "", 0) },
                         container = container,
                     )
                 }
@@ -1552,45 +1520,11 @@ fun NodePulseNavHost(
                 )
             }
 
-            // Feature 2: Black Friday & Major Promo Hub (integrated with Feature 7 Overseas Intel & Feature 1 Restock)
-            composable<DealsHubRoute> { backStackEntry ->
-                val route = backStackEntry.toRoute<DealsHubRoute>()
-                DealsHubScreen(
-                    dealsRepository = container.dealsRepository,
-                    onOpenTopic = { targetTopicId, titleHint ->
-                        openTopic(targetTopicId, 0, titleHint)
-                    },
-                    onAddRestockWatch = { orderUrl, title, rawPriceText, topicId ->
-                        pendingRestockWatchRequest = RestockWatchPrefillRequest(
-                            url = orderUrl,
-                            title = title,
-                            priceHint = rawPriceText,
-                            sourceTopicId = topicId,
-                        )
-                    },
-                    initialTabIndex = route.initialTab,
+            // Feature 2: Community Activity Hub (ForumWatch integration placeholder)
+            composable<ActivityRoute> {
+                ActivityScreen(
+                    repository = container.activityRepository,
                     onBack = safePopBackStack,
-                    overseasTabContent = {
-                        EmbeddedOverseasOfferFeed(
-                            repository = container.overseasIntelRepository,
-                            onAddRestockWatch = { orderUrl, title, priceLabel ->
-                                pendingRestockWatchRequest = RestockWatchPrefillRequest(
-                                    url = orderUrl,
-                                    title = title,
-                                    priceHint = priceLabel,
-                                    sourceTopicId = null,
-                                )
-                            },
-                            onShareDealToForum = { suggestedTitle, markdownBody ->
-                                openComposerWithPrefill("info", suggestedTitle, markdownBody)
-                            },
-                            onFeedbackMessage = { msg ->
-                                appScope.launch {
-                                    rootSnackbarHostState.showSnackbar(msg)
-                                }
-                            },
-                        )
-                    },
                 )
             }
 

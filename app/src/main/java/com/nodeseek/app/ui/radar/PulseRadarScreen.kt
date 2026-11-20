@@ -59,7 +59,6 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ClearAll
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
@@ -160,7 +159,6 @@ fun PulseRadarScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     modifier: Modifier = Modifier,
     initialTab: Int = 0,
-    onOpenRestockMonitor: (() -> Unit)? = null,
     container: AppContainer = LocalAppContainer.current,
     previewUiState: PulseRadarUiState? = null,
 ) {
@@ -289,19 +287,6 @@ fun PulseRadarScreen(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
 
-            if (onOpenRestockMonitor != null) {
-                val restockWatches by container.restockRepository.watchItemsFlow.collectAsStateWithLifecycle()
-                val restockEvents by container.restockRepository.eventHistoryFlow.collectAsStateWithLifecycle()
-                val activeWatchCount = remember(restockWatches) { restockWatches.count { it.isEnabled } }
-                val unreadRestockCount = remember(restockEvents) { restockEvents.count { !it.isRead } }
-                RadarRestockShortcutBanner(
-                    activeWatchCount = activeWatchCount,
-                    unreadRestockCount = unreadRestockCount,
-                    onClick = onOpenRestockMonitor,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                )
-            }
-
             RadarSegmentedTabs(
                 selectedTab = pagerState.currentPage,
                 unreadAlertCount = uiState.unreadAlertCount,
@@ -405,82 +390,6 @@ fun PulseRadarScreen(
                 confirmClearAllDialog = false
                 viewModel.clearAllAlerts()
             },
-        )
-    }
-}
-
-@Composable
-private fun RadarRestockShortcutBanner(
-    activeWatchCount: Int,
-    unreadRestockCount: Int,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.MediumBadge,
-            )
-            .pulseBouncyClickable(
-                role = Role.Button,
-                onClickLabel = "打开 VPS 补货抢购监控",
-                onClick = onClick,
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .clip(PulseArchitecturalShapes.SmallChip)
-                .background(MaterialTheme.colorScheme.primaryContainer),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Bolt,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.size(17.dp),
-            )
-        }
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = "VPS 补货抢购监控",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = if (activeWatchCount > 0) {
-                    "正在监控 $activeWatchCount 个商家商品页 · 补货即时跳转下单"
-                } else {
-                    "监控 WHMCS / SolusVM / HostBill 库存 · 补货一键直达下单页"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (unreadRestockCount > 0) {
-            CompactCountBadge(
-                count = unreadRestockCount,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            )
-        }
-        Icon(
-            imageVector = Icons.Rounded.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
         )
     }
 }
