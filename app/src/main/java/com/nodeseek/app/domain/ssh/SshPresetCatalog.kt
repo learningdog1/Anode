@@ -61,7 +61,8 @@ object SshPresetCatalog {
             estimatedDurationLabel = "~4-8 分钟",
             // Upstream oneclickvirt/ecs: noninteractive=true skips goecs.sh mirror/env prompts;
             // -menu=false is required by goecs.go to bypass the interactive TUI menu.
-            commandTemplate = "export noninteractive=true && (curl -fsSL https://cdn.spiritlhl.net/https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh || curl -fsSL https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh) && chmod +x goecs.sh && ./goecs.sh install && (command -v goecs >/dev/null 2>&1 && goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER} || ./goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER})",
+            // Uses if/elif/else so a non-zero exit code from goecs never triggers a duplicate run.
+            commandTemplate = "export noninteractive=true && (curl -fsSL https://cdn.spiritlhl.net/https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh || curl -fsSL https://raw.githubusercontent.com/oneclickvirt/ecs/master/goecs.sh -o goecs.sh) && chmod +x goecs.sh && ./goecs.sh install && if command -v goecs >/dev/null 2>&1; then goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; elif [ -x ./goecs ]; then ./goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; else /root/goecs -menu=false ${SshScriptPreset.FLAGS_PLACEHOLDER}; fi",
             flags = listOf(
                 SshPresetFlag(
                     id = "ecs_no_speed",

@@ -25,6 +25,8 @@ import com.nodeseek.app.domain.ssh.SshStdinWriter
 import com.nodeseek.app.domain.ssh.SshStreamEvent
 import com.nodeseek.app.domain.ssh.SshTransport
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import com.nodeseek.app.ui.ssh.ForegroundServiceContractCoordinator
+import com.nodeseek.app.ui.ssh.LiteSshForegroundService
 import com.nodeseek.app.ui.ssh.LiteSshSessionManager
 import com.nodeseek.app.ui.ssh.LiteSshViewModel
 import com.nodeseek.app.ui.ssh.SshConnectionPhase
@@ -36,6 +38,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -121,12 +124,20 @@ class SshNonInteractiveAndBackgroundSessionTest {
         assertTrue(rewrittenGoEcs.contains("noninteractive=true"))
         assertTrue(rewrittenGoEcs.contains("./goecs.sh install && goecs -l zh -menu=false"))
 
-        // 5. Legacy spiritLHLS/ecs shell script -> appends -m 1 when missing
+        // 5. Legacy spiritLHLS/ecs shell script -> pipes newline (to skip BBR) and appends -m 1 when missing
         val rewrittenLegacyEcs = SshCommandRewriter.rewriteToNonInteractive("bash ecs.sh")
-        assertTrue(rewrittenLegacyEcs.contains("bash ecs.sh -m 1"))
+        assertTrue(rewrittenLegacyEcs.contains("printf '\\n' | bash ecs.sh -m 1"))
         val explicitMenuEcs = SshCommandRewriter.rewriteToNonInteractive("bash ecs.sh -m 2")
-        assertTrue(explicitMenuEcs.contains("bash ecs.sh -m 2"))
+        assertTrue(explicitMenuEcs.contains("printf '\\n' | bash ecs.sh -m 2"))
         assertFalse(explicitMenuEcs.contains("-m 1"))
+        assertEquals(rewrittenLegacyEcs, SshCommandRewriter.rewriteToNonInteractive(rewrittenLegacyEcs))
+
+        // 5b. Built-in GoECS preset uses if/elif/else (never `&& ... || ./goecs` which would double-run on non-zero exit)
+        val ecsBuiltInCmd = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_ECS)!!.buildCommand()
+        assertTrue(ecsBuiltInCmd.contains("if command -v goecs >/dev/null 2>&1; then goecs -menu=false"))
+        assertTrue(ecsBuiltInCmd.contains("elif [ -x ./goecs ]; then ./goecs -menu=false"))
+        assertTrue(ecsBuiltInCmd.contains("else /root/goecs -menu=false"))
+        assertFalse(ecsBuiltInCmd.contains("|| ./goecs"))
 
         // 6. Package manager install commands -> injects -y
         val rewrittenApt = SshCommandRewriter.rewriteToNonInteractive("apt-get install fio iperf3 && yum install -y curl")
@@ -286,6 +297,202 @@ class SshNonInteractiveAndBackgroundSessionTest {
             command = "test.sh",
         ).collect { twoArgEvents += it }
         assertEquals(listOf("y\n"), contextStdin)
+    }
+
+    @Test
+    fun `SshPromptAutoResponder deduplicates PTY crlf echo and skips BBR or sysctl host mutations`() {
+        val responder = SshPromptAutoResponder(SshAutoRespondConfig(enabled = true))
+
+        // 1. Inline "Press ENTER to continue: " followed by PTY "\r\n" echo MUST NOT double-fire
+        val enterDecision = responder.onOutputChunk("Press ENTER to continue: ")
+        assertNotNull(enterDecision)
+        assertEquals("\n", enterDecision!!.response)
+        assertEquals(1, responder.responseCount)
+        assertNull("PTY \\r\\n echo after inline Enter prompt must not trigger duplicate reply", responder.onOutputChunk("\r\n"))
+        assertEquals(1, responder.responseCount)
+
+        // 2. Chinese inline "按回车继续：" followed by "\r\n" echo MUST NOT double-fire
+        val cnEnterDecision = responder.onOutputChunk("按回车继续：")
+        assertNotNull(cnEnterDecision)
+        assertEquals("\n", cnEnterDecision!!.response)
+        assertNull(responder.onOutputChunk("\r\n"))
+        assertEquals(2, responder.responseCount)
+
+        // 3. Silent `read -s -p "Continue? [y/N]: "` followed by "\r\n" echo MUST NOT double-fire
+        val silentYnDecision = responder.onOutputChunk("Continue? [y/N]: ")
+        assertNotNull(silentYnDecision)
+        assertEquals("y\n", silentYnDecision!!.response)
+        assertNull("PTY \\r\\n echo after silent [y/N] prompt must not trigger duplicate reply", responder.onOutputChunk("\r\n"))
+        assertEquals(3, responder.responseCount)
+
+        // 4. Legacy spiritLHLS/ecs.sh BBR prompts (zh + en) MUST answer "\n" (skip), NEVER "y\n"
+        val ecsBbrZh = responder.onOutputChunk("是否要开启bbr再进行测试？(回车则默认不开启，输入y则开启) [y/n] ")
+        assertNotNull(ecsBbrZh)
+        assertEquals("\n", ecsBbrZh!!.response)
+        assertNull(responder.onOutputChunk("\r\n"))
+
+        val ecsBbrEn = responder.onOutputChunk("Should I turn on bbr before testing? (Enter to skip, type y to enable) [y/n] ")
+        assertNotNull(ecsBbrEn)
+        assertEquals("\n", ecsBbrEn!!.response)
+        assertNull(responder.onOutputChunk("\r\n"))
+
+        // 5. Direct sysctl / firewall host-modification prompts without skip-by-enter are denylisted
+        assertNull(responder.onOutputChunk("Modify /etc/sysctl.conf and reload kernel parameters? [y/N]: "))
+        responder.onOutputChunk("\r\n")
+        assertNull(responder.onOutputChunk("Disable ufw firewall rules before testing? [y/N]: "))
+        assertEquals(5, responder.responseCount)
+    }
+
+    @Test
+    fun `LiteSshExecutor suppresses auto-responder on piped-stdin commands and debounces transient prompts`() = runTest {
+        // 1. Verify piped-stdin detection across built-in presets & custom commands
+        assertTrue(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_NEXT_TRACE)!!.buildCommand(),
+            ),
+        )
+        assertTrue(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_NODE_QUALITY)!!.buildCommand(),
+            ),
+        )
+        assertTrue(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_MEDIA_UNLOCK)!!.buildCommand(),
+            ),
+        )
+        assertFalse(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_QUICK_CHECK)!!.buildCommand(),
+            ),
+        )
+        assertFalse(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_ECS)!!.buildCommand(),
+            ),
+        )
+        assertFalse(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_YABS)!!.buildCommand(),
+            ),
+        )
+        assertFalse(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_BENCH)!!.buildCommand(),
+            ),
+        )
+        assertFalse(
+            SshPromptAutoResponder.commandAlreadyPipesStdin(
+                "echo '=== Start ==='; ./custom_bench.sh | tee run.log",
+            ),
+        )
+
+        // 2. Piped NextTrace command pausing 3s at "请选择选项：" during openFastTraceWSIfNeeded() MUST NOT misfire
+        val pipedStdinWrites = mutableListOf<String>()
+        val nextTraceTransport = object : SshTransport {
+            override fun execute(
+                request: SshConnectionRequest,
+                command: String,
+                onStdinReady: (SshStdinWriter) -> Unit,
+            ): Flow<SshStreamEvent> = flow {
+                onStdinReady { input -> pipedStdinWrites += input }
+                emit(SshStreamEvent.Connected)
+                emit(SshStreamEvent.OutputChunk("1. IPv4\n2. IPv6\n请选择选项：1. 北京三网\n请选择选项："))
+                delay(3_000L) // Simulate 3s WebSocket/PoW handshake while output ends at "请选择选项："
+                emit(SshStreamEvent.OutputChunk("\ntraceroute to 202.96.199.133, 30 hops max\n"))
+                emit(SshStreamEvent.Completed(exitCode = 0))
+            }
+
+            override fun execute(request: SshConnectionRequest, command: String): Flow<SshStreamEvent> =
+                error("Expected 3-arg execute")
+        }
+
+        val pipedEvents = mutableListOf<com.nodeseek.app.domain.ssh.LiteSshExecutionEvent>()
+        LiteSshExecutor(transport = nextTraceTransport).runCommand(
+            request = SshConnectionRequest(host = "203.0.113.20"),
+            command = SshPresetCatalog.findBuiltIn(SshPresetCatalog.PRESET_NEXT_TRACE)!!.buildCommand(),
+            autoRespondConfig = SshAutoRespondConfig(enabled = true, idleDebounceMillis = 1_500L),
+        ).collect { pipedEvents += it }
+
+        assertTrue("Piped-stdin command must never receive stray PTY auto-responses", pipedStdinWrites.isEmpty())
+        assertTrue(pipedEvents.filterIsInstance<com.nodeseek.app.domain.ssh.LiteSshExecutionEvent.AutoResponded>().isEmpty())
+
+        // 3. Unpiped command: transient 200ms pause at prompt does NOT fire, while genuine >=1500ms stall DOES fire
+        val debouncedWrites = mutableListOf<String>()
+        val unblockGate = Channel<String>(Channel.UNLIMITED)
+        val debouncedTransport = object : SshTransport {
+            override fun execute(
+                request: SshConnectionRequest,
+                command: String,
+                onStdinReady: (SshStdinWriter) -> Unit,
+            ): Flow<SshStreamEvent> = flow {
+                onStdinReady { input ->
+                    debouncedWrites += input
+                    unblockGate.trySend(input)
+                }
+                emit(SshStreamEvent.Connected)
+                emit(SshStreamEvent.OutputChunk("Transient prompt? [y/N]: "))
+                delay(200L) // < 1500ms debounce: script advances on its own without blocking
+                emit(SshStreamEvent.OutputChunk("auto-skipped\nReal blocking prompt? [y/N]: "))
+                val reply = unblockGate.receive() // Blocks until 1500ms debounce fires
+                emit(SshStreamEvent.OutputChunk("$reply\r\nCompleted cleanly\n"))
+                emit(SshStreamEvent.Completed(exitCode = 0))
+            }
+
+            override fun execute(request: SshConnectionRequest, command: String): Flow<SshStreamEvent> =
+                error("Expected 3-arg execute")
+        }
+
+        val debouncedEvents = mutableListOf<com.nodeseek.app.domain.ssh.LiteSshExecutionEvent>()
+        LiteSshExecutor(transport = debouncedTransport).runCommand(
+            request = SshConnectionRequest(host = "203.0.113.21"),
+            command = "./unpiped_bench.sh",
+            autoRespondConfig = SshAutoRespondConfig(enabled = true, idleDebounceMillis = 1_500L),
+        ).collect { debouncedEvents += it }
+
+        assertEquals(listOf("y\n"), debouncedWrites)
+        val autoEvents = debouncedEvents.filterIsInstance<com.nodeseek.app.domain.ssh.LiteSshExecutionEvent.AutoResponded>()
+        assertEquals(1, autoEvents.size)
+        assertEquals("Real blocking prompt? [y/N]:", autoEvents.single().decision.matchedPromptLine)
+    }
+
+    @Test
+    fun `ForegroundServiceContractCoordinator prevents premature stopService before startForeground contract completes`() {
+        val coordinator = ForegroundServiceContractCoordinator()
+        val dummyService = LiteSshForegroundService()
+
+        // Race scenario: startForegroundService is requested, then session fails 2ms later BEFORE onStartCommand
+        val firstDirective = coordinator.requestStartOrUpdate(
+            ForegroundServiceContractCoordinator.SessionNotificationPayload(
+                serverAlias = "HKG-1",
+                presetName = "系统快检",
+                statusLine = "正在建立 SSH 连接...",
+            ),
+        )
+        assertEquals(ForegroundServiceContractCoordinator.StartDirective.START_FOREGROUND_SERVICE, firstDirective)
+        assertTrue(coordinator.isContractPendingForTest)
+
+        // Session finishes before onStartCommand: requestStop() MUST return null (no premature Context.stopService!)
+        assertNull(coordinator.requestStop())
+        assertTrue("5s startForeground contract is still pending on Main thread", coordinator.isContractPendingForTest)
+        assertFalse(coordinator.shouldRemainForegroundForTest)
+
+        // Main thread delivers onStartCommand -> calls ServiceCompat.startForeground -> checks coordinator
+        val keepRunning = coordinator.onServicePromotedToForeground(service = dummyService)
+        assertFalse("Service must immediately stopForeground + stopSelf after fulfilling startForeground", keepRunning)
+        assertFalse(coordinator.isContractPendingForTest)
+
+        // Normal scenario: start -> duplicate update -> promote -> remain running -> stop returns active service
+        assertEquals(
+            ForegroundServiceContractCoordinator.StartDirective.START_FOREGROUND_SERVICE,
+            coordinator.requestStartOrUpdate(),
+        )
+        assertEquals(
+            ForegroundServiceContractCoordinator.StartDirective.UPDATE_NOTIFICATION_ONLY,
+            coordinator.requestStartOrUpdate(),
+        )
+        assertTrue(coordinator.onServicePromotedToForeground(service = dummyService))
+        assertEquals(dummyService, coordinator.requestStop())
     }
 
     // ── 3. Long-Silence Progress & Stage Detection ──────────────────────────────────────────────

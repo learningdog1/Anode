@@ -9,9 +9,11 @@ import androidx.compose.runtime.Immutable
 data class SshAutoRespondConfig(
     val enabled: Boolean = true,
     val maxResponsesPerRun: Int = DEFAULT_MAX_RESPONSES_PER_RUN,
+    val idleDebounceMillis: Long = DEFAULT_IDLE_DEBOUNCE_MILLIS,
 ) {
     companion object {
         const val DEFAULT_MAX_RESPONSES_PER_RUN: Int = 16
+        const val DEFAULT_IDLE_DEBOUNCE_MILLIS: Long = 1_500L
     }
 }
 
@@ -28,16 +30,21 @@ data class SshAutoRespondDecision(
 
 /**
  * Stateful streaming detector that watches raw PTY chunks for common interactive confirmation
- * prompts (`[y/N]`, `(Y/n)`, `[y/f/v/n]`, `[y/l/n]`, `Press Enter`, `按回车`, `请选择选项：`) and
- * emits safe, bounded automatic replies as a fallback when a benchmark script still prompts.
+ * prompts (`[y/N]`, `(Y/n)`, `[y/n]`, `[y/f/v/n]`, `[y/l/n]`, `Press Enter`, `按回车`, `请选择选项：`)
+ * and emits safe, bounded automatic replies as a fallback when a benchmark script stalls waiting
+ * for user input.
  *
- * Anti-misfire guarantees:
- * - Evaluates ONLY the active trailing line at the very end of the stream (never historical lines).
- * - Requires seeing a newline after each auto-reply before firing again, preventing duplicate
- *   answers when a prompt arrives across multiple TCP/PTY chunks.
+ * Anti-misfire & deduplication guarantees:
+ * - Tracks an explicit [consumedUpToIndex] watermark in the rolling plain-text buffer so already
+ *   answered prompts can NEVER be matched a second time when the remote PTY echoes `\r\n`, `y\r\n`,
+ *   or trailing spaces.
+ * - Evaluates ONLY the active trailing line of the unanswered tail (never historical lines).
+ * - Answers `"\n"` (skip) instead of `"y\n"` on opt-in host-modification prompts such as legacy
+ *   `ecs.sh`'s BBR prompt (`Enter to skip` / `回车则默认不开启` / `turn on bbr` / `开启bbr`), keeping
+ *   `/etc/sysctl.conf` untouched.
  * - Strictly denylists credential prompts (`password`, `passphrase`, `otp`, `sudo`), SSH host-key
  *   prompts (`continue connecting`, `fingerprint`), help/flag documentation lines, and destructive
- *   operations (`rm -rf`, `reboot`, `shutdown`, `mkfs`, `format`, `uninstall`).
+ *   or host-mutating operations (`rm -rf`, `reboot`, `shutdown`, `mkfs`, `format`, `sysctl`, `uninstall`).
  * - Enforces [SshAutoRespondConfig.maxResponsesPerRun] to prevent infinite loops.
  */
 class SshPromptAutoResponder(
@@ -45,43 +52,34 @@ class SshPromptAutoResponder(
 ) {
     private val plainWindow = StringBuilder()
     private var escState: Int = ESC_NONE
-    private var awaitingNewlineSinceLastReply: Boolean = false
+    private var consumedUpToIndex: Int = 0
 
     var responseCount: Int = 0
         private set
 
     /**
-     * Feeds a newly arrived raw PTY chunk and returns an [SshAutoRespondDecision] if and only if
-     * the stream is currently parked at a safe, recognized interactive prompt.
+     * Appends newly arrived raw PTY output into the ANSI-stripped rolling window without
+     * consuming or triggering a decision yet (used by [LiteSshExecutor] before idle debounce).
      */
-    fun onOutputChunk(rawChunk: String): SshAutoRespondDecision? {
-        if (rawChunk.isEmpty()) return null
+    fun appendOutputChunk(rawChunk: String) {
+        if (rawChunk.isEmpty()) return
         appendPlainStripped(rawChunk)
+    }
 
-        if (!config.enabled || responseCount >= config.maxResponsesPerRun) {
-            return null
-        }
-        if (awaitingNewlineSinceLastReply) {
-            return null
-        }
+    /**
+     * Returns true if the unanswered portion of the stream is currently parked at a safe,
+     * recognized interactive prompt.
+     */
+    fun hasPendingPrompt(): Boolean = evaluateUnansweredCandidate() != null
 
-        val snapshot = plainWindow.toString()
-        if (snapshot.isBlank()) return null
-
-        val endsWithNewline = snapshot.endsWith('\n')
-        val candidateLine = extractActiveTrailingLine(snapshot, endsWithNewline)
-            .trim()
-        if (candidateLine.isEmpty() || candidateLine.length > MAX_PROMPT_LINE_CHARS) {
-            return null
-        }
-
-        if (isExcludedLine(candidateLine)) {
-            return null
-        }
-
-        val reply = matchPromptReply(candidateLine, endsWithNewline) ?: return null
+    /**
+     * Evaluates the unanswered tail of the stream and, if parked at a recognized prompt,
+     * advances [consumedUpToIndex] past the prompt and returns the [SshAutoRespondDecision].
+     */
+    fun pollPendingDecision(): SshAutoRespondDecision? {
+        val (reply, candidateLine) = evaluateUnansweredCandidate() ?: return null
         responseCount += 1
-        awaitingNewlineSinceLastReply = true
+        consumedUpToIndex = plainWindow.length
         return SshAutoRespondDecision(
             response = reply,
             matchedPromptLine = candidateLine,
@@ -89,11 +87,55 @@ class SshPromptAutoResponder(
         )
     }
 
+    /**
+     * Convenience single-step helper (equivalent to [appendOutputChunk] + [pollPendingDecision]).
+     */
+    fun onOutputChunk(rawChunk: String): SshAutoRespondDecision? {
+        if (rawChunk.isEmpty()) return null
+        appendOutputChunk(rawChunk)
+        return pollPendingDecision()
+    }
+
     fun reset() {
         plainWindow.clear()
         escState = ESC_NONE
-        awaitingNewlineSinceLastReply = false
+        consumedUpToIndex = 0
         responseCount = 0
+    }
+
+    private fun evaluateUnansweredCandidate(): Pair<String, String>? {
+        if (!config.enabled || responseCount >= config.maxResponsesPerRun) {
+            return null
+        }
+        val safeStart = consumedUpToIndex.coerceIn(0, plainWindow.length)
+        if (safeStart >= plainWindow.length) {
+            return null
+        }
+
+        val unanswered = plainWindow.substring(safeStart)
+        if (unanswered.isBlank()) return null
+
+        val endsWithNewline = unanswered.endsWith('\n')
+        val candidateLine = extractActiveTrailingLine(unanswered, endsWithNewline).trim()
+        if (candidateLine.isEmpty() || candidateLine.length > MAX_PROMPT_LINE_CHARS) {
+            return null
+        }
+
+        // Check opt-in host-tuning / "Enter to skip" prompts BEFORE generic [y/n] or sysctl denylist
+        // so scripts like legacy spiritLHLS/ecs.sh receive "\n" (skip BBR) instead of hanging or writing "y".
+        if (SKIP_BY_ENTER_PROMPT_REGEX.containsMatchIn(candidateLine) &&
+            (!endsWithNewline || PROMPT_PUNCTUATION_END_REGEX.containsMatchIn(candidateLine) ||
+                YES_NO_BRACKET_PROMPT_REGEX.containsMatchIn(candidateLine))
+        ) {
+            return "\n" to candidateLine
+        }
+
+        if (isExcludedLine(candidateLine)) {
+            return null
+        }
+
+        val reply = matchPromptReply(candidateLine, endsWithNewline) ?: return null
+        return reply to candidateLine
     }
 
     private fun extractActiveTrailingLine(text: String, endsWithNewline: Boolean): String {
@@ -118,7 +160,6 @@ class SshPromptAutoResponder(
 
     private fun isExcludedLine(line: String): Boolean {
         val trimmed = line.trimStart()
-        // Never trigger on CLI flag documentation, shell comments, or command previews
         if (trimmed.startsWith("-") ||
             trimmed.startsWith("#") ||
             trimmed.startsWith("Usage:", ignoreCase = true) ||
@@ -134,7 +175,6 @@ class SshPromptAutoResponder(
     private fun matchPromptReply(line: String, endsWithNewline: Boolean): String? {
         // 1. Explicit [y/N], (Y/n), [y/n], ([y]/n), [y/f/v/n], [y/l/n] confirmation prompts
         if (YES_NO_BRACKET_PROMPT_REGEX.containsMatchIn(line)) {
-            // If terminated by newline, require question/colon ending so prose lines never match
             if (!endsWithNewline || PROMPT_PUNCTUATION_END_REGEX.containsMatchIn(line)) {
                 return "y\n"
             }
@@ -162,13 +202,10 @@ class SshPromptAutoResponder(
                 ESC_NONE -> {
                     when (ch) {
                         '\u001B' -> escState = ESC_SEEN
-                        '\n' -> {
-                            plainWindow.append('\n')
-                            awaitingNewlineSinceLastReply = false
-                        }
+                        '\n' -> plainWindow.append('\n')
                         '\r' -> plainWindow.append('\r')
                         '\b' -> {
-                            if (plainWindow.isNotEmpty() &&
+                            if (plainWindow.length > consumedUpToIndex &&
                                 plainWindow.last() != '\n' &&
                                 plainWindow.last() != '\r'
                             ) {
@@ -210,7 +247,9 @@ class SshPromptAutoResponder(
         }
 
         if (plainWindow.length > MAX_ROLLING_WINDOW_CHARS) {
-            plainWindow.delete(0, plainWindow.length - TRIMMED_WINDOW_CHARS)
+            val dropCount = plainWindow.length - TRIMMED_WINDOW_CHARS
+            plainWindow.delete(0, dropCount)
+            consumedUpToIndex = (consumedUpToIndex - dropCount).coerceAtLeast(0)
         }
     }
 
@@ -225,6 +264,27 @@ class SshPromptAutoResponder(
         private const val MAX_PROMPT_LINE_CHARS = 160
         private const val MAX_ROLLING_WINDOW_CHARS = 1_024
         private const val TRIMMED_WINDOW_CHARS = 512
+
+        /**
+         * Returns true when [command] already feeds automated answers into the target benchmark's
+         * stdin via an explicit `printf ... |`, `echo ... |`, or `yes |` shell pipeline.
+         *
+         * In such pipelines the target process reads from the pipe (`fd 0`), not the outer PTY, so
+         * writing fallback replies to the PTY during silent network handshakes (e.g. NextTrace
+         * `openFastTraceWSIfNeeded()`) would only echo stray characters.
+         */
+        fun commandAlreadyPipesStdin(command: String): Boolean =
+            EXPLICIT_STDIN_PIPE_REGEX.containsMatchIn(command)
+
+        private val EXPLICIT_STDIN_PIPE_REGEX = Regex(
+            """(?:^|[;&]\s*|&&\s*|\|\|\s*)(?:printf|echo|yes)\b(?:[^|\n;&]|\$\([^|]*\))*(?<!\|)\|(?!\|)(?!\s*(?:awk|sed|cut|tr|head|tail|wc|grep|sort|uniq)\b)""",
+        )
+
+        // Prompts where pressing Enter skips optional host modifications (e.g. legacy ecs.sh BBR prompt)
+        private val SKIP_BY_ENTER_PROMPT_REGEX = Regex(
+            """(?:enter\s+to\s+skip|回车则默认不|回车默认不|默认不开启|回车跳过|(?:turn\s+on|enable)\s+bbr|(?:开启|启用)\s*bbr)""",
+            RegexOption.IGNORE_CASE,
+        )
 
         // Matches trailing [y/N], (Y/n), [y/n], ([y]/n), [y/f/v/n], [y/l/n], (yes/no)
         private val YES_NO_BRACKET_PROMPT_REGEX = Regex(
@@ -252,9 +312,9 @@ class SshPromptAutoResponder(
             RegexOption.IGNORE_CASE,
         )
 
-        // Denylist for credentials, host keys, sudo, and destructive operations
+        // Denylist for credentials, host keys, sudo, kernel/firewall mutations, and destructive operations
         private val EXCLUDED_PROMPT_REGEX = Regex(
-            """\b(?:password|passphrase|sudo|otp|2fa|token|continue\s+connecting|fingerprint|reboot|shutdown|poweroff|format|parted|mkfs|fdisk|wipefs|wipe|erase|overwrite|destroy|uninstall)\b|rm\s+-rf|密码|口令|验证码|重启|关机|格式化|卸载|删除""",
+            """\b(?:password|passphrase|sudo|otp|2fa|token|continue\s+connecting|fingerprint|reboot|shutdown|poweroff|format|parted|mkfs|fdisk|wipefs|wipe|erase|overwrite|destroy|uninstall|sysctl|iptables|ufw|firewalld|selinux)\b|rm\s+-rf|密码|口令|验证码|重启|关机|格式化|卸载|删除""",
             RegexOption.IGNORE_CASE,
         )
     }

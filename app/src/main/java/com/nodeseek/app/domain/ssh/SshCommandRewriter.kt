@@ -188,21 +188,26 @@ object SshCommandRewriter {
     }
 
     /**
-     * Appends `-m 1` to legacy `spiritLHLS/ecs` (`bash ecs.sh` / `./ecs.sh`) invocations when
-     * no `-m` menu option was supplied.
+     * Appends `-m 1` (if no `-m` option was supplied) and pipes `printf '\n'` (when not already
+     * piped) to legacy `spiritLHLS/ecs` (`bash ecs.sh` / `./ecs.sh`) so its optional BBR prompt
+     * (`Enter to skip`) is safely skipped without modifying `/etc/sysctl.conf`.
      */
     private fun rewriteLegacyEcsShellIfNeeded(command: String): String {
         if (!command.contains("ecs.sh") || command.contains("goecs.sh")) return command
+        val alreadyPiped = PIPE_BEFORE_LEGACY_ECS_REGEX.containsMatchIn(command)
         return LEGACY_ECS_SH_REGEX.replace(command) { match ->
-            val full = match.value
-            val args = match.groupValues[2]
-            if (args.contains("-m")) {
-                full
+            val prefix = match.groupValues[1]
+            val invoke = match.groupValues[2]
+            val args = match.groupValues[3]
+            val pipePrefix = if (alreadyPiped) "" else "printf '\\n' | "
+            val withMenuFlag = if (args.contains("-m")) {
+                "$invoke$args"
             } else {
-                val trimmedFull = full.trimEnd()
-                val trailingSpace = full.substring(trimmedFull.length)
-                "$trimmedFull -m 1$trailingSpace"
+                val trimmed = "$invoke$args".trimEnd()
+                val trailingSpace = "$invoke$args".substring(trimmed.length)
+                "$trimmed -m 1$trailingSpace"
             }
+            "$prefix$pipePrefix$withMenuFlag"
         }
     }
 
@@ -269,8 +274,12 @@ object SshCommandRewriter {
         """(?:^|[;&|]\s*|&&\s*|\|\|\s*)((?:\./|/usr/bin/|/usr/local/bin/)?goecs)(?!\.sh)\b([^\n;&|]*)""",
     )
 
+    private val PIPE_BEFORE_LEGACY_ECS_REGEX = Regex(
+        """\|\s*(?:bash\s+|sh\s+|\./)ecs\.sh\b""",
+    )
+
     private val LEGACY_ECS_SH_REGEX = Regex(
-        """((?:bash\s+|sh\s+|\./)ecs\.sh)\b([^\n;&|]*)""",
+        """(^|[;&]\s*|&&\s*|\|\|\s*)((?:bash\s+|sh\s+|\./)ecs\.sh)\b([^\n;&|]*)""",
     )
 
     private val PKG_INSTALL_HINT_REGEX = Regex("""\b(?:apt-get|apt|yum|dnf)\s+install\b""")
