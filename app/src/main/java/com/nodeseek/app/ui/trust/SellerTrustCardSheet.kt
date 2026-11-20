@@ -91,6 +91,7 @@ import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.trust.ExposureHitTopic
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
+import com.nodeseek.app.domain.trust.TrustFetchStatus
 import com.nodeseek.app.domain.trust.TrustRiskAssessment
 import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
@@ -239,14 +240,18 @@ internal fun SellerTrustCardSheetContent(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (report != null && report.isFromCache) {
-                    Text(
-                        text = "5 分钟缓存快照 · 点击右下角刷新核验",
-                        style = extraType.microLabel,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
+                val headerSubtitle = rememberTrustHeaderSubtitle(uiState)
+                Text(
+                    text = headerSubtitle,
+                    style = extraType.microLabel.withTabularNumbers(),
+                    color = if (uiState.loadStatus == SellerTrustLoadStatus.RATE_LIMITED) {
+                        TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER).accent
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             IconButton(
                 onClick = onDismiss,
@@ -275,40 +280,85 @@ internal fun SellerTrustCardSheetContent(
             // 1. Seller Identity Header
             SellerIdentityHeaderCard(uiState = uiState)
 
-            if (uiState.isLoading && report == null) {
-                SellerTrustLoadingSkeleton()
-            } else if (uiState.errorMessage != null && report == null) {
-                SellerTrustErrorCard(
-                    message = uiState.errorMessage,
-                    onRetry = onRefresh,
-                )
-            } else if (report != null) {
-                // 2. Prominent Risk Banner
-                RiskAssessmentBanner(
-                    assessment = report.riskAssessment,
-                    searchSucceeded = report.searchSucceeded,
-                    searchFailureReason = report.searchFailureReason,
-                    onRetrySearch = onRefresh,
-                )
-
-                // 3. 4-Metric Bento Grid
-                SellerMetricsGrid(report = report)
-
-                // 4a. Exposure / Scam Hits (Red-tinted clickable cards)
-                if (report.exposureSearchHits.isNotEmpty()) {
-                    ExposureHitsSection(
-                        hits = report.exposureSearchHits,
-                        onOpenTopic = onOpenTopic,
-                    )
+            when (val status = uiState.loadStatus) {
+                SellerTrustLoadStatus.LOADING -> {
+                    SellerTrustLoadingSkeleton()
                 }
 
-                // 4b. Recent Trade Threads (up to 3 by default, expandable)
-                RecentTradeTopicsSection(
-                    totalTradeCount = report.historicalTradeTopicCount,
-                    recentTopics = report.recentTradeTopics,
-                    topicsSucceeded = report.topicsSucceeded,
-                    onOpenTopic = onOpenTopic,
-                )
+                SellerTrustLoadStatus.RATE_LIMITED,
+                SellerTrustLoadStatus.FAILED_RETRYABLE -> {
+                    // Always surface local blacklist / caution banner even when remote is rate-limited or offline.
+                    if (report != null && uiState.localNote?.isMeaningful == true) {
+                        RiskAssessmentBanner(
+                            assessment = report.riskAssessment,
+                            searchSucceeded = true,
+                            searchFailureReason = null,
+                            cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+                            onRetrySearch = onRefresh,
+                        )
+                    }
+
+                    if (status == SellerTrustLoadStatus.RATE_LIMITED) {
+                        SellerTrustRateLimitedCard(
+                            message = report?.failureMessage
+                                ?: uiState.errorMessage
+                                ?: "请求过于频繁触发官网限流保护，请稍后重试",
+                            cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+                            onRetry = onRefresh,
+                        )
+                    } else {
+                        SellerTrustErrorCard(
+                            message = report?.failureMessage
+                                ?: uiState.errorMessage
+                                ?: "信誉核验加载失败，请检查网络后手动重试",
+                            isNegativeCacheHit = report?.isNegativeCache == true && report.isFromCache,
+                            cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+                            onRetry = onRefresh,
+                        )
+                    }
+                }
+
+                SellerTrustLoadStatus.FROM_CACHE,
+                SellerTrustLoadStatus.FRESH -> {
+                    if (report != null) {
+                        if (report.isFromCache || uiState.cooldownRemainingSeconds > 0 || !uiState.statusNoticeMessage.isNullOrBlank()) {
+                            TrustCacheAndCooldownStatusStrip(
+                                report = report,
+                                cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+                                statusNoticeMessage = uiState.statusNoticeMessage,
+                                isManualRefreshThrottled = uiState.isManualRefreshThrottled || report.isRefreshThrottled,
+                            )
+                        }
+
+                        // 2. Prominent Risk Banner
+                        RiskAssessmentBanner(
+                            assessment = report.riskAssessment,
+                            searchSucceeded = report.searchSucceeded,
+                            searchFailureReason = report.searchFailureReason,
+                            cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+                            onRetrySearch = onRefresh,
+                        )
+
+                        // 3. 4-Metric Bento Grid
+                        SellerMetricsGrid(report = report)
+
+                        // 4a. Exposure / Scam Hits (Red-tinted clickable cards)
+                        if (report.exposureSearchHits.isNotEmpty()) {
+                            ExposureHitsSection(
+                                hits = report.exposureSearchHits,
+                                onOpenTopic = onOpenTopic,
+                            )
+                        }
+
+                        // 4b. Recent Trade Threads (up to 3 by default, expandable)
+                        RecentTradeTopicsSection(
+                            totalTradeCount = report.historicalTradeTopicCount,
+                            recentTopics = report.recentTradeTopics,
+                            topicsSucceeded = report.topicsSucceeded,
+                            onOpenTopic = onOpenTopic,
+                        )
+                    }
+                }
             }
 
             // 5. Local Private Note & 1-tap TrustTag Chips
@@ -334,6 +384,8 @@ internal fun SellerTrustCardSheetContent(
             resolvedUid = uiState.resolvedUid,
             resolvedUsername = uiState.resolvedUsername,
             isRefreshing = uiState.isRefreshing || uiState.isLoading,
+            cooldownRemainingSeconds = uiState.cooldownRemainingSeconds,
+            hasUsableReport = uiState.hasUsableReport,
             onOpenUserProfile = onOpenUserProfile,
             onStartDm = onStartDm,
             onRefresh = onRefresh,
@@ -460,10 +512,117 @@ private fun SellerIdentityHeaderCard(
 }
 
 @Composable
+private fun rememberTrustHeaderSubtitle(uiState: SellerTrustUiState): String {
+    val report = uiState.report
+    val cooldownSec = uiState.cooldownRemainingSeconds
+    return when (uiState.loadStatus) {
+        SellerTrustLoadStatus.LOADING -> "加载中 · 正在请求官网核验卖家信誉..."
+        SellerTrustLoadStatus.FROM_CACHE -> {
+            val updatedAt = formatTrustUpdatedAt(report?.fetchedAtEpochMillis ?: 0L)
+            when {
+                uiState.isRefreshing -> "正在刷新核验 · 当前缓存更新于 $updatedAt"
+                report?.fetchStatus == TrustFetchStatus.STALE_CACHE_FALLBACK && !uiState.isManualRefreshThrottled -> {
+                    if (cooldownSec > 0) {
+                        "来自缓存（限流冷却 ${cooldownSec}s）· 更新于 $updatedAt"
+                    } else {
+                        "来自缓存（限流兜底）· 更新于 $updatedAt"
+                    }
+                }
+                cooldownSec > 0 -> "来自缓存 · 更新于 $updatedAt · ${cooldownSec}s 后可再刷"
+                else -> "来自缓存 · 更新于 $updatedAt"
+            }
+        }
+        SellerTrustLoadStatus.FRESH -> {
+            if (uiState.isRefreshing) {
+                "正在向官网刷新核验..."
+            } else {
+                val updatedAt = formatTrustUpdatedAt(report?.fetchedAtEpochMillis ?: 0L)
+                "实时核验 · 更新于 $updatedAt"
+            }
+        }
+        SellerTrustLoadStatus.RATE_LIMITED -> {
+            if (cooldownSec > 0) {
+                "被限流稍后重试 · 冷却剩余 ${cooldownSec}s"
+            } else {
+                "限流冷却已结束 · 可点击下方手动重试"
+            }
+        }
+        SellerTrustLoadStatus.FAILED_RETRYABLE -> "核验加载失败 · 可点击下方手动重试"
+    }
+}
+
+@Composable
+private fun TrustCacheAndCooldownStatusStrip(
+    report: SellerTrustReport,
+    cooldownRemainingSeconds: Int,
+    statusNoticeMessage: String?,
+    isManualRefreshThrottled: Boolean,
+) {
+    val isDark = NodePulseThemeTokens.isDark
+    val ext = NodePulseThemeTokens.extendedColors
+    val updatedAt = formatTrustUpdatedAt(report.fetchedAtEpochMillis)
+    val isRateLimitFallback =
+        report.fetchStatus == TrustFetchStatus.STALE_CACHE_FALLBACK && !isManualRefreshThrottled
+
+    val amberTone = TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER)
+    val containerColor = if (isRateLimitFallback) {
+        amberTone.container
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = if (isDark) 0.88f else 0.94f)
+    }
+    val borderColor = if (isRateLimitFallback) amberTone.border else ext.cardBorder
+    val contentColor = if (isRateLimitFallback) amberTone.content else MaterialTheme.colorScheme.onSurfaceVariant
+    val iconColor = if (isRateLimitFallback) amberTone.accent else MaterialTheme.colorScheme.primary
+
+    val displayText = when {
+        isRateLimitFallback -> buildString {
+            append("官网触发限流保护，当前展示缓存数据（更新于 ")
+            append(updatedAt)
+            append("）")
+            if (cooldownRemainingSeconds > 0) {
+                append(" · ")
+                append(cooldownRemainingSeconds)
+                append("s 后可重试")
+            }
+        }
+        isManualRefreshThrottled && cooldownRemainingSeconds > 0 -> {
+            "手动刷新受节流保护，请 ${cooldownRemainingSeconds}s 后再试 · 缓存更新于 $updatedAt"
+        }
+        !statusNoticeMessage.isNullOrBlank() -> "$statusNoticeMessage · 更新于 $updatedAt"
+        else -> "来自本地缓存 · 更新于 $updatedAt"
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.MediumBadge)
+            .background(containerColor)
+            .border(width = 0.8.dp, color = borderColor, shape = PulseArchitecturalShapes.MediumBadge)
+            .padding(horizontal = 11.dp, vertical = 7.5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Icon(
+            imageVector = if (isRateLimitFallback) Icons.Rounded.WarningAmber else Icons.Rounded.Schedule,
+            contentDescription = null,
+            tint = iconColor,
+            modifier = Modifier.size(14.5.dp),
+        )
+        Text(
+            text = displayText,
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            color = contentColor,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
 private fun RiskAssessmentBanner(
     assessment: TrustRiskAssessment,
     searchSucceeded: Boolean,
     searchFailureReason: String?,
+    cooldownRemainingSeconds: Int = 0,
     onRetrySearch: () -> Unit,
 ) {
     val tone = TrustPalette.forRiskLevel(assessment.level)
@@ -571,14 +730,15 @@ private fun RiskAssessmentBanner(
                     color = tone.content,
                     modifier = Modifier.weight(1f),
                 )
+                val canRetry = cooldownRemainingSeconds <= 0
                 Text(
-                    text = "重试",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = if (canRetry) "重试" else "${cooldownRemainingSeconds}s",
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                     fontWeight = FontWeight.Bold,
-                    color = tone.accent,
+                    color = if (canRetry) tone.accent else tone.content.copy(alpha = 0.62f),
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .clickable(role = Role.Button, onClick = onRetrySearch)
+                        .clickable(enabled = canRetry, role = Role.Button, onClick = onRetrySearch)
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
@@ -1278,10 +1438,15 @@ private fun SellerTrustBottomActions(
     resolvedUid: Long,
     resolvedUsername: String,
     isRefreshing: Boolean,
+    cooldownRemainingSeconds: Int,
+    hasUsableReport: Boolean,
     onOpenUserProfile: (Long, String) -> Unit,
     onStartDm: ((Long, String) -> Unit)?,
     onRefresh: () -> Unit,
 ) {
+    val isCoolingDown = cooldownRemainingSeconds > 0
+    val canClickRefresh = !isRefreshing && !isCoolingDown
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1338,28 +1503,44 @@ private fun SellerTrustBottomActions(
 
         FilledTonalButton(
             onClick = onRefresh,
-            enabled = !isRefreshing,
+            enabled = canClickRefresh,
             modifier = Modifier.weight(if (onStartDm != null && resolvedUid > 0L) 0.95f else 1f),
             shape = PulseArchitecturalShapes.MediumBadge,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
             colors = ButtonDefaults.filledTonalButtonColors(),
         ) {
-            if (isRefreshing) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(14.dp),
-                    strokeWidth = 2.dp,
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Rounded.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
+            when {
+                isRefreshing -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+                isCoolingDown -> {
+                    Icon(
+                        imageVector = Icons.Rounded.Schedule,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                else -> {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
             Spacer(modifier = Modifier.width(5.dp))
+            val buttonLabel = when {
+                isRefreshing -> "加载中"
+                isCoolingDown -> "冷却 ${cooldownRemainingSeconds}s"
+                !hasUsableReport -> "手动重试"
+                else -> "刷新核验"
+            }
             Text(
-                text = "刷新核验",
-                style = MaterialTheme.typography.labelLarge,
+                text = buttonLabel,
+                style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
                 maxLines = 1,
                 softWrap = false,
             )
@@ -1370,6 +1551,26 @@ private fun SellerTrustBottomActions(
 @Composable
 private fun SellerTrustLoadingSkeleton() {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(PulseArchitecturalShapes.SmallChip)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(horizontal = 11.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(13.dp),
+                strokeWidth = 1.8.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "正在从官网拉取卖家档案、近期交易帖与曝光检索...",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         PulseShimmerBox(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1414,12 +1615,14 @@ private fun SellerTrustLoadingSkeleton() {
 }
 
 @Composable
-private fun SellerTrustErrorCard(
+private fun SellerTrustRateLimitedCard(
     message: String,
+    cooldownRemainingSeconds: Int,
     onRetry: () -> Unit,
 ) {
     val amberTone = TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER)
     val shape = PulseArchitecturalShapes.EditorialCard
+    val isCoolingDown = cooldownRemainingSeconds > 0
 
     Column(
         modifier = Modifier
@@ -1430,28 +1633,123 @@ private fun SellerTrustErrorCard(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = "信誉核验暂时无法完成",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = amberTone.content,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Schedule,
+                contentDescription = null,
+                tint = amberTone.accent,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = "触发官网限流 · 请稍后重试",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = amberTone.content,
+            )
+        }
         Text(
             text = message,
             style = MaterialTheme.typography.bodySmall,
-            color = amberTone.content.copy(alpha = 0.88f),
+            color = amberTone.content.copy(alpha = 0.90f),
+        )
+        Text(
+            text = if (isCoolingDown) {
+                "保护冷却期内已暂停继续请求官网，剩余约 ${cooldownRemainingSeconds} 秒后自动解锁重试。"
+            } else {
+                "限流冷却期已结束，您可以点击下方按钮手动重新核验。"
+            },
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            color = amberTone.content.copy(alpha = 0.80f),
         )
         FilledTonalButton(
             onClick = onRetry,
+            enabled = !isCoolingDown,
             shape = PulseArchitecturalShapes.SmallChip,
         ) {
             Icon(
-                imageVector = Icons.Rounded.Refresh,
+                imageVector = if (isCoolingDown) Icons.Rounded.Schedule else Icons.Rounded.Refresh,
                 contentDescription = null,
                 modifier = Modifier.size(15.dp),
             )
             Spacer(modifier = Modifier.width(5.dp))
-            Text(text = "重新核验")
+            Text(
+                text = if (isCoolingDown) "稍后重试 (${cooldownRemainingSeconds}s)" else "手动重试",
+                style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SellerTrustErrorCard(
+    message: String,
+    isNegativeCacheHit: Boolean,
+    cooldownRemainingSeconds: Int,
+    onRetry: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val shape = PulseArchitecturalShapes.EditorialCard
+    val isThrottled = cooldownRemainingSeconds > 0
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = shape,
+                containerColor = ext.cardSurface,
+                borderColor = ext.cardBorder,
+                elevation = PulseElevation.Subtle,
+            )
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.WarningAmber,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = "信誉核验加载失败 · 可手动重试",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (isNegativeCacheHit) {
+            Text(
+                text = "为避免连续失败导致官网限流，自动查询已暂停片刻；您仍可随时点击下方手动重试。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.80f),
+            )
+        }
+        FilledTonalButton(
+            onClick = onRetry,
+            enabled = !isThrottled,
+            shape = PulseArchitecturalShapes.SmallChip,
+        ) {
+            Icon(
+                imageVector = if (isThrottled) Icons.Rounded.Schedule else Icons.Rounded.Refresh,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                text = if (isThrottled) "请稍候 (${cooldownRemainingSeconds}s)" else "手动重试",
+                style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+            )
         }
     }
 }

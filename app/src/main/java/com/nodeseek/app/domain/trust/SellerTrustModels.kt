@@ -100,6 +100,27 @@ data class ExposureCandidate(
 )
 
 /**
+ * Data source & resilience status of a [SellerTrustReport].
+ */
+@Serializable
+enum class TrustFetchStatus {
+    /** Fresh remote inspection completed (all or partial signals succeeded). */
+    FRESH,
+
+    /** Served from memory LRU or persistent disk cache within valid TTL. */
+    FROM_CACHE,
+
+    /** Served from cached snapshot because remote is in rate-limit cooldown, throttled, or degraded. */
+    STALE_CACHE_FALLBACK,
+
+    /** Remote site is rate-limited (HTTP 429/503 / cooldown) and no usable positive cache exists. */
+    RATE_LIMITED,
+
+    /** Remote inspection failed or returned empty/unresolvable seller (or hit short negative cache); manually retryable. */
+    FAILED_RETRYABLE,
+}
+
+/**
  * Complete pre-trade seller trust inspection report aggregated from profile, user topics,
  * station exposure searches, and local private notes.
  */
@@ -127,10 +148,24 @@ data class SellerTrustReport(
     val searchFailureReason: String? = null,
     val fetchedAtEpochMillis: Long = 0L,
     val isFromCache: Boolean = false,
+    val fetchStatus: TrustFetchStatus = if (isFromCache) TrustFetchStatus.FROM_CACHE else TrustFetchStatus.FRESH,
+    val cachedAtEpochMillis: Long = 0L,
+    val cacheExpiresAtEpochMillis: Long = 0L,
+    val cooldownUntilEpochMillis: Long = 0L,
+    val failureMessage: String? = null,
+    val isNegativeCache: Boolean = false,
+    val isRefreshThrottled: Boolean = false,
 ) {
     val rankLabel: String
         get() = "Lv.${rankLevel.coerceIn(0, 6)}"
 
     val isNewAccount: Boolean
         get() = registrationDays != null && registrationDays < TrustRiskEvaluator.NEW_ACCOUNT_THRESHOLD_DAYS
+
+    val anyRemoteSucceeded: Boolean
+        get() = profileSucceeded || topicsSucceeded || searchSucceeded
+
+    val isRateLimited: Boolean
+        get() = fetchStatus == TrustFetchStatus.RATE_LIMITED ||
+            (fetchStatus == TrustFetchStatus.STALE_CACHE_FALLBACK && !isRefreshThrottled && cooldownUntilEpochMillis > 0L)
 }

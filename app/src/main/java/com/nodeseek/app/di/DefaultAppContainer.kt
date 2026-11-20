@@ -411,6 +411,12 @@ class DefaultAppContainer(
             context = appContext,
             userRepository = userRepository,
             forumRepository = forumRepository,
+            baseHttpClient = apiHttpClient,
+            userAgentProvider = userAgentProvider,
+            sameOriginTransport = sameOriginActionRunner,
+            onConfigObserved = { config ->
+                sessionRepositoryImpl.onConfigPayloadObserved(config)
+            },
         )
     }
 
