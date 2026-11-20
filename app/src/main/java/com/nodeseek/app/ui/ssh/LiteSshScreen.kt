@@ -322,6 +322,16 @@ fun LiteSshScreen(
                 val viewedRun = uiState.viewingRun
                 val consoleHostForMask = viewedRun?.serverHost ?: uiState.activeServerHost ?: uiState.selectedServer?.host
                 val hasCopyableOutput = viewedRun?.hasOutput == true || uiState.hasLiveOutput
+                val livePtyResizeCallback: ((SshPtySize) -> Unit)? = remember(
+                    previewUiState == null && viewedRun == null,
+                    viewModel,
+                ) {
+                    if (previewUiState == null && viewedRun == null) {
+                        viewModel::updateTerminalPtySize
+                    } else {
+                        null
+                    }
+                }
                 AnsiTerminalConsoleCard(
                     consoleStreamHandle = if (previewUiState == null && viewedRun == null) {
                         viewModel.consoleStreamHandle
@@ -364,7 +374,7 @@ fun LiteSshScreen(
                         viewModel.pinchConsoleFontScale(zoomFactor, autoFitStartScale = effectiveScale)
                     },
                     onResetZoom = viewModel::resetConsoleFontScale,
-                    onPtySizeChanged = viewModel::updateTerminalPtySize,
+                    onPtySizeChanged = livePtyResizeCallback,
                     onToggleAutoScroll = viewModel::toggleAutoScrollConsole,
                     onCopyOutput = {
                         val currentState = previewUiState ?: viewModel.uiState.value
@@ -1246,7 +1256,7 @@ private fun AnsiTerminalConsoleCard(
     onZoomIn: (effectiveScale: Float) -> Unit,
     onPinchZoom: (zoomFactor: Float, effectiveScale: Float) -> Unit,
     onResetZoom: () -> Unit,
-    onPtySizeChanged: (SshPtySize) -> Unit,
+    onPtySizeChanged: ((SshPtySize) -> Unit)?,
     onToggleAutoScroll: (Boolean) -> Unit,
     onCopyOutput: () -> Unit,
 ) {
@@ -1759,7 +1769,7 @@ private fun AnsiTerminalViewport(
     terminalAutoFitEnabled: Boolean,
     autoScrollConsole: Boolean,
     onPinchZoom: (zoomFactor: Float, effectiveScale: Float) -> Unit,
-    onPtySizeChanged: (SshPtySize) -> Unit,
+    onPtySizeChanged: ((SshPtySize) -> Unit)?,
     onLayoutSolved: (TerminalLayoutSolution) -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -1968,11 +1978,12 @@ private fun AnsiTerminalViewport(
             onLayoutSolved(layoutSolution)
         }
 
-        LaunchedEffect(layoutSolution.ptySize, isRunning) {
+        LaunchedEffect(layoutSolution.ptySize, isRunning, onPtySizeChanged) {
+            val callback = onPtySizeChanged ?: return@LaunchedEffect
             if (isRunning) {
                 delay(PTY_RESIZE_DEBOUNCE_MS)
             }
-            onPtySizeChanged(layoutSolution.ptySize)
+            callback(layoutSolution.ptySize)
         }
 
         LaunchedEffect(layoutSolution.requiresHorizontalScroll) {

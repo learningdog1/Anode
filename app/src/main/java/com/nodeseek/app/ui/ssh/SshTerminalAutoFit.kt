@@ -234,12 +234,27 @@ object SshTerminalAutoFit {
         val visibleCols = floor(viewportWidthPx / cellWidthPx).toInt().coerceAtLeast(1)
         val visibleRows = floor(viewportHeightPx / cellHeightPx).toInt().coerceAtLeast(1)
         val requiresHorizontalScroll = safeColsTarget > visibleCols
-        val ptySize = calculatePtySize(
+        val rawPtySize = calculatePtySize(
             viewportWidthPx = viewportWidthPx,
             viewportHeightPx = viewportHeightPx,
             cellWidthPx = cellWidthPx,
             lineHeightPx = cellHeightPx,
         )
+        // In AUTO_FIT mode, never advertise a PTY column count wider than what fits without
+        // triggering another shrink pass if SIGWINCH-responsive tools redraw to $COLUMNS.
+        val ptySize = if (fitMode == TerminalFitMode.AUTO_FIT) {
+            val cappedCols = if (effectiveFontSizeSp < safeBaseSp && safeColsTarget > 0) {
+                minOf(visibleCols, safeColsTarget)
+            } else {
+                val safeColsAtBase = floor((viewportWidthPx / cellWidthPx) - AUTO_FIT_COLUMN_SAFETY_SLACK)
+                    .toInt()
+                    .coerceAtLeast(1)
+                minOf(visibleCols, safeColsAtBase)
+            }
+            rawPtySize.copy(cols = cappedCols).normalized()
+        } else {
+            rawPtySize
+        }
 
         return TerminalLayoutSolution(
             fitMode = fitMode,

@@ -166,7 +166,21 @@ class SshTerminalAutoFitTest {
         assertTrue(cols80Solved.visibleColumnsAtFont >= 80)
         assertFalse(cols80Solved.requiresHorizontalScroll)
         assertFalse(cols80Solved.hitMinReadableFloor)
-        assertEquals(cols80Solved.visibleColumnsAtFont, cols80Solved.ptySize.cols)
+        // PTY cols must stay capped at 80 (not 81) so SIGWINCH redraws never cause shrink-loop
+        assertEquals(80, cols80Solved.ptySize.cols)
+
+        // Feeding ptySize.cols back as maxLineColumns must converge cleanly without shrinking font
+        val reEvaluated80 = SshTerminalAutoFit.solveLayout(
+            viewportWidthPx = widthPx,
+            viewportHeightPx = heightPx,
+            charWidthPxPerSp = charWidthPerSp,
+            lineHeightPxPerSp = lineHeightPerSp,
+            maxLineColumns = maxOf(80, cols80Solved.ptySize.cols),
+            fitMode = TerminalFitMode.AUTO_FIT,
+            manualFontScale = 1.0f,
+        )
+        assertEquals(cols80Solved.effectiveFontSizeSp, reEvaluated80.effectiveFontSizeSp, 0.001f)
+        assertEquals(cols80Solved.ptySize.cols, reEvaluated80.ptySize.cols)
 
         // Case 3: Ultra-wide 160-col line clamps at 6.0sp readable floor and enables horizontal scroll
         val ultraWideSolved = SshTerminalAutoFit.solveLayout(
@@ -196,6 +210,48 @@ class SshTerminalAutoFitTest {
         assertEquals(11.5f * 1.30f, fixedZoomedIn.effectiveFontSizeSp, 0.02f)
         assertTrue(fixedZoomedIn.requiresHorizontalScroll)
         assertTrue(fixedZoomedIn.ptySize.cols < 50)
+    }
+
+    @Test
+    fun `solveLayout AUTO_FIT PTY feedback loop never shrinks font across diverse viewport widths and line lengths`() {
+        val density = 3.0f
+        val charWidthPerSp = 0.60f * density
+        val lineHeightPerSp = TerminalFontSpec.DEFAULT_LINE_HEIGHT_RATIO * density
+        val widthsDp = listOf(304f, 320f, 352f, 356f, 400f, 740f)
+        val initialMaxColsList = listOf(0, 32, 50, 51, 72, 80, 95, 120, 160)
+
+        for (wDp in widthsDp) {
+            val wPx = wDp * density
+            val hPx = 396f * density
+            for (initialCols in initialMaxColsList) {
+                val pass1 = SshTerminalAutoFit.solveLayout(
+                    viewportWidthPx = wPx,
+                    viewportHeightPx = hPx,
+                    charWidthPxPerSp = charWidthPerSp,
+                    lineHeightPxPerSp = lineHeightPerSp,
+                    maxLineColumns = initialCols,
+                    fitMode = TerminalFitMode.AUTO_FIT,
+                    manualFontScale = 1.0f,
+                )
+                val nextMaxCols = maxOf(initialCols, pass1.ptySize.cols)
+                val pass2 = SshTerminalAutoFit.solveLayout(
+                    viewportWidthPx = wPx,
+                    viewportHeightPx = hPx,
+                    charWidthPxPerSp = charWidthPerSp,
+                    lineHeightPxPerSp = lineHeightPerSp,
+                    maxLineColumns = nextMaxCols,
+                    fitMode = TerminalFitMode.AUTO_FIT,
+                    manualFontScale = 1.0f,
+                )
+                assertEquals(
+                    "Font size must not ratchet down on SIGWINCH feedback (wDp=$wDp, initialCols=$initialCols, ptyCols=${pass1.ptySize.cols})",
+                    pass1.effectiveFontSizeSp,
+                    pass2.effectiveFontSizeSp,
+                    0.001f,
+                )
+                assertEquals(pass1.ptySize.cols, pass2.ptySize.cols)
+            }
+        }
     }
 
     @Test
