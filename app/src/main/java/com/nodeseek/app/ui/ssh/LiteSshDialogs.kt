@@ -29,11 +29,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
@@ -80,12 +83,15 @@ import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
+import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseDropdownMenu
+import com.nodeseek.app.ui.components.PulseDropdownMenuItem
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -104,6 +110,7 @@ internal fun SshServerEditorDialog(
     existing: SshServerProfile?,
     onDismiss: () -> Unit,
     onSave: (SshServerDraft) -> Unit,
+    servers: List<SshServerProfile> = emptyList(),
 ) {
     val isEditing = existing != null
     var alias by rememberSaveable(existing?.id) { mutableStateOf(existing?.alias.orEmpty()) }
@@ -120,7 +127,21 @@ internal fun SshServerEditorDialog(
     var secret by rememberSaveable(existing?.id) { mutableStateOf("") }
     var passphrase by rememberSaveable(existing?.id) { mutableStateOf("") }
     var showPassword by rememberSaveable(existing?.id) { mutableStateOf(false) }
+    var selectedJumpHostId by rememberSaveable(existing?.id) {
+        mutableStateOf(
+            SshJumpHostResolver.normalizeJumpHostId(existing?.jumpHostId)
+                ?.takeIf { jumpId -> jumpId != existing?.id && (servers.isEmpty() || servers.any { it.id == jumpId }) },
+        )
+    }
+    var jumpMenuExpanded by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
+
+    val otherServers = remember(servers, existing?.id) {
+        servers.filter { it.id != existing?.id }
+    }
+    val selectedJumpHost = remember(otherServers, selectedJumpHostId) {
+        selectedJumpHostId?.let { jumpId -> otherServers.firstOrNull { it.id == jumpId } }
+    }
 
     val hasSavedSecret = existing?.encryptedSecret?.isNotEmpty() == true
     val hasSavedPassphrase = !existing?.encryptedPassphrase.isNullOrEmpty()
@@ -139,11 +160,23 @@ internal fun SshServerEditorDialog(
         confirmEnabled = canSubmit,
         onConfirm = {
             val port = portText.trim().toIntOrNull()
+            val jumpCheckError = if (servers.isNotEmpty() || selectedJumpHostId != null) {
+                runCatching {
+                    SshJumpHostResolver.validateJumpHostSelection(
+                        serverId = existing?.id,
+                        jumpHostId = selectedJumpHostId,
+                        servers = servers,
+                    )
+                }.exceptionOrNull()?.message
+            } else {
+                null
+            }
             when {
                 host.trim().isEmpty() -> validationError = "请输入服务器 IP 或域名"
                 port == null || port !in 1..65535 -> validationError = "端口必须在 1 ~ 65535 之间"
                 secret.isEmpty() && !(isEditing && hasSavedSecret && authMethod == existing?.authMethod) ->
                     validationError = if (authMethod == SshAuthMethod.PASSWORD) "请输入 SSH 密码" else "请粘贴 PEM / OpenSSH 私钥"
+                jumpCheckError != null -> validationError = jumpCheckError
                 else -> {
                     onSave(
                         SshServerDraft(
@@ -157,6 +190,7 @@ internal fun SshServerEditorDialog(
                             passphrase = passphrase.takeIf { it.isNotEmpty() },
                             keepExistingSecret = isEditing && secret.isEmpty() && authMethod == existing?.authMethod,
                             keepExistingPassphrase = isEditing && passphrase.isEmpty() && hasSavedPassphrase && authMethod == existing?.authMethod,
+                            jumpHostId = selectedJumpHostId,
                         ),
                     )
                 }
@@ -167,7 +201,7 @@ internal fun SshServerEditorDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 440.dp)
+                .heightIn(max = 480.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -322,6 +356,120 @@ internal fun SshServerEditorDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
+            }
+
+            // Jump host (ProxyJump) selector
+            Box(modifier = Modifier.fillMaxWidth()) {
+                val selectorShape = RoundedCornerShape(12.dp)
+                val isJumpActive = selectedJumpHost != null
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(selectorShape)
+                        .background(
+                            if (isJumpActive) {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                            },
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (isJumpActive) {
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                            },
+                            shape = selectorShape,
+                        )
+                        .clickable { jumpMenuExpanded = true }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.AltRoute,
+                        contentDescription = null,
+                        tint = if (isJumpActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "跳板机（ProxyJump）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = when {
+                                selectedJumpHost != null ->
+                                    "${selectedJumpHost.displayName} (${selectedJumpHost.displayAddress})"
+                                otherServers.isEmpty() -> "直连（保险库暂无其他主机）"
+                                else -> "直连"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (isJumpActive) FontWeight.SemiBold else FontWeight.Normal,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Icon(
+                        imageVector = if (jumpMenuExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = "选择跳板机",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+
+                PulseDropdownMenu(
+                    expanded = jumpMenuExpanded,
+                    onDismissRequest = { jumpMenuExpanded = false },
+                    minWidth = 240.dp,
+                    maxWidth = 310.dp,
+                ) {
+                    PulseDropdownMenuItem(
+                        text = "直连",
+                        subtitle = "直接连接当前目标主机",
+                        icon = Icons.Rounded.Dns,
+                        selected = selectedJumpHostId == null,
+                        onClick = {
+                            selectedJumpHostId = null
+                            validationError = null
+                            jumpMenuExpanded = false
+                        },
+                    )
+                    otherServers.forEach { candidate ->
+                        val createsCycle = SshJumpHostResolver.wouldCreateCycle(
+                            serverId = existing?.id,
+                            candidateJumpHostId = candidate.id,
+                            servers = servers,
+                        )
+                        PulseDropdownMenuItem(
+                            text = candidate.displayName,
+                            subtitle = if (createsCycle) {
+                                "${candidate.displayAddress} · 会产生循环引用"
+                            } else {
+                                candidate.displayAddress
+                            },
+                            icon = Icons.AutoMirrored.Rounded.AltRoute,
+                            selected = selectedJumpHostId == candidate.id,
+                            enabled = !createsCycle,
+                            badgeText = when {
+                                createsCycle -> "循环"
+                                candidate.usesJumpHost -> "链式"
+                                else -> null
+                            },
+                            onClick = {
+                                selectedJumpHostId = candidate.id
+                                validationError = null
+                                jumpMenuExpanded = false
+                            },
+                        )
+                    }
+                }
             }
 
             validationError?.let { msg ->

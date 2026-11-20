@@ -6,6 +6,7 @@ import com.nodeseek.app.domain.ssh.DecryptedSshCredentials
 import com.nodeseek.app.domain.ssh.HostKeyTrustPolicy
 import com.nodeseek.app.domain.ssh.SecretCipher
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
+import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultRepository
@@ -79,6 +80,13 @@ class SshServerVault(
                 val existing = draft.id?.let { targetId ->
                     existingList.firstOrNull { it.id == targetId }
                 }
+                val resolvedId = existing?.id ?: draft.id?.takeIf { it.isNotBlank() } ?: idGenerator()
+                val cleanJumpHostId = SshJumpHostResolver.normalizeJumpHostId(draft.jumpHostId)
+                SshJumpHostResolver.validateJumpHostSelection(
+                    serverId = resolvedId,
+                    jumpHostId = cleanJumpHostId,
+                    servers = existingList,
+                )
 
                 val encryptedSecret = when {
                     draft.keepExistingSecret && existing != null && draft.secret.isEmpty() ->
@@ -102,7 +110,7 @@ class SshServerVault(
                     )
 
                 val saved = SshServerProfile(
-                    id = existing?.id ?: draft.id?.takeIf { it.isNotBlank() } ?: idGenerator(),
+                    id = resolvedId,
                     alias = cleanAlias,
                     host = cleanHost,
                     port = safePort,
@@ -114,6 +122,7 @@ class SshServerVault(
                     knownHostKeyAlgorithm = if (endpointChanged) null else existing?.knownHostKeyAlgorithm,
                     lastConnectedEpochMillis = existing?.lastConnectedEpochMillis,
                     createdAtEpochMillis = existing?.createdAtEpochMillis ?: clock(),
+                    jumpHostId = cleanJumpHostId,
                 )
 
                 val updated = if (existing != null) {
@@ -130,9 +139,16 @@ class SshServerVault(
     override suspend fun deleteServer(serverId: String) {
         withContext(ioDispatcher) {
             mutex.withLock {
-                val updated = _serversFlow.value.filterNot { it.id == serverId }
-                if (updated.size != _serversFlow.value.size) {
-                    _serversFlow.value = updated
+                val remaining = _serversFlow.value.filterNot { it.id == serverId }
+                if (remaining.size != _serversFlow.value.size) {
+                    val cleaned = remaining.map { profile ->
+                        if (profile.jumpHostId == serverId) {
+                            profile.copy(jumpHostId = null)
+                        } else {
+                            profile
+                        }
+                    }
+                    _serversFlow.value = cleaned
                     persistCurrentStateLocked()
                 }
             }
@@ -287,8 +303,17 @@ class SshServerVault(
         if (!vaultFile.isFile) return SshVaultFilePayload()
         return runCatching {
             val raw = vaultFile.readText(Charsets.UTF_8)
-            if (raw.isBlank()) SshVaultFilePayload()
-            else json.decodeFromString<SshVaultFilePayload>(raw)
+            if (raw.isBlank()) {
+                SshVaultFilePayload()
+            } else {
+                val decoded = json.decodeFromString<SshVaultFilePayload>(raw)
+                decoded.copy(
+                    servers = decoded.servers.map { server ->
+                        val normalizedJump = SshJumpHostResolver.normalizeJumpHostId(server.jumpHostId)
+                        if (normalizedJump == server.jumpHostId) server else server.copy(jumpHostId = normalizedJump)
+                    },
+                )
+            }
         }.getOrDefault(SshVaultFilePayload())
     }
 

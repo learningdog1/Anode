@@ -18,6 +18,9 @@ import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
+import com.nodeseek.app.domain.ssh.SshJumpHostConnectionException
+import com.nodeseek.app.domain.ssh.SshJumpHostCycleException
+import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
@@ -58,6 +61,7 @@ data class PendingHostKeyMismatchPrompt(
     val command: String,
     val expectedFingerprint: String,
     val actualHostKey: HostKeyInfo,
+    val mismatchServerId: String = serverId,
 )
 
 @Immutable
@@ -401,20 +405,25 @@ class LiteSshViewModel(
 
         viewModelScope.launch {
             vaultRepository.updateHostKeyFingerprint(
-                serverId = server.id,
+                serverId = prompt.mismatchServerId,
                 fingerprintSha256 = prompt.actualHostKey.fingerprintSha256,
                 algorithm = prompt.actualHostKey.algorithm,
             )
             val refreshed = _uiState.value.servers.firstOrNull { it.id == server.id }
-                ?: server.copy(
-                    knownHostKeyFingerprint = prompt.actualHostKey.fingerprintSha256,
-                    knownHostKeyAlgorithm = prompt.actualHostKey.algorithm,
-                )
+                ?: if (prompt.mismatchServerId == server.id) {
+                    server.copy(
+                        knownHostKeyFingerprint = prompt.actualHostKey.fingerprintSha256,
+                        knownHostKeyAlgorithm = prompt.actualHostKey.algorithm,
+                    )
+                } else {
+                    server
+                }
             executePresetOnServer(
                 server = refreshed,
                 preset = prompt.preset,
                 command = prompt.command,
                 allowHostKeyMismatchOverride = true,
+                mismatchOverrideServerId = prompt.mismatchServerId,
             )
         }
     }
@@ -580,6 +589,7 @@ class LiteSshViewModel(
         preset: SshScriptPreset,
         command: String,
         allowHostKeyMismatchOverride: Boolean,
+        mismatchOverrideServerId: String? = null,
     ) {
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
@@ -616,16 +626,11 @@ class LiteSshViewModel(
 
         executionJob = viewModelScope.launch {
             try {
-                val credentials = vaultRepository.decryptCredentials(server)
-                val request = SshConnectionRequest(
-                    host = server.host,
-                    port = server.port,
-                    username = server.username,
-                    authMethod = server.authMethod,
-                    secret = credentials.secret,
-                    passphrase = credentials.passphrase,
-                    expectedHostKeyFingerprint = server.knownHostKeyFingerprint,
+                val request: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
+                    vaultRepository = vaultRepository,
+                    server = server,
                     allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                    mismatchOverrideServerId = mismatchOverrideServerId,
                 )
 
                 executor.runCommand(request = request, command = command).collect { event ->
@@ -634,10 +639,11 @@ class LiteSshViewModel(
                             _uiState.update { it.copy(connectionPhase = SshConnectionPhase.CONNECTING) }
                         }
                         is LiteSshExecutionEvent.HostKeyChecked -> {
+                            val checkedServerId = event.serverId ?: server.id
                             when (val verification = event.verification) {
                                 is HostKeyVerificationResult.FirstUseTrust -> {
                                     vaultRepository.updateHostKeyFingerprint(
-                                        serverId = server.id,
+                                        serverId = checkedServerId,
                                         fingerprintSha256 = verification.hostKey.fingerprintSha256,
                                         algorithm = verification.hostKey.algorithm,
                                     )
@@ -649,7 +655,7 @@ class LiteSshViewModel(
                                 }
                                 is HostKeyVerificationResult.KeyChangedWarning -> {
                                     vaultRepository.updateHostKeyFingerprint(
-                                        serverId = server.id,
+                                        serverId = checkedServerId,
                                         fingerprintSha256 = verification.hostKey.fingerprintSha256,
                                         algorithm = verification.hostKey.algorithm,
                                     )
@@ -715,6 +721,10 @@ class LiteSshViewModel(
             } catch (ce: CancellationException) {
                 throw ce
             } catch (mismatch: SshHostKeyMismatchException) {
+                val resolvedMismatchServerId = mismatch.serverId ?: server.id
+                val resolvedMismatchAlias = mismatch.serverAlias
+                    ?: _uiState.value.servers.firstOrNull { it.id == resolvedMismatchServerId }?.displayName
+                    ?: server.displayName
                 _uiState.update {
                     it.copy(
                         isRunning = false,
@@ -722,11 +732,12 @@ class LiteSshViewModel(
                         errorMessage = "检测到主机密钥变更，已阻断连接",
                         pendingHostKeyMismatch = PendingHostKeyMismatchPrompt(
                             serverId = server.id,
-                            serverAlias = server.displayName,
+                            serverAlias = resolvedMismatchAlias,
                             preset = preset,
                             command = command,
                             expectedFingerprint = mismatch.expectedFingerprint,
                             actualHostKey = mismatch.actualHostKey,
+                            mismatchServerId = resolvedMismatchServerId,
                         ),
                     )
                 }
@@ -770,8 +781,12 @@ class LiteSshViewModel(
     }
 
     private fun formatFriendlySshError(t: Throwable): String {
+        if (t is SshJumpHostConnectionException || t is SshJumpHostCycleException) {
+            return t.message?.trim()?.takeIf { it.isNotEmpty() } ?: "跳板机连接失败"
+        }
         val raw = t.message?.trim().orEmpty()
         return when {
+            raw.startsWith("跳板机连接失败") || raw.startsWith("目标经跳板连接失败") -> raw
             raw.contains("Auth fail", ignoreCase = true) ||
                 raw.contains("Auth cancel", ignoreCase = true) ->
                 "SSH 认证失败：请检查用户名、密码或私钥（及私钥口令）"
@@ -801,9 +816,10 @@ class LiteSshViewModel(
 
         fun factory(context: Context): ViewModelProvider.Factory {
             val appContext = context.applicationContext ?: context
+            val vault = SshServerVault.getDefault(appContext)
             return factory(
-                vaultRepository = SshServerVault.getDefault(appContext),
-                executor = LiteSshExecutor(transport = JSchSshTransport()),
+                vaultRepository = vault,
+                executor = LiteSshExecutor(transport = JSchSshTransport(vaultRepository = vault)),
             )
         }
 
