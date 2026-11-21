@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -481,7 +482,11 @@ private fun FleetPortfolioHeroCard(
                     (usdRateDisplay?.let { " · $it" }.orEmpty()),
                 style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
+                    .weight(1f, fill = false)
+                    .padding(end = 8.dp)
                     .clip(PulseArchitecturalShapes.SmallChip)
                     .clickable(onClick = onRefreshFx)
                     .padding(horizontal = 4.dp, vertical = 2.dp),
@@ -513,6 +518,7 @@ private fun FleetPortfolioHeroCard(
                     style = NodePulseThemeTokens.extraTypography.microLabel,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
@@ -889,6 +895,9 @@ private fun ProbeServerCard(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -906,6 +915,8 @@ private fun ProbeServerCard(
                         text = formatSpeedBps(snapshot.netInSpeedBps),
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
                 Row(
@@ -922,6 +933,8 @@ private fun ProbeServerCard(
                         text = formatSpeedBps(snapshot.netOutSpeedBps),
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -930,6 +943,7 @@ private fun ProbeServerCard(
                 PulseAccentPill(
                     text = "账本：${linkedAsset.nickname}",
                     icon = Icons.Rounded.Link,
+                    modifier = Modifier.widthIn(max = 148.dp),
                 )
             } else {
                 Row(
@@ -955,6 +969,8 @@ private fun ProbeServerCard(
                         text = "录入账本",
                         style = NodePulseThemeTokens.extraTypography.microLabel,
                         color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -1062,6 +1078,11 @@ private fun AssetsTabContent(
                     text = "按到期倒计时排序 · 共 ${uiState.assets.size} 台",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                 )
                 FilledTonalButton(
                     onClick = onAddAsset,
@@ -1070,7 +1091,12 @@ private fun AssetsTabContent(
                 ) {
                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("录入小鸡", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "录入小鸡",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
         }
@@ -1246,11 +1272,18 @@ private fun VpsAssetCard(
                 style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
             )
             Text(
                 text = "到期 ${asset.expiryDateIso}",
                 style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
             )
         }
 
@@ -1273,6 +1306,9 @@ private fun VpsAssetCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -1287,6 +1323,8 @@ private fun VpsAssetCard(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Text(
@@ -1298,6 +1336,8 @@ private fun VpsAssetCard(
                     ),
                     style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
@@ -1372,6 +1412,9 @@ private fun VpsAssetCard(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onPrimary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }

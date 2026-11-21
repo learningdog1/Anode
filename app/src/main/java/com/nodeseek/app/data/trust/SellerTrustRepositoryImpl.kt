@@ -12,6 +12,8 @@ import com.nodeseek.app.domain.model.UserProfile
 import com.nodeseek.app.domain.repository.ForumRepository
 import com.nodeseek.app.domain.repository.UserRepository
 import com.nodeseek.app.domain.trust.ExposureCandidate
+import com.nodeseek.app.domain.trust.ExposureCheckScope
+import com.nodeseek.app.domain.trust.ExposureHitTopic
 import com.nodeseek.app.domain.trust.LocalSellerNote
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
@@ -32,6 +34,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import java.io.File
 import java.net.SocketTimeoutException
@@ -40,27 +45,36 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Resilient [SellerTrustRepository] aggregating seller profile, recent trade topics,
- * station exposure searches (`"曝光 <username>"` & `"骗子 <username>"`), and persistent
- * device-local seller notes (`filesDir/seller_trust_notes.json`).
+ * a shared page-1 `/categories/expose` board snapshot (zero `/search` traffic by default),
+ * optional on-demand single-query deep `/search` verification, and persistent device-local
+ * seller notes (`filesDir/seller_trust_notes.json`).
  *
  * Stability & anti-rate-limit guarantees:
+ * - **Zero `/search` calls on default inspection**: Default card loads match against a shared
+ *   30-minute `/categories/expose` board snapshot (or existing `ForumRepository` feed cache),
+ *   preventing NodeSeek `/search` 429 rate-limits across sellers.
+ * - **On-demand single-query deep search**: Explicit user-triggered [searchSellerExposureDeep]
+ *   issues at most 1 `/search` call governed by an isolated [searchRateLimiter] with a 10s
+ *   minimum interval and separate 30s+ cooldown bucket so `/search` rate limits never block
+ *   profile/topic checks.
  * - **Two-tier cache**: Memory LRU + persistent disk JSON (`seller_trust_cache_v1.json`) with
  *   long positive TTL (default 18h), medium partial TTL (15m), short negative TTL (3m) for
  *   failed/empty results, and 7-day stale positive fallback during rate-limit cooldowns.
  * - **Single-flight deduplication**: Concurrent calls for the same seller key coalesce into one pipeline.
  * - **Global concurrency cap & per-site pacing**: Outbound requests are bounded (`maxGlobalConcurrency = 2`)
- *   and spaced (`minSiteIntervalMillis = 350ms` + extra search interval) via [SellerTrustRateLimiter].
+ *   and spaced (`minSiteIntervalMillis = 350ms`) via [SellerTrustRateLimiter].
  * - **429 / 503 / timeout backoff & cooldown**: Respects `Retry-After` (delta-seconds & HTTP-date),
  *   applies exponential backoff + jitter, enters cooldown on rate limits, and serves cached or
  *   structured retry-later states without hammering the origin server.
  * - **Minimal payload path**: Fetches lightweight `/api/account/getInfo/{uid}` (without `readme=1`
- *   or `/api/block-list/list`) first to resolve canonical username (preventing duplicate hint +
- *   canonical searches) and skips `/api/content/list-discussions` when `nPost == 0`.
+ *   or `/api/block-list/list`) first to resolve canonical username and skips
+ *   `/api/content/list-discussions` when `nPost == 0`.
  */
 class SellerTrustRepositoryImpl internal constructor(
     private val remoteDataSource: SellerTrustRemoteDataSource,
     notesFile: File,
     cacheFile: File = defaultCacheFileFor(notesFile),
+    exposeBoardFile: File = defaultExposeBoardFileFor(cacheFile),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val cacheTtlMillis: Long = DEFAULT_CACHE_TTL_MILLIS,
@@ -68,10 +82,21 @@ class SellerTrustRepositoryImpl internal constructor(
     private val negativeCacheTtlMillis: Long = DEFAULT_NEGATIVE_CACHE_TTL_MILLIS,
     private val manualRefreshMinIntervalMillis: Long = DEFAULT_MANUAL_REFRESH_MIN_INTERVAL_MILLIS,
     private val failedRetryMinIntervalMillis: Long = DEFAULT_FAILED_RETRY_MIN_INTERVAL_MILLIS,
-    private val searchExtraIntervalMillis: Long = DEFAULT_SEARCH_EXTRA_INTERVAL_MILLIS,
+    private val exposeBoardTtlMillis: Long = DEFAULT_EXPOSE_BOARD_TTL_MILLIS,
+    private val exposeBoardRefreshMinIntervalMillis: Long = DEFAULT_EXPOSE_BOARD_REFRESH_MIN_INTERVAL_MILLIS,
+    private val exposeBoardStaleRetentionMillis: Long = DEFAULT_EXPOSE_BOARD_STALE_RETENTION_MILLIS,
+    private val searchMinIntervalMillis: Long = DEFAULT_SEARCH_MIN_INTERVAL_MILLIS,
     maxMemoryCacheEntries: Int = SellerTrustCacheStore.DEFAULT_MAX_MEMORY_ENTRIES,
     maxDiskCacheEntries: Int = SellerTrustCacheStore.DEFAULT_MAX_DISK_ENTRIES,
     internal val rateLimiter: SellerTrustRateLimiter = SellerTrustRateLimiter(
+        clockMillis = clockMillis,
+    ),
+    internal val searchRateLimiter: SellerTrustRateLimiter = SellerTrustRateLimiter(
+        maxGlobalConcurrency = 1,
+        minSiteIntervalMillis = 0L,
+        maxTransientRetries = 0,
+        baseCooldownMillis = DEFAULT_SEARCH_BASE_COOLDOWN_MILLIS,
+        overloadBaseCooldownMillis = DEFAULT_SEARCH_BASE_COOLDOWN_MILLIS,
         clockMillis = clockMillis,
     ),
     private val zoneId: ZoneId = ZoneId.of("Asia/Shanghai"),
@@ -128,11 +153,24 @@ class SellerTrustRepositoryImpl internal constructor(
         clockMillis = clockMillis,
     )
 
+    private val exposeBoardStore = ExposeBoardSnapshotStore(
+        snapshotFile = exposeBoardFile,
+        ioDispatcher = ioDispatcher,
+        clockMillis = clockMillis,
+        freshTtlMillis = exposeBoardTtlMillis,
+        staleRetentionMillis = exposeBoardStaleRetentionMillis,
+    )
+
     private val singleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
+    private val exposeBoardSingleFlight = KeyedSingleFlight<String, Result<FeedPageResult>>(ioDispatcher)
+    private val deepSearchSingleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
     private val backgroundScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     private val attemptMutex = Mutex()
     private val lastRemoteAttemptByKey = HashMap<String, Long>()
+
+    private val deepSearchGateMutex = Mutex()
+    private var lastDeepSearchAttemptAtMillis: Long = 0L
 
     private val queueMutex = Mutex()
     private val pendingQueue = LinkedHashSet<QueuedInspectTarget>()
@@ -243,6 +281,49 @@ class SellerTrustRepositoryImpl internal constructor(
         }
 
         syncWithLatestNote(flightReport, flightReport.uid.takeIf { it > 0L } ?: uid)
+    }
+
+    override suspend fun searchSellerExposureDeep(
+        uid: Long,
+        usernameHint: String,
+    ): SellerTrustReport = withContext(ioDispatcher) {
+        val cleanHint = sanitizeUsernameHint(usernameHint)
+        val baseReport = getCachedReportOnly(uid = uid, usernameHint = usernameHint)
+            ?: inspectSeller(uid = uid, usernameHint = usernameHint, forceRefresh = false)
+
+        val targetUsername = baseReport.username.trim()
+            .takeUnless { PLACEHOLDER_USER_REGEX.matches(it) }
+            ?: cleanHint
+        if (targetUsername.isEmpty()) {
+            return@withContext baseReport.copy(
+                deepSearchNoticeMessage = "未获取到卖家用户名，无法执行历史曝光深搜",
+            )
+        }
+
+        val siteHost = remoteDataSource.siteHost
+        val now = clockMillis()
+        val preBlockUntil = getDeepSearchBlockUntil(siteHost, now)
+        if (preBlockUntil > now) {
+            val remSec = ((preBlockUntil - now + 999L) / 1_000L).coerceAtLeast(1L)
+            return@withContext baseReport.copy(
+                deepSearchCooldownUntilEpochMillis = preBlockUntil,
+                deepSearchNoticeMessage = "为避免触发官网搜索限流，请 ${remSec} 秒后再试（也可使用下方 Google 查曝光）",
+            )
+        }
+
+        val effectiveUid = baseReport.uid.takeIf { it > 0L } ?: uid
+        val flightKey = buildCacheKey(uid = effectiveUid, username = targetUsername)
+            .ifEmpty { "deep:${targetUsername.lowercase()}" }
+
+        val updatedReport = deepSearchSingleFlight.execute(flightKey) {
+            executeDeepExposureSearch(
+                baseReport = baseReport,
+                targetUid = effectiveUid,
+                targetUsername = targetUsername,
+            )
+        }
+
+        syncWithLatestNote(updatedReport, effectiveUid)
     }
 
     override fun observeCachedReport(uid: Long): Flow<SellerTrustReport?> =
@@ -421,11 +502,28 @@ class SellerTrustRepositoryImpl internal constructor(
             ?: cleanHint.ifEmpty { localNote?.username?.trim().orEmpty() }
 
         val userExplicitlyNotFound = isUserNotFoundFailure(profileResult.exceptionOrNull())
+        val rateLimitFailure = (profileResult.exceptionOrNull() as? SellerTrustRateLimitedException)
+            ?: (uidResolutionFailure as? SellerTrustRateLimitedException)
+        val activeCooldownBeforeStepC = rateLimiter.getActiveCooldownUntil(siteHost, clockMillis())
+        val abortedByRateLimit = profile == null && (
+            rateLimitFailure != null ||
+                activeCooldownBeforeStepC > clockMillis()
+            )
 
         // Step C: Fetch page-1 user discussions (if needed) and exposure searches via governed concurrency.
         val aggregated = coroutineScope {
             val topicsDeferred: Deferred<Result<List<TopicSummary>>> = async {
                 when {
+                    abortedByRateLimit -> {
+                        Result.failure(
+                            rateLimitFailure ?: SellerTrustRateLimitedException(
+                                host = siteHost,
+                                cooldownUntilEpochMillis = activeCooldownBeforeStepC,
+                                message = "请求触发限流",
+                            ),
+                        )
+                    }
+
                     targetUid <= 0L -> {
                         if (uidResolutionFailure != null) {
                             Result.failure(uidResolutionFailure)
@@ -447,28 +545,17 @@ class SellerTrustRepositoryImpl internal constructor(
                 }
             }
 
-            val canRunExposureSearch = canonicalUsername.isNotEmpty() &&
-                !(userExplicitlyNotFound && cleanHint.isEmpty())
+            val canRunExposureCheck = canonicalUsername.isNotEmpty() &&
+                !(userExplicitlyNotFound && cleanHint.isEmpty()) &&
+                !abortedByRateLimit
 
-            val exposeDeferred: Deferred<Result<FeedPageResult>>? = if (canRunExposureSearch) {
+            val exposeBoardDeferred: Deferred<Result<FeedPageResult>>? = if (canRunExposureCheck) {
                 async {
-                    governedCall(extraIntervalMs = searchExtraIntervalMillis) {
-                        remoteDataSource.searchExposureTopicsPage1(
-                            query = "${TrustRiskEvaluator.TERM_EXPOSE} $canonicalUsername",
-                        )
-                    }
-                }
-            } else {
-                null
-            }
-
-            val scamDeferred: Deferred<Result<FeedPageResult>>? = if (canRunExposureSearch) {
-                async {
-                    governedCall(extraIntervalMs = searchExtraIntervalMillis) {
-                        remoteDataSource.searchExposureTopicsPage1(
-                            query = "${TrustRiskEvaluator.TERM_SCAMMER} $canonicalUsername",
-                        )
-                    }
+                    resolveExposeBoardPage(
+                        siteHost = siteHost,
+                        forceRefresh = forceRefresh,
+                        governedCall = { governedCall { remoteDataSource.fetchExposeBoardPage1() } },
+                    )
                 }
             } else {
                 null
@@ -479,8 +566,7 @@ class SellerTrustRepositoryImpl internal constructor(
                 canonicalUsername = canonicalUsername,
                 profileResult = profileResult,
                 topicsResult = topicsDeferred.await(),
-                exposeSearchResult = exposeDeferred?.await(),
-                scamSearchResult = scamDeferred?.await(),
+                exposeBoardResult = exposeBoardDeferred?.await(),
                 localNote = localNote,
             )
         }
@@ -543,17 +629,25 @@ class SellerTrustRepositoryImpl internal constructor(
             return failedReport
         }
 
-        val isFullSuccess = baseReport.profileSucceeded && baseReport.topicsSucceeded && baseReport.searchSucceeded
+        // Preserve any prior deep-search verification / hits when refreshing profile/topics manually.
+        val priorPositive = cacheStore.getStalePositiveFallback(allKeys, finishedNow)
+        val mergedReport = mergeWithPriorDeepSearchIfValid(
+            freshReport = baseReport,
+            priorEntry = priorPositive,
+            nowMillis = finishedNow,
+        )
+
+        val isFullSuccess = mergedReport.profileSucceeded && mergedReport.topicsSucceeded && mergedReport.searchSucceeded
         val ttlMillis = if (isFullSuccess) {
             cacheTtlMillis
         } else {
             minOf(partialCacheTtlMillis, cacheTtlMillis)
         }
 
-        val freshReport = baseReport.copy(
+        val freshReport = mergedReport.copy(
             fetchStatus = TrustFetchStatus.FRESH,
             cooldownUntilEpochMillis = effectiveCooldown,
-            failureMessage = if (!baseReport.searchSucceeded) baseReport.searchFailureReason else null,
+            failureMessage = if (!mergedReport.searchSucceeded) mergedReport.searchFailureReason else null,
         )
 
         cacheStore.put(
@@ -565,6 +659,237 @@ class SellerTrustRepositoryImpl internal constructor(
         )
 
         return freshReport
+    }
+
+    private suspend fun resolveExposeBoardPage(
+        siteHost: String,
+        forceRefresh: Boolean,
+        governedCall: suspend () -> Result<FeedPageResult>,
+    ): Result<FeedPageResult> {
+        val now = clockMillis()
+
+        // 1. Reuse ForumRepository's fresh `/categories/expose` feed cache if already browsed by user.
+        if (!forceRefresh) {
+            remoteDataSource.getCachedExposeBoardPage1()?.let { feedCached ->
+                exposeBoardStore.put(feedCached, now)
+                return Result.success(feedCached)
+            }
+            exposeBoardStore.getFresh(now)?.let { snapshot ->
+                return Result.success(snapshot.page)
+            }
+        } else {
+            // Even during manual refresh, avoid hammering `/categories/expose` more than once per minute.
+            val lastFetched = exposeBoardStore.getLastFetchedAtMillis()
+            if (lastFetched > 0L && now >= lastFetched && (now - lastFetched) < exposeBoardRefreshMinIntervalMillis) {
+                exposeBoardStore.getFresh(now)?.let { snapshot ->
+                    return Result.success(snapshot.page)
+                }
+            }
+        }
+
+        val fetchedResult = exposeBoardSingleFlight.execute("expose_board:$siteHost") {
+            val innerNow = clockMillis()
+            if (!forceRefresh) {
+                exposeBoardStore.getFresh(innerNow)?.let { return@execute Result.success(it.page) }
+            }
+            val result = governedCall()
+            result.getOrNull()?.let { page ->
+                exposeBoardStore.put(page, clockMillis())
+            }
+            result
+        }
+        return fetchedResult
+    }
+
+    private suspend fun executeDeepExposureSearch(
+        baseReport: SellerTrustReport,
+        targetUid: Long,
+        targetUsername: String,
+    ): SellerTrustReport {
+        val siteHost = remoteDataSource.siteHost
+        val now = clockMillis()
+        val gateUntil = getDeepSearchBlockUntil(siteHost, now)
+        if (gateUntil > now) {
+            val remSec = ((gateUntil - now + 999L) / 1_000L).coerceAtLeast(1L)
+            return baseReport.copy(
+                deepSearchCooldownUntilEpochMillis = gateUntil,
+                deepSearchNoticeMessage = "为避免触发官网搜索限流，请 ${remSec} 秒后再试（也可使用下方 Google 查曝光）",
+            )
+        }
+
+        val (query, categorySlug) = TrustRiskEvaluator.buildDeepSearchQuery(targetUsername)
+        recordDeepSearchAttempt(now)
+        val searchResult: Result<FeedPageResult> = try {
+            Result.success(
+                searchRateLimiter.execute(host = siteHost) {
+                    remoteDataSource.searchExposureTopicsPage1(
+                        query = query,
+                        categorySlug = categorySlug,
+                    )
+                },
+            )
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            Result.failure(t)
+        } finally {
+            recordDeepSearchAttempt(clockMillis())
+        }
+
+        val finishedNow = clockMillis()
+        val searchPage = searchResult.getOrNull()
+        if (searchPage == null) {
+            val failure = searchResult.exceptionOrNull()
+            val searchCooldownUntil = maxOf(
+                searchRateLimiter.getActiveCooldownUntil(siteHost, finishedNow),
+                (failure as? SellerTrustRateLimitedException)?.cooldownUntilEpochMillis ?: 0L,
+                (failure as? SellerTrustTimeoutException)?.cooldownUntilEpochMillis ?: 0L,
+            )
+            return baseReport.copy(
+                deepSearchCooldownUntilEpochMillis = searchCooldownUntil,
+                deepSearchNoticeMessage = formatSearchFailureReason(failure),
+            )
+        }
+
+        val deepHits = TrustRiskEvaluator.filterExposureHits(
+            candidates = (searchPage.pinnedTopics + searchPage.topics).map { topic ->
+                ExposureCandidate(topic = topic)
+            },
+            targetUid = targetUid,
+            targetUsername = targetUsername,
+        )
+        val mergedHits = mergeExposureHits(baseReport.exposureSearchHits, deepHits)
+        val latestNote = if (targetUid > 0L) noteStore.getNote(targetUid) else baseReport.localNote
+        val updatedAssessment = TrustRiskEvaluator.evaluate(
+            rankLevel = baseReport.rankLevel,
+            registrationDays = baseReport.registrationDays,
+            historicalTradeTopicCount = baseReport.historicalTradeTopicCount,
+            exposureSearchHits = mergedHits,
+            searchSucceeded = true,
+            localNote = latestNote,
+            profileSucceeded = baseReport.profileSucceeded,
+            registrationDurationLabel = baseReport.registrationDurationLabel,
+            exposureCheckScope = ExposureCheckScope.DEEP_SEARCH,
+        )
+
+        val updatedReport = baseReport.copy(
+            exposureSearchHits = mergedHits,
+            searchSucceeded = true,
+            searchFailureReason = null,
+            exposureCheckScope = ExposureCheckScope.DEEP_SEARCH,
+            localNote = latestNote,
+            riskAssessment = updatedAssessment,
+            fetchedAtEpochMillis = finishedNow,
+            isFromCache = false,
+            fetchStatus = if (baseReport.anyRemoteSucceeded) TrustFetchStatus.FRESH else baseReport.fetchStatus,
+            deepSearchCooldownUntilEpochMillis = 0L,
+            deepSearchNoticeMessage = null,
+        )
+
+        val keys = buildList {
+            if (targetUid > 0L) add(buildCacheKey(uid = targetUid, username = targetUsername))
+            if (targetUsername.isNotBlank()) add(buildCacheKey(uid = 0L, username = targetUsername))
+        }.distinct()
+        if (keys.isNotEmpty() && updatedReport.anyRemoteSucceeded) {
+            val isFullSuccess = updatedReport.profileSucceeded && updatedReport.topicsSucceeded && updatedReport.searchSucceeded
+            val ttlMillis = if (isFullSuccess) cacheTtlMillis else minOf(partialCacheTtlMillis, cacheTtlMillis)
+            cacheStore.put(
+                keys = keys,
+                report = updatedReport,
+                ttlMillis = ttlMillis,
+                isNegative = false,
+                nowMillis = finishedNow,
+            )
+        }
+
+        return updatedReport
+    }
+
+    private suspend fun getDeepSearchBlockUntil(
+        siteHost: String,
+        nowMillis: Long,
+    ): Long {
+        val cooldownUntil = searchRateLimiter.getActiveCooldownUntil(siteHost, nowMillis)
+        val minIntervalUntil = deepSearchGateMutex.withLock {
+            if (lastDeepSearchAttemptAtMillis > 0L && nowMillis >= lastDeepSearchAttemptAtMillis) {
+                val candidate = lastDeepSearchAttemptAtMillis + searchMinIntervalMillis
+                if (candidate > nowMillis) candidate else 0L
+            } else {
+                0L
+            }
+        }
+        return maxOf(cooldownUntil, minIntervalUntil)
+    }
+
+    private suspend fun recordDeepSearchAttempt(epochMillis: Long) {
+        deepSearchGateMutex.withLock {
+            if (epochMillis > lastDeepSearchAttemptAtMillis) {
+                lastDeepSearchAttemptAtMillis = epochMillis
+            }
+        }
+    }
+
+    private fun mergeWithPriorDeepSearchIfValid(
+        freshReport: SellerTrustReport,
+        priorEntry: PersistedTrustCacheEntry?,
+        nowMillis: Long,
+    ): SellerTrustReport {
+        val prior = priorEntry?.report ?: return freshReport
+        if (!prior.isDeepSearchVerified) return freshReport
+        val priorStillFresh = nowMillis < priorEntry.expiresAtEpochMillis
+        if (!priorStillFresh && prior.exposureSearchHits.isEmpty()) return freshReport
+
+        val mergedHits = mergeExposureHits(freshReport.exposureSearchHits, prior.exposureSearchHits)
+        val mergedScope = if (priorStillFresh && prior.searchSucceeded) {
+            ExposureCheckScope.DEEP_SEARCH
+        } else {
+            freshReport.exposureCheckScope
+        }
+        val mergedSearchSucceeded = freshReport.searchSucceeded || (priorStillFresh && prior.searchSucceeded)
+        val assessment = TrustRiskEvaluator.evaluate(
+            rankLevel = freshReport.rankLevel,
+            registrationDays = freshReport.registrationDays,
+            historicalTradeTopicCount = freshReport.historicalTradeTopicCount,
+            exposureSearchHits = mergedHits,
+            searchSucceeded = mergedSearchSucceeded,
+            localNote = freshReport.localNote,
+            profileSucceeded = freshReport.profileSucceeded,
+            registrationDurationLabel = freshReport.registrationDurationLabel,
+            exposureCheckScope = mergedScope,
+        )
+        return freshReport.copy(
+            exposureSearchHits = mergedHits,
+            searchSucceeded = mergedSearchSucceeded,
+            searchFailureReason = if (mergedSearchSucceeded) null else freshReport.searchFailureReason,
+            exposureCheckScope = mergedScope,
+            riskAssessment = assessment,
+        )
+    }
+
+    private fun mergeExposureHits(
+        primary: List<ExposureHitTopic>,
+        secondary: List<ExposureHitTopic>,
+    ): List<ExposureHitTopic> {
+        if (secondary.isEmpty()) return primary
+        if (primary.isEmpty()) return secondary
+        val byId = LinkedHashMap<Long, ExposureHitTopic>()
+        fun severity(term: String): Int = when (term) {
+            TrustRiskEvaluator.TERM_SCAMMER -> 4
+            TrustRiskEvaluator.TERM_RUNAWAY -> 3
+            TrustRiskEvaluator.TERM_CALLOUT -> 2
+            TrustRiskEvaluator.TERM_EXPOSE -> 1
+            else -> 0
+        }
+        for (hit in primary + secondary) {
+            val existing = byId[hit.topicId]
+            if (existing == null || severity(hit.matchedTerm) > severity(existing.matchedTerm)) {
+                byId[hit.topicId] = hit
+            }
+        }
+        return byId.values.sortedWith(
+            compareByDescending<ExposureHitTopic> { severity(it.matchedTerm) }
+                .thenByDescending { it.topicId },
+        )
     }
 
     private suspend fun resolveCooldownResponse(
@@ -679,6 +1004,7 @@ class SellerTrustRepositoryImpl internal constructor(
             localNote = localNote,
             profileSucceeded = false,
             registrationDurationLabel = "注册时间未知",
+            exposureCheckScope = ExposureCheckScope.UNVERIFIED,
         )
         return SellerTrustReport(
             uid = uid,
@@ -697,6 +1023,7 @@ class SellerTrustRepositoryImpl internal constructor(
             cooldownUntilEpochMillis = cooldownUntilEpochMillis,
             failureMessage = failureMessage,
             isRefreshThrottled = isRefreshThrottled,
+            exposureCheckScope = ExposureCheckScope.UNVERIFIED,
         )
     }
 
@@ -715,7 +1042,7 @@ class SellerTrustRepositoryImpl internal constructor(
         val tradeTopics = allUserTopics.filter(TrustRiskEvaluator::isTradeTopic)
 
         val candidates = mutableListOf<ExposureCandidate>()
-        aggregated.exposeSearchResult?.getOrNull()?.let { page ->
+        aggregated.exposeBoardResult?.getOrNull()?.let { page ->
             (page.pinnedTopics + page.topics).forEach { topic ->
                 candidates += ExposureCandidate(
                     topic = topic,
@@ -723,27 +1050,19 @@ class SellerTrustRepositoryImpl internal constructor(
                 )
             }
         }
-        aggregated.scamSearchResult?.getOrNull()?.let { page ->
-            (page.pinnedTopics + page.topics).forEach { topic ->
-                candidates += ExposureCandidate(
-                    topic = topic,
-                    queryTermHint = TrustRiskEvaluator.TERM_SCAMMER,
-                )
-            }
-        }
 
-        val exposeSucceeded = aggregated.exposeSearchResult?.isSuccess == true
-        val scamSucceeded = aggregated.scamSearchResult?.isSuccess == true
-        val searchSucceeded = aggregated.canonicalUsername.isNotBlank() && exposeSucceeded && scamSucceeded
+        val exposeBoardSucceeded = aggregated.exposeBoardResult?.isSuccess == true
+        val searchSucceeded = aggregated.canonicalUsername.isNotBlank() && exposeBoardSucceeded
+        val exposureCheckScope = if (searchSucceeded) {
+            ExposureCheckScope.BOARD_SNAPSHOT
+        } else {
+            ExposureCheckScope.UNVERIFIED
+        }
 
         val searchFailureReason = when {
             searchSucceeded -> null
             aggregated.canonicalUsername.isBlank() -> "未获取到卖家用户名，无法执行站内曝光检索"
-            else -> {
-                val failure = aggregated.exposeSearchResult?.exceptionOrNull()
-                    ?: aggregated.scamSearchResult?.exceptionOrNull()
-                formatSearchFailureReason(failure)
-            }
+            else -> formatBoardCheckFailureReason(aggregated.exposeBoardResult?.exceptionOrNull())
         }
 
         val exposureHits = if (aggregated.canonicalUsername.isNotBlank()) {
@@ -775,6 +1094,7 @@ class SellerTrustRepositoryImpl internal constructor(
             localNote = aggregated.localNote,
             profileSucceeded = profileSucceeded,
             registrationDurationLabel = tenure.durationLabel,
+            exposureCheckScope = exposureCheckScope,
         )
 
         return SellerTrustReport(
@@ -801,6 +1121,7 @@ class SellerTrustRepositoryImpl internal constructor(
             fetchedAtEpochMillis = nowEpochMillis,
             isFromCache = false,
             fetchStatus = TrustFetchStatus.FRESH,
+            exposureCheckScope = exposureCheckScope,
         )
     }
 
@@ -817,6 +1138,7 @@ class SellerTrustRepositoryImpl internal constructor(
             localNote = note,
             profileSucceeded = report.profileSucceeded,
             registrationDurationLabel = report.registrationDurationLabel,
+            exposureCheckScope = report.exposureCheckScope,
         )
         return report.copy(
             localNote = note,
@@ -828,8 +1150,7 @@ class SellerTrustRepositoryImpl internal constructor(
         val allErrors = listOfNotNull(
             aggregated.profileResult.exceptionOrNull(),
             aggregated.topicsResult.exceptionOrNull(),
-            aggregated.exposeSearchResult?.exceptionOrNull(),
-            aggregated.scamSearchResult?.exceptionOrNull(),
+            aggregated.exposeBoardResult?.exceptionOrNull(),
         )
         allErrors.firstOrNull { it is SellerTrustRateLimitedException }?.let { return it }
         allErrors.firstOrNull { it is SellerTrustTimeoutException }?.let { return it }
@@ -843,21 +1164,41 @@ class SellerTrustRepositoryImpl internal constructor(
             apiErr.message?.contains("没有找到这位用户") == true
     }
 
-    private fun formatSearchFailureReason(failure: Throwable?): String = when (failure) {
-        is TopicAccessException.SignInRequired -> "需要登录后才可使用站内曝光搜索"
-        is TopicAccessException.CloudflareChallengeRequired -> "触发安全验证，站内曝光检索暂不可用"
+    private fun formatBoardCheckFailureReason(failure: Throwable?): String = when (failure) {
+        is TopicAccessException.SignInRequired -> "需要登录后才可拉取最新曝光版列表"
+        is TopicAccessException.CloudflareChallengeRequired -> "触发安全验证，曝光版巡检暂未完成"
         is SellerTrustRateLimitedException -> {
             if (failure.statusCode == 503) {
-                "官网服务繁忙（503），站内曝光检索进入冷却保护"
+                "官网服务繁忙（503），曝光版巡检进入冷却保护"
             } else {
-                "站内搜索请求过于频繁（限流），请稍后刷新核验"
+                "官网请求频繁触发冷却保护，请稍后刷新核验"
             }
         }
-        is SellerTrustTimeoutException, is SocketTimeoutException -> "站内搜索请求超时，请稍后重试"
+        is SellerTrustTimeoutException, is SocketTimeoutException -> "曝光版巡检超时，请稍后重试"
         is NodeSeekApiException -> when (failure.statusCode) {
-            429 -> "站内搜索请求过于频繁（限流），请稍后刷新核验"
+            429 -> "官网请求频繁触发冷却保护，请稍后刷新核验"
+            503 -> "官网服务繁忙（503），曝光版列表暂时不可用"
+            401, 403 -> "当前未登录或无访问权限，曝光版巡检未完成"
+            else -> failure.message?.takeIf { it.isNotBlank() } ?: "曝光版巡检暂时不可用"
+        }
+        else -> failure?.message?.takeIf { it.isNotBlank() } ?: "曝光版巡检暂时不可用"
+    }
+
+    private fun formatSearchFailureReason(failure: Throwable?): String = when (failure) {
+        is TopicAccessException.SignInRequired -> "需要登录后才可使用站内历史曝光深搜"
+        is TopicAccessException.CloudflareChallengeRequired -> "触发安全验证，站内深搜暂不可用（可使用 Google 查曝光）"
+        is SellerTrustRateLimitedException -> {
+            if (failure.statusCode == 503) {
+                "官网服务繁忙（503），搜索进入冷却保护（可使用下方 Google 查曝光）"
+            } else {
+                "官网搜索触发限流保护，请稍后重试（可使用下方 Google 查曝光）"
+            }
+        }
+        is SellerTrustTimeoutException, is SocketTimeoutException -> "站内搜索请求超时，请稍后重试（可使用 Google 查曝光）"
+        is NodeSeekApiException -> when (failure.statusCode) {
+            429 -> "官网搜索触发限流保护，请稍后重试（可使用下方 Google 查曝光）"
             503 -> "官网服务繁忙（503），站内曝光搜索暂时不可用"
-            401, 403 -> "当前未登录或无搜索权限，站内曝光检索未完成"
+            401, 403 -> "当前未登录或无搜索权限，站内曝光深搜未完成"
             else -> failure.message?.takeIf { it.isNotBlank() } ?: "站内曝光搜索暂时不可用"
         }
         else -> failure?.message?.takeIf { it.isNotBlank() } ?: "站内曝光搜索暂时不可用"
@@ -937,8 +1278,7 @@ class SellerTrustRepositoryImpl internal constructor(
         val canonicalUsername: String,
         val profileResult: Result<UserProfile>,
         val topicsResult: Result<List<TopicSummary>>,
-        val exposeSearchResult: Result<FeedPageResult>?,
-        val scamSearchResult: Result<FeedPageResult>?,
+        val exposeBoardResult: Result<FeedPageResult>?,
         val localNote: LocalSellerNote?,
     )
 
@@ -949,7 +1289,7 @@ class SellerTrustRepositoryImpl internal constructor(
         /** Positive full-success cache TTL: 18 hours (within 12–24h window). */
         const val DEFAULT_CACHE_TTL_MILLIS: Long = 18L * 60L * 60L * 1000L
 
-        /** Partial-success cache TTL (e.g. profile succeeded while search was unauthenticated): 15 minutes. */
+        /** Partial-success cache TTL (e.g. profile succeeded while board check was unauthenticated): 15 minutes. */
         const val DEFAULT_PARTIAL_CACHE_TTL_MILLIS: Long = 15L * 60L * 1000L
 
         /** Negative cache TTL for failed / empty / unresolvable checks: 3 minutes. */
@@ -961,8 +1301,20 @@ class SellerTrustRepositoryImpl internal constructor(
         /** Minimum debounce interval between manual retries on failed state: 3s. */
         const val DEFAULT_FAILED_RETRY_MIN_INTERVAL_MILLIS: Long = 3_000L
 
-        /** Extra spacing before HTML `/search` queries to avoid tripping search WAF limits. */
-        const val DEFAULT_SEARCH_EXTRA_INTERVAL_MILLIS: Long = 250L
+        /** Shared `/categories/expose` board snapshot TTL across all sellers: 30 minutes. */
+        const val DEFAULT_EXPOSE_BOARD_TTL_MILLIS: Long = 30L * 60L * 1000L
+
+        /** Minimum spacing between manual refreshes of `/categories/expose`: 60 seconds. */
+        const val DEFAULT_EXPOSE_BOARD_REFRESH_MIN_INTERVAL_MILLIS: Long = 60_000L
+
+        /** Stale retention for `/categories/expose` board snapshot: 6 hours. */
+        const val DEFAULT_EXPOSE_BOARD_STALE_RETENTION_MILLIS: Long = 6L * 60L * 60L * 1000L
+
+        /** Minimum interval between explicit on-demand `/search` deep-scan calls: 10 seconds. */
+        const val DEFAULT_SEARCH_MIN_INTERVAL_MILLIS: Long = 10_000L
+
+        /** Base cooldown on `/search` 429/503 rate limits: 30 seconds. */
+        const val DEFAULT_SEARCH_BASE_COOLDOWN_MILLIS: Long = 30_000L
 
         const val MAX_RECENT_TRADE_TOPICS: Int = 5
         private const val MAX_PREFETCH_QUEUE_SIZE: Int = 16
@@ -980,6 +1332,12 @@ class SellerTrustRepositoryImpl internal constructor(
                 "${prefix}_cache_v1.json"
             }
             return File(dir, fileName)
+        }
+
+        internal fun defaultExposeBoardFileFor(cacheFile: File): File {
+            val dir = cacheFile.parentFile ?: File(".")
+            val prefix = cacheFile.nameWithoutExtension.ifBlank { "seller_trust_cache" }
+            return File(dir, "${prefix}_expose_board.json")
         }
 
         /**
@@ -1012,6 +1370,7 @@ class SellerTrustRepositoryImpl internal constructor(
                     userAgentProvider = userAgentProvider ?: UserAgentProvider().also { it.initFromContext(appCtx) },
                     sameOriginTransport = sameOriginTransport,
                     onConfigObserved = onConfigObserved,
+                    forumRepository = forumRepository,
                 )
             } else {
                 RepositorySellerTrustRemoteDataSource(
@@ -1027,6 +1386,101 @@ class SellerTrustRepositoryImpl internal constructor(
             )
             sharedInstances[key] = created
             return created
+        }
+    }
+}
+
+@Serializable
+internal data class PersistedExposeBoardSnapshot(
+    val fetchedAtEpochMillis: Long,
+    val page: FeedPageResult,
+)
+
+/**
+ * Shared memory + disk cache for page 1 of `/categories/expose`, enabling zero-`/search`
+ * exposure screening across all inspected sellers within a 30-minute freshness window.
+ */
+internal class ExposeBoardSnapshotStore(
+    private val snapshotFile: File,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val clockMillis: () -> Long = System::currentTimeMillis,
+    private val freshTtlMillis: Long = SellerTrustRepositoryImpl.DEFAULT_EXPOSE_BOARD_TTL_MILLIS,
+    private val staleRetentionMillis: Long = SellerTrustRepositoryImpl.DEFAULT_EXPOSE_BOARD_STALE_RETENTION_MILLIS,
+) {
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        prettyPrint = false
+    }
+
+    private val mutex = Mutex()
+    private var loadedFromDisk = false
+    private var snapshot: PersistedExposeBoardSnapshot? = null
+
+    suspend fun getFresh(nowMillis: Long = clockMillis()): PersistedExposeBoardSnapshot? =
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked(nowMillis)
+                val current = snapshot ?: return@withLock null
+                val age = nowMillis - current.fetchedAtEpochMillis
+                if (age in 0L until freshTtlMillis) current else null
+            }
+        }
+
+    suspend fun getLastFetchedAtMillis(): Long =
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked(clockMillis())
+                snapshot?.fetchedAtEpochMillis ?: 0L
+            }
+        }
+
+    suspend fun put(
+        page: FeedPageResult,
+        nowMillis: Long = clockMillis(),
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                loadedFromDisk = true
+                val next = PersistedExposeBoardSnapshot(
+                    fetchedAtEpochMillis = nowMillis,
+                    page = page,
+                )
+                snapshot = next
+                writeToDiskLocked(next)
+            }
+        }
+    }
+
+    private fun ensureLoadedLocked(nowMillis: Long) {
+        if (loadedFromDisk) return
+        loadedFromDisk = true
+        if (!snapshotFile.isFile || snapshotFile.length() <= 0L) return
+        val loaded = runCatching {
+            val raw = snapshotFile.readText(Charsets.UTF_8)
+            if (raw.isBlank()) null else json.decodeFromString<PersistedExposeBoardSnapshot>(raw)
+        }.getOrNull() ?: run {
+            runCatching { snapshotFile.delete() }
+            return
+        }
+        val age = nowMillis - loaded.fetchedAtEpochMillis
+        if (age in 0L until staleRetentionMillis) {
+            snapshot = loaded
+        } else {
+            runCatching { snapshotFile.delete() }
+        }
+    }
+
+    private fun writeToDiskLocked(item: PersistedExposeBoardSnapshot) {
+        runCatching {
+            snapshotFile.parentFile?.mkdirs()
+            val encoded = json.encodeToString(item)
+            val tmpFile = File(snapshotFile.parentFile, "${snapshotFile.name}.tmp")
+            tmpFile.writeText(encoded, Charsets.UTF_8)
+            if (!tmpFile.renameTo(snapshotFile)) {
+                snapshotFile.writeText(encoded, Charsets.UTF_8)
+                tmpFile.delete()
+            }
         }
     }
 }

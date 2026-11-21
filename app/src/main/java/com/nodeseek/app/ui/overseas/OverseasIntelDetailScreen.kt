@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -550,6 +551,7 @@ private fun OverseasDetailBottomBar(
         OutlinedButton(
             onClick = onOpenSource,
             enabled = sourceUrl.isNotBlank(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             modifier = Modifier.weight(1f),
             shape = CircleShape,
         ) {
@@ -559,13 +561,19 @@ private fun OverseasDetailBottomBar(
                 modifier = Modifier.size(16.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("打开原帖")
+            Text(
+                text = "打开原帖",
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         if (canRepost) {
             Button(
                 onClick = onRepost,
                 enabled = !isReposting,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 modifier = Modifier.weight(1.25f),
                 shape = CircleShape,
             ) {
@@ -583,7 +591,12 @@ private fun OverseasDetailBottomBar(
                     )
                 }
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(if (isReposting) "获取主楼中…" else "一键搬运发帖")
+                Text(
+                    text = if (isReposting) "获取主楼中…" else "一键搬运发帖",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

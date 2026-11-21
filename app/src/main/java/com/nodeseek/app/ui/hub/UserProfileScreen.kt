@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package com.nodeseek.app.ui.hub
 
@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -847,6 +849,12 @@ private fun UserProfileHeroBento(
                             style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
                             fontWeight = FontWeight.Bold,
                             color = rankSpec.contentColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .padding(end = 8.dp),
                         )
                         Text(
                             text = if (rankProgress.nextThresholdCoins != null) {
@@ -857,6 +865,7 @@ private fun UserProfileHeroBento(
                             style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -885,6 +894,7 @@ private fun UserProfileHeroBento(
                     onClick = onEditProfile,
                     interactionSource = editInteraction,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                     colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
                             alpha = if (isDark) 0.78f else 0.90f,
@@ -905,12 +915,15 @@ private fun UserProfileHeroBento(
                     Text(
                         text = "编辑个人简介、签名与 README",
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             } else if (isSignedIn) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val followed = profile.isFollowedByViewer == true
                     val followInteraction = remember { MutableInteractionSource() }
@@ -920,6 +933,7 @@ private fun UserProfileHeroBento(
                             enabled = !isUpdatingRelation,
                             interactionSource = followInteraction,
                             shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp)
@@ -930,8 +944,14 @@ private fun UserProfileHeroBento(
                                 contentDescription = null,
                                 modifier = Modifier.size(17.dp),
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("已关注", fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "已关注",
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     } else {
                         val ctaGradient = Brush.horizontalGradient(
@@ -961,8 +981,9 @@ private fun UserProfileHeroBento(
                             contentAlignment = Alignment.Center,
                         ) {
                             Row(
+                                modifier = Modifier.padding(horizontal = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
                             ) {
                                 if (isUpdatingRelation) {
                                     CircularProgressIndicator(
@@ -983,6 +1004,9 @@ private fun UserProfileHeroBento(
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onPrimary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -994,6 +1018,7 @@ private fun UserProfileHeroBento(
                             onClick = onSendMessage,
                             interactionSource = dmInteraction,
                             shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(44.dp)
@@ -1004,8 +1029,14 @@ private fun UserProfileHeroBento(
                                 contentDescription = null,
                                 modifier = Modifier.size(17.dp),
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("发私信", fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "发私信",
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
 
@@ -1909,26 +1940,52 @@ private fun UserProfileLoadErrorCard(
             textAlign = TextAlign.Center,
         )
         Spacer(modifier = Modifier.height(2.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (isChallengeError && onVerifySecurity != null) {
-                Button(onClick = onVerifySecurity, shape = CircleShape) {
-                    Text("前往安全验证", fontWeight = FontWeight.SemiBold)
+                Button(
+                    onClick = onVerifySecurity,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = "前往安全验证",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
-                OutlinedButton(onClick = onRetry, shape = CircleShape) {
-                    Text("重试")
+                OutlinedButton(
+                    onClick = onRetry,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = "重试",
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             } else {
-                FilledTonalButton(onClick = onRetry, shape = CircleShape) {
+                FilledTonalButton(
+                    onClick = onRetry,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("重新加载", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "重新加载",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
         }

@@ -320,6 +320,9 @@ internal fun SshResultPublishSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
@@ -333,6 +336,8 @@ internal fun SshResultPublishSheet(
                                 text = "勾选要合并发布的测试结果（已选 ${runsToFormat.size} 项）",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         if (sameServerCandidates.size >= 2) {
@@ -340,7 +345,12 @@ internal fun SshResultPublishSheet(
                                 onClick = { onSelectCandidateRuns(sameServerCandidates) },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             ) {
-                                Text("全选本机 (${sameServerCandidates.size})", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = "全选本机 (${sameServerCandidates.size})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
                             }
                         }
                     }
@@ -549,27 +559,27 @@ internal fun SshResultPublishSheet(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 OutlinedButton(
                     enabled = actionsEnabled,
                     onClick = {
                         currentPost?.let { onCopyMarkdown(it.markdownContent) }
                     },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 ) {
                     Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("复制 MD", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("复制 MD", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
 
                 if (currentPost?.plainTextCopy != null && onCopyPlainText != null) {
                     OutlinedButton(
                         enabled = actionsEnabled,
                         onClick = { onCopyPlainText(currentPost.plainTextCopy) },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     ) {
-                        Text("复制纯文本", maxLines = 1)
+                        Text("复制纯文本", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                     }
                 }
 
@@ -582,9 +592,9 @@ internal fun SshResultPublishSheet(
                                 onDismiss()
                             }
                         },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     ) {
-                        Text("插入回复", maxLines = 1)
+                        Text("插入回复", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                     }
                 }
 
@@ -600,11 +610,16 @@ internal fun SshResultPublishSheet(
                         }
                     },
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                 ) {
-                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("一键发测评", maxLines = 1)
+                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = if (onInsertToReply != null) "发测评" else "一键发测评",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

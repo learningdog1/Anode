@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalLayoutApi::class)
+
 package com.nodeseek.app.ui.explore
 
 import androidx.compose.animation.animateColorAsState
@@ -1008,17 +1010,17 @@ private fun ExploreBoardFeedPage(
                                             overflow = TextOverflow.Ellipsis,
                                         )
                                     }
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
                                     ) {
                                         if (slice.isChallengeOrAuthRequired) {
                                             Button(onClick = onTriggerWebViewAuth, shape = CircleShape) {
-                                                Text(text = "完成网页验证")
+                                                Text(text = "完成网页验证", maxLines = 1, softWrap = false)
                                             }
                                         }
                                         OutlinedButton(onClick = onLoadNextPage, shape = CircleShape) {
-                                            Text(text = "点按重试")
+                                            Text(text = "点按重试", maxLines = 1, softWrap = false)
                                         }
                                     }
                                 }
@@ -1169,16 +1171,16 @@ private fun ExploreErrorRecoveryCard(
             textAlign = TextAlign.Center,
         )
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (isChallengeRequired) {
                 Button(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "完成网页验证 / 登录")
+                    Text(text = "完成网页验证 / 登录", maxLines = 1, softWrap = false)
                 }
                 OutlinedButton(onClick = onRetry, shape = CircleShape) {
-                    Text(text = "重试")
+                    Text(text = "重试", maxLines = 1, softWrap = false)
                 }
             } else {
                 Button(onClick = onRetry, shape = CircleShape) {
@@ -1188,10 +1190,10 @@ private fun ExploreErrorRecoveryCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "重新加载")
+                    Text(text = "重新加载", maxLines = 1, softWrap = false)
                 }
                 FilledTonalButton(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "网页会话")
+                    Text(text = "网页会话", maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -1271,22 +1273,22 @@ private fun ExploreRssFallbackCard(
         ) {
             if (preferRssFallback && !isChallengeRequired) {
                 Button(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                    Text(text = "切换为完整网页流")
+                    Text(text = "切换为完整网页流", maxLines = 1, softWrap = false)
                 }
                 OutlinedButton(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "网页验证 / 登录")
+                    Text(text = "网页验证 / 登录", maxLines = 1, softWrap = false)
                 }
             } else {
                 Button(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "完成网页验证，加载完整内容")
+                    Text(text = "完成网页验证，加载完整内容", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
                 if (preferRssFallback) {
                     FilledTonalButton(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                        Text(text = "关闭 RSS 优先")
+                        Text(text = "关闭 RSS 优先", maxLines = 1, softWrap = false)
                     }
                 } else {
                     OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                        Text(text = "重试")
+                        Text(text = "重试", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -1347,11 +1349,11 @@ private fun ExploreEmptyCard(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (selectedCategorySlug.isNotBlank()) {
                 FilledTonalButton(onClick = onResetCategory, shape = CircleShape) {
-                    Text(text = "返回全部")
+                    Text(text = "返回全部", maxLines = 1, softWrap = false)
                 }
             }
             OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                Text(text = "刷新")
+                Text(text = "刷新", maxLines = 1, softWrap = false)
             }
         }
     }

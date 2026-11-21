@@ -1021,7 +1021,7 @@ private fun SeekMailApiKeyDialog(
                 onClick = onDismiss,
                 enabled = !isVerifying,
             ) {
-                Text("取消")
+                Text("取消", maxLines = 1, softWrap = false)
             }
             Button(
                 onClick = {
@@ -1038,9 +1038,14 @@ private fun SeekMailApiKeyDialog(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("验证中")
+                    Text("验证中", maxLines = 1, softWrap = false)
                 } else {
-                    Text("更换并验证", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "更换并验证",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
         },
@@ -1196,7 +1201,12 @@ private fun SeekMailSearchBar(
             shape = CircleShape,
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
         ) {
-            Text("搜索", fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "搜索",
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+            )
         }
     }
 }
@@ -1811,14 +1821,14 @@ private fun SeekMailListPane(
                                         onClick = onManageApiKey,
                                         contentPadding = PaddingValues(horizontal = 8.dp),
                                     ) {
-                                        Text("更换 Key")
+                                        Text("更换 Key", maxLines = 1, softWrap = false)
                                     }
                                 }
                                 TextButton(
                                     onClick = onRetry,
                                     contentPadding = PaddingValues(horizontal = 8.dp),
                                 ) {
-                                    Text("重试")
+                                    Text("重试", maxLines = 1, softWrap = false)
                                 }
                             }
                         }
@@ -3113,7 +3123,12 @@ private fun AttachmentsRailSection(
                         onClick = onRetry,
                         contentPadding = PaddingValues(horizontal = 8.dp),
                     ) {
-                        Text("重试", style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            text = "重试",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }
@@ -3303,7 +3318,12 @@ private fun RawEmlReaderView(
                             modifier = Modifier.size(14.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("复制源码", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = "复制源码",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
 
                     Button(
@@ -3326,7 +3346,12 @@ private fun RawEmlReaderView(
                             )
                         }
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("保存 .eml", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = "保存 .eml",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
 
@@ -3538,19 +3563,21 @@ private fun CreateMailboxBottomSheet(
                     onClick = onCheckAvailability,
                     enabled = !uiState.isCheckingAvailability && !uiState.isCreatingMailbox,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(1f),
                 ) {
                     if (uiState.isCheckingAvailability) {
                         CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Text("检测可用性")
+                    Text("检测可用性", maxLines = 1, softWrap = false)
                 }
 
                 Button(
                     onClick = onCreateMailbox,
                     enabled = !uiState.isCreatingMailbox && !uiState.isCheckingAvailability,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(1f),
                 ) {
                     if (uiState.isCreatingMailbox) {
@@ -3561,7 +3588,7 @@ private fun CreateMailboxBottomSheet(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Text("创建邮箱", fontWeight = FontWeight.Bold)
+                    Text("创建邮箱", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
             }
         }

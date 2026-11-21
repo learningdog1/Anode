@@ -549,6 +549,8 @@ internal fun ReplyComposerBottomSheet(
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
                             color = contentTint,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
@@ -1878,14 +1880,14 @@ internal fun TopicAccessRestrictionCard(
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("打开官方登录页")
+                        Text("打开官方登录页", maxLines = 1, softWrap = false)
                     }
                     OutlinedButton(
                         onClick = onRetry,
                         shape = CircleShape,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("我已登录，重新加载")
+                        Text("我已登录，重新加载", maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -1901,14 +1903,14 @@ internal fun TopicAccessRestrictionCard(
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("前往完成安全验证")
+                        Text("前往完成安全验证", maxLines = 1, softWrap = false)
                     }
                     OutlinedButton(
                         onClick = onRetry,
                         shape = CircleShape,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("已完成验证，刷新帖子")
+                        Text("已完成验证，刷新帖子", maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -1919,7 +1921,7 @@ internal fun TopicAccessRestrictionCard(
                             shape = CircleShape,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("登录高阶账号查看")
+                            Text("登录高阶账号查看", maxLines = 1, softWrap = false)
                         }
                     }
                     OutlinedButton(
@@ -1927,7 +1929,7 @@ internal fun TopicAccessRestrictionCard(
                         shape = CircleShape,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("返回上一页")
+                        Text("返回上一页", maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -1937,7 +1939,7 @@ internal fun TopicAccessRestrictionCard(
                         shape = CircleShape,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("返回上一页")
+                        Text("返回上一页", maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -1953,7 +1955,7 @@ internal fun TopicAccessRestrictionCard(
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("重新加载")
+                        Text("重新加载", maxLines = 1, softWrap = false)
                     }
                 }
             }

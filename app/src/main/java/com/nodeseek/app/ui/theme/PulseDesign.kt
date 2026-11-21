@@ -726,6 +726,8 @@ fun PulseAccentPill(
             style = NodePulseThemeTokens.extraTypography.microLabel,
             color = contentColor,
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

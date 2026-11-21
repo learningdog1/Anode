@@ -14,6 +14,15 @@ interface SellerTrustRepository {
     ): SellerTrustReport
 
     /**
+     * Runs an explicit, user-triggered single-query station `/search` deep scan for historical
+     * exposure posts mentioning the seller, merging any hits into the cached [SellerTrustReport].
+     */
+    suspend fun searchSellerExposureDeep(
+        uid: Long,
+        usernameHint: String,
+    ): SellerTrustReport = inspectSeller(uid = uid, usernameHint = usernameHint, forceRefresh = true)
+
+    /**
      * Observes cached positive/partial [SellerTrustReport] snapshots for [uid] from memory/disk
      * without ever triggering remote HTTP requests. Safe for inline list/floor badges.
      */

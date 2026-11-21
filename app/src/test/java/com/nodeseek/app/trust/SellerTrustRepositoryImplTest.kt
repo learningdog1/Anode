@@ -15,6 +15,7 @@ import com.nodeseek.app.domain.model.UserProfile
 import com.nodeseek.app.domain.model.UserReplyExcerpt
 import com.nodeseek.app.domain.repository.ForumRepository
 import com.nodeseek.app.domain.repository.UserRepository
+import com.nodeseek.app.domain.trust.ExposureCheckScope
 import com.nodeseek.app.domain.trust.TrustFetchStatus
 import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.trust.TrustRiskLevel
@@ -55,11 +56,14 @@ class SellerTrustRepositoryImplTest {
     private val baseClockMillis: Long = Instant.parse("2026-11-19T04:00:00Z").toEpochMilli()
 
     @Test
-    fun inspectSeller_fetchesProfileTopicsAndSearchesWithBoundedConcurrencyAndPacing() = runTest {
+    fun inspectSeller_fetchesProfileTopicsAndExposeBoardWithZeroSearchCalls_andSharesBoardSnapshotAcrossSellers() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        val searchCalls = AtomicInteger(0)
+        val exposeFeedCalls = AtomicInteger(0)
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
-                Result.success(sampleProfile(uid = uid, username = "CloudSeller", coins = 1750, joinedAtIso = "2024-07-10T08:00:00Z"))
+                val name = if (uid == 1001L) "CloudSeller" else "ShadyVendor"
+                Result.success(sampleProfile(uid = uid, username = name, coins = 1750, joinedAtIso = "2024-07-10T08:00:00Z"))
             },
             onGetTopics = { uid, _ ->
                 Result.success(
@@ -72,7 +76,29 @@ class SellerTrustRepositoryImplTest {
             },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = {
+            onGetFeed = { slug, _, _ ->
+                if (slug == "expose") {
+                    exposeFeedCalls.incrementAndGet()
+                    Result.success(
+                        FeedPageResult(
+                            topics = listOf(
+                                sampleTopic(
+                                    id = 888L,
+                                    title = "曝光 ShadyVendor 收款不给机跑路",
+                                    categorySlug = "expose",
+                                    categoryName = "曝光",
+                                    authorId = 9001L,
+                                    authorName = "victim88",
+                                ),
+                            ),
+                        ),
+                    )
+                } else {
+                    Result.success(FeedPageResult(topics = emptyList()))
+                }
+            },
+            onSearch = { _, _ ->
+                searchCalls.incrementAndGet()
                 Result.success(FeedPageResult(topics = emptyList()))
             },
         )
@@ -86,71 +112,110 @@ class SellerTrustRepositoryImplTest {
             zoneId = shanghaiZone,
         )
 
-        val report = repo.inspectSeller(uid = 1001L, usernameHint = "CloudSeller")
+        val report1 = repo.inspectSeller(uid = 1001L, usernameHint = "CloudSeller")
         assertTrue(
             "Expected global concurrency cap <= 2, actual=${repo.rateLimiter.peakConcurrencyForTest}",
             repo.rateLimiter.peakConcurrencyForTest <= 2,
         )
-        assertEquals(1001L, report.uid)
-        assertEquals("CloudSeller", report.username)
-        assertEquals(4, report.rankLevel)
-        assertEquals(1750, report.coins)
-        assertEquals(2, report.historicalTradeTopicCount)
-        assertEquals(2, report.recentTradeTopics.size)
-        assertTrue(report.searchSucceeded)
-        assertTrue(report.exposureSearchHits.isEmpty())
-        assertEquals(TrustRiskLevel.NORMAL_CLEAR, report.riskAssessment.level)
-        assertFalse(report.isFromCache)
-        assertEquals(TrustFetchStatus.FRESH, report.fetchStatus)
+        assertEquals(0, searchCalls.get())
+        assertEquals(1, exposeFeedCalls.get())
+        assertEquals(1001L, report1.uid)
+        assertEquals("CloudSeller", report1.username)
+        assertEquals(4, report1.rankLevel)
+        assertEquals(1750, report1.coins)
+        assertEquals(2, report1.historicalTradeTopicCount)
+        assertEquals(2, report1.recentTradeTopics.size)
+        assertTrue(report1.searchSucceeded)
+        assertEquals(ExposureCheckScope.BOARD_SNAPSHOT, report1.exposureCheckScope)
+        assertTrue(report1.exposureSearchHits.isEmpty())
+        assertEquals(TrustRiskLevel.NORMAL_CLEAR, report1.riskAssessment.level)
+        assertFalse(report1.isFromCache)
+        assertEquals(TrustFetchStatus.FRESH, report1.fetchStatus)
+
+        // Second seller reuses shared `/categories/expose` snapshot -> still 1 board fetch, 0 `/search` calls, flags hit!
+        val report2 = repo.inspectSeller(uid = 1002L, usernameHint = "ShadyVendor")
+        assertEquals(0, searchCalls.get())
+        assertEquals(1, exposeFeedCalls.get())
+        assertEquals(1, report2.exposureSearchHits.size)
+        assertEquals(TrustRiskLevel.HIGH_RISK_RED, report2.riskAssessment.level)
     }
 
     @Test
-    fun inspectSeller_handlesSearchRateLimitGracefullyWhileProfileSucceeds_andShortCircuitsSiblingSearch() = runTest {
+    fun searchSellerExposureDeep_isolatesSearchRateLimitFromProfileChecks_andEnforcesIntervalWithoutBlocking() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        var manualOffsetMillis = 0L
+        val clock = { baseClockMillis + testScheduler.currentTime + manualOffsetMillis }
         val searchCalls = AtomicInteger(0)
+        var shouldFailSearch429 = true
+
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
-                Result.success(sampleProfile(uid = uid, username = "VeteranUser", coins = 2600, joinedAtIso = "2023-05-01T00:00:00Z"))
+                Result.success(sampleProfile(uid = uid, username = "VeteranUser$uid", coins = 2600, joinedAtIso = "2023-05-01T00:00:00Z"))
             },
             onGetTopics = { uid, _ ->
                 Result.success(
                     listOf(
-                        sampleTopic(id = 21L, title = "[出] 搬瓦工", categorySlug = "trade", categoryName = "交易", authorId = uid, authorName = "VeteranUser"),
+                        sampleTopic(id = 21L, title = "[出] 搬瓦工", categorySlug = "trade", categoryName = "交易", authorId = uid, authorName = "VeteranUser$uid"),
                     ) to false,
                 )
             },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = {
+            onGetFeed = { _, _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { _, _ ->
                 searchCalls.incrementAndGet()
-                Result.failure(NodeSeekApiException(message = "Too Many Requests", statusCode = 429, retryAfterSeconds = 20L))
+                if (shouldFailSearch429) {
+                    Result.failure(NodeSeekApiException(message = "Too Many Requests", statusCode = 429, retryAfterSeconds = 20L))
+                } else {
+                    Result.success(FeedPageResult(topics = emptyList()))
+                }
             },
         )
 
         val repo = SellerTrustRepositoryImpl(
             userRepository = userRepo,
             forumRepository = forumRepo,
-            notesFile = File(tempFolder.root, "seller_trust_notes.json"),
+            notesFile = File(tempFolder.root, "isolated_search_notes.json"),
             ioDispatcher = dispatcher,
-            clockMillis = { baseClockMillis + testScheduler.currentTime },
+            clockMillis = clock,
             zoneId = shanghaiZone,
         )
 
-        val report = repo.inspectSeller(uid = 2002L, usernameHint = "VeteranUser")
-        assertTrue(report.profileSucceeded)
-        assertTrue(report.topicsSucceeded)
-        assertFalse(report.searchSucceeded)
-        assertNotNull(report.searchFailureReason)
-        assertTrue(report.searchFailureReason!!.contains("限流"))
-        assertEquals(1, searchCalls.get()) // Second search aborted immediately once first tripped 429 cooldown!
-        assertEquals(5, report.rankLevel)
-        assertEquals(1, report.historicalTradeTopicCount)
-        assertEquals(TrustRiskLevel.CAUTION_AMBER, report.riskAssessment.level)
-        assertTrue(report.cooldownUntilEpochMillis > baseClockMillis)
+        val baseReport = repo.inspectSeller(uid = 2002L, usernameHint = "VeteranUser2002")
+        assertTrue(baseReport.profileSucceeded)
+        assertTrue(baseReport.searchSucceeded)
+        assertEquals(0, searchCalls.get())
+
+        // Deep search hits 429 -> enters searchRateLimiter cooldown, returns notice without poisoning profile limiter!
+        val limitedDeep = repo.searchSellerExposureDeep(uid = 2002L, usernameHint = "VeteranUser2002")
+        assertEquals(1, searchCalls.get())
+        assertTrue(limitedDeep.deepSearchCooldownUntilEpochMillis > clock())
+        assertTrue(limitedDeep.deepSearchNoticeMessage.orEmpty().contains("限流"))
+        assertEquals(0L, repo.rateLimiter.getActiveCooldownUntil("www.nodeseek.com", clock()))
+
+        // Inspecting another seller while `/search` is cooling down still succeeds cleanly!
+        val otherSeller = repo.inspectSeller(uid = 2003L, usernameHint = "VeteranUser2003")
+        assertTrue(otherSeller.profileSucceeded)
+        assertEquals(TrustRiskLevel.NORMAL_CLEAR, otherSeller.riskAssessment.level)
+
+        // Advance past 20s+ jitter search cooldown and succeed on deep search
+        manualOffsetMillis += 35_000L
+        shouldFailSearch429 = false
+        val okDeep = repo.searchSellerExposureDeep(uid = 2002L, usernameHint = "VeteranUser2002")
+        assertEquals(2, searchCalls.get())
+        assertTrue(okDeep.isDeepSearchVerified)
+        assertEquals(0L, okDeep.deepSearchCooldownUntilEpochMillis)
+
+        // Immediate repeat deep search 2s later is gated by 10s searchMinIntervalMillis WITHOUT sleeping or hitting /search
+        manualOffsetMillis += 2_000L
+        val gatedDeep = repo.searchSellerExposureDeep(uid = 2002L, usernameHint = "VeteranUser2002")
+        assertEquals(2, searchCalls.get())
+        assertTrue(gatedDeep.deepSearchCooldownUntilEpochMillis > clock())
+        assertTrue(gatedDeep.deepSearchNoticeMessage.orEmpty().contains("限流"))
     }
 
     @Test
-    fun inspectSeller_partialSearchFailureStillSurfacesExposureHitFromSucceededQuery() = runTest {
+    fun searchSellerExposureDeep_mergesHitsWithBoardSnapshot_andPreservesThemOnProfileRefresh() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
@@ -159,48 +224,65 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { query ->
-                if (query.startsWith("曝光")) {
-                    Result.failure(TopicAccessException.SignInRequired)
-                } else {
-                    Result.success(
-                        FeedPageResult(
-                            topics = listOf(
-                                sampleTopic(
-                                    id = 909L,
-                                    title = "骗子 ShadyGuy 收钱拉黑跑路",
-                                    categorySlug = "expose",
-                                    categoryName = "曝光",
-                                    authorId = 888L,
-                                    authorName = "victim1",
-                                ),
+            onGetFeed = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            sampleTopic(
+                                id = 908L,
+                                title = "曝光 ShadyGuy 疑似跑路",
+                                categorySlug = "expose",
+                                categoryName = "曝光",
+                                authorId = 887L,
+                                authorName = "victim0",
                             ),
                         ),
-                    )
-                }
+                    ),
+                )
+            },
+            onSearch = { _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            sampleTopic(
+                                id = 909L,
+                                title = "骗子 ShadyGuy 收钱拉黑跑路",
+                                categorySlug = "daily",
+                                categoryName = "日常",
+                                authorId = 888L,
+                                authorName = "victim1",
+                            ),
+                        ),
+                    ),
+                )
             },
         )
 
         val repo = SellerTrustRepositoryImpl(
             userRepository = userRepo,
             forumRepository = forumRepo,
-            notesFile = File(tempFolder.root, "seller_trust_notes.json"),
+            notesFile = File(tempFolder.root, "merge_deep_notes.json"),
             ioDispatcher = dispatcher,
             clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
-        val report = repo.inspectSeller(uid = 3003L, usernameHint = "ShadyGuy")
-        assertFalse(report.searchSucceeded)
-        assertEquals(1, report.exposureSearchHits.size)
-        assertEquals(909L, report.exposureSearchHits.single().topicId)
-        assertEquals(TrustRiskEvaluator.TERM_SCAMMER, report.exposureSearchHits.single().matchedTerm)
-        assertEquals(TrustRiskLevel.HIGH_RISK_RED, report.riskAssessment.level)
+        val initial = repo.inspectSeller(uid = 3003L, usernameHint = "ShadyGuy")
+        assertEquals(ExposureCheckScope.BOARD_SNAPSHOT, initial.exposureCheckScope)
+        assertEquals(1, initial.exposureSearchHits.size)
+        assertEquals(TrustRiskLevel.HIGH_RISK_RED, initial.riskAssessment.level)
+
+        val deep = repo.searchSellerExposureDeep(uid = 3003L, usernameHint = "ShadyGuy")
+        assertEquals(ExposureCheckScope.DEEP_SEARCH, deep.exposureCheckScope)
+        assertEquals(2, deep.exposureSearchHits.size)
+        assertEquals(setOf(908L, 909L), deep.exposureSearchHits.map { it.topicId }.toSet())
+        assertEquals(TrustRiskLevel.HIGH_RISK_RED, deep.riskAssessment.level)
     }
 
     @Test
-    fun inspectSeller_deduplicatesExposureHitsAcrossQueriesAndFiltersNoise() = runTest {
+    fun searchSellerExposureDeep_deduplicatesExposureHitsAndFiltersNoise() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        val searchedArgs = mutableListOf<Pair<String, String>>()
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
                 Result.success(sampleProfile(uid = uid, username = "fox", coins = 420, joinedAtIso = "2025-01-01T00:00:00Z"))
@@ -224,7 +306,9 @@ class SellerTrustRepositoryImplTest {
             authorName = "bob",
         )
         val forumRepo = FakeForumRepository(
-            onSearch = {
+            onGetFeed = { _, _, _ -> Result.success(FeedPageResult(topics = listOf(sharedExposure, noiseSubstring))) },
+            onSearch = { query, categorySlug ->
+                searchedArgs += query to categorySlug
                 Result.success(FeedPageResult(topics = listOf(sharedExposure, noiseSubstring)))
             },
         )
@@ -232,13 +316,15 @@ class SellerTrustRepositoryImplTest {
         val repo = SellerTrustRepositoryImpl(
             userRepository = userRepo,
             forumRepository = forumRepo,
-            notesFile = File(tempFolder.root, "seller_trust_notes.json"),
+            notesFile = File(tempFolder.root, "fox_notes.json"),
             ioDispatcher = dispatcher,
             clockMillis = { baseClockMillis + testScheduler.currentTime },
             zoneId = shanghaiZone,
         )
 
-        val report = repo.inspectSeller(uid = 4004L, usernameHint = "fox")
+        val report = repo.searchSellerExposureDeep(uid = 4004L, usernameHint = "fox")
+        assertEquals(1, searchedArgs.size)
+        assertEquals("fox" to "expose", searchedArgs.single())
         assertEquals(1, report.exposureSearchHits.size)
         assertEquals(500L, report.exposureSearchHits.single().topicId)
         assertEquals(TrustRiskLevel.HIGH_RISK_RED, report.riskAssessment.level)
@@ -260,7 +346,7 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
         )
 
         val repo = SellerTrustRepositoryImpl(
@@ -325,7 +411,7 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
         )
 
         val repo1 = SellerTrustRepositoryImpl(
@@ -389,9 +475,9 @@ class SellerTrustRepositoryImplTest {
     }
 
     @Test
-    fun inspectSeller_resolvesCanonicalUsernameUpfront_withoutDuplicateSpeculativeHintSearches() = runTest {
+    fun inspectSeller_resolvesCanonicalUsernameUpfront_withZeroSearchCalls_andSingleQueryDeepSearch() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val searchedQueries = mutableListOf<String>()
+        val searchedQueries = mutableListOf<Pair<String, String>>()
 
         val userRepo = FakeUserRepository(
             onGetProfile = { uid ->
@@ -400,8 +486,9 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { query ->
-                searchedQueries += query
+            onGetFeed = { _, _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { query, categorySlug ->
+                searchedQueries += query to categorySlug
                 Result.success(FeedPageResult(topics = emptyList()))
             },
         )
@@ -415,11 +502,14 @@ class SellerTrustRepositoryImplTest {
             zoneId = shanghaiZone,
         )
 
-        // Even when caller passes an outdated/mismatched usernameHint, only canonical searches are issued (2 instead of 4)!
         val report = repo.inspectSeller(uid = 7007L, usernameHint = "OutdatedHintName")
         assertEquals("RealSellerName", report.username)
-        assertEquals(2, searchedQueries.size)
-        assertEquals(setOf("曝光 RealSellerName", "骗子 RealSellerName"), searchedQueries.toSet())
+        assertEquals(0, searchedQueries.size)
+
+        // Explicit deep search issues exactly ONE canonical query across all boards (not 2 or 4!)
+        val deep = repo.searchSellerExposureDeep(uid = 7007L, usernameHint = "OutdatedHintName")
+        assertTrue(deep.isDeepSearchVerified)
+        assertEquals(listOf("RealSellerName" to ""), searchedQueries)
     }
 
     @Test
@@ -436,7 +526,7 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.success(emptyList<TopicSummary>() to false) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
         )
 
         val clock = { baseClockMillis + testScheduler.currentTime }
@@ -510,26 +600,23 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.failure(RuntimeException("502 Bad Gateway")) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { query ->
-                if (query.startsWith("曝光")) {
-                    Result.success(
-                        FeedPageResult(
-                            topics = listOf(
-                                sampleTopic(
-                                    id = 999L,
-                                    title = "曝光 GhostSeller 跑路",
-                                    categorySlug = "expose",
-                                    categoryName = "曝光",
-                                    authorId = 321L,
-                                    authorName = "buyerX",
-                                ),
+            onGetFeed = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            sampleTopic(
+                                id = 999L,
+                                title = "曝光 GhostSeller 跑路",
+                                categorySlug = "expose",
+                                categoryName = "曝光",
+                                authorId = 321L,
+                                authorName = "buyerX",
                             ),
                         ),
-                    )
-                } else {
-                    Result.success(FeedPageResult(topics = emptyList()))
-                }
+                    ),
+                )
             },
+            onSearch = { _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
         )
 
         val repo = SellerTrustRepositoryImpl(
@@ -565,7 +652,8 @@ class SellerTrustRepositoryImplTest {
             onGetTopics = { _, _ -> Result.failure(RuntimeException("Offline")) },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { Result.failure(RuntimeException("Offline")) },
+            onGetFeed = { _, _, _ -> Result.failure(RuntimeException("Offline")) },
+            onSearch = { _, _ -> Result.failure(RuntimeException("Offline")) },
         )
 
         val repo = SellerTrustRepositoryImpl(
@@ -620,7 +708,7 @@ class SellerTrustRepositoryImplTest {
             },
         )
         val forumRepo = FakeForumRepository(
-            onSearch = { Result.success(FeedPageResult(topics = emptyList())) },
+            onSearch = { _, _ -> Result.success(FeedPageResult(topics = emptyList())) },
         )
 
         val repo = SellerTrustRepositoryImpl(
@@ -701,16 +789,21 @@ class SellerTrustRepositoryImplTest {
     }
 
     private class FakeForumRepository(
-        private val onSearch: suspend (String) -> Result<FeedPageResult>,
+        private val onGetFeed: suspend (String, FeedSort, Int) -> Result<FeedPageResult> = { _, _, _ ->
+            Result.success(FeedPageResult(topics = emptyList()))
+        },
+        private val onSearch: suspend (String, String) -> Result<FeedPageResult> = { _, _ ->
+            Result.success(FeedPageResult(topics = emptyList()))
+        },
     ) : ForumRepository {
         override fun observeCategories(): Flow<List<Category>> = emptyFlow()
         override suspend fun refreshCategories(force: Boolean): Result<List<Category>> = Result.success(emptyList())
         override suspend fun getFeed(categorySlug: String, sort: FeedSort, page: Int, includeBlocked: Boolean, forceRefresh: Boolean): Result<FeedPageResult> =
-            Result.success(FeedPageResult(topics = emptyList()))
+            onGetFeed(categorySlug, sort, page)
         override suspend fun getCuratedFeed(page: Int, forceRefresh: Boolean): Result<FeedPageResult> =
             Result.success(FeedPageResult(topics = emptyList()))
         override suspend fun searchTopics(query: String, categorySlug: String, sort: FeedSort, page: Int): Result<FeedPageResult> =
-            onSearch(query)
+            onSearch(query, categorySlug)
         override suspend fun getTopicDetail(topicId: Long, page: Int, includeBlocked: Boolean): Result<TopicDetailPage> =
             Result.failure(UnsupportedOperationException())
         override suspend fun createTopic(categorySlug: String, title: String, markdownContent: String, requiredViewLevel: Int): Result<Unit> =

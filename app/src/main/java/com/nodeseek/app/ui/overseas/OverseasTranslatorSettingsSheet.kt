@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,6 +56,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
@@ -388,6 +390,7 @@ fun OverseasTranslatorSettingsSheet(
                 OutlinedButton(
                     onClick = { onTestConnection(draftConfig) },
                     enabled = !isTesting,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.weight(1f),
                     shape = CircleShape,
                 ) {
@@ -398,11 +401,17 @@ fun OverseasTranslatorSettingsSheet(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Text("测试通道")
+                    Text(
+                        text = "测试通道",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
 
                 TextButton(
                     onClick = onClearCache,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     shape = CircleShape,
                 ) {
                     Icon(
@@ -411,7 +420,11 @@ fun OverseasTranslatorSettingsSheet(
                         modifier = Modifier.size(17.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("清空缓存")
+                    Text(
+                        text = "清空缓存",
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
 
@@ -421,10 +434,16 @@ fun OverseasTranslatorSettingsSheet(
                     onSave(draftConfig)
                     onDismiss()
                 },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 modifier = Modifier.fillMaxWidth(),
                 shape = CircleShape,
             ) {
-                Text("保存配置")
+                Text(
+                    text = "保存配置",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

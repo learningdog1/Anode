@@ -1983,18 +1983,20 @@ private fun NodeImageApiKeyDialog(
                     Text(
                         text = "清除密钥",
                         color = MaterialTheme.colorScheme.error,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
             Spacer(modifier = Modifier.weight(1f))
             TextButton(onClick = onDismiss) {
-                Text("取消")
+                Text("取消", maxLines = 1, softWrap = false)
             }
             Button(
                 onClick = { onSave(apiKeyDraft.trim()) },
                 shape = CircleShape,
             ) {
-                Text("保存", fontWeight = FontWeight.SemiBold)
+                Text("保存", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
             }
         },
     ) {
@@ -2112,7 +2114,7 @@ private fun BlockedUsersManagerDialog(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(3.dp))
-                    Text("屏蔽")
+                    Text("屏蔽", maxLines = 1, softWrap = false)
                 }
             }
 

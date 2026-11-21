@@ -100,6 +100,21 @@ data class ExposureCandidate(
 )
 
 /**
+ * Scope of exposure verification reflected by a [SellerTrustReport].
+ */
+@Serializable
+enum class ExposureCheckScope {
+    /** Matched locally against the shared page-1 `/categories/expose` board snapshot (zero `/search` calls). */
+    BOARD_SNAPSHOT,
+
+    /** Verified via on-demand single-query station `/search` deep scan in addition to the board snapshot. */
+    DEEP_SEARCH,
+
+    /** Neither board snapshot nor deep search succeeded cleanly. */
+    UNVERIFIED,
+}
+
+/**
  * Data source & resilience status of a [SellerTrustReport].
  */
 @Serializable
@@ -155,6 +170,9 @@ data class SellerTrustReport(
     val failureMessage: String? = null,
     val isNegativeCache: Boolean = false,
     val isRefreshThrottled: Boolean = false,
+    val exposureCheckScope: ExposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
+    val deepSearchCooldownUntilEpochMillis: Long = 0L,
+    val deepSearchNoticeMessage: String? = null,
 ) {
     val rankLabel: String
         get() = "Lv.${rankLevel.coerceIn(0, 6)}"
@@ -164,6 +182,9 @@ data class SellerTrustReport(
 
     val anyRemoteSucceeded: Boolean
         get() = profileSucceeded || topicsSucceeded || searchSucceeded
+
+    val isDeepSearchVerified: Boolean
+        get() = exposureCheckScope == ExposureCheckScope.DEEP_SEARCH
 
     val isRateLimited: Boolean
         get() = fetchStatus == TrustFetchStatus.RATE_LIMITED ||

@@ -298,6 +298,8 @@ fun DrumstickCheckInChip(
                 text = "签到中",
                 style = MaterialTheme.typography.labelMedium,
                 color = contentColor,
+                maxLines = 1,
+                softWrap = false,
             )
         } else {
             Icon(

@@ -1809,7 +1809,7 @@ internal fun NetBenchMarkdownReportCard(
                     .clip(PulseArchitecturalShapes.MediumBadge)
                     .background(MaterialTheme.colorScheme.secondaryContainer)
                     .pulseBouncyClickable(onClick = onCopyMarkdown)
-                    .padding(vertical = 11.dp),
+                    .padding(horizontal = 12.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
             ) {
@@ -1824,6 +1824,9 @@ internal fun NetBenchMarkdownReportCard(
                     text = "复制 Markdown",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -1834,7 +1837,7 @@ internal fun NetBenchMarkdownReportCard(
                         .clip(PulseArchitecturalShapes.MediumBadge)
                         .background(MaterialTheme.colorScheme.primary)
                         .pulseBouncyClickable(onClick = { onInsertMarkdown(markdown) })
-                        .padding(vertical = 11.dp),
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
                 ) {
@@ -1849,6 +1852,9 @@ internal fun NetBenchMarkdownReportCard(
                         text = insertActionLabel,
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

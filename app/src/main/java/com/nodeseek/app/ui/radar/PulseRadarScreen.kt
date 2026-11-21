@@ -1140,7 +1140,12 @@ private fun AlertsFeedTabPage(
                         modifier = Modifier.size(15.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("全部已读", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "全部已读",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
                 TextButton(
                     onClick = onClearRead,
@@ -1153,7 +1158,12 @@ private fun AlertsFeedTabPage(
                         modifier = Modifier.size(15.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("清理已读", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "清理已读",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
                 IconButton(
                     onClick = onRequestClearAll,
@@ -1334,6 +1344,8 @@ private fun AlertRecordCard(
                 Text(
                     text = if (isUnread) "标为已读" else "标为未读",
                     style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
             IconButton(
@@ -1635,7 +1647,12 @@ private fun TrackedTopicCard(
                     onClick = onMarkAlertsRead,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                 ) {
-                    Text("已读", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        text = "已读",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
             TextButton(
@@ -1653,6 +1670,8 @@ private fun TrackedTopicCard(
                     text = "停止追踪",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
             Icon(
@@ -1798,9 +1817,10 @@ private fun AddKeywordRuleBottomSheet(
                 TextButton(
                     onClick = onDismiss,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("取消")
+                    Text("取消", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
                 Button(
                     onClick = {
@@ -1808,6 +1828,7 @@ private fun AddKeywordRuleBottomSheet(
                     },
                     enabled = !isSubmitting,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(2f),
                 ) {
                     if (isSubmitting) {
@@ -1818,7 +1839,7 @@ private fun AddKeywordRuleBottomSheet(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                     }
-                    Text("保存并监控")
+                    Text("保存并监控", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

@@ -880,7 +880,12 @@ private fun PresetCatalogSection(
                     enabled = !isRunning,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
-                    Text("停止", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        text = "停止",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
             FilledTonalButton(
@@ -888,7 +893,12 @@ private fun PresetCatalogSection(
                 enabled = !isRunning,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
             ) {
-                Text("配置/开启", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    text = "配置/开启",
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
         }
 
@@ -1114,6 +1124,9 @@ private fun SessionRunsCollectorStrip(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
@@ -1131,6 +1144,8 @@ private fun SessionRunsCollectorStrip(
                     },
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (!isRunning) {
@@ -1138,7 +1153,12 @@ private fun SessionRunsCollectorStrip(
                     onClick = onClearAll,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                 ) {
-                    Text("清空", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "清空",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
         }
@@ -2097,43 +2117,48 @@ private fun LiteSshExportDock(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             OutlinedButton(
                 onClick = onPreview,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
             ) {
-                Icon(Icons.Rounded.Preview, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.Preview, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("预览")
+                Text("预览", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
 
             OutlinedButton(
                 onClick = onCopyMarkdown,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
             ) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("复制")
+                Text("复制", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
 
             if (onInsertToReply != null) {
                 FilledTonalButton(
                     onClick = onInsertToReply,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
                 ) {
-                    Text("插入回复")
+                    Text("插入回复", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
 
             Button(
                 onClick = onPublishToComposer,
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
             ) {
-                Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("一键发测评帖", maxLines = 1)
+                Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (onInsertToReply != null) "发测评" else "一键发测评帖",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

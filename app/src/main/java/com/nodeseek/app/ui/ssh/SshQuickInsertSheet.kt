@@ -166,6 +166,9 @@ fun SshQuickInsertSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -179,11 +182,15 @@ fun SshQuickInsertSheet(
                             text = "插入 SSH 测机报告",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                         Text(
                             text = "单选生成 ansi 代码块 · 多选自动生成 :::: tabs",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -201,7 +208,12 @@ fun SshQuickInsertSheet(
                             modifier = Modifier.size(15.dp),
                         )
                         Spacer(Modifier.width(4.dp))
-                        Text("去测机", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = "去测机",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }
@@ -325,6 +337,11 @@ fun SshQuickInsertSheet(
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
                     )
                     if (currentFormattedPost != null) {
                         PulseAccentPill(
@@ -342,10 +359,16 @@ fun SshQuickInsertSheet(
                         onClick = {
                             currentFormattedPost?.let { copyTextToClipboard(context, it.markdownContent) }
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     ) {
                         Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("复制")
+                        Text(
+                            text = "复制",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
 
                     if (onPublishToComposer != null) {
@@ -357,8 +380,14 @@ fun SshQuickInsertSheet(
                                     onDismiss()
                                 }
                             },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         ) {
-                            Text("发测评")
+                            Text(
+                                text = "发测评",
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
 
@@ -370,11 +399,17 @@ fun SshQuickInsertSheet(
                                 onDismiss()
                             }
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(5.dp))
-                        Text("一键插入 Markdown")
+                        Text(
+                            text = "一键插入 Markdown",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }

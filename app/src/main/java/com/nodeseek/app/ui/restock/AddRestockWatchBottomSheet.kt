@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -314,6 +315,7 @@ fun AddRestockWatchBottomSheet(
                     },
                     enabled = !isProbing,
                     shape = PulseArchitecturalShapes.MediumBadge,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 ) {
                     if (isProbing) {
                         CircularProgressIndicator(
@@ -321,7 +323,12 @@ fun AddRestockWatchBottomSheet(
                             strokeWidth = 2.dp,
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("正在探测…")
+                        Text(
+                            text = "正在探测…",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     } else {
                         Icon(
                             imageVector = Icons.Rounded.Science,
@@ -329,7 +336,12 @@ fun AddRestockWatchBottomSheet(
                             modifier = Modifier.size(16.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("测试检测")
+                        Text(
+                            text = "测试检测",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
 
@@ -536,6 +548,7 @@ fun AddRestockWatchBottomSheet(
                     .fillMaxWidth()
                     .height(48.dp),
                 shape = PulseArchitecturalShapes.MediumBadge,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Bolt,
@@ -547,6 +560,9 @@ fun AddRestockWatchBottomSheet(
                     text = if (editingItem != null) "保存监控设置" else "开始蹲守补货",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }

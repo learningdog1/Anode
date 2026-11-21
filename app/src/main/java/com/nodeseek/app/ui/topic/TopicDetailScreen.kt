@@ -1636,7 +1636,7 @@ private fun MagazineArticleHeader(
                         modifier = Modifier.size(14.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("编辑", style = MaterialTheme.typography.labelMedium)
+                    Text("编辑", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -1763,7 +1763,7 @@ private fun OpeningFloorArticleBody(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 TextButton(onClick = onCollapseSubPageOp) {
-                    Text("收起主楼")
+                    Text("收起主楼", maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -1848,14 +1848,14 @@ private fun CollapsedSubPageOpBar(
                 onClick = onExpandOp,
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
             ) {
-                Text("展开主楼", style = MaterialTheme.typography.labelMedium)
+                Text("展开主楼", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
             }
         }
         TextButton(
             onClick = onGoFirstPage,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
         ) {
-            Text("回第 1 页", style = MaterialTheme.typography.labelMedium)
+            Text("回第 1 页", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
         }
     }
 }
@@ -3834,11 +3834,11 @@ private fun EmptyRepliesNotice(
         if (opOnly) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onDisableOpOnly, shape = CircleShape) {
-                    Text("显示全部楼层")
+                    Text("显示全部楼层", maxLines = 1, softWrap = false)
                 }
                 if (hasMorePages && hasNextPage) {
                     FilledTonalButton(onClick = onNextPage, shape = CircleShape) {
-                        Text("查看下一页")
+                        Text("查看下一页", maxLines = 1, softWrap = false)
                     }
                 }
             }

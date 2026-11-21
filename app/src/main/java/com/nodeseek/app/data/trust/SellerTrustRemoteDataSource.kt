@@ -8,9 +8,12 @@ import com.nodeseek.app.data.network.NodeSeekUrlNormalizer
 import com.nodeseek.app.data.network.SameOriginTransport
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.parser.ConfigPayloadDto
+import com.nodeseek.app.data.parser.FeedTopicDto
 import com.nodeseek.app.data.parser.NodeSeekPostAccessException
+import com.nodeseek.app.data.parser.ParsedFeedPageDto
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedPageResult
+import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.TopicAccessException
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.model.UserProfile
@@ -36,7 +39,19 @@ internal interface SellerTrustRemoteDataSource {
 
     suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary>
 
-    suspend fun searchExposureTopicsPage1(query: String): FeedPageResult
+    /** Returns an in-memory/disk fresh page-1 `expose` board snapshot from [ForumRepository] if present. */
+    fun getCachedExposeBoardPage1(): FeedPageResult? = null
+
+    /** Fetches page 1 of the official `/categories/expose` board (zero `/search` load). */
+    suspend fun fetchExposeBoardPage1(): FeedPageResult = searchExposureTopicsPage1(
+        query = "",
+        categorySlug = "expose",
+    )
+
+    suspend fun searchExposureTopicsPage1(
+        query: String,
+        categorySlug: String = "",
+    ): FeedPageResult
 }
 
 /**
@@ -60,8 +75,35 @@ internal class RepositorySellerTrustRemoteDataSource(
     override suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary> =
         userRepository.getUserTopics(uid = uid, page = 1).getOrThrow().first
 
-    override suspend fun searchExposureTopicsPage1(query: String): FeedPageResult =
-        forumRepository.searchTopics(query = query, page = 1).getOrThrow()
+    override fun getCachedExposeBoardPage1(): FeedPageResult? {
+        if (!forumRepository.isFeedFresh("expose", FeedSort.LATEST_REPLY, maxAgeMillis = EXPOSE_BOARD_FRESH_MS)) {
+            return null
+        }
+        return forumRepository.getCachedFeed(categorySlug = "expose", sort = FeedSort.LATEST_REPLY)
+            ?.takeIf { (it.pinnedTopics + it.topics).isNotEmpty() }
+    }
+
+    override suspend fun fetchExposeBoardPage1(): FeedPageResult =
+        forumRepository.getFeed(
+            categorySlug = "expose",
+            sort = FeedSort.LATEST_REPLY,
+            page = 1,
+            forceRefresh = false,
+        ).getOrThrow()
+
+    override suspend fun searchExposureTopicsPage1(
+        query: String,
+        categorySlug: String,
+    ): FeedPageResult =
+        forumRepository.searchTopics(
+            query = query,
+            categorySlug = categorySlug,
+            page = 1,
+        ).getOrThrow()
+
+    private companion object {
+        private const val EXPOSE_BOARD_FRESH_MS: Long = 30L * 60L * 1000L
+    }
 }
 
 /**
@@ -82,6 +124,7 @@ internal class HttpSellerTrustRemoteDataSource(
     sameOriginTransport: SameOriginTransport? = null,
     onConfigObserved: ((ConfigPayloadDto) -> Unit)? = null,
     clockMillis: () -> Long = System::currentTimeMillis,
+    private val forumRepository: ForumRepository? = null,
     connectTimeoutSeconds: Long = DEFAULT_CONNECT_TIMEOUT_SECONDS,
     readTimeoutSeconds: Long = DEFAULT_READ_TIMEOUT_SECONDS,
     writeTimeoutSeconds: Long = DEFAULT_WRITE_TIMEOUT_SECONDS,
@@ -174,14 +217,57 @@ internal class HttpSellerTrustRemoteDataSource(
         }
     }
 
-    override suspend fun searchExposureTopicsPage1(query: String): FeedPageResult = mapTrustRemoteExceptions {
-        val parsed = apiClient.searchTopicsPage(
+    override fun getCachedExposeBoardPage1(): FeedPageResult? {
+        val repo = forumRepository ?: return null
+        if (!repo.isFeedFresh("expose", FeedSort.LATEST_REPLY, maxAgeMillis = EXPOSE_BOARD_FRESH_MS)) {
+            return null
+        }
+        return repo.getCachedFeed(categorySlug = "expose", sort = FeedSort.LATEST_REPLY)
+            ?.takeIf { (it.pinnedTopics + it.topics).isNotEmpty() }
+    }
+
+    override suspend fun fetchExposeBoardPage1(): FeedPageResult = mapTrustRemoteExceptions {
+        val parsed = try {
+            apiClient.fetchFeedPage(
+                categorySlug = "expose",
+                sortBy = "replyTime",
+                page = 1,
+                includeBlocked = false,
+                bypassHttpCache = false,
+            )
+        } catch (challenge: CloudflareChallengeException) {
+            fetchRssExposeFallbackOrThrow(challenge)
+        } catch (signIn: NodeSeekPostAccessException.SignInRequired) {
+            fetchRssExposeFallbackOrThrow(signIn)
+        }
+        parsed.toFeedPageResult()
+    }
+
+    private suspend fun fetchRssExposeFallbackOrThrow(originalError: Throwable): ParsedFeedPageDto {
+        val rssPage = runCatching { apiClient.fetchRssFeed() }.getOrNull()
+            ?: throw originalError
+        val exposeTopics = rssPage.topics.filter { topic ->
+            topic.categoryKey.equals("expose", ignoreCase = true) ||
+                topic.categoryName.contains("曝光")
+        }
+        return rssPage.copy(pinnedTopics = emptyList(), topics = exposeTopics)
+    }
+
+    override suspend fun searchExposureTopicsPage1(
+        query: String,
+        categorySlug: String,
+    ): FeedPageResult = mapTrustRemoteExceptions {
+        apiClient.searchTopicsPage(
             query = query,
+            categorySlug = categorySlug,
             sortBy = "replyTime",
             page = 1,
             includeBlocked = false,
-        )
-        fun com.nodeseek.app.data.parser.FeedTopicDto.toSummary(): TopicSummary = TopicSummary(
+        ).toFeedPageResult()
+    }
+
+    private fun ParsedFeedPageDto.toFeedPageResult(): FeedPageResult {
+        fun FeedTopicDto.toSummary(): TopicSummary = TopicSummary(
             id = id,
             title = title,
             categorySlug = categoryKey,
@@ -197,12 +283,12 @@ internal class HttpSellerTrustRemoteDataSource(
             isPinned = pinned,
             requiredViewLevel = requiredRank,
         )
-        FeedPageResult(
-            pinnedTopics = parsed.pinnedTopics.map { it.toSummary() },
-            topics = parsed.topics.map { it.toSummary() },
-            currentPage = parsed.currentPage,
-            hasNextPage = parsed.hasNextPage,
-            isFromRssFallback = parsed.isFromRssFallback,
+        return FeedPageResult(
+            pinnedTopics = pinnedTopics.map { it.toSummary() },
+            topics = topics.map { it.toSummary() },
+            currentPage = currentPage,
+            hasNextPage = hasNextPage,
+            isFromRssFallback = isFromRssFallback,
         )
     }
 
@@ -227,6 +313,7 @@ internal class HttpSellerTrustRemoteDataSource(
         const val DEFAULT_READ_TIMEOUT_SECONDS: Long = 10L
         const val DEFAULT_WRITE_TIMEOUT_SECONDS: Long = 10L
         const val DEFAULT_CALL_TIMEOUT_SECONDS: Long = 15L
+        private const val EXPOSE_BOARD_FRESH_MS: Long = 30L * 60L * 1000L
     }
 }
 

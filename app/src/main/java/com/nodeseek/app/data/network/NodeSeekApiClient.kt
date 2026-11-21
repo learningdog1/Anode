@@ -79,6 +79,7 @@ class NodeSeekApiClient(
         sortBy: String = "replyTime",
         page: Int = 1,
         includeBlocked: Boolean = false,
+        bypassHttpCache: Boolean = true,
     ): ParsedFeedPageDto {
         val safePage = page.coerceAtLeast(1)
         val slug = categorySlug.trim()
@@ -91,7 +92,12 @@ class NodeSeekApiClient(
             queryParams = listOf("sortBy" to sortBy),
             baseOrigin = baseOrigin,
         )
-        val html = executeHtmlGet(url = url, checkingPostAccess = false, requireTempScript = true)
+        val html = executeHtmlGet(
+            url = url,
+            checkingPostAccess = false,
+            requireTempScript = true,
+            bypassHttpCache = bypassHttpCache,
+        )
         return withContext(Dispatchers.Default) {
             NodeSeekHtmlParser.parseFeedPage(
                 html = html,
@@ -996,14 +1002,18 @@ class NodeSeekApiClient(
         url: HttpUrl,
         checkingPostAccess: Boolean,
         requireTempScript: Boolean,
+        bypassHttpCache: Boolean = true,
     ): String {
-        val request = Request.Builder()
+        val reqBuilder = Request.Builder()
             .url(url)
             .get()
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-            .header("Cache-Control", "no-cache, no-store, max-age=0")
-            .header("Pragma", "no-cache")
-            .build()
+        if (bypassHttpCache) {
+            reqBuilder
+                .header("Cache-Control", "no-cache, no-store, max-age=0")
+                .header("Pragma", "no-cache")
+        }
+        val request = reqBuilder.build()
 
         return try {
             httpClient.newCall(request).awaitString { status, headers, body ->

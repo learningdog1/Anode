@@ -810,11 +810,17 @@ internal fun SshExportPreviewBottomSheet(
             ) {
                 OutlinedButton(
                     onClick = { onCopyMarkdown(formattedPost.markdownContent) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("复制 MD")
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "复制 MD",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
 
                 if (onInsertToReply != null) {
@@ -823,9 +829,15 @@ internal fun SshExportPreviewBottomSheet(
                             onInsertToReply(formattedPost.markdownContent)
                             onDismiss()
                         },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text("插入回复")
+                        Text(
+                            text = "插入回复",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
 
@@ -834,11 +846,17 @@ internal fun SshExportPreviewBottomSheet(
                         onPublishToComposer(formattedPost.suggestedTitle, formattedPost.markdownContent)
                         onDismiss()
                     },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                     modifier = Modifier.weight(1.25f),
                 ) {
                     Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("一键发测评")
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "一键发测评",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
@@ -889,6 +907,9 @@ internal fun SshHistoryBottomSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -901,6 +922,8 @@ internal fun SshHistoryBottomSheet(
                         text = "最近本地测试记录（${recentRuns.size}）",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 if (groupedRuns.isNotEmpty()) {
@@ -995,6 +1018,8 @@ internal fun SshHistoryBottomSheet(
                                         text = "最近测试：${formatRunTimestamp(group.latestStartedAtEpochMillis)}",
                                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                                 if (group.runCount >= 2 && onLoadGroupToSession != null) {
@@ -1002,13 +1027,20 @@ internal fun SshHistoryBottomSheet(
                                         onClick = { onLoadGroupToSession(group.runs) },
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                     ) {
-                                        Text("整组载入", style = MaterialTheme.typography.labelSmall)
+                                        Text(
+                                            text = "整组载入",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
                                     }
                                 }
                                 Text(
                                     text = if (isExpanded) "收起" else "展开",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
 
