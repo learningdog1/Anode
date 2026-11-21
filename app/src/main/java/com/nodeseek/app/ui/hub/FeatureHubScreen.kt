@@ -88,7 +88,7 @@ private data class FeatureTileItem(
 )
 
 /**
- * NodePulse「功能栏」主入口页（网格与分组卡片风格，沿用 Cool Mist & Slate Steel 主题）。
+ * Anode「功能栏」主入口页（网格与分组卡片风格，沿用 Cool Mist & Slate Steel 主题）。
  *
  * 汇聚邮箱、活动、海外情报、补货监控、我的服务器、手机端测机与轻量 SSH。
  */

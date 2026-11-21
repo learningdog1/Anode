@@ -5,7 +5,7 @@ import com.nodeseek.app.ui.components.unwrapNodeSeekJumpUrl
 
 /**
  * Resolves a clicked URL inside Markdown content, routing first-party `nodeseek.com` links
- * (`post-*`, `/space/{uid}`, `/categories/{slug}`, `/jump?to=...`) natively inside NodePulse
+ * (`post-*`, `/space/{uid}`, `/categories/{slug}`, `/jump?to=...`) natively inside Anode
  * before falling back to the system browser [UriHandler].
  */
 fun openNodeSeekOrExternalUrl(

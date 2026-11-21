@@ -8,7 +8,7 @@ import androidx.compose.ui.graphics.Color
 import kotlin.math.roundToInt
 
 /**
- * NodePulse ("Cool Mist Light & Slate Steel Dark") Color Tokens.
+ * Anode ("Cool Mist Light & Slate Steel Dark") Color Tokens.
  *
  * Core Material 3 color palette:
  * - Cool Mist Ice-Blue Light (#F7FAFF canvas, #FFFFFF crisp sheet, #2D637E Steel Teal-Blue)

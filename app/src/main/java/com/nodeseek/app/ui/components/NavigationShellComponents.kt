@@ -91,7 +91,7 @@ import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 
 /**
- * Top-level destinations in NodePulse's 3-tab Bottom Navigation Bar.
+ * Top-level destinations in Anode's 3-tab Bottom Navigation Bar.
  */
 enum class PulseNavTab(
     val label: String,
@@ -862,7 +862,7 @@ fun CollapsiblePinnedTicker(
 }
 
 /**
- * Shared floating capsule snackbar matching NodePulse's layered glass surfaces across shells.
+ * Shared floating capsule snackbar matching Anode's layered glass surfaces across shells.
  */
 @Composable
 fun PulseSnackbarPill(

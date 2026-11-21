@@ -133,7 +133,7 @@ class NodeSeekSigningAndUrlTest {
 
             val coilClient = CoilHttpClientFactory.create(
                 cookieBridge = cookieBridge,
-                userAgentProvider = UserAgentProvider("NodePulseTestUA/1.0"),
+                userAgentProvider = UserAgentProvider("AnodeTestUA/1.0"),
             )
 
             val imgUrl = cdnServer.url("/image/test.png")
@@ -147,7 +147,7 @@ class NodeSeekSigningAndUrlTest {
 
             val recorded = cdnServer.takeRequest()
             assertEquals("https://www.nodeseek.com/", recorded.getHeader("Referer"))
-            assertEquals("NodePulseTestUA/1.0", recorded.getHeader("User-Agent"))
+            assertEquals("AnodeTestUA/1.0", recorded.getHeader("User-Agent"))
             assertNull(recorded.getHeader("Cookie"))
             assertNull(recorded.getHeader("Authorization"))
         }

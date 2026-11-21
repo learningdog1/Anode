@@ -294,6 +294,6 @@ object BackupFileNaming {
         val stamp = FILE_TIMESTAMP_FORMATTER.format(
             Instant.ofEpochMilli(epochMillis).atZone(zoneId),
         )
-        return "nodepulse-backup-$stamp.json"
+        return "anode-backup-$stamp.json"
     }
 }

@@ -204,7 +204,7 @@ internal fun shouldRequestSearchAutoFocus(
 }
 
 /**
- * NodePulse Boards & Unified Search Screen (`版块`).
+ * Anode Boards & Unified Search Screen (`版块`).
  *
  * Dual-Mode Architecture:
  * 1. **Asymmetric Visual Bento Board Directory**:

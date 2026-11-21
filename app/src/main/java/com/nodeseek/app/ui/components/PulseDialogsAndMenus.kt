@@ -73,7 +73,7 @@ import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulsePressScale
 
 /**
- * Semantic accent tone for NodePulse dialogs.
+ * Semantic accent tone for Anode dialogs.
  */
 enum class PulseDialogTone {
     PRIMARY,
@@ -82,7 +82,7 @@ enum class PulseDialogTone {
 }
 
 /**
- * Expressive NodePulse dialog container built on [BasicAlertDialog].
+ * Expressive Anode dialog container built on [BasicAlertDialog].
  *
  * Supports single-button notice/list dialogs (`dismissText = null`), two-button confirmation &
  * destructive flows, custom form/list bodies via [content], optional leading [icon] badge,
@@ -357,7 +357,7 @@ fun PulseAlertDialog(
 }
 
 /**
- * Convenience NodePulse confirmation / destructive alert dialog.
+ * Convenience Anode confirmation / destructive alert dialog.
  */
 @Composable
 fun PulseConfirmDialog(
@@ -399,7 +399,7 @@ fun PulseConfirmDialog(
 }
 
 /**
- * Capsule primary action button styled for NodePulse dialogs.
+ * Capsule primary action button styled for Anode dialogs.
  */
 @Composable
 fun PulseDialogPrimaryButton(
@@ -486,7 +486,7 @@ fun PulseDialogPrimaryButton(
 }
 
 /**
- * Capsule secondary / dismiss action button styled for NodePulse dialogs.
+ * Capsule secondary / dismiss action button styled for Anode dialogs.
  */
 @Composable
 fun PulseDialogSecondaryButton(
@@ -696,7 +696,7 @@ private fun resolveDialogBadgeColors(
 }
 
 /**
- * Refined NodePulse popup dropdown menu with large rounded elevated sheet surface,
+ * Refined Anode popup dropdown menu with large rounded elevated sheet surface,
  * hairline border, soft ambient elevation, and clean offset spacing.
  */
 @Composable

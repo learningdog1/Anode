@@ -322,7 +322,7 @@ class LiteSshForegroundService : Service() {
             val pm = getSystemService(PowerManager::class.java) ?: return
             wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "NodePulse:LiteSshBenchmarkWakeLock",
+                "Anode:LiteSshBenchmarkWakeLock",
             ).apply {
                 setReferenceCounted(false)
                 acquire(MAX_WAKE_LOCK_DURATION_MS)

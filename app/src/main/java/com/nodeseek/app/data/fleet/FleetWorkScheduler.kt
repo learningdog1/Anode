@@ -95,7 +95,7 @@ class FleetWorkScheduler internal constructor(
     )
 
     /**
-     * Convenience entrypoint for `NodePulseApp` startup: observes repository settings, panels,
+     * Convenience entrypoint for [com.nodeseek.app.NodePulseApp] startup: observes repository settings, panels,
      * and assets, keeping WorkManager periodic work automatically synchronized.
      */
     fun observeRepository(

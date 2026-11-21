@@ -26,7 +26,7 @@ class SanityTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""<html><body><div id="payload">{"app":"NodePulse","ok":true}</div></body></html>""")
+                .setBody("""<html><body><div id="payload">{"app":"Anode","ok":true}</div></body></html>""")
         )
         server.start()
         try {
@@ -39,7 +39,7 @@ class SanityTest {
 
             val rawJson = Jsoup.parse(html).selectFirst("#payload")?.text().orEmpty()
             val parsed = Json.decodeFromString<PulsePayload>(rawJson)
-            assertEquals("NodePulse", parsed.app)
+            assertEquals("Anode", parsed.app)
             assertEquals(true, parsed.ok)
         } finally {
             server.shutdown()

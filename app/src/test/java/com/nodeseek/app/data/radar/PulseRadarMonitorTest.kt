@@ -86,7 +86,7 @@ class PulseRadarMonitorTest {
         val cookieBridge = WebViewCookieBridge(forceInMemory = true)
         val okHttp = NodeSeekApiClient.createDefaultHttpClient(
             cookieBridge = cookieBridge,
-            userAgentProvider = UserAgentProvider("NodePulseRadarTest/1.0"),
+            userAgentProvider = UserAgentProvider("AnodeRadarTest/1.0"),
             additionalTargetHost = baseUrl.host,
         )
 

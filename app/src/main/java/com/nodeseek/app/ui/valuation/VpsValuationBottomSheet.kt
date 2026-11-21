@@ -199,7 +199,7 @@ internal fun insertMarkdownBlockAtCursor(
 }
 
 /**
- * NodePulse VPS Remaining Value & Second-Hand Transfer Valuation Bottom Sheet.
+ * Anode VPS Remaining Value & Second-Hand Transfer Valuation Bottom Sheet.
  *
  * Features:
  * - Sticky live telemetry hero card with animated remaining progress bar & semantic spread badge

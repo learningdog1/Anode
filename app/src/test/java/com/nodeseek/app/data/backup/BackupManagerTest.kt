@@ -153,7 +153,7 @@ class BackupManagerTest {
             val baseUrl = server.url("/")
             val okHttp = NodeSeekApiClient.createDefaultHttpClient(
                 cookieBridge = cookieBridge,
-                userAgentProvider = UserAgentProvider("NodePulseBackupTest/1.0"),
+                userAgentProvider = UserAgentProvider("AnodeBackupTest/1.0"),
                 additionalTargetHost = baseUrl.host,
             )
             apiClient = NodeSeekApiClient(
@@ -776,7 +776,7 @@ class BackupManagerTest {
             epochMillis = millis,
             zoneId = ZoneOffset.UTC,
         )
-        assertEquals("nodepulse-backup-20251118-1533.json", fileName)
+        assertEquals("anode-backup-20251118-1533.json", fileName)
     }
 
     @Test

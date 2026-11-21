@@ -121,7 +121,7 @@ import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 
 /**
- * NodePulse "我的 · Pulse Hub" Dashboard Screen.
+ * Anode "我的" Dashboard Screen (`PulseHubScreen`).
  */
 @Composable
 fun PulseHubScreen(

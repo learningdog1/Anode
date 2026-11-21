@@ -97,7 +97,7 @@ class FleetMonitorWorker internal constructor(
         private const val MAX_TRANSIENT_RETRIES = 3
 
         /**
-         * Optional DI hook allowing `NodePulseApp` / `@integrator` to override the repository
+         * Optional DI hook allowing [com.nodeseek.app.NodePulseApp] to override the repository
          * resolved by [FleetMonitorWorker]. Defaults to [FleetRepositoryImpl.forContext].
          */
         @Volatile

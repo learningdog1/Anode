@@ -1206,7 +1206,7 @@ object NetBenchMarkdownFormatter {
     }
 
     private fun buildSignatureFooter(timestamp: String): String =
-        "*📊 报告由 **NodePulse 移动端网络实测** 生成 · 测试时间：`$timestamp` · 已自动脱敏保护本机隐私 IP*"
+        "*📊 报告由 **Anode 移动端网络实测** 生成 · 测试时间：`$timestamp` · 已自动脱敏保护本机隐私 IP*"
 
     // ── Shared Formatting Helpers ────────────────────────────────────────────────────────────
 
