@@ -1,10 +1,13 @@
 package com.nodeseek.app.netbench
 
+import android.os.Build
 import com.nodeseek.app.data.netbench.AndroidOsIcmpKernelDatagramOps
 import com.nodeseek.app.data.netbench.IcmpEchoPacketCodec
 import com.nodeseek.app.data.netbench.IcmpKernelDatagramOps
 import com.nodeseek.app.data.netbench.IcmpPingParser
 import com.nodeseek.app.data.netbench.IcmpPingRunner
+import com.nodeseek.app.data.netbench.IcmpPosixException
+import com.nodeseek.app.data.netbench.IcmpPosixSyscalls
 import com.nodeseek.app.data.netbench.IcmpRawDatagram
 import com.nodeseek.app.data.netbench.KernelBoundIcmpDirectProber
 import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
@@ -13,6 +16,7 @@ import com.nodeseek.app.data.netbench.NetBenchTargetResolver
 import com.nodeseek.app.data.netbench.PingExecutionEvent
 import com.nodeseek.app.data.netbench.PingProcessExecutor
 import com.nodeseek.app.data.netbench.PingProcessRequest
+import com.nodeseek.app.data.netbench.PosixErrnoTable
 import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.data.netbench.SystemPingProcessExecutor
 import com.nodeseek.app.domain.netbench.IcmpNetworkBindingMode
@@ -1126,6 +1130,463 @@ class IcmpPingRunnerTest {
         assertEquals("目标拒绝或过滤 ICMP 请求", samples[2].errorMessage)
         assertTrue(samples[3].success)
         assertEquals(59, samples[3].ttl)
+    }
+
+    @Test
+    fun `SDK 26 29 30 and 31 normal execution gates socket flags fcntlInt and recvmsg strictly by API level`() = runBlocking {
+        for (sdk in listOf(
+            Build.VERSION_CODES.O, // API 26
+            Build.VERSION_CODES.Q, // API 29
+            Build.VERSION_CODES.R, // API 30
+            Build.VERSION_CODES.S, // API 31
+        )) {
+            val syscalls = RecordingSdkGatedSyscalls(simulatedSdkInt = sdk, simulatedTtl = 57)
+            val ops = AndroidOsIcmpKernelDatagramOps(sdkInt = sdk, syscalls = syscalls)
+            val bridge = singleDirectWifiBridge("203.0.113.88")
+            val subprocessCalls = AtomicInteger(0)
+
+            val runner = IcmpPingRunner(
+                resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = bridge),
+                executor = PingProcessExecutor {
+                    subprocessCalls.incrementAndGet()
+                    flow { emit(PingExecutionEvent.Exited(0)) }
+                },
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+                directProber = KernelBoundIcmpDirectProber(
+                    ops = ops,
+                    pollSliceMs = 15L,
+                    sdkInt = sdk,
+                ),
+                sdkInt = sdk,
+            )
+
+            val result = runner.run(
+                IcmpPingConfig(
+                    target = "203.0.113.88",
+                    probeCount = 4,
+                    timeoutMs = 250,
+                    intervalMs = 50L,
+                    useProxy = false,
+                ),
+            ).toList().last()
+
+            assertEquals("sdk=$sdk must use direct physical socket without subprocess fallback", 0, subprocessCalls.get())
+            assertEquals("sdk=$sdk", IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND, result.summary.bindingMode)
+            assertEquals("sdk=$sdk", 4, result.summary.sent)
+            assertEquals("sdk=$sdk", 4, result.summary.received)
+            assertEquals("sdk=$sdk", 0.0, result.summary.lossPercent, 0.001)
+            assertNotNull("sdk=$sdk must compute valid RTT", result.summary.avgMs)
+            assertEquals("sdk=$sdk must close FD once", 1, syscalls.closedFds.size)
+
+            when (sdk) {
+                Build.VERSION_CODES.O -> {
+                    assertEquals(1, syscalls.openDatagramCalls)
+                    assertEquals(0, syscalls.openNonBlockingApi29Calls)
+                    assertEquals(0, syscalls.setRcvTimeoApi29Calls)
+                    assertEquals(0, syscalls.fcntlApi30Calls)
+                    assertEquals(0, syscalls.setRecvTtlOptionCalls)
+                    assertEquals(0, syscalls.recvMsgApi31Calls)
+                    assertEquals(4, syscalls.recvFromCalls)
+                    assertTrue(result.summary.samples.all { it.success && it.ttl == null })
+                }
+
+                Build.VERSION_CODES.Q -> {
+                    assertEquals(0, syscalls.openDatagramCalls)
+                    assertEquals(1, syscalls.openNonBlockingApi29Calls)
+                    assertEquals(1, syscalls.setRcvTimeoApi29Calls)
+                    assertEquals(0, syscalls.fcntlApi30Calls)
+                    assertEquals(0, syscalls.setRecvTtlOptionCalls)
+                    assertEquals(0, syscalls.recvMsgApi31Calls)
+                    assertEquals(4, syscalls.recvFromCalls)
+                    assertTrue(result.summary.samples.all { it.success && it.ttl == null })
+                }
+
+                Build.VERSION_CODES.R -> {
+                    assertEquals(0, syscalls.openDatagramCalls)
+                    assertEquals(1, syscalls.openNonBlockingApi29Calls)
+                    assertEquals(0, syscalls.setRcvTimeoApi29Calls)
+                    assertEquals(1, syscalls.fcntlApi30Calls)
+                    assertEquals(0, syscalls.setRecvTtlOptionCalls)
+                    assertEquals(0, syscalls.recvMsgApi31Calls)
+                    assertEquals(4, syscalls.recvFromCalls)
+                    assertTrue(result.summary.samples.all { it.success && it.ttl == null })
+
+                    // Even if caller passes tryReadTtl = true directly on API 30, recvMsgApi31 must NEVER be invoked!
+                    val extraBuf = ByteArray(128)
+                    syscalls.enqueueReply(IpFamily.IPV4, seq = 99)
+                    val pkt = ops.receivePacket(FileDescriptor(), extraBuf, IpFamily.IPV4, tryReadTtl = true)
+                    assertNotNull(pkt)
+                    assertNull(pkt!!.ttl)
+                    assertEquals(0, syscalls.recvMsgApi31Calls)
+                }
+
+                Build.VERSION_CODES.S -> {
+                    assertEquals(0, syscalls.openDatagramCalls)
+                    assertEquals(1, syscalls.openNonBlockingApi29Calls)
+                    assertEquals(0, syscalls.setRcvTimeoApi29Calls)
+                    assertEquals(1, syscalls.fcntlApi30Calls)
+                    assertEquals(1, syscalls.setRecvTtlOptionCalls)
+                    assertEquals(4, syscalls.recvMsgApi31Calls)
+                    assertEquals(0, syscalls.recvFromCalls)
+                    assertTrue(result.summary.samples.all { it.success && it.ttl == 57 })
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `SDK 26 29 30 and 31 fallback paths handle EINTR EINVAL EAGAIN and socket setup degradation cleanly`() = runBlocking {
+        // 1. API 26 fallback: EINTR during pollReadable + MSG_DONTWAIT rejected with EINVAL -> falls back to flags=0 recvFrom
+        val api26Syscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.O, simulatedTtl = null) {
+            private var pollAttempts = 0
+            override fun pollReadableOnce(fd: FileDescriptor, timeoutMs: Int): Boolean {
+                if (pollAttempts++ == 0) {
+                    throw IcmpPosixException(PosixErrnoTable.LINUX_EINTR, "poll interrupted by signal")
+                }
+                return super.pollReadableOnce(fd, timeoutMs)
+            }
+
+            override fun recvFrom(fd: FileDescriptor, buffer: ByteArray, flags: Int): Int {
+                if (flags == AndroidOsIcmpKernelDatagramOps.LINUX_MSG_DONTWAIT) {
+                    throw IcmpPosixException(PosixErrnoTable.LINUX_EINVAL, "MSG_DONTWAIT unsupported")
+                }
+                assertEquals(0, flags)
+                return super.recvFrom(fd, buffer, flags)
+            }
+        }
+        val api26Ops = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.O, syscalls = api26Syscalls)
+        val fd26 = api26Ops.openIcmpDatagramSocket(IpFamily.IPV4)
+        assertFalse(api26Ops.enableReceiveTtlBestEffort(fd26, IpFamily.IPV4))
+        api26Syscalls.enqueueReply(IpFamily.IPV4, seq = 1)
+        assertTrue(api26Ops.pollReadable(fd26, timeoutMs = 100))
+        val buf26 = ByteArray(128)
+        val dgram26 = api26Ops.receivePacket(fd26, buf26, IpFamily.IPV4, tryReadTtl = false)
+        assertNotNull(dgram26)
+        assertNull(dgram26!!.ttl)
+        api26Ops.closeQuietly(fd26)
+
+        // 2. API 29 fallback: SOCK_NONBLOCK rejected with EINVAL -> falls back to openDatagramSocket + SO_RCVTIMEO
+        val api29Syscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.Q, simulatedTtl = null) {
+            override fun openNonBlockingDatagramSocketApi29(ipFamily: IpFamily): FileDescriptor {
+                super.openNonBlockingDatagramSocketApi29(ipFamily)
+                throw IcmpPosixException(PosixErrnoTable.LINUX_EINVAL, "SOCK_NONBLOCK rejected")
+            }
+        }
+        val api29Ops = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.Q, syscalls = api29Syscalls)
+        val fd29 = api29Ops.openIcmpDatagramSocket(IpFamily.IPV6)
+        assertEquals(1, api29Syscalls.openNonBlockingApi29Calls)
+        assertEquals(1, api29Syscalls.openDatagramCalls)
+        assertEquals(1, api29Syscalls.setRcvTimeoApi29Calls)
+        assertEquals(0, api29Syscalls.fcntlApi30Calls)
+        api29Ops.closeQuietly(fd29)
+
+        // 3. API 30 fallback: SOCK_NONBLOCK rejected (EINVAL) AND fcntlInt rejected (EPERM) -> falls back to SO_RCVTIMEO without leaking FD
+        val api30Syscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.R, simulatedTtl = null) {
+            override fun openNonBlockingDatagramSocketApi29(ipFamily: IpFamily): FileDescriptor {
+                super.openNonBlockingDatagramSocketApi29(ipFamily)
+                throw IcmpPosixException(PosixErrnoTable.LINUX_EINVAL, "SOCK_NONBLOCK rejected")
+            }
+
+            override fun ensureNonBlockingApi30(fd: FileDescriptor) {
+                super.ensureNonBlockingApi30(fd)
+                throw IcmpPosixException(PosixErrnoTable.LINUX_EPERM, "fcntl F_SETFL blocked by seccomp")
+            }
+        }
+        val api30Ops = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.R, syscalls = api30Syscalls)
+        val fd30 = api30Ops.openIcmpDatagramSocket(IpFamily.IPV4)
+        assertEquals(1, api30Syscalls.openNonBlockingApi29Calls)
+        assertEquals(1, api30Syscalls.openDatagramCalls)
+        assertEquals(1, api30Syscalls.fcntlApi30Calls)
+        assertEquals(1, api30Syscalls.setRcvTimeoApi29Calls)
+        assertTrue("FD must remain open when fallback succeeds", api30Syscalls.closedFds.isEmpty())
+        api30Ops.closeQuietly(fd30)
+        assertEquals(1, api30Syscalls.closedFds.size)
+
+        // 4. API 31 fallback:
+        //    - seq 1: recvMsgWithTtlApi31 throws EAGAIN -> returns null without calling recvFrom, then succeeds on retry with HopLimit 61
+        //    - seq 2: recvMsgWithTtlApi31 throws ENOSYS -> falls back cleanly to recvFrom (ttl = null)
+        //    - seq 3: recvMsgWithTtlApi31 throws EHOSTUNREACH -> rethrows immediately and surfaces "目标主机不可达"
+        var seq1FirstRead = true
+        var activeSeq = 0
+        val api31FallbackSyscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.S, simulatedTtl = 61) {
+            override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
+                activeSeq = ((packet[6].toInt() and 0xFF) shl 8) or (packet[7].toInt() and 0xFF)
+                super.sendTo(fd, packet, address)
+            }
+
+            override fun pollReadableOnce(fd: FileDescriptor, timeoutMs: Int): Boolean = true
+
+            override fun recvMsgWithTtlApi31(
+                fd: FileDescriptor,
+                buffer: ByteArray,
+                ipFamily: IpFamily,
+                flags: Int,
+            ): IcmpRawDatagram? {
+                return when (activeSeq) {
+                    1 -> {
+                        if (seq1FirstRead) {
+                            seq1FirstRead = false
+                            recvMsgApi31Calls++
+                            throw IcmpPosixException(PosixErrnoTable.LINUX_EAGAIN, "spurious wakeup")
+                        }
+                        super.recvMsgWithTtlApi31(fd, buffer, ipFamily, flags)
+                    }
+                    2 -> {
+                        recvMsgApi31Calls++
+                        throw IcmpPosixException(PosixErrnoTable.LINUX_ENOSYS, "recvmsg disabled")
+                    }
+                    3 -> {
+                        recvMsgApi31Calls++
+                        throw IcmpPosixException(PosixErrnoTable.LINUX_EINVAL, "cmsg control rejected")
+                    }
+                    else -> {
+                        recvMsgApi31Calls++
+                        throw IcmpPosixException(PosixErrnoTable.LINUX_EHOSTUNREACH, "host unreachable")
+                    }
+                }
+            }
+        }
+        val v6Bridge = singleDirectWifiBridge("2606:4700:4700::1111")
+        val api31Runner = IcmpPingRunner(
+            resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = v6Bridge),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = v6Bridge,
+            directProber = KernelBoundIcmpDirectProber(
+                ops = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.S, syscalls = api31FallbackSyscalls),
+                pollSliceMs = 15L,
+                sdkInt = Build.VERSION_CODES.S,
+            ),
+            sdkInt = Build.VERSION_CODES.S,
+        )
+        val api31Result = api31Runner.run(
+            IcmpPingConfig(
+                target = "2606:4700:4700::1111",
+                probeCount = 4,
+                timeoutMs = 250,
+                intervalMs = 30L,
+                preferredFamily = PreferredIpFamily.IPV6_ONLY,
+                useProxy = false,
+            ),
+        ).toList().last()
+
+        val s = api31Result.summary.samples
+        assertEquals(4, s.size)
+        assertTrue(s[0].success)
+        assertEquals(61, s[0].ttl)
+        assertTrue(s[1].success)
+        assertNull("Fallback to Os.recvfrom on ENOSYS must succeed with null TTL", s[1].ttl)
+        assertTrue(s[2].success)
+        assertNull("Fallback to Os.recvfrom on EINVAL must succeed with null TTL", s[2].ttl)
+        assertFalse(s[3].success)
+        assertEquals("目标主机不可达", s[3].errorMessage)
+        assertEquals("seq=2 ENOSYS and seq=3 EINVAL must fall back to recvFrom", 2, api31FallbackSyscalls.recvFromCalls)
+
+        // 5. API 31 setsockoptInt(IP_RECVTTL) failure -> enableReceiveTtlBestEffort returns false and receivePacket uses recvFrom
+        val api31NoTtlOptSyscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.S, simulatedTtl = 57) {
+            override fun setReceiveTtlOption(fd: FileDescriptor, ipFamily: IpFamily) {
+                super.setReceiveTtlOption(fd, ipFamily)
+                throw IcmpPosixException(PosixErrnoTable.LINUX_EOPNOTSUPP, "IP_RECVTTL unsupported")
+            }
+        }
+        val api31NoTtlOps = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.S, syscalls = api31NoTtlOptSyscalls)
+        val fd31NoTtl = api31NoTtlOps.openIcmpDatagramSocket(IpFamily.IPV4)
+        assertFalse(api31NoTtlOps.enableReceiveTtlBestEffort(fd31NoTtl, IpFamily.IPV4))
+        api31NoTtlOptSyscalls.enqueueReply(IpFamily.IPV4, seq = 1)
+        val noTtlPkt = api31NoTtlOps.receivePacket(fd31NoTtl, ByteArray(128), IpFamily.IPV4, tryReadTtl = false)
+        assertNotNull(noTtlPkt)
+        assertNull(noTtlPkt!!.ttl)
+        assertEquals(0, api31NoTtlOptSyscalls.recvMsgApi31Calls)
+        assertEquals(1, api31NoTtlOptSyscalls.recvFromCalls)
+        api31NoTtlOps.closeQuietly(fd31NoTtl)
+
+        // 6. API 30 unexpected non-POSIX failure during socket setup -> closes FD immediately without leaking
+        val fatalSetupSyscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.R, simulatedTtl = null) {
+            override fun ensureNonBlockingApi30(fd: FileDescriptor) {
+                throw IllegalStateException("unexpected runtime failure")
+            }
+        }
+        val fatalSetupOps = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.R, syscalls = fatalSetupSyscalls)
+        val thrown = runCatching { fatalSetupOps.openIcmpDatagramSocket(IpFamily.IPV4) }.exceptionOrNull()
+        assertTrue(thrown is IllegalStateException)
+        assertEquals("Failed setup must close allocated FD", 1, fatalSetupSyscalls.closedFds.size)
+
+        // 7. API 26 socket EACCES (ping_group_range disabled) -> degrades smoothly to /system/bin/ping subprocess with parsed TTL
+        val api26DisabledSyscalls = object : RecordingSdkGatedSyscalls(simulatedSdkInt = Build.VERSION_CODES.O, simulatedTtl = null) {
+            override fun openDatagramSocket(ipFamily: IpFamily): FileDescriptor {
+                throw IcmpPosixException(PosixErrnoTable.LINUX_EACCES, "ping_group_range disabled")
+            }
+        }
+        val v4Bridge = singleDirectWifiBridge("203.0.113.44")
+        val api26SubprocessRunner = IcmpPingRunner(
+            resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = v4Bridge),
+            executor = PingProcessExecutor {
+                flow {
+                    emit(PingExecutionEvent.StdoutLine("64 bytes from 203.0.113.44: icmp_seq=1 ttl=54 time=21.5 ms"))
+                    emit(PingExecutionEvent.StdoutLine("64 bytes from 203.0.113.44: icmp_seq=2 ttl=54 time=23.5 ms"))
+                    emit(PingExecutionEvent.StdoutLine("2 packets transmitted, 2 received, 0% packet loss"))
+                    emit(PingExecutionEvent.Exited(0))
+                }
+            },
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = v4Bridge,
+            directProber = KernelBoundIcmpDirectProber(
+                ops = AndroidOsIcmpKernelDatagramOps(sdkInt = Build.VERSION_CODES.O, syscalls = api26DisabledSyscalls),
+                sdkInt = Build.VERSION_CODES.O,
+            ),
+            sdkInt = Build.VERSION_CODES.O,
+        )
+        val api26FallbackResult = api26SubprocessRunner.run(
+            IcmpPingConfig(target = "203.0.113.44", probeCount = 2, useProxy = false),
+        ).toList().last()
+        assertEquals(2, api26FallbackResult.summary.received)
+        assertEquals(54, api26FallbackResult.summary.samples.first().ttl)
+    }
+
+    private open class RecordingSdkGatedSyscalls(
+        private val simulatedSdkInt: Int,
+        private val simulatedTtl: Int?,
+    ) : IcmpPosixSyscalls {
+        var openDatagramCalls = 0
+        var openNonBlockingApi29Calls = 0
+        var setRcvTimeoApi29Calls = 0
+        var fcntlApi30Calls = 0
+        var setRecvTtlOptionCalls = 0
+        var recvMsgApi31Calls = 0
+        var recvFromCalls = 0
+        val closedFds = mutableListOf<FileDescriptor>()
+        private val rxFrames = ArrayDeque<ByteArray>()
+
+        fun enqueueReply(ipFamily: IpFamily, seq: Int, id: Int = 0x4E50) {
+            rxFrames.addLast(buildStaticEchoReply(ipFamily, id, seq))
+        }
+
+        override fun ensureRuntimeAvailable() = Unit
+
+        override fun openDatagramSocket(ipFamily: IpFamily): FileDescriptor {
+            openDatagramCalls++
+            return FileDescriptor()
+        }
+
+        override fun openNonBlockingDatagramSocketApi29(ipFamily: IpFamily): FileDescriptor {
+            if (simulatedSdkInt < Build.VERSION_CODES.Q) {
+                throw AssertionError("API 29 SOCK_NONBLOCK called on sdkInt=$simulatedSdkInt")
+            }
+            openNonBlockingApi29Calls++
+            return FileDescriptor()
+        }
+
+        override fun setReceiveTimeoutApi29(fd: FileDescriptor, timeoutMs: Long) {
+            if (simulatedSdkInt < Build.VERSION_CODES.Q) {
+                throw AssertionError("API 29 setsockoptTimeval called on sdkInt=$simulatedSdkInt")
+            }
+            setRcvTimeoApi29Calls++
+        }
+
+        override fun ensureNonBlockingApi30(fd: FileDescriptor) {
+            if (simulatedSdkInt < Build.VERSION_CODES.R) {
+                throw AssertionError("API 30 Os.fcntlInt called on sdkInt=$simulatedSdkInt")
+            }
+            fcntlApi30Calls++
+        }
+
+        override fun setReceiveTtlOption(fd: FileDescriptor, ipFamily: IpFamily) {
+            if (simulatedSdkInt < Build.VERSION_CODES.O) {
+                throw AssertionError("API 26 Os.setsockoptInt called on sdkInt=$simulatedSdkInt")
+            }
+            setRecvTtlOptionCalls++
+        }
+
+        override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
+            val ipFamily = if (address.address.size == 16) IpFamily.IPV6 else IpFamily.IPV4
+            val id = ((packet[4].toInt() and 0xFF) shl 8) or (packet[5].toInt() and 0xFF)
+            val seq = ((packet[6].toInt() and 0xFF) shl 8) or (packet[7].toInt() and 0xFF)
+            rxFrames.addLast(buildStaticEchoReply(ipFamily, id, seq))
+        }
+
+        override fun pollReadableOnce(fd: FileDescriptor, timeoutMs: Int): Boolean = rxFrames.isNotEmpty()
+
+        override fun recvFrom(fd: FileDescriptor, buffer: ByteArray, flags: Int): Int {
+            recvFromCalls++
+            val frame = rxFrames.pollFirst() ?: throw IcmpPosixException(PosixErrnoTable.LINUX_EAGAIN, "EAGAIN")
+            System.arraycopy(frame, 0, buffer, 0, frame.size)
+            return frame.size
+        }
+
+        override fun recvMsgWithTtlApi31(
+            fd: FileDescriptor,
+            buffer: ByteArray,
+            ipFamily: IpFamily,
+            flags: Int,
+        ): IcmpRawDatagram? {
+            if (simulatedSdkInt < Build.VERSION_CODES.S) {
+                throw AssertionError("API 31 Os.recvmsg / StructMsghdr / StructCmsghdr called on sdkInt=$simulatedSdkInt")
+            }
+            recvMsgApi31Calls++
+            val frame = rxFrames.pollFirst() ?: throw IcmpPosixException(PosixErrnoTable.LINUX_EAGAIN, "EAGAIN")
+            System.arraycopy(frame, 0, buffer, 0, frame.size)
+            return IcmpRawDatagram(length = frame.size, ttl = simulatedTtl)
+        }
+
+        override fun closeQuietly(fd: FileDescriptor) {
+            closedFds += fd
+        }
+
+        companion object {
+            private fun buildStaticEchoReply(ipFamily: IpFamily, identifier: Int, sequence: Int): ByteArray {
+                val bytes = ByteArray(IcmpEchoPacketCodec.ICMP_HEADER_BYTES + 56)
+                bytes[0] = (
+                    if (ipFamily == IpFamily.IPV6) {
+                        IcmpEchoPacketCodec.ICMPV6_ECHO_REPLY_TYPE
+                    } else {
+                        IcmpEchoPacketCodec.ICMPV4_ECHO_REPLY_TYPE
+                    }
+                    ).toByte()
+                bytes[1] = 0
+                bytes[4] = ((identifier ushr 8) and 0xFF).toByte()
+                bytes[5] = (identifier and 0xFF).toByte()
+                bytes[6] = ((sequence ushr 8) and 0xFF).toByte()
+                bytes[7] = (sequence and 0xFF).toByte()
+                val csum = IcmpEchoPacketCodec.computeChecksum(bytes)
+                bytes[2] = ((csum ushr 8) and 0xFF).toByte()
+                bytes[3] = (csum and 0xFF).toByte()
+                return bytes
+            }
+        }
+    }
+
+    private fun singleDirectWifiBridge(resolvedIp: String): NetBenchNetworkBridge {
+        val directWifi: NetBenchSocketChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-101"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val supportsFileDescriptorBind: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun bindDatagramFileDescriptor(fd: FileDescriptor) = Unit
+            override fun resolveAllByName(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName(resolvedIp))
+        }
+        return object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(
+                            token = directWifi,
+                            networkId = "wifi-101",
+                            isVpn = false,
+                            hasInternet = true,
+                            isValidated = true,
+                            transports = setOf(NetBenchTransportKind.WIFI),
+                            interfaceName = "wlan0",
+                        ),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, directWifi, directWifi)
+            }
+        }
     }
 
     private fun buildEchoReplyBytes(

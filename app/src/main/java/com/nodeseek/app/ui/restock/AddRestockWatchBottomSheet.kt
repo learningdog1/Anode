@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.restock.MerchantLinkDetector
 import com.nodeseek.app.data.restock.StockPageAnalyzer
 import com.nodeseek.app.domain.restock.MerchantPanelType
@@ -585,6 +586,7 @@ fun AddRestockWatchBottomSheet(
     sourceTopicId: Long? = null,
     onWatchSaved: (RestockWatchItem) -> Unit = {},
 ) {
+    val settings by repository.settingsFlow.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     AddRestockWatchBottomSheet(
         onDismiss = onDismiss,
@@ -592,7 +594,7 @@ fun AddRestockWatchBottomSheet(
         initialTitle = initialTitle,
         initialPriceHint = initialPriceHint,
         sourceTopicId = sourceTopicId,
-        defaultPollIntervalMinutes = repository.settingsFlow.value.defaultPollIntervalMinutes,
+        defaultPollIntervalMinutes = settings.defaultPollIntervalMinutes,
         onProbeUrl = { url, inKw, outKw ->
             controller.probeUrl(
                 rawUrl = url,

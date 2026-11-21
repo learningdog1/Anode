@@ -7,6 +7,7 @@ import android.system.OsConstants
 import android.system.StructCmsghdr
 import android.system.StructMsghdr
 import android.system.StructPollfd
+import android.system.StructTimeval
 import androidx.annotation.RequiresApi
 import com.nodeseek.app.domain.netbench.DirectBindFailureReason
 import com.nodeseek.app.domain.netbench.IcmpNetworkBindingMode
@@ -796,130 +797,175 @@ interface IcmpKernelDatagramOps {
 }
 
 /**
- * Production Android `android.system.Os` implementation of [IcmpKernelDatagramOps].
+ * Carrier exception for POSIX `errno` values, enabling deterministic JVM unit testing of
+ * [AndroidOsIcmpKernelDatagramOps] where stub `android.system.ErrnoException.errno` defaults to 0.
  */
-object AndroidOsIcmpKernelDatagramOps : IcmpKernelDatagramOps {
-    private const val LINUX_IP_RECVTTL = 12
-    private const val LINUX_MSG_DONTWAIT = 0x40
+internal class IcmpPosixException(
+    val errno: Int,
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
 
-    override fun openIcmpDatagramSocket(ipFamily: IpFamily): FileDescriptor {
+internal data class PosixErrnoTable(
+    val eperm: Int = OsConstants.EPERM.takeIf { it != 0 } ?: LINUX_EPERM,
+    val eintr: Int = OsConstants.EINTR.takeIf { it != 0 } ?: LINUX_EINTR,
+    val eagain: Int = OsConstants.EAGAIN.takeIf { it != 0 } ?: LINUX_EAGAIN,
+    val eacces: Int = OsConstants.EACCES.takeIf { it != 0 } ?: LINUX_EACCES,
+    val einval: Int = OsConstants.EINVAL.takeIf { it != 0 } ?: LINUX_EINVAL,
+    val enosys: Int = OsConstants.ENOSYS.takeIf { it != 0 } ?: LINUX_ENOSYS,
+    val eopnotsupp: Int = OsConstants.EOPNOTSUPP.takeIf { it != 0 } ?: LINUX_EOPNOTSUPP,
+    val enetunreach: Int = OsConstants.ENETUNREACH.takeIf { it != 0 } ?: LINUX_ENETUNREACH,
+    val econnrefused: Int = OsConstants.ECONNREFUSED.takeIf { it != 0 } ?: LINUX_ECONNREFUSED,
+    val ehostunreach: Int = OsConstants.EHOSTUNREACH.takeIf { it != 0 } ?: LINUX_EHOSTUNREACH,
+) {
+    companion object {
+        const val LINUX_EPERM = 1
+        const val LINUX_EINTR = 4
+        const val LINUX_EAGAIN = 11
+        const val LINUX_EACCES = 13
+        const val LINUX_EINVAL = 22
+        const val LINUX_ENOSYS = 38
+        const val LINUX_EOPNOTSUPP = 95
+        const val LINUX_ENETUNREACH = 101
+        const val LINUX_ECONNREFUSED = 111
+        const val LINUX_EHOSTUNREACH = 113
+    }
+}
+
+internal fun extractPosixErrno(throwable: Throwable): Int? = when (throwable) {
+    is IcmpPosixException -> throwable.errno
+    is ErrnoException -> throwable.errno
+    else -> null
+}
+
+/**
+ * Low-level Android/POSIX syscall adapter consumed by [AndroidOsIcmpKernelDatagramOps].
+ *
+ * Isolating raw `android.system.Os` calls behind `@RequiresApi` static nested helper objects
+ * (`Api29Impl`, `Api30Impl`, `Api31Impl`) avoids ART class verification failures on API 26–30
+ * while allowing [AndroidOsIcmpKernelDatagramOps] to be deterministically tested across SDK
+ * levels 26, 29, 30, and 31 on plain JVM.
+ */
+internal interface IcmpPosixSyscalls {
+    val errnoTable: PosixErrnoTable
+        get() = PosixErrnoTable()
+
+    fun ensureRuntimeAvailable()
+
+    @Throws(Exception::class)
+    fun openDatagramSocket(ipFamily: IpFamily): FileDescriptor
+
+    @Throws(Exception::class)
+    fun openNonBlockingDatagramSocketApi29(ipFamily: IpFamily): FileDescriptor
+
+    @Throws(Exception::class)
+    fun setReceiveTimeoutApi29(fd: FileDescriptor, timeoutMs: Long)
+
+    @Throws(Exception::class)
+    fun ensureNonBlockingApi30(fd: FileDescriptor)
+
+    @Throws(Exception::class)
+    fun setReceiveTtlOption(fd: FileDescriptor, ipFamily: IpFamily)
+
+    @Throws(Exception::class)
+    fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress)
+
+    @Throws(Exception::class)
+    fun pollReadableOnce(fd: FileDescriptor, timeoutMs: Int): Boolean
+
+    @Throws(Exception::class)
+    fun recvFrom(fd: FileDescriptor, buffer: ByteArray, flags: Int): Int
+
+    @Throws(Exception::class)
+    fun recvMsgWithTtlApi31(
+        fd: FileDescriptor,
+        buffer: ByteArray,
+        ipFamily: IpFamily,
+        flags: Int,
+    ): IcmpRawDatagram?
+
+    fun closeQuietly(fd: FileDescriptor)
+}
+
+internal object SystemIcmpPosixSyscalls : IcmpPosixSyscalls {
+    override fun ensureRuntimeAvailable() {
         // When `unitTests.isReturnDefaultValues = true` on host JVM, OsConstants are 0 and Os.socket returns null
         if (OsConstants.AF_INET == 0 && OsConstants.SOCK_DGRAM == 0) {
             throw UnsupportedOperationException("Android OsConstants unavailable on host JVM")
         }
+    }
+
+    override fun openDatagramSocket(ipFamily: IpFamily): FileDescriptor {
         val domain = if (ipFamily == IpFamily.IPV6) OsConstants.AF_INET6 else OsConstants.AF_INET
         val protocol = if (ipFamily == IpFamily.IPV6) OsConstants.IPPROTO_ICMPV6 else OsConstants.IPPROTO_ICMP
-        val fd: FileDescriptor? = try {
-            Os.socket(domain, OsConstants.SOCK_DGRAM or OsConstants.SOCK_NONBLOCK, protocol)
-        } catch (_: ErrnoException) {
-            Os.socket(domain, OsConstants.SOCK_DGRAM, protocol)
-        }
+        val fd = Os.socket(domain, OsConstants.SOCK_DGRAM, protocol)
         if (fd == null || !fd.valid()) {
             throw UnsupportedOperationException("Os.socket returned invalid FileDescriptor")
-        }
-        try {
-            val currentFlags = Os.fcntlInt(fd, OsConstants.F_GETFL, 0)
-            if ((currentFlags and OsConstants.O_NONBLOCK) == 0) {
-                Os.fcntlInt(fd, OsConstants.F_SETFL, currentFlags or OsConstants.O_NONBLOCK)
-            }
-        } catch (t: Throwable) {
-            closeQuietly(fd)
-            throw t
         }
         return fd
     }
 
-    override fun enableReceiveTtlBestEffort(fd: FileDescriptor, ipFamily: IpFamily): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        return runCatching {
-            if (ipFamily == IpFamily.IPV6) {
-                Os.setsockoptInt(fd, OsConstants.IPPROTO_IPV6, OsConstants.IPV6_RECVHOPLIMIT, 1)
-            } else {
-                Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, LINUX_IP_RECVTTL, 1)
-            }
-            true
-        }.getOrDefault(false)
+    override fun openNonBlockingDatagramSocketApi29(ipFamily: IpFamily): FileDescriptor {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return openDatagramSocket(ipFamily)
+        }
+        val domain = if (ipFamily == IpFamily.IPV6) OsConstants.AF_INET6 else OsConstants.AF_INET
+        val protocol = if (ipFamily == IpFamily.IPV6) OsConstants.IPPROTO_ICMPV6 else OsConstants.IPPROTO_ICMP
+        val fd = Api29Impl.socketNonBlocking(domain, protocol)
+        if (fd == null || !fd.valid()) {
+            throw UnsupportedOperationException("Os.socket returned invalid FileDescriptor")
+        }
+        return fd
+    }
+
+    override fun setReceiveTimeoutApi29(fd: FileDescriptor, timeoutMs: Long) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Api29Impl.setReceiveTimeout(fd, timeoutMs)
+        }
+    }
+
+    override fun ensureNonBlockingApi30(fd: FileDescriptor) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Api30Impl.ensureNonBlocking(fd)
+        }
+    }
+
+    override fun setReceiveTtlOption(fd: FileDescriptor, ipFamily: IpFamily) {
+        if (ipFamily == IpFamily.IPV6) {
+            Os.setsockoptInt(fd, OsConstants.IPPROTO_IPV6, OsConstants.IPV6_RECVHOPLIMIT, 1)
+        } else {
+            Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, AndroidOsIcmpKernelDatagramOps.LINUX_IP_RECVTTL, 1)
+        }
     }
 
     override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
         Os.sendto(fd, packet, 0, packet.size, 0, address, 0)
     }
 
-    override fun pollReadable(fd: FileDescriptor, timeoutMs: Int): Boolean {
-        val clampedMs = timeoutMs.coerceAtLeast(1)
-        val deadlineNanos = System.nanoTime() + clampedMs * 1_000_000L
+    override fun pollReadableOnce(fd: FileDescriptor, timeoutMs: Int): Boolean {
         val pollfd = StructPollfd().apply {
             this.fd = fd
             this.events = OsConstants.POLLIN.toShort()
         }
-        val pollArray = arrayOf(pollfd)
-        while (true) {
-            val remainingMs = ((deadlineNanos - System.nanoTime() + 999_999L) / 1_000_000L).toInt()
-            if (remainingMs <= 0) return false
-            try {
-                val ready = Os.poll(pollArray, remainingMs)
-                if (ready <= 0) return false
-                val revents = pollfd.revents.toInt()
-                return (revents and (OsConstants.POLLIN or OsConstants.POLLERR)) != 0
-            } catch (e: ErrnoException) {
-                if (e.errno == OsConstants.EINTR) continue
-                throw e
-            }
-        }
+        val ready = Os.poll(arrayOf(pollfd), timeoutMs)
+        if (ready <= 0) return false
+        val revents = pollfd.revents.toInt()
+        return (revents and (OsConstants.POLLIN or OsConstants.POLLERR)) != 0
     }
 
-    internal enum class RecvMsgErrnoAction {
-        RETURN_NULL,
-        FALLBACK_RECVFROM,
-        RETHROW,
-    }
+    override fun recvFrom(fd: FileDescriptor, buffer: ByteArray, flags: Int): Int =
+        Os.recvfrom(fd, buffer, 0, buffer.size, flags, null)
 
-    internal fun classifyRecvMsgErrno(
-        errno: Int,
-        eagain: Int = OsConstants.EAGAIN,
-        eintr: Int = OsConstants.EINTR,
-        einval: Int = OsConstants.EINVAL,
-        eopnotsupp: Int = OsConstants.EOPNOTSUPP,
-        enosys: Int = OsConstants.ENOSYS,
-    ): RecvMsgErrnoAction = when (errno) {
-        eagain, eintr -> RecvMsgErrnoAction.RETURN_NULL
-        einval, eopnotsupp, enosys -> RecvMsgErrnoAction.FALLBACK_RECVFROM
-        else -> RecvMsgErrnoAction.RETHROW
-    }
-
-    override fun receivePacket(
+    override fun recvMsgWithTtlApi31(
         fd: FileDescriptor,
         buffer: ByteArray,
         ipFamily: IpFamily,
-        tryReadTtl: Boolean,
+        flags: Int,
     ): IcmpRawDatagram? {
-        if (tryReadTtl && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                return Api29RecvMsgHelper.receiveWithTtl(fd, buffer, ipFamily)
-            } catch (e: ErrnoException) {
-                when (classifyRecvMsgErrno(e.errno)) {
-                    RecvMsgErrnoAction.RETURN_NULL -> return null
-                    RecvMsgErrnoAction.FALLBACK_RECVFROM -> {
-                        // Kernel rejected recvmsg control buffer or syscall; fall through to non-blocking Os.recvfrom
-                    }
-                    RecvMsgErrnoAction.RETHROW -> throw e // Surface EHOSTUNREACH, ENETUNREACH, ECONNREFUSED, EACCES, EPERM immediately
-                }
-            } catch (_: LinkageError) {
-                // Fall through to Os.recvfrom
-            } catch (_: UnsupportedOperationException) {
-                // Fall through to Os.recvfrom
-            }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            throw UnsupportedOperationException("Os.recvmsg requires API 31")
         }
-        return try {
-            val bytesRead = Os.recvfrom(fd, buffer, 0, buffer.size, LINUX_MSG_DONTWAIT, null)
-            if (bytesRead <= 0) null else IcmpRawDatagram(length = bytesRead, ttl = null)
-        } catch (e: ErrnoException) {
-            if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) {
-                null
-            } else {
-                throw e
-            }
-        }
+        return Api31Impl.receiveWithTtl(fd, buffer, ipFamily, flags)
     }
 
     override fun closeQuietly(fd: FileDescriptor) {
@@ -931,23 +977,45 @@ object AndroidOsIcmpKernelDatagramOps : IcmpKernelDatagramOps {
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private object Api29RecvMsgHelper {
+    private object Api29Impl {
+        fun socketNonBlocking(domain: Int, protocol: Int): FileDescriptor? =
+            Os.socket(domain, OsConstants.SOCK_DGRAM or OsConstants.SOCK_NONBLOCK, protocol)
+
+        fun setReceiveTimeout(fd: FileDescriptor, timeoutMs: Long) {
+            val timeval = StructTimeval.fromMillis(timeoutMs.coerceAtLeast(1L))
+            Os.setsockoptTimeval(fd, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO, timeval)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private object Api30Impl {
+        fun ensureNonBlocking(fd: FileDescriptor) {
+            val currentFlags = Os.fcntlInt(fd, OsConstants.F_GETFL, 0)
+            if ((currentFlags and OsConstants.O_NONBLOCK) == 0) {
+                Os.fcntlInt(fd, OsConstants.F_SETFL, currentFlags or OsConstants.O_NONBLOCK)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private object Api31Impl {
         private const val LINUX_IPV6_HOPLIMIT = 52
 
         fun receiveWithTtl(
             fd: FileDescriptor,
             buffer: ByteArray,
             ipFamily: IpFamily,
+            flags: Int,
         ): IcmpRawDatagram? {
             val iov = arrayOf(ByteBuffer.wrap(buffer))
             val controlSeed = arrayOf(StructCmsghdr(0, 0, ByteArray(16)))
             val msgHdr = StructMsghdr(null, iov, controlSeed, 0)
-            val n = Os.recvmsg(fd, msgHdr, LINUX_MSG_DONTWAIT)
+            val n = Os.recvmsg(fd, msgHdr, flags)
             if (n <= 0) return null
             val ttl = msgHdr.msg_control?.firstNotNullOfOrNull { cmsg ->
                 val isV4Ttl = ipFamily != IpFamily.IPV6 &&
                     cmsg.cmsg_level == OsConstants.IPPROTO_IP &&
-                    (cmsg.cmsg_type == OsConstants.IP_TTL || cmsg.cmsg_type == LINUX_IP_RECVTTL)
+                    (cmsg.cmsg_type == OsConstants.IP_TTL || cmsg.cmsg_type == AndroidOsIcmpKernelDatagramOps.LINUX_IP_RECVTTL)
                 val isV6HopLimit = ipFamily == IpFamily.IPV6 &&
                     cmsg.cmsg_level == OsConstants.IPPROTO_IPV6 &&
                     (cmsg.cmsg_type == LINUX_IPV6_HOPLIMIT || cmsg.cmsg_type == OsConstants.IPV6_RECVHOPLIMIT)
@@ -958,6 +1026,194 @@ object AndroidOsIcmpKernelDatagramOps : IcmpKernelDatagramOps {
                 }
             }
             return IcmpRawDatagram(length = n, ttl = ttl)
+        }
+    }
+}
+
+/**
+ * Production Android `android.system.Os` implementation of [IcmpKernelDatagramOps] with clean
+ * SDK-level dispatch across API 26–28 (`O`–`P`), API 29 (`Q`), API 30 (`R`), and API 31+ (`S`).
+ */
+class AndroidOsIcmpKernelDatagramOps internal constructor(
+    internal val sdkInt: Int,
+    private val syscalls: IcmpPosixSyscalls,
+) : IcmpKernelDatagramOps {
+
+    constructor(sdkInt: Int = Build.VERSION.SDK_INT) : this(
+        sdkInt = sdkInt,
+        syscalls = SystemIcmpPosixSyscalls,
+    )
+
+    override fun openIcmpDatagramSocket(ipFamily: IpFamily): FileDescriptor {
+        syscalls.ensureRuntimeAvailable()
+
+        val fd: FileDescriptor = if (sdkInt >= Build.VERSION_CODES.Q) {
+            try {
+                syscalls.openNonBlockingDatagramSocketApi29(ipFamily)
+            } catch (t: Throwable) {
+                if (extractPosixErrno(t) != null) {
+                    syscalls.openDatagramSocket(ipFamily)
+                } else {
+                    throw t
+                }
+            }
+        } else {
+            syscalls.openDatagramSocket(ipFamily)
+        }
+
+        try {
+            when {
+                sdkInt >= Build.VERSION_CODES.R -> {
+                    try {
+                        syscalls.ensureNonBlockingApi30(fd)
+                    } catch (t: Throwable) {
+                        if (extractPosixErrno(t) != null) {
+                            runCatching { syscalls.setReceiveTimeoutApi29(fd, SAFETY_SO_RCVTIMEO_MS) }
+                        } else {
+                            throw t
+                        }
+                    }
+                }
+                sdkInt >= Build.VERSION_CODES.Q -> {
+                    runCatching { syscalls.setReceiveTimeoutApi29(fd, SAFETY_SO_RCVTIMEO_MS) }
+                }
+                else -> {
+                    // API 26–28: OsConstants.SOCK_NONBLOCK (API 29), Os.setsockoptTimeval (API 29),
+                    // and Os.fcntlInt (API 30) are unavailable. Waiting is bounded by Os.poll() slices
+                    // and reads pass MSG_DONTWAIT per call to Os.recvfrom().
+                }
+            }
+        } catch (t: Throwable) {
+            syscalls.closeQuietly(fd)
+            throw t
+        }
+        return fd
+    }
+
+    override fun enableReceiveTtlBestEffort(fd: FileDescriptor, ipFamily: IpFamily): Boolean {
+        // Ancillary cmsg TTL extraction requires Os.recvmsg + StructMsghdr + StructCmsghdr (API 31+).
+        if (sdkInt < Build.VERSION_CODES.S) return false
+        return runCatching {
+            syscalls.setReceiveTtlOption(fd, ipFamily)
+            true
+        }.getOrDefault(false)
+    }
+
+    override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
+        syscalls.sendTo(fd, packet, address)
+    }
+
+    override fun pollReadable(fd: FileDescriptor, timeoutMs: Int): Boolean {
+        val clampedMs = timeoutMs.coerceAtLeast(1)
+        val deadlineNanos = System.nanoTime() + clampedMs * 1_000_000L
+        val errnos = syscalls.errnoTable
+        while (true) {
+            val remainingMs = ((deadlineNanos - System.nanoTime() + 999_999L) / 1_000_000L).toInt()
+            if (remainingMs <= 0) return false
+            try {
+                return syscalls.pollReadableOnce(fd, remainingMs)
+            } catch (t: Throwable) {
+                if (extractPosixErrno(t) == errnos.eintr) continue
+                throw t
+            }
+        }
+    }
+
+    override fun receivePacket(
+        fd: FileDescriptor,
+        buffer: ByteArray,
+        ipFamily: IpFamily,
+        tryReadTtl: Boolean,
+    ): IcmpRawDatagram? {
+        val errnos = syscalls.errnoTable
+        if (tryReadTtl && sdkInt >= Build.VERSION_CODES.S) {
+            try {
+                return syscalls.recvMsgWithTtlApi31(fd, buffer, ipFamily, LINUX_MSG_DONTWAIT)
+            } catch (t: Throwable) {
+                val errno = extractPosixErrno(t)
+                if (errno != null) {
+                    when (
+                        classifyRecvMsgErrno(
+                            errno = errno,
+                            eagain = errnos.eagain,
+                            eintr = errnos.eintr,
+                            einval = errnos.einval,
+                            eopnotsupp = errnos.eopnotsupp,
+                            enosys = errnos.enosys,
+                        )
+                    ) {
+                        RecvMsgErrnoAction.RETURN_NULL -> return null
+                        RecvMsgErrnoAction.FALLBACK_RECVFROM -> {
+                            // Kernel rejected recvmsg control buffer or syscall; fall through to non-blocking Os.recvfrom
+                        }
+                        RecvMsgErrnoAction.RETHROW -> throw t // Surface EHOSTUNREACH, ENETUNREACH, ECONNREFUSED, EACCES, EPERM immediately
+                    }
+                } else if (t is LinkageError || t is UnsupportedOperationException) {
+                    // Fall through to Os.recvfrom
+                } else {
+                    throw t
+                }
+            }
+        }
+        return recvFromWithDontWaitFallback(fd, buffer, errnos)
+    }
+
+    private fun recvFromWithDontWaitFallback(
+        fd: FileDescriptor,
+        buffer: ByteArray,
+        errnos: PosixErrnoTable,
+    ): IcmpRawDatagram? {
+        val bytesRead = try {
+            syscalls.recvFrom(fd, buffer, LINUX_MSG_DONTWAIT)
+        } catch (t: Throwable) {
+            val errno = extractPosixErrno(t)
+            when {
+                errno == errnos.eagain || errno == errnos.eintr -> return null
+                errno == errnos.einval || errno == errnos.eopnotsupp -> {
+                    // Caller already verified POLLIN | POLLERR via Os.poll() on this exclusive FD;
+                    // if an older kernel rejects MSG_DONTWAIT in flags, retry once with flags = 0.
+                    try {
+                        syscalls.recvFrom(fd, buffer, 0)
+                    } catch (retryErr: Throwable) {
+                        val retryErrno = extractPosixErrno(retryErr)
+                        if (retryErrno == errnos.eagain || retryErrno == errnos.eintr) {
+                            return null
+                        }
+                        throw retryErr
+                    }
+                }
+                else -> throw t
+            }
+        }
+        return if (bytesRead <= 0) null else IcmpRawDatagram(length = bytesRead, ttl = null)
+    }
+
+    override fun closeQuietly(fd: FileDescriptor) {
+        syscalls.closeQuietly(fd)
+    }
+
+    internal enum class RecvMsgErrnoAction {
+        RETURN_NULL,
+        FALLBACK_RECVFROM,
+        RETHROW,
+    }
+
+    companion object : IcmpKernelDatagramOps by AndroidOsIcmpKernelDatagramOps() {
+        internal const val LINUX_IP_RECVTTL = 12
+        internal const val LINUX_MSG_DONTWAIT = 0x40
+        internal const val SAFETY_SO_RCVTIMEO_MS = 100L
+
+        internal fun classifyRecvMsgErrno(
+            errno: Int,
+            eagain: Int = OsConstants.EAGAIN.takeIf { it != 0 } ?: PosixErrnoTable.LINUX_EAGAIN,
+            eintr: Int = OsConstants.EINTR.takeIf { it != 0 } ?: PosixErrnoTable.LINUX_EINTR,
+            einval: Int = OsConstants.EINVAL.takeIf { it != 0 } ?: PosixErrnoTable.LINUX_EINVAL,
+            eopnotsupp: Int = OsConstants.EOPNOTSUPP.takeIf { it != 0 } ?: PosixErrnoTable.LINUX_EOPNOTSUPP,
+            enosys: Int = OsConstants.ENOSYS.takeIf { it != 0 } ?: PosixErrnoTable.LINUX_ENOSYS,
+        ): RecvMsgErrnoAction = when (errno) {
+            eagain, eintr -> RecvMsgErrnoAction.RETURN_NULL
+            einval, eopnotsupp, enosys -> RecvMsgErrnoAction.FALLBACK_RECVFROM
+            else -> RecvMsgErrnoAction.RETHROW
         }
     }
 }
@@ -1005,9 +1261,12 @@ fun interface IcmpDirectProber {
  * underlying physical [android.net.Network] (`Network.bindSocket(fd)`), 100% bypassing TUN VPN routes.
  */
 class KernelBoundIcmpDirectProber(
-    private val ops: IcmpKernelDatagramOps = AndroidOsIcmpKernelDatagramOps,
+    ops: IcmpKernelDatagramOps? = null,
     private val pollSliceMs: Long = DEFAULT_POLL_SLICE_MS,
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
 ) : IcmpDirectProber {
+
+    private val ops: IcmpKernelDatagramOps = ops ?: AndroidOsIcmpKernelDatagramOps(sdkInt = sdkInt)
 
     override suspend fun probe(
         endpoint: ResolvedEndpoint,
@@ -1281,13 +1540,14 @@ class KernelBoundIcmpDirectProber(
         throwable: Throwable,
         isVpnActive: Boolean,
     ): String {
-        val errno = (throwable as? ErrnoException)?.errno ?: 0
+        val errno = extractPosixErrno(throwable) ?: 0
+        val errnos = PosixErrnoTable()
         val combined = generateSequence(throwable) { it.cause }
             .take(6)
             .joinToString(" | ") { "${it.javaClass.simpleName}:${it.message.orEmpty()}" }
             .lowercase(Locale.US)
 
-        val isPermDenied = (errno != 0 && (errno == OsConstants.EPERM || errno == OsConstants.EACCES)) ||
+        val isPermDenied = (errno != 0 && (errno == errnos.eperm || errno == errnos.eacces)) ||
             "eperm" in combined ||
             "operation not permitted" in combined ||
             "eacces" in combined ||
@@ -1300,7 +1560,7 @@ class KernelBoundIcmpDirectProber(
             }
         }
 
-        val isHostUnreach = (errno != 0 && errno == OsConstants.EHOSTUNREACH) ||
+        val isHostUnreach = (errno != 0 && errno == errnos.ehostunreach) ||
             "ehostunreach" in combined ||
             "no route to host" in combined ||
             "host unreachable" in combined
@@ -1308,14 +1568,14 @@ class KernelBoundIcmpDirectProber(
             return "目标主机不可达"
         }
 
-        val isNetUnreach = (errno != 0 && errno == OsConstants.ENETUNREACH) ||
+        val isNetUnreach = (errno != 0 && errno == errnos.enetunreach) ||
             "enetunreach" in combined ||
             "network is unreachable" in combined
         if (isNetUnreach) {
             return "底层网络不可达"
         }
 
-        val isRefused = (errno != 0 && errno == OsConstants.ECONNREFUSED) ||
+        val isRefused = (errno != 0 && errno == errnos.econnrefused) ||
             "econnrefused" in combined ||
             "connection refused" in combined ||
             "port unreachable" in combined ||
@@ -1349,8 +1609,11 @@ class IcmpPingRunner(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
     private val ping6BinaryAvailable: () -> Boolean = { File(IcmpPingParser.DEFAULT_PING6_BINARY).exists() },
-    private val directProber: IcmpDirectProber = KernelBoundIcmpDirectProber(),
+    directProber: IcmpDirectProber? = null,
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
 ) {
+
+    private val directProber: IcmpDirectProber = directProber ?: KernelBoundIcmpDirectProber(sdkInt = sdkInt)
 
     fun run(config: IcmpPingConfig): Flow<IcmpPingProgress> = flow {
         val plannedCount = config.normalizedProbeCount
