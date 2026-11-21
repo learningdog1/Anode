@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storefront
@@ -81,6 +83,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -93,6 +96,7 @@ import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.trust.TrustFetchStatus
 import com.nodeseek.app.domain.trust.TrustRiskAssessment
+import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.ui.components.CategoryMicroTag
@@ -166,6 +170,7 @@ fun SellerTrustCardSheet(
         SellerTrustCardSheetContent(
             uiState = uiState,
             onRefresh = stateHolder::refresh,
+            onRunDeepSearch = stateHolder::runDeepExposureSearch,
             onToggleTag = stateHolder::toggleTag,
             onNoteTextChange = stateHolder::updateDraftNoteText,
             onSaveNote = stateHolder::saveNoteNow,
@@ -199,10 +204,12 @@ internal fun SellerTrustCardSheetContent(
     onOpenUserProfile: (Long, String) -> Unit,
     onStartDm: ((Long, String) -> Unit)?,
     onDismiss: () -> Unit,
+    onRunDeepSearch: () -> Unit = {},
 ) {
     val scrollState = rememberScrollState()
     val report = uiState.report
     val extraType = NodePulseThemeTokens.extraTypography
+    val uriHandler = LocalUriHandler.current
 
     Column(
         modifier = Modifier
@@ -341,6 +348,20 @@ internal fun SellerTrustCardSheetContent(
 
                         // 3. 4-Metric Bento Grid
                         SellerMetricsGrid(report = report)
+
+                        // 3b. On-Demand Historical Deep Search & Google Site Search Card (Anti-Rate-Limit)
+                        ExposureDeepSearchActionCard(
+                            report = report,
+                            username = uiState.resolvedUsername,
+                            isDeepSearching = uiState.isDeepSearching,
+                            deepSearchCooldownSeconds = uiState.deepSearchCooldownSeconds,
+                            deepSearchNotice = uiState.deepSearchNotice,
+                            onRunDeepSearch = onRunDeepSearch,
+                            onOpenGoogleSearch = {
+                                val url = TrustRiskEvaluator.buildExternalExposureSearchUrl(uiState.resolvedUsername)
+                                runCatching { uriHandler.openUri(url) }
+                            },
+                        )
 
                         // 4a. Exposure / Scam Hits (Red-tinted clickable cards)
                         if (report.exposureSearchHits.isNotEmpty()) {
@@ -808,8 +829,9 @@ private fun SellerMetricsGrid(
     }
     val exposureSubtext = when {
         exposureCount > 0 -> "命中站内曝光/骗子帖"
-        !report.searchSucceeded -> "搜索未完整完成"
-        else -> "站内检索未见曝光"
+        !report.searchSucceeded -> "板块巡检暂未完成"
+        report.isDeepSearchVerified -> "全站深搜未见曝光"
+        else -> "曝光版近况未见 · 可深搜"
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -851,6 +873,131 @@ private fun SellerMetricsGrid(
                 highlightDanger = exposureCount > 0,
                 modifier = Modifier.weight(1f),
             )
+        }
+    }
+}
+
+@Composable
+private fun ExposureDeepSearchActionCard(
+    report: SellerTrustReport,
+    username: String,
+    isDeepSearching: Boolean,
+    deepSearchCooldownSeconds: Int,
+    deepSearchNotice: String?,
+    onRunDeepSearch: () -> Unit,
+    onOpenGoogleSearch: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val shape = PulseArchitecturalShapes.EditorialCard
+    val isDeepVerified = report.isDeepSearchVerified
+    val canDeepSearch = !isDeepSearching && deepSearchCooldownSeconds <= 0 && username.isNotBlank()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = shape,
+                containerColor = ext.cardSurface,
+                borderColor = ext.cardBorder,
+                elevation = PulseElevation.None,
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = if (isDeepVerified) Icons.Rounded.CheckCircle else Icons.Rounded.Search,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = if (isDeepVerified) {
+                    "已完成站内历史曝光深搜（单次低频模式）"
+                } else {
+                    "默认巡检「曝光」板块动态以防限流，大额可补查历史"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        if (!deepSearchNotice.isNullOrBlank()) {
+            Text(
+                text = deepSearchNotice,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                color = TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER).accent,
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilledTonalButton(
+                onClick = onRunDeepSearch,
+                enabled = canDeepSearch,
+                shape = PulseArchitecturalShapes.SmallChip,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                if (isDeepSearching) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (deepSearchCooldownSeconds > 0) Icons.Rounded.Schedule else Icons.Rounded.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(5.dp))
+                val deepLabel = when {
+                    isDeepSearching -> "深搜中…"
+                    deepSearchCooldownSeconds > 0 -> "保护间隔 ${deepSearchCooldownSeconds}s"
+                    isDeepVerified -> "重新深搜"
+                    else -> "站内历史深搜"
+                }
+                Text(
+                    text = deepLabel,
+                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            OutlinedButton(
+                onClick = onOpenGoogleSearch,
+                enabled = username.isNotBlank(),
+                shape = PulseArchitecturalShapes.SmallChip,
+                border = BorderStroke(0.8.dp, ext.cardBorder),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = "Google 查曝光",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -1349,6 +1496,8 @@ private fun LocalSellerNoteCard(
                 Text(
                     text = "保存备注",
                     style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
@@ -1566,7 +1715,7 @@ private fun SellerTrustLoadingSkeleton() {
                 color = MaterialTheme.colorScheme.primary,
             )
             Text(
-                text = "正在从官网拉取卖家档案、近期交易帖与曝光检索...",
+                text = "正在拉取卖家档案、近期交易帖与曝光版动态...",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1668,6 +1817,7 @@ private fun SellerTrustRateLimitedCard(
             onClick = onRetry,
             enabled = !isCoolingDown,
             shape = PulseArchitecturalShapes.SmallChip,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
         ) {
             Icon(
                 imageVector = if (isCoolingDown) Icons.Rounded.Schedule else Icons.Rounded.Refresh,
@@ -1678,6 +1828,8 @@ private fun SellerTrustRateLimitedCard(
             Text(
                 text = if (isCoolingDown) "稍后重试 (${cooldownRemainingSeconds}s)" else "手动重试",
                 style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                maxLines = 1,
+                softWrap = false,
             )
         }
     }
@@ -1739,6 +1891,7 @@ private fun SellerTrustErrorCard(
             onClick = onRetry,
             enabled = !isThrottled,
             shape = PulseArchitecturalShapes.SmallChip,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
         ) {
             Icon(
                 imageVector = if (isThrottled) Icons.Rounded.Schedule else Icons.Rounded.Refresh,
@@ -1749,6 +1902,8 @@ private fun SellerTrustErrorCard(
             Text(
                 text = if (isThrottled) "请稍候 (${cooldownRemainingSeconds}s)" else "手动重试",
                 style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                maxLines = 1,
+                softWrap = false,
             )
         }
     }

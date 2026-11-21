@@ -18,6 +18,9 @@ import com.nodeseek.app.domain.ssh.SshJumpConnectionStage
 import com.nodeseek.app.domain.ssh.SshJumpHop
 import com.nodeseek.app.domain.ssh.SshJumpHostConnectionException
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
+import com.nodeseek.app.domain.ssh.SshPtyResizeCallbackContext
+import com.nodeseek.app.domain.ssh.SshPtyResizer
+import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshStreamEvent
 import com.nodeseek.app.domain.ssh.SshTransport
@@ -25,6 +28,7 @@ import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -71,6 +75,7 @@ internal interface ManagedExecChannel {
     fun setInputStream(inputStream: InputStream?) = Unit
     fun setPty(enable: Boolean) = Unit
     fun setPtyType(ptyType: String, col: Int, row: Int, wp: Int, hp: Int) = Unit
+    fun setPtySize(col: Int, row: Int, wp: Int, hp: Int) = Unit
     fun connect(connectTimeoutMillis: Int)
     fun disconnect()
 }
@@ -340,51 +345,96 @@ class JSchSshTransport internal constructor(
                     throw CancellationException("SSH 会话已取消")
                 }
 
+                val initialPtySize = SshPtySize(
+                    cols = request.ptyCols,
+                    rows = request.ptyRows,
+                    widthPx = request.ptyWidthPx,
+                    heightPx = request.ptyHeightPx,
+                ).normalized()
+
                 val channel = targetEntry.session.openExecChannel()
                 channelRef.set(channel)
                 channel.setCommand(command)
                 channel.setInputStream(null)
                 channel.setPty(true)
-                channel.setPtyType(request.ptyType, request.ptyCols, request.ptyRows, 0, 0)
+                channel.setPtyType(
+                    request.ptyType,
+                    initialPtySize.cols,
+                    initialPtySize.rows,
+                    initialPtySize.widthPx,
+                    initialPtySize.heightPx,
+                )
 
                 val remoteStdin = channel.outputStream
                 val reader = InputStreamReader(channel.inputStream, StandardCharsets.UTF_8)
                 channel.connect(request.connectTimeoutMillis)
-                coroutineContext[com.nodeseek.app.domain.ssh.SshStdinCallbackContext]?.onStdinReady?.invoke(
-                    com.nodeseek.app.domain.ssh.SshStdinWriter { input ->
-                        if (!closedFlag.get() && input.isNotEmpty()) {
+
+                val ptyResizeQueue = Channel<SshPtySize>(Channel.CONFLATED)
+                var lastAppliedPtySize = initialPtySize
+                val ptyResizeJob = launch(ioDispatcher) {
+                    for (requestedSize in ptyResizeQueue) {
+                        if (closedFlag.get() || channel.isClosed) break
+                        val normalized = requestedSize.normalized()
+                        if (normalized != lastAppliedPtySize) {
                             runCatching {
-                                synchronized(remoteStdin) {
-                                    remoteStdin.write(input.toByteArray(StandardCharsets.UTF_8))
-                                    remoteStdin.flush()
-                                }
+                                channel.setPtySize(
+                                    normalized.cols,
+                                    normalized.rows,
+                                    normalized.widthPx,
+                                    normalized.heightPx,
+                                )
+                                lastAppliedPtySize = normalized
                             }
                         }
-                    },
-                )
-
-                val buffer = CharArray(STREAM_READ_BUFFER_CHARS)
-                while (!closedFlag.get()) {
-                    val count = reader.read(buffer)
-                    if (count < 0) break
-                    if (count > 0) {
-                        val chunk = String(buffer, 0, count)
-                        send(SshStreamEvent.OutputChunk(chunk))
                     }
                 }
+                try {
+                    coroutineContext[com.nodeseek.app.domain.ssh.SshStdinCallbackContext]?.onStdinReady?.invoke(
+                        com.nodeseek.app.domain.ssh.SshStdinWriter { input ->
+                            if (!closedFlag.get() && input.isNotEmpty()) {
+                                runCatching {
+                                    synchronized(remoteStdin) {
+                                        remoteStdin.write(input.toByteArray(StandardCharsets.UTF_8))
+                                        remoteStdin.flush()
+                                    }
+                                }
+                            }
+                        },
+                    )
+                    coroutineContext[SshPtyResizeCallbackContext]?.onPtyResizerReady?.invoke(
+                        SshPtyResizer { nextSize ->
+                            if (!closedFlag.get() && !channel.isClosed) {
+                                ptyResizeQueue.trySend(nextSize.normalized())
+                            }
+                        },
+                    )
 
-                // Wait briefly for remote exit status if the stream closed right before status packet
-                var waitAttempts = 0
-                while (!channel.isClosed && !closedFlag.get() && waitAttempts < EXIT_STATUS_POLL_ATTEMPTS) {
-                    Thread.sleep(EXIT_STATUS_POLL_MS)
-                    waitAttempts++
-                }
+                    val buffer = CharArray(STREAM_READ_BUFFER_CHARS)
+                    while (!closedFlag.get()) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        if (count > 0) {
+                            val chunk = String(buffer, 0, count)
+                            send(SshStreamEvent.OutputChunk(chunk))
+                        }
+                    }
 
-                if (!closedFlag.get()) {
-                    val exitCode = channel.exitStatus
-                    send(SshStreamEvent.Completed(exitCode = exitCode))
+                    // Wait briefly for remote exit status if the stream closed right before status packet
+                    var waitAttempts = 0
+                    while (!channel.isClosed && !closedFlag.get() && waitAttempts < EXIT_STATUS_POLL_ATTEMPTS) {
+                        Thread.sleep(EXIT_STATUS_POLL_MS)
+                        waitAttempts++
+                    }
+
+                    if (!closedFlag.get()) {
+                        val exitCode = channel.exitStatus
+                        send(SshStreamEvent.Completed(exitCode = exitCode))
+                    }
+                    close()
+                } finally {
+                    ptyResizeQueue.close()
+                    ptyResizeJob.cancel()
                 }
-                close()
             } catch (ce: CancellationException) {
                 disconnectQuietly()
                 throw ce
@@ -573,6 +623,10 @@ class JSchSshTransport internal constructor(
 
         override fun setPtyType(ptyType: String, col: Int, row: Int, wp: Int, hp: Int) {
             channel.setPtyType(ptyType, col, row, wp, hp)
+        }
+
+        override fun setPtySize(col: Int, row: Int, wp: Int, hp: Int) {
+            channel.setPtySize(col, row, wp, hp)
         }
 
         override fun connect(connectTimeoutMillis: Int) {

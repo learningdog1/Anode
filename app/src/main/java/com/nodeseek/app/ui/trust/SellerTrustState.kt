@@ -131,6 +131,9 @@ data class SellerTrustUiState(
     val cooldownRemainingSeconds: Int = 0,
     val statusNoticeMessage: String? = null,
     val isManualRefreshThrottled: Boolean = false,
+    val isDeepSearching: Boolean = false,
+    val deepSearchCooldownSeconds: Int = 0,
+    val deepSearchNotice: String? = null,
 ) {
     val resolvedUid: Long
         get() = report?.uid?.takeIf { it > 0L } ?: uid
@@ -201,10 +204,12 @@ class SellerTrustStateHolder(
     val uiState: StateFlow<SellerTrustUiState> = _uiState.asStateFlow()
 
     private var inspectJob: Job? = null
+    private var deepSearchJob: Job? = null
     private var observeNoteJob: Job? = null
     private var autoSaveJob: Job? = null
     private var feedbackJob: Job? = null
     private var cooldownTickerJob: Job? = null
+    private var deepSearchTickerJob: Job? = null
     private var lastManualRefreshAcceptedAtMillis: Long = 0L
     private var noteEditSequence: Long = 0L
     private var tagEditSequence: Long = 0L
@@ -298,6 +303,7 @@ class SellerTrustStateHolder(
                                 localNote = note,
                                 profileSucceeded = report.profileSucceeded,
                                 registrationDurationLabel = report.registrationDurationLabel,
+                                exposureCheckScope = report.exposureCheckScope,
                             ),
                         )
                     } else {
@@ -355,6 +361,72 @@ class SellerTrustStateHolder(
 
     fun refresh() {
         load(forceRefresh = true)
+    }
+
+    /**
+     * Triggers an explicit on-demand single-query `/search` deep scan for historical exposure posts,
+     * adhering to the isolated deep-search cooldown & interval guard.
+     */
+    fun runDeepExposureSearch() {
+        val snapshot = _uiState.value
+        if (snapshot.isDeepSearching || snapshot.isLoading || snapshot.deepSearchCooldownSeconds > 0) return
+
+        deepSearchJob?.cancel()
+        deepSearchJob = scope.launch {
+            _uiState.update { it.copy(isDeepSearching = true, deepSearchNotice = null) }
+            try {
+                val updated = repository.searchSellerExposureDeep(
+                    uid = snapshot.resolvedUid,
+                    usernameHint = snapshot.resolvedUsername.ifBlank { snapshot.usernameHint },
+                )
+                val finishedNow = clockMillis()
+                val deepUntil = updated.deepSearchCooldownUntilEpochMillis.takeIf { it > finishedNow } ?: 0L
+                val deepRemSec = computeRemainingSeconds(deepUntil, finishedNow)
+
+                _uiState.update { current ->
+                    val note = current.localNote ?: updated.localNote
+                    val synced = if (note != updated.localNote) {
+                        updated.copy(
+                            localNote = note,
+                            riskAssessment = TrustRiskEvaluator.evaluate(
+                                rankLevel = updated.rankLevel,
+                                registrationDays = updated.registrationDays,
+                                historicalTradeTopicCount = updated.historicalTradeTopicCount,
+                                exposureSearchHits = updated.exposureSearchHits,
+                                searchSucceeded = updated.searchSucceeded,
+                                localNote = note,
+                                profileSucceeded = updated.profileSucceeded,
+                                registrationDurationLabel = updated.registrationDurationLabel,
+                                exposureCheckScope = updated.exposureCheckScope,
+                            ),
+                        )
+                    } else {
+                        updated
+                    }
+                    current.copy(
+                        isDeepSearching = false,
+                        report = synced,
+                        deepSearchCooldownSeconds = deepRemSec,
+                        deepSearchNotice = synced.deepSearchNoticeMessage,
+                    )
+                }
+
+                if (deepUntil > finishedNow) {
+                    startDeepSearchCooldownTicker(deepUntil)
+                } else {
+                    deepSearchTickerJob?.cancel()
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _uiState.update { current ->
+                    current.copy(
+                        isDeepSearching = false,
+                        deepSearchNotice = t.message?.takeIf { it.isNotBlank() } ?: "历史曝光深搜失败，请稍后重试",
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -426,6 +498,29 @@ class SellerTrustStateHolder(
         }
     }
 
+    private fun startDeepSearchCooldownTicker(untilMillis: Long) {
+        deepSearchTickerJob?.cancel()
+        deepSearchTickerJob = scope.launch {
+            while (true) {
+                val now = clockMillis()
+                val remaining = computeRemainingSeconds(untilMillis, now)
+                if (remaining <= 0) {
+                    _uiState.update { current ->
+                        current.copy(
+                            deepSearchCooldownSeconds = 0,
+                            deepSearchNotice = null,
+                        )
+                    }
+                    break
+                }
+                _uiState.update { current ->
+                    current.copy(deepSearchCooldownSeconds = remaining)
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
     private fun computeRemainingSeconds(untilMillis: Long, nowMillis: Long): Int {
         if (untilMillis <= nowMillis) return 0
         return ((untilMillis - nowMillis + 999L) / 1_000L).coerceAtLeast(1L).toInt()
@@ -452,6 +547,7 @@ class SellerTrustStateHolder(
                                     localNote = observedNote,
                                     profileSucceeded = existing.profileSucceeded,
                                     registrationDurationLabel = existing.registrationDurationLabel,
+                                    exposureCheckScope = existing.exposureCheckScope,
                                 ),
                             )
                         }
@@ -579,6 +675,7 @@ class SellerTrustViewModel(
     }
 
     fun refresh() = stateHolder.refresh()
+    fun runDeepExposureSearch() = stateHolder.runDeepExposureSearch()
     fun toggleTag(tag: TrustTag) = stateHolder.toggleTag(tag)
     fun updateDraftNoteText(text: String) = stateHolder.updateDraftNoteText(text)
     fun saveNoteNow() = stateHolder.saveNoteNow()

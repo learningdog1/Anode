@@ -946,6 +946,8 @@ fun VpsValuationBottomSheet(
                         text = if (copiedBadgeVisible) "已复制" else "复制",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                         color = if (isValid) {
                             if (copiedBadgeVisible) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
                         } else {
@@ -1009,6 +1011,7 @@ fun VpsValuationBottomSheet(
                         fontWeight = FontWeight.Bold,
                         color = ctaTint,
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -1399,6 +1402,7 @@ private fun StickyValuationTelemetryCard(
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }

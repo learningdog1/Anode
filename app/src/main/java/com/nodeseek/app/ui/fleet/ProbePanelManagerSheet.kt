@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -214,7 +215,12 @@ internal fun ProbePanelManagerSheet(
                                 ) {
                                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("新增面板", style = MaterialTheme.typography.labelMedium)
+                                    Text(
+                                        text = "新增面板",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
                                 }
                             }
                         },
@@ -461,11 +467,17 @@ internal fun ProbePanelManagerSheet(
                                 onClick = { onTestConnection(buildCandidateConfig()) },
                                 enabled = urlInput.isNotBlank() && testState != PanelTestUiState.Testing,
                                 shape = CircleShape,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Rounded.Radar, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("测试连接")
+                                Text(
+                                    text = "测试连接",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                             Button(
                                 onClick = {
@@ -475,9 +487,15 @@ internal fun ProbePanelManagerSheet(
                                 },
                                 enabled = urlInput.isNotBlank(),
                                 shape = CircleShape,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(if (editingPanelId == null) "保存并同步" else "更新面板")
+                                Text(
+                                    text = if (editingPanelId == null) "保存并同步" else "更新面板",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
                     }
@@ -654,6 +672,11 @@ private fun PanelListCard(
                 text = if (!panel.apiToken.isNullOrBlank()) "已加密保存 Token" else "公开模式（无 Token）",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -663,6 +686,8 @@ private fun PanelListCard(
                     text = "离线告警",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
                 )
                 Switch(
                     checked = panel.notifyOnOffline,

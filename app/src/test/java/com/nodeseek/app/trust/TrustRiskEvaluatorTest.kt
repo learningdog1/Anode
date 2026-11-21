@@ -2,6 +2,7 @@ package com.nodeseek.app.trust
 
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.trust.ExposureCandidate
+import com.nodeseek.app.domain.trust.ExposureCheckScope
 import com.nodeseek.app.domain.trust.ExposureHitTopic
 import com.nodeseek.app.domain.trust.LocalSellerNote
 import com.nodeseek.app.domain.trust.TrustRiskEvaluator
@@ -381,6 +382,45 @@ class TrustRiskEvaluatorTest {
         )
         assertEquals(TrustRiskLevel.NORMAL_CLEAR, midRankClear.level)
         assertTrue(midRankClear.headline.contains("靠谱卖家"))
+    }
+
+    @Test
+    fun buildDeepSearchQuery_consolidatesToSingleQuery_andScopesAmbiguousShortUsernamesToExposeBoard() {
+        assertEquals("CloudSeller" to "", TrustRiskEvaluator.buildDeepSearchQuery(" @CloudSeller "))
+        assertEquals("bob" to "expose", TrustRiskEvaluator.buildDeepSearchQuery("bob"))
+        assertEquals("HK" to "expose", TrustRiskEvaluator.buildDeepSearchQuery("HK"))
+        assertEquals("VPS" to "expose", TrustRiskEvaluator.buildDeepSearchQuery("VPS"))
+        assertEquals("小明" to "", TrustRiskEvaluator.buildDeepSearchQuery("小明"))
+
+        val googleUrl = TrustRiskEvaluator.buildExternalExposureSearchUrl("@CloudSeller")
+        assertTrue(googleUrl.startsWith("https://www.google.com/search?q="))
+        assertTrue(googleUrl.contains("nodeseek.com"))
+        assertTrue(googleUrl.contains("CloudSeller"))
+    }
+
+    @Test
+    fun evaluate_distinguishesBoardSnapshotAndDeepSearchWordingWhenClear() {
+        val boardClear = TrustRiskEvaluator.evaluate(
+            rankLevel = 3,
+            registrationDays = 200,
+            historicalTradeTopicCount = 2,
+            exposureSearchHits = emptyList(),
+            searchSucceeded = true,
+            exposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
+        )
+        assertEquals(TrustRiskLevel.NORMAL_CLEAR, boardClear.level)
+        assertTrue(boardClear.headline.contains("近期未见曝光异常"))
+
+        val deepClear = TrustRiskEvaluator.evaluate(
+            rankLevel = 3,
+            registrationDays = 200,
+            historicalTradeTopicCount = 2,
+            exposureSearchHits = emptyList(),
+            searchSucceeded = true,
+            exposureCheckScope = ExposureCheckScope.DEEP_SEARCH,
+        )
+        assertEquals(TrustRiskLevel.NORMAL_CLEAR, deepClear.level)
+        assertTrue(deepClear.headline.contains("全站深搜未命中曝光记录"))
     }
 
     private fun topic(

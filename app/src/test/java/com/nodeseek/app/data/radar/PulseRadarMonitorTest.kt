@@ -21,6 +21,7 @@ import com.nodeseek.app.domain.radar.LocalAlertRecord
 import com.nodeseek.app.domain.radar.RadarBackgroundPollOutcome
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -1058,6 +1059,98 @@ class PulseRadarMonitorTest {
             assertTrue(quietPopups.isEmpty())
         } finally {
             quietJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `eager unconfined and multi-threaded cold-start transitions never throw UninitializedPropertyAccessException`() = runTest {
+        radarRepository.updatePollingSettings {
+            it.copy(
+                isEnabled = true,
+                keywordAlertsEnabled = false,
+                replyTrackingEnabled = false,
+                inboxPushEnabled = false,
+            )
+        }
+        radarRepository.getPollingSettings()
+
+        val uncaughtErrors = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val handler = CoroutineExceptionHandler { _, throwable ->
+            uncaughtErrors.add(throwable)
+        }
+
+        // 1. Deterministic immediate-dispatch check (`Dispatchers.Unconfined`): executes the launched
+        //    coroutine body synchronously BEFORE `scope.launch` returns to the caller frame, which
+        //    deterministically triggered `UninitializedPropertyAccessException: lateinit property launched`
+        //    prior to the CoroutineStart.LAZY + context Job fix.
+        val unconfinedScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined + handler)
+        val eagerMonitor = createMonitor(unconfinedScope)
+        try {
+            eagerMonitor.onForegroundChanged(false)
+            eagerMonitor.start()
+            assertFalse(eagerMonitor.isForegroundLoopActive())
+
+            eagerMonitor.onForegroundChanged(true)
+            assertTrue("Uncaught exception on eager start: $uncaughtErrors", uncaughtErrors.isEmpty())
+            assertTrue(eagerMonitor.isForegroundLoopActive())
+
+            eagerMonitor.onForegroundChanged(false)
+            assertFalse(eagerMonitor.isForegroundLoopActive())
+
+            eagerMonitor.triggerImmediateCheck()
+            assertTrue("Uncaught exception on immediate check: $uncaughtErrors", uncaughtErrors.isEmpty())
+            eagerMonitor.stop()
+            assertFalse(eagerMonitor.isForegroundLoopActive())
+        } finally {
+            unconfinedScope.cancel()
+        }
+
+        // 2. Multi-threaded cold-start race simulation on real Dispatchers.IO with pre-warmed worker threads
+        //    and concurrent SystemJobService/WorkManager `runBackgroundPollPass` contention.
+        val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + handler)
+        val concurrentMonitor = createMonitor(ioScope)
+        try {
+            withContext(Dispatchers.Default) {
+                // Pre-warm Dispatchers.IO worker pool so launched tasks can run on another core immediately.
+                val warmups = (1..8).map {
+                    async(Dispatchers.IO) { delay(5L) }
+                }
+                warmups.forEach { it.await() }
+
+                repeat(80) { round ->
+                    val jobs = listOf(
+                        launch(Dispatchers.Default) {
+                            concurrentMonitor.onForegroundChanged(false)
+                            concurrentMonitor.start()
+                            concurrentMonitor.onForegroundChanged(true)
+                        },
+                        launch(Dispatchers.IO) {
+                            concurrentMonitor.triggerImmediateCheck()
+                        },
+                        launch(Dispatchers.IO) {
+                            if (round % 4 == 0) {
+                                concurrentMonitor.runBackgroundPollPass()
+                            }
+                        },
+                        launch(Dispatchers.Default) {
+                            concurrentMonitor.onForegroundChanged(false)
+                            if (round % 5 == 0) {
+                                concurrentMonitor.stop()
+                            }
+                        },
+                    )
+                    jobs.forEach { it.join() }
+                }
+            }
+            concurrentMonitor.stop()
+            assertFalse(concurrentMonitor.isForegroundLoopActive())
+            assertTrue(
+                "Expected zero uncaught exceptions under concurrent cold-start contention, got: $uncaughtErrors",
+                uncaughtErrors.isEmpty(),
+            )
+        } finally {
+            ioScope.cancel()
         }
     }
 }

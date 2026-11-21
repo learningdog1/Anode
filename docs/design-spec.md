@@ -22,14 +22,16 @@ NodeSeek is home to infrastructure builders, VPS benchmarkers, network engineers
 | :--- | :--- |
 | **Brand & App Icon** | **Anode**: Concentric radar pulse arcs and Anode architectural pillars in Steel Blue (`#2D637E` → `#06B6D4`) with a glowing Cyan/Gold signal core on an adaptive squircle. |
 | **Color Philosophy** | **Cool Mist Light (`#F7FAFF`)** + **Slate Steel Dark (`#101417`)** (`#000000` Pitch option); **Steel Teal-Blue (`#2D637E` / `#9ACAEC`)** primary, **Muted Steel (`#4E616D` / `#B5C9D7`)** secondary, **Drumstick Gold (`#C86D00` / `#FFB951`)** reward accent, plus optional **Material You** wallpaper harmonization (`useDynamicColor = false` by default). |
-| **Navigation Shell** | Edge-to-edge viewport with a **Floating Tonal Pill Dock** (`Explore / 首页`, `Seek Mail / 邮箱`, `Pulse Hub / 我的`) + **Contextual Collapsing Squircle FAB** (`发帖` on Explore). |
+| **Navigation Shell & Adaptive Layout** | Edge-to-edge viewport with a **Floating Tonal Pill Dock** (`首页 / EXPLORE`, `功能栏 / FEATURE_HUB`, `我的 / PULSE_HUB`) + **Contextual Collapsing Squircle FAB** (`发帖` on Explore). Re-tapping `首页` scrolls smoothly to top and refreshes. On `width >= 600.dp` (`Medium` / `Expanded`), `AdaptiveLayout` switches the dock to a start-edge **`NavigationRail`** and activates **dual-pane master-detail** (`0.42f/0.58f` or `0.38f/0.62f`). |
 | **Feed Top Bar & Sort** | **Minimalist Glass Top Bar** with left `Anode` emblem + right compact **Search Icon** (`SearchRoute`) + borderless **Sort Selector** (`新评论 ▾` / `新帖子` / `热门` / `推荐阅读`), paired with a full-board **Text Category Strip** synchronized 1:1 with `HorizontalPager`. |
 | **Pinned Topics** | Compact, transparent **Collapsible Pinned Ticker Strip** (`📌 置顶`) that expands inline on tap—preserving vertical viewport space. |
 | **Feed Cards** | **High-Density Outlined `PulseTopicCard`** (`14dp` radius + `0.85dp` transparent hairline border, zero card fill/left spine): `24dp` author avatar, **1-tap Bookmark icon**, crisp **Read vs Unread typographic weight/alpha contrast**, compact telemetry footer, and **bottom-right backgroundless Category indicator**. |
 | **Unified Search** | Dedicated **Search Screen (`SearchRoute`)** supporting topic/user scope switching, board & sort filters, recent search chips, and 1-tap Google `site:www.nodeseek.com` fallback. |
-| **Topic Reader & Comments** | **Magazine-Grade Article Surface** + clean **Threaded Stream** separated by architectural hairlines: `楼主` (**OP**) solid Cobalt highlight chip on OP floors, compact tabular `#12` floor pill inside header, syntax-tinted code blocks with 1-tap copy, zoomable Coil image cards, and inline tonal reaction chips (`👍` `🍗` `👎` `💬`). |
-| **Reader Bottom Controls & Floor Jump** | **Single Anchored Tonal Quick-Reply Bar** (inline quick-reply pill + bookmark + floor counter `12/148` + expand icon) + **Full Markdown Reply Bottom Sheet**, paired with a draggable right-edge **Floor Jump Scrubber & Sheet** (`只看楼主`, slider, page jump). |
-| **Profile Hub & Check-in** | **Personal Hub (`我的`)**: Preserved ambient-glow Hero Rank & `Lv` Coin Progress Card with 4-column stats (`鸡腿 / 星尘 / 主题 / 评论`), **1-Line Compact Check-in Card**, settings-style grouped lists (`消息`: 通知/私信/关键词提醒; `内容`: 我的收藏/浏览记录/我的帖子) linking to **`HubCollectionScreen`** (which unifies Bookmarks, History with category/resume badges, and User Profile topics onto `PulseTopicCard`), grouped-card **`SettingsScreen`**, in-place **`SeekMailApiKeyDialog`**, and a **Clean WebView Session Login Bottom Sheet**. |
+| **Feature Hub (`功能栏`) & Toolbox** | Centralized tool dock organizing **社区服务** (`邮箱 / SeekMailScreen`, `活动 / ActivityScreen`), **情报与监控** (`海外情报 / OverseasIntelScreen`, `补货监控 / RestockMonitorScreen`), **主机与网络** (`我的服务器 / MyServersScreen`, `手机端测机 / MobileNetBenchScreen` with ICMP Ping + TCPing + `-P` iperf3 + Dual Exit IP), and Hero **`轻量 SSH`** (`LiteSshScreen` with `SshTerminalAutoFit`, virtualized console & `NodeQuality` `:::: tabs` export). |
+| **Topic Reader & Comments** | **Magazine-Grade Article Surface** + clean **Threaded Stream** separated by architectural hairlines: `楼主` (**OP**) solid Cobalt highlight chip on OP floors, compact tabular `#12` floor pill inside header, syntax-tinted code blocks with 1-tap copy, zoomable Coil image cards, and inline tonal reaction chips (`👍` `🍗` `👎` `💬`), plus **Seller Trust Sheet (`SellerTrustCardSheet`)** on avatar/badge tap. |
+| **Reader Bottom Controls & Floor Jump** | **Single Anchored Tonal Quick-Reply Bar** (inline quick-reply pill + bookmark + floor counter `12/148` + expand icon + contextual `发测评` SSH quick action) + **Full Markdown Reply Bottom Sheet**, paired with a draggable right-edge **Floor Jump Scrubber & Sheet** (`只看楼主`, slider, page jump). |
+| **Profile Hub, Check-in & Settings** | **Personal Hub (`我的`)**: Preserved ambient-glow Hero Rank & `Lv` Coin Progress Card with 4-column stats (`鸡腿 / 星尘 / 主题 / 评论`), **1-Line Compact Check-in Card (`CompactCheckInCard`)**, settings-style grouped lists (`消息`: 通知/私信/关键词提醒; `内容`: 我的收藏/浏览记录/我的帖子) linking to **`HubCollectionScreen`**, grouped-card **`SettingsScreen`** (hosting **`ContentFilterSection`** & **`BackupRestoreSection`**), in-place **`SeekMailApiKeyDialog`**, and **`WebViewSessionSheet`**. |
+| **Single-Line Interactive Control Discipline** | Buttons, filter chips, segmented pills, and status tags across 30+ screens/dialogs enforce `maxLines = 1`, `softWrap = false`, `TextOverflow.Ellipsis` to prevent cramped multi-line button wrapping under `90%` compact density or dynamic font scaling. |
 
 ---
 
@@ -153,9 +155,9 @@ Anode pairs clean CJK editorial legibility (`Noto Sans CJK SC` / Android system 
 
 ## 3. Screen & Component Specifications for Jetpack Compose
 
-### 3.1 Root Navigation Shell (`AnodeAppShell`)
+### 3.1 Root Navigation Shell (`NodePulseRootShell` & `AdaptiveLayout`)
 
-Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tonal Pill Dock + Contextual Expressive FAB**.
+Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tonal Pill Dock + Contextual Expressive FAB** (switching automatically to a start-edge **`NavigationRail`** + dual-pane master-detail split when `width >= 600.dp`).
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
@@ -166,25 +168,23 @@ Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tona
 │        with bottom ContentPadding = 96.dp + navInsets)   │
 │                                                          │
 │       ┌────────────────────────────────────┐  ┌────────┐ │
-│       │  (◉ 脉冲)    ❖ 版块    ◎ 枢机•     │  │ ✎ 发帖 │ │
+│       │  (🏠 首页)   ❖ 功能栏    👤 我的•   │  │ ✎ 发帖 │ │
 │       └────────────────────────────────────┘  └────────┘ │
 │                    [Gesture Pill Area]                   │
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Edge-to-Edge Setup**: `enableEdgeToEdge()` in `MainActivity` with transparent status and navigation bars. Bottom area applies a subtle `56.dp` vertical scrim fade (`background.copy(alpha = 0f)` → `background.copy(alpha = 0.88f)`) so list content scrolling underneath the floating dock remains clean and legible.
-- **Floating Tonal Pill Dock (`PulseFloatingNavBar`)**:
-  - **Dimensions**: Height `62.dp`, horizontal margin `20.dp` (or centered `maxWidth = 300.dp` paired alongside the FAB), floating `12.dp` above `WindowInsets.navigationBars`, `CircleShape`, `surfaceContainerHigh` (`94%` alpha) + `1.dp` `outlineVariant` stroke + `6.dp` tonal shadow.
-  - **3 Focused Destinations**:
-    1. **`脉冲` (Explore / Feed)** — `Icons.Rounded.Explore` (selected) / `Icons.Outlined.Explore`: Main topic stream, sort switcher, quick check-in. Re-tapping while active smoothly scrolls `LazyColumn` to index `0` and triggers pull-to-refresh if already at top.
-    2. **`版块` (Boards / Discover)** — `Icons.Rounded.GridView` / `Icons.Outlined.GridView`: Asymmetric Bento board directory, RSS/Web mode switcher, and instant search.
-    3. **`枢机` (Pulse Hub / Me)** — `Icons.Rounded.Hub` / `Icons.Outlined.Hub` (with live `8.dp` `primary` or `tertiary` unread badge dot when `unreadNotifications > 0` or daily check-in pending): Bento profile dashboard, check-in card, inbox, offline bookmarks, history, and settings.
-  - **Selection Indicator**: Sliding `primaryContainer` stadium pill (`height = 46.dp`) animating horizontally between tabs via `animateDpAsState(spring(0.72f, 380f))`, displaying Icon + `labelMedium` label for the active destination and crisp icon + compact label (or icon-first compact pill) for inactive destinations.
-- **Contextual Expressive FAB (`PulseContextualFab`)**:
-  - **On `脉冲` (Explore)**: `56.dp`-tall squircle (`RoundedCornerShape(18.dp)`) in `primary` (`#3655D6` / `#8DA2FF`) next to the Floating Pill Dock. Shows `Icons.Rounded.Edit` + `"发帖"` when at top of feed or scrolling up; smoothly collapses to a `56.dp × 56.dp` icon-only squircle when scrolling down. Tapping opens `TopicComposerSheet` (or `SessionLoginSheet` if unauthenticated).
-  - **On `版块` & `枢机`**: Smoothly scales out (`scaleOut + fadeOut`) so Bento grids breathe unobstructed.
-  - **On `TopicReaderScreen`**: Navigation dock hides automatically (`slideOutVertically`) in favor of the Reader's anchored **Quick-Reply Bar** and right-edge **Floor Scrubber**.
-- **Large-Screen / Foldable Adaptation (`width >= 600.dp`)**: Dock automatically transforms into a left-anchored `NavigationRail` with the Compose squircle FAB at the top of the rail.
+- **Edge-to-Edge Setup**: `enableEdgeToEdge()` in `MainActivity` with transparent status and navigation bars. Bottom area applies a subtle vertical scrim fade so list content scrolling underneath the floating dock remains clean and legible.
+- **Floating Tonal Pill Dock (`FloatingPillDock` in `NavigationShellComponents.kt`)**:
+  - **3 Focused Top-Level Destinations (`PulseNavTab`)**:
+    1. **`首页` (`EXPLORE`)** — `Icons.Rounded.Home` / `Icons.Outlined.Home`: Main topic stream, sort switcher, full board strip. **Re-tapping** while active smoothly scrolls the active feed list to index `0` and triggers pull-to-refresh.
+    2. **`功能栏` (`FEATURE_HUB`)** — `Icons.Rounded.GridView` / `Icons.Outlined.GridView`: Categorized toolbox hub (`FeatureHubScreen`) linking Seek Mail, Activity placeholder, Overseas Intel, Restock Monitor, My Servers, Mobile NetBench, and Lite SSH Hero card with live telemetry badges.
+    3. **`我的` (`PULSE_HUB`)** — `Icons.Rounded.Person` / `Icons.Outlined.Person` (showing unread count badge when `unreadNotifications > 0`, or indicator dot when daily check-in is pending): Personal profile Hero card, 1-line check-in bar, grouped Messages & Content links, and Settings.
+  - **Selection Indicator**: Sliding `primaryContainer` / `secondaryContainer` gradient stadium pill (`pulseNavActiveIndicatorBrush`) animating smoothly between tabs.
+- **Contextual Expressive FAB (`CollapsingSquircleFab`)**:
+  - **On `首页` (`EXPLORE`)**: Morphing `56.dp` squircle in `primary` next to the Floating Pill Dock showing `Icons.Rounded.Edit` + `"发帖"`, collapsing smoothly when scrolling down. Tapping opens `ComposerRoute` (or `WebViewSessionSheet` if unauthenticated).
+  - **On `功能栏` & `我的` & Child Screens**: Smoothly scales out (`scaleOut + fadeOut`) or hides the bottom dock on secondary detail destinations so terminal/reader viewports remain unobstructed.
+- **Large-Screen / Foldable Adaptation (`PulseAdaptiveLayoutInfo`, `width >= 600.dp`)**: Dock transforms into a start-edge **`PulseNavigationRail`** with the Compose squircle FAB at the top of the rail, and `AdaptiveLayout` enables **dual-pane master-detail** (`listPaneWeight = 0.42f` / `detailPaneWeight = 0.58f` for `Medium`, `0.38f` / `0.62f` for `Expanded >= 840.dp`).
 
 ---
 
@@ -263,7 +263,9 @@ Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tona
 
 ---
 
-### 3.3 Screen 2: Boards & Search Screen (`BoardsBentoScreen`)
+### 3.3 Screen 2: Unified Search & Boards Directory (`BoardsScreen` · `SearchRoute` / `BoardsRoute`)
+
+> **Navigation Note**: `BoardsRoute` was consolidated off the primary 3-tab bottom dock in `v2.3+`; `ExploreScreen` exposes the full category strip inline, while tapping the top-right Search icon opens **`SearchRoute` (`BoardsScreen`)** for unified topic/user search, category filtering, and external Google site-search fallback.
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
@@ -413,77 +415,35 @@ Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tona
 
 ---
 
-### 3.5 Screen 4: Pulse Hub (Me) Screen (`PulseHubScreen`)
+### 3.5 Screen 4: Personal Hub (`PulseHubScreen`) & Grouped Settings (`SettingsScreen`)
 
-Presents a vibrant **Material 3 Bento-Grid Dashboard** + **Embedded Offline Bookmarks & History Tabs** + **Clean In-App WebView Session Login Sheet**.
+Reorganized in `v2.x` from the initial Bento concept into an elevated **Hero Rank Card + 1-Line Compact Check-In Bar (`CompactCheckInCard`) + Clean Settings-Style Grouped Sections (`消息` & `内容`)**, while migrating toolbox utilities cleanly into **`FeatureHubScreen` (`功能栏`)**:
 
-```text
-┌──────────────────────────────────────────────────────────┐
-│ 枢机 · Pulse Hub                              [⚙ 设置]   │
-├──────────────────────────────────────────────────────────┤
-│ ┌──────────────────────────────────────────────────────┐ │
-│ │ (Avatar)  alex_dev  [Lv.4 钴蓝核心]      [UID 10492] │ │ <- Hero Identity & Rank
-│ │  64dp     Lv.4 ━━━━━━━━━━━░░░░░ Lv.5 (1,920 / 2,500) │ │    Bento Card (2x1)
-│ │  Ring     ┌──────────┬──────────┬──────────────────┐ │ │
-│ │           │ 🍗 1,920 │ ✨ 340   │ 📝 24 帖 · 186 回│ │ │
-│ │           │ 鸡腿余额 │ 星尘结晶 │ 社区足迹         │ │ │
-│ │           └──────────┴──────────┴──────────────────┘ │ │
-│ └──────────────────────────────────────────────────────┘ │
-│ ┌─────────────────────────┐  ┌─────────────────────────┐ │
-│ │ 🍗 每日鸡腿签到         │  │ 🔔 消息与提及     [3•]  │ │ <- 1x1 Interactive Bento
-│ │ [🎲 随机手气 | 稳拿5腿] │  │ @alice 在 #12 提到了你  │ │    Row (Check-in + Inbox)
-│ │ ┌─────────────────────┐ │  │ 私信: "小鸡还在吗？"    │ │
-│ │ │   立即签到领鸡腿    │ │  │                         │ │
-│ │ └─────────────────────┘ │  │ 查看全部通知与私信 →    │ │
-│ └─────────────────────────┘  └─────────────────────────┘ │
-├──────────────────────────────────────────────────────────┤
-│   [ 🔖 离线收藏 (18) ]          [ 🕓 阅读历史 (64) ]     │ <- Embedded PrimaryTabRow
-├──────────────────────────────────────────────────────────┤
-│ ┌──────────────────────────────────────────────────────┐ │
-│ │ [测评] DMIT LAX Pro 三网回程深度实测       [⚡已离线]│ │ <- Offline Cached Item
-│ │ 收藏于 2 小时前 · 已缓存正文与 42 条评论             │ │
-│ └──────────────────────────────────────────────────────┘ │
-│ ┌──────────────────────────────────────────────────────┐ │
-│ │ [技术] Docker Compose 自建 Vaultwarden 备份方案      │ │ <- History Resume Item
-│ │ 浏览于 昨天 22:15 · [上次读至 #24 楼 →]              │ │
-│ └──────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
-```
+1. **Hero User Rank & Stats Card (`UserRankHeroCard`)**: `64.dp` Avatar wrapped in `Lv0–Lv6` conic gradient ring + ambient hero wash + `Lv.X` pill + UID + coin rank bar + 4-column telemetry (`鸡腿` / `星尘` / `主题` / `评论`); guest state offers WebView or Native Sign-in triggers.
+2. **Compact Check-In Bar (`CompactCheckInCard`)**: Single-line row displaying check-in rank/gain and post/reply/like quota pills, allowing in-place `固定 +5` / `试试手气` toggle and check-in execution.
+3. **Grouped Lists (`消息` & `内容`)**:
+   - **消息**: `通知`, `私信`, `关键词提醒` (Pulse Radar alerts) with live unread pills.
+   - **内容**: `我的收藏`, `浏览记录`, `我的帖子` linking to `HubCollectionScreen` (which reuses outlined `PulseTopicCard` with offline snapshots and `读至 #N 楼` badges) and `UserProfileScreen`.
+4. **Grouped-Card Settings (`SettingsScreen`)**: Theme mode (`Cool Mist Light` / `Slate Steel Dark` / `Pure Pitch AMOLED`), Material You opt-in, global font scale (`90%` default), check-in strategy, **`ContentFilterSection`** (muted categories & keyword/regex block rules), **`BackupRestoreSection`** (versioned JSON export/preview/merge/replace), Pulse Radar polling/quiet hours, NodeImage API Key modal, cache cleanup, and GitHub Releases update controls.
+5. **In-App WebView Session Login Sheet (`WebViewSessionSheet`)**: Official `https://www.nodeseek.com/signIn.html` WebView matching theme palette, strict anti-tamper compliance, and automatic `CookieManager` -> OkHttp cookie bridging upon sign-in verification.
 
-#### Component Breakdown & Compose Specs:
-1. **Hero User Rank & Stats Bento Card (`UserRankHeroCard`, Full-Width `2x1`)**:
-   - **Authenticated State**:
-     - `64.dp` Avatar wrapped in an animated `2.5.dp` `Lv0–Lv6` metallic/gemstone ring + username (`titleLarge`, Bold) + `Lv.X` persona pill (`Lv.4 钴蓝核心`) + `UID` monospace pill.
-     - **Rank Progress Bar**: Linear progress track (`8.dp` height, `CircleShape`, gradient fill matching current Lv tier) showing exact progress toward next `100 * (Lv + 1)²` coin threshold (e.g., `1,920 / 2,500 鸡腿 · 距 Lv.5 还差 580`).
-     - **3-Column Telemetry Strip**: `🍗 鸡腿` (tappable → Coin Ledger sheet), `✨ 星尘` (tappable → Stardust Ledger), and `📝 主题 / 回复` (tappable → My Posts sheet).
-   - **Unauthenticated / Guest RSS State**:
-     - Warm Cobalt/Amber hero card with radar illustration: *"当前处于 RSS 极速访客模式"* + subtitle *"连接 NodeSeek 账号以解锁每日鸡腿签到、内版阅读、云端收藏同步与回帖互动"* + full-width **`连接 NodeSeek 账号`** `primary` CTA button opening `SessionLoginSheet`.
-2. **Interactive Daily Check-in (`鸡腿`) Bento Card (`CheckInBentoCard`, `1x1`)**:
-   - **Mode Switcher Pill**: Compact 2-way toggle right inside the card:
-     - `🎲 手气随机` (`random = true`, variable drumstick reward)
-     - `🛡️ 稳拿 5 腿` (`random = false`, guaranteed `+5` drumsticks)
-     - Persists user's preferred mode in `DataStore` (also used by the Explore top bar's 1-tap check-in chip!).
-   - **Action & Celebration State**:
-     - *Before Check-in*: Warm `tertiary` (`#C86D00` / `#FFB951`) full-width capsule button `"立即签到"`.
-     - *After Check-in*: Morphs smoothly into a gold-tinted badge displaying `"今日已获 +7 🍗"` + `"今日第 386 位签到 · 连签记录"`.
-3. **Notifications & Mentions Inbox Bento Card (`InboxBentoCard`, `1x1`)**:
-   - Header with `Icons.Rounded.Notifications` + live unread count pill (`primary` Cobalt fill).
-   - Displays a 2-line preview of the most recent unread `@提及`, `帖子回复`, or `私信 (DM)` (or *"暂无未读动态，一切静好"* when caught up).
-   - Tapping opens `InboxBottomSheet` / `InboxScreen` with 3 filter pills (`回复我的`, `@提到我`, `站内私信`) and a 1-tap `全部已读` action button.
-4. **Unified Collections, History & Profile Topic Stream (`HubCollectionScreen` & `UserProfileScreen`)**:
-   - **Tab 1 — `🔖 离线收藏 (Offline Bookmarks)`** & **Tab 2 — `🕓 阅读历史 (Read History)`** & **User Profile `发布的主题`** all reuse the exact same outlined **`PulseTopicCard`** design as Home Explore for visual consistency across the entire app:
-     - **Offline Bookmarks**: Stores full parsed `TopicDetail` + first-page comments in local **Room** database on bookmark so users can read saved threads offline while keeping the Home-style outlined card layout and 1-tap bookmark toggle.
-     - **Read History**: Records viewed topics in Room with timestamp and last visible floor index, retaining the card's bottom-right **category indicator** and **`读至 #N 楼`** resume badge while supporting 1-tap bookmarking from history.
-5. **Grouped-Card Settings & In-Place Seek Mail Key Management (`SettingsScreen` & `SeekMailScreen`)**:
-   - **Grouped List Architecture (`SettingsScreen`)**: Styled identically to `PulseHubScreen` (`我的`) using rounded grouped cards (`surfaceContainerLow`), subtle dividers, and `30.dp` aligned rounded icon badges across 7 coherent sections (外观主题 / 字体与排版 / 社区与签到 / 脉搏雷达 / 数据与隐私 / 图床与进阶 / 关于与更新).
-   - **Theme & Typography Presets**: Switch between `跟随系统 / 清雾浅色 / 深岩深色`, **Pure Pitch AMOLED (`#000000`)**, **Material You Dynamic Color** (`false` by default), and global `fontScale` (`90%` default with `85% / 90% / 100% / 115%` preset pills and continuous `85%–130%` slider + live preview).
-   - **Integrations & Maintenance**: NodeImage API Key management via clean `NodeImageApiKeyDialog` (Seek Mail API Key configuration is consolidated directly inside `SeekMailScreen`'s top bar via `SeekMailApiKeyDialog`), image/history cache clearing, blocked-users management, and GitHub Releases update controls.
-6. **Clean In-App WebView Session Login Bottom Sheet (`SessionLoginSheet`)**:
-   - `ModalBottomSheet` (`92%` screen height, `28.dp` top corners, `dragHandle` disabled over WebView scroll area to prevent accidental swipe-dismiss during verification):
-     - **Header Bar**: Close `[✕]` button + **`🔒 https://www.nodeseek.com/signIn.html`** verified SSL domain pill + Reload `[↻]` button.
-     - **Trust & Privacy Callout Strip** (`secondaryContainer`, `12.dp` radius): *"安全声明：您在下方官方网页直接完成登录、人机验证或两步验证（2FA）。Anode 绝不读取或存储您的密码，仅在登录成功后同步本地会话 Cookie。"*
-     - **WebView Container**: `androidx.webkit` WebView matching app Dark/Light theme (`WebSettingsCompat`), zero custom script injection or anti-bot tampering—letting the user complete official sign-in/2FA naturally in the visible UI.
-     - **Automatic Session Bridge**: Observes `CookieManager.getInstance().getCookie("https://www.nodeseek.com")`; as soon as valid NodeSeek session cookies appear and `/api/account` or profile verification succeeds, bridges cookies into the shared OkHttp `CookieJar`, triggers haptic success feedback (`HapticFeedbackType.LongPress`), dismisses the sheet, and refreshes Pulse Hub!
+---
+
+### 3.6 Feature Hub (`功能栏`) & v2.4.0 Toolbox UX Architecture
+
+1. **Feature Hub (`FeatureHubScreen`)**: Categorized architectural tile grid with live `FeatureHubTelemetry` badges:
+   - **社区服务**: `邮箱` (`SeekMailScreen`, `已配置 / 待配置`) & `活动` (`ActivityScreen`, ForumWatch placeholder `即将接入`).
+   - **情报与监控**: `海外情报` (`OverseasIntelScreen`) & `补货监控` (`RestockMonitorScreen`, active watch & unread badges).
+   - **主机与网络**: `我的服务器` (`MyServersScreen`, server count) & `手机端测机` (`MobileNetBenchScreen`).
+   - **Hero Card**: `轻量 SSH` (`LiteSshScreen`, saved vault count).
+2. **Mobile NetBench (`MobileNetBenchScreen` & `NetBenchVisualComponents`)**:
+   - **Test Toggles**: Places **Ping 延迟与抖动** (ICMP Ping) in the first toggle row directly above **TCPing 延迟与抖动**, displaying an inline warning callout when VPN is active without proxy mode (`Network.bindSocket` cannot bind external `/system/bin/ping` processes).
+   - **Dual Egress Telemetry & Controls**: Displays both real cellular/Wi-Fi physical exit IP and proxy/VPN exit IP (`testViaProxy` toggle + lockdown fallback banner), `-P` parallel stream selector (`1 / 2 / 4 / 8`), zero-allocation `Canvas` latency waveforms & throughput charts, and `NetBenchIperf3ServerPromptDialog` coordinating 1-click VPS `iperf3` setup via SSH.
+3. **Lite SSH (`LiteSshScreen` · `SshTerminalAutoFit` · `SshResultPublishSheet`)**:
+   - **Virtualized Adaptive Terminal**: Uses `LazyColumn` (`SshTerminalConsoleBuffer`) for 60fps scrolling, **`AUTO_FIT`** dynamic font solver (`6.0sp–11.5sp`) to prevent wide NodeQuality/YABS ASCII tables from wrapping, **`FIXED`** mode with two-finger pinch zoom (`0.50x–1.80x`) & reset controls, and non-looping live PTY `window-change` dimension updates.
+   - **Publishing Workflow (`SshResultPublishSheet`)**: Supports off-main-thread Markdown formatting, multi-run merge (`SshMergeLayout`), official 4-tab `NodeQuality` `:::: tabs` or plain-text copy, and contextual **`发测评`** button label when invoked from a topic reply bar.
+4. **Overseas Intel (`OverseasIntelScreen` & `OverseasIntelDetailScreen`)**: Clear typographic deal card hierarchy with list-level translation switching (`标题原文 / 中文译文 / 双语对照`); detail screen directly presents server-parsed Chinese titles, spec sections, promo codes, pros/cons, AI commentary, and 1-click NodeSeek repost.
+5. **Seller Trust (`SellerTrustCardSheet` & `SellerTrustState`)**: Surfaces cached `/categories/expose` snapshot status immediately with zero default `/search` calls, explicit **on-demand deep `/search` verification** with live cooldown countdown pill, Google `site:www.nodeseek.com` site-search fallback, and local app-sandbox JSON notes (`filesDir/seller_trust_notes.json`).
 
 ---
 
@@ -510,6 +470,6 @@ UI engineers should structure `com.nodeseek.app.ui.theme` into four clean, decou
 ## 5. Accessibility, Contrast & Quality Checklist
 
 - **Contrast Compliance**: Every text/surface pair in both Cool Mist Light (`#171C1F` on `#F7FAFF`) and Slate Steel Dark (`#DFE3E7` on `#101417`), as well as all semantic Category Badges (`>= 5.2:1`), meets or exceeds **WCAG 2.1 AA** (and AAA for body text).
-- **Touch Targets**: All interactive chips, bookmark toggles, floor pills, and reaction buttons enforce `minimumInteractiveComponentSize()` (`48.dp × 48.dp` hit bounds even when visual pill height is `28.dp–34.dp`).
+- **Touch Targets & Single-Line Labels**: All interactive chips, bookmark toggles, floor pills, and reaction buttons enforce `minimumInteractiveComponentSize()` (`48.dp × 48.dp` hit bounds even when visual pill height is `28.dp–34.dp`), while button/chip labels consistently enforce single-line ellipsized layout (`maxLines = 1`, `softWrap = false`, `TextOverflow.Ellipsis`).
 - **TalkBack & Semantics**: `PulseTopicCard` merges header/title/telemetry via `Modifier.semantics(mergeDescendants = true)` with explicit `stateDescription = "未读"` / `"已读"`, while keeping the Bookmark quick-toggle as an independent accessible action.
 - **Reduced Motion**: Respect system animator duration scale; spring bounces gracefully degrade to instant crossfades when animations are disabled.

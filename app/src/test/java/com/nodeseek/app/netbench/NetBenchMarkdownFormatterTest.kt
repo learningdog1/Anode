@@ -4,6 +4,8 @@ import com.nodeseek.app.domain.netbench.ClientCarrier
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
+import com.nodeseek.app.domain.netbench.IcmpNetworkBindingMode
+import com.nodeseek.app.domain.netbench.IcmpPingSummary
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
@@ -266,5 +268,98 @@ class NetBenchMarkdownFormatterTest {
         assertTrue(viaProxyMd.contains("经由代理"))
         assertFalse(viaProxyMd.contains("114.240.88.123"))
         assertFalse(viaProxyMd.contains("45.76.200.10"))
+    }
+
+    @Test
+    fun `places ICMP Ping row before TCPing row in both reply card and aligned full table`() {
+        val base = sampleReport()
+        val withPing = base.copy(
+            icmpPingSummary = IcmpPingSummary(
+                resolvedTarget = base.resolvedTarget,
+                sent = 10,
+                received = 10,
+                lossPercent = 0.0,
+                minMs = 28.4,
+                avgMs = 30.2,
+                maxMs = 33.9,
+                jitterMdevMs = 1.6,
+                bindingMode = IcmpNetworkBindingMode.UNBOUND_SUBPROCESS_FALLBACK,
+            ),
+        )
+
+        val replyMd = NetBenchMarkdownFormatter.format(
+            report = withPing,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 19:50"),
+        )
+        val replyPingIdx = replyMd.indexOf("**Ping (10次)**")
+        val replyTcpIdx = replyMd.indexOf("**TCPing (10次)**")
+        assertTrue("Ping line missing in reply card:\n$replyMd", replyPingIdx >= 0)
+        assertTrue("TCPing line missing in reply card:\n$replyMd", replyTcpIdx >= 0)
+        assertTrue("Ping line must precede TCPing line", replyPingIdx < replyTcpIdx)
+        assertTrue(replyMd.contains("30.2 ms"))
+        assertTrue(replyMd.contains("抖动 `1.6 ms`"))
+
+        val tableMd = NetBenchMarkdownFormatter.format(
+            report = withPing,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 19:50"),
+        )
+        val tablePingIdx = tableMd.indexOf("Ping 延迟")
+        val tableTcpIdx = tableMd.indexOf("TCPing 延迟")
+        assertTrue("Ping row missing in full table:\n$tableMd", tablePingIdx >= 0)
+        assertTrue("TCPing row missing in full table:\n$tableMd", tableTcpIdx >= 0)
+        assertTrue("Ping row must precede TCPing row", tablePingIdx < tableTcpIdx)
+        assertTrue(tableMd.contains("默认路由"))
+
+        val blocks = parseNodeSeekMarkdownBlocks(tableMd)
+        val table = blocks.filterIsInstance<MdBlock.Table>().single()
+        val pingRowIdx = table.rows.indexOfFirst { it.first() == "Ping 延迟" }
+        val tcpRowIdx = table.rows.indexOfFirst { it.first() == "TCPing 延迟" }
+        assertTrue(pingRowIdx >= 0 && tcpRowIdx > pingRowIdx)
+
+        val tableLines = tableMd.lines().filter { it.trimStart().startsWith("|") }
+        val expectedWidth = NetBenchMarkdownFormatter.displayWidth(tableLines.first())
+        for (line in tableLines) {
+            assertEquals("Table line width mismatch: $line", expectedWidth, NetBenchMarkdownFormatter.displayWidth(line))
+        }
+    }
+
+    @Test
+    fun `notes iperf3 parallel stream count only when greater than 1`() {
+        val base = sampleReport()
+
+        val singleReply = NetBenchMarkdownFormatter.format(
+            report = base,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertFalse("Single-stream report must not display -P flag", singleReply.contains("-P "))
+
+        val singleTable = NetBenchMarkdownFormatter.format(
+            report = base,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertFalse("Single-stream table must not display -P flag", singleTable.contains("-P "))
+
+        val multi = base.copy(
+            iperfDownloadResult = base.iperfDownloadResult!!.copy(parallelStreams = 4),
+            iperfUploadResult = base.iperfUploadResult!!.copy(parallelStreams = 4),
+        )
+
+        val multiReply = NetBenchMarkdownFormatter.format(
+            report = multi,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.REPLY_CARD, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertTrue(multiReply.contains("**iperf3 测速 (-P 4)**"))
+
+        val multiTable = NetBenchMarkdownFormatter.format(
+            report = multi,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertTrue(multiTable.contains("-P 4 并发"))
+
+        val tableLines = multiTable.lines().filter { it.trimStart().startsWith("|") }
+        val expectedWidth = NetBenchMarkdownFormatter.displayWidth(tableLines.first())
+        for (line in tableLines) {
+            assertEquals("Table line width mismatch: $line", expectedWidth, NetBenchMarkdownFormatter.displayWidth(line))
+        }
     }
 }

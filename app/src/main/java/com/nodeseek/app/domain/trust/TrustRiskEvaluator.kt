@@ -1,6 +1,7 @@
 package com.nodeseek.app.domain.trust
 
 import com.nodeseek.app.domain.model.TopicSummary
+import java.net.URLEncoder
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -73,6 +74,50 @@ object TrustRiskEvaluator {
     private val RUNAWAY_SYNONYMS: List<String> = listOf("跑路", "卷款", "失联", "收款拉黑", "删号跑")
     private val CALLOUT_SYNONYMS: List<String> = listOf("挂人", "避雷", "避坑", "黑名单", "拉黑")
     private val EXPOSE_SYNONYMS: List<String> = listOf("曝光", "实锤", "维权", "交易纠纷", "仲裁")
+    private val AMBIGUOUS_SHORT_ASCII_REGEX = Regex("^[A-Za-z0-9_]{1,3}$")
+    private val AMBIGUOUS_GENERIC_USERNAMES: Set<String> = setOf(
+        "vps", "cloud", "hk", "us", "jp", "sg", "uk", "de", "kr", "tw",
+        "nat", "cn2", "bgp", "ip", "ssh", "dns", "cdn", "ssl", "api", "ai",
+        "dmit", "bwg", "rn", "cc", "claw", "push",
+    )
+
+    /**
+     * Builds the single-request `(query, categorySlug)` pair for on-demand historical exposure deep search.
+     *
+     * Consolidates legacy multi-query searches (`"曝光 <user>"` + `"骗子 <user>"`) into one username
+     * query, scoping broad/ambiguous short tokens to the `expose` board to avoid irrelevant noise.
+     */
+    fun buildDeepSearchQuery(canonicalUsername: String): Pair<String, String> {
+        val clean = canonicalUsername.trim().removePrefix("@")
+        val categorySlug = if (isBroadAmbiguousUsername(clean)) "expose" else ""
+        return clean to categorySlug
+    }
+
+    /**
+     * Returns true when [username] is short ASCII (`<= 3` chars) or matches a common VPS/forum term
+     * where an unscoped site search would return unrelated trade/discussion noise.
+     */
+    fun isBroadAmbiguousUsername(username: String): Boolean {
+        val clean = username.trim().removePrefix("@")
+        if (clean.isEmpty()) return false
+        return AMBIGUOUS_SHORT_ASCII_REGEX.matches(clean) ||
+            clean.lowercase(Locale.ROOT) in AMBIGUOUS_GENERIC_USERNAMES
+    }
+
+    /**
+     * Builds an external Google site-search URL for checking NodeSeek exposure posts without hitting
+     * NodeSeek's `/search` rate limits.
+     */
+    fun buildExternalExposureSearchUrl(username: String): String {
+        val clean = username.trim().removePrefix("@")
+        val rawQuery = if (clean.isEmpty()) {
+            "site:www.nodeseek.com 曝光"
+        } else {
+            "site:www.nodeseek.com \"$clean\" (曝光 OR 骗子 OR 跑路 OR 挂人 OR 避雷)"
+        }
+        val encoded = runCatching { URLEncoder.encode(rawQuery, "UTF-8") }.getOrDefault(rawQuery)
+        return "https://www.google.com/search?q=$encoded"
+    }
 
     /**
      * Parses a raw NodeSeek registration timestamp (`ISO-8601`, `yyyy-MM-dd`, `yyyy-MM-dd HH:mm:ss`,
@@ -432,6 +477,7 @@ object TrustRiskEvaluator {
         localNote: LocalSellerNote? = null,
         profileSucceeded: Boolean = true,
         registrationDurationLabel: String = "",
+        exposureCheckScope: ExposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
     ): TrustRiskAssessment {
         val reasons = mutableListOf<String>()
         var isHighRisk = false
@@ -502,7 +548,11 @@ object TrustRiskEvaluator {
                 reasons += "近1页公开主题中存在 ${historicalTradeTopicCount} 篇历史交易帖可供参考"
             }
             if (reasons.isEmpty()) {
-                reasons += "未命中站内曝光/骗子关联帖，暂未发现明显高危风险信号"
+                reasons += if (exposureCheckScope == ExposureCheckScope.DEEP_SEARCH) {
+                    "已完成站内历史曝光深搜，未命中曝光/骗子关联帖"
+                } else {
+                    "近期「曝光」板块动态未见关联异常，大额交易可点下方「历史深搜」复核"
+                }
             }
         }
 
@@ -524,8 +574,10 @@ object TrustRiskEvaluator {
             TrustRiskLevel.NORMAL_CLEAR -> {
                 if (localNote?.tag == TrustTag.TRUSTED) {
                     "未命中曝光异常 · 已标记为靠谱卖家"
+                } else if (exposureCheckScope == ExposureCheckScope.DEEP_SEARCH) {
+                    "全站深搜未命中曝光记录，大额交易请走官方中介"
                 } else {
-                    "暂未命中曝光记录，大额交易请走官方中介"
+                    "近期未见曝光异常，大额交易请走官方中介"
                 }
             }
         }

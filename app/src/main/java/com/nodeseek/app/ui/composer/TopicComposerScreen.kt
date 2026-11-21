@@ -697,6 +697,8 @@ private fun ComposerTopBar(
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = contentTint,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -816,12 +818,16 @@ private fun ComposerWriteSurface(
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     color = boardSpec.contentColor,
+                    maxLines = 1,
+                    softWrap = false,
                 )
                 if (uiState.isEditMode) {
                     Text(
                         text = "(版块不可改)",
                         style = MaterialTheme.typography.labelSmall,
                         color = boardSpec.contentColor.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 } else {
                     Icon(
@@ -885,6 +891,8 @@ private fun ComposerWriteSurface(
                     style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
                     fontWeight = FontWeight.SemiBold,
                     color = permFg,
+                    maxLines = 1,
+                    softWrap = false,
                 )
                 Icon(
                     imageVector = Icons.Rounded.ExpandMore,
@@ -929,6 +937,8 @@ private fun ComposerWriteSurface(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -1369,6 +1379,8 @@ private fun ComposerBottomFormattingBar(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             } else {
@@ -1506,6 +1518,8 @@ private fun ComposerToolbarButton(
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
@@ -2265,12 +2279,12 @@ private fun ComposerLoadErrorCard(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = onLogin, shape = CircleShape) {
-                    Text("验证登录")
+                    Text("验证登录", maxLines = 1, softWrap = false)
                 }
                 FilledTonalButton(onClick = onRetry, shape = CircleShape) {
                     Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(5.dp))
-                    Text("重试")
+                    Text("重试", maxLines = 1, softWrap = false)
                 }
             }
         }

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -74,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
@@ -173,7 +175,7 @@ fun MobileNetBenchScreen(
                         maxLines = 1,
                     )
                     Text(
-                        text = "TCPing · 原生 iperf3 · IP 原生/广播鉴定",
+                        text = "Ping · TCPing · 原生 iperf3 · IP 原生/广播鉴定",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -230,6 +232,7 @@ fun MobileNetBenchScreen(
                 PulseStaggeredEntrance(index = 1) {
                     TestModulesConfigCard(
                         uiState = uiState,
+                        onToggleIcmpPing = viewModel::toggleIcmpPing,
                         onToggleTcpPing = viewModel::toggleTcpPing,
                         onToggleIpCheck = viewModel::toggleIpCheck,
                         onToggleIperf3 = viewModel::toggleIperf3,
@@ -237,6 +240,7 @@ fun MobileNetBenchScreen(
                         onToggleTestViaProxy = viewModel::toggleTestViaProxy,
                         onIperfPortChange = viewModel::updateIperfPortText,
                         onIperfDurationChange = viewModel::updateIperfDurationSec,
+                        onIperfParallelStreamsChange = viewModel::updateIperfParallelStreams,
                         onIperfModeChange = viewModel::updateIperfTestMode,
                         onOpenIperf3SshManager = { directSshControlTrigger++ },
                     )
@@ -274,7 +278,14 @@ fun MobileNetBenchScreen(
                 }
             }
 
-            // 6. Live TCPing Telemetry Card
+            // 6. Live ICMP Ping Telemetry Card
+            uiState.icmpPingProgress?.let { pingProgress ->
+                item(key = "icmp_ping_card") {
+                    NetBenchIcmpPingCard(progress = pingProgress)
+                }
+            }
+
+            // 7. Live TCPing Telemetry Card
             uiState.tcpPingProgress?.let { tcpProgress ->
                 item(key = "tcping_card") {
                     NetBenchTcpPingCard(
@@ -503,7 +514,7 @@ private fun TargetAndPortConfigCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "TCPing 探测次数",
+                    text = "Ping / TCPing 探测次数",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -536,6 +547,7 @@ private fun TargetAndPortConfigCard(
 @Composable
 private fun TestModulesConfigCard(
     uiState: MobileNetBenchUiState,
+    onToggleIcmpPing: (Boolean) -> Unit,
     onToggleTcpPing: (Boolean) -> Unit,
     onToggleIpCheck: (Boolean) -> Unit,
     onToggleIperf3: (Boolean) -> Unit,
@@ -543,9 +555,11 @@ private fun TestModulesConfigCard(
     onToggleTestViaProxy: (Boolean) -> Unit,
     onIperfPortChange: (String) -> Unit,
     onIperfDurationChange: (Int) -> Unit,
+    onIperfParallelStreamsChange: (Int) -> Unit,
     onIperfModeChange: (Iperf3TestMode) -> Unit,
     onOpenIperf3SshManager: () -> Unit = {},
 ) {
+    val vpnDirectPingNote = uiState.clientEgress?.isVpnActive == true && !uiState.testViaProxy
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -559,6 +573,27 @@ private fun TestModulesConfigCard(
             icon = Icons.Rounded.Tune,
         )
 
+        ModuleToggleRow(
+            title = "Ping 延迟与抖动",
+            subtitle = if (vpnDirectPingNote) {
+                "ICMP Ping · 无法对 ping 进程强制绑定底层网络，VPN 下可能走默认路由"
+            } else {
+                "ICMP Ping 实时统计平均/最小/最大延迟、mdev 抖动与丢包"
+            },
+            icon = Icons.Rounded.GraphicEq,
+            checked = uiState.enableIcmpPing,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleIcmpPing,
+        )
+        AnimatedVisibility(
+            visible = uiState.enableIcmpPing && vpnDirectPingNote,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            NetBenchWarningCallout(
+                message = "系统 /system/bin/ping 为外部进程，无法像 TCPing/iperf3 一样通过 Network.bindSocket 绕过 VPN；开启 VPN 时 ICMP 结果可能反映代理/默认路由，请以 TCPing 作为直连延迟参考。",
+            )
+        }
         ModuleToggleRow(
             title = "TCPing 延迟与抖动",
             subtitle = "实时统计平均/最小/最大延迟、mdev 抖动与丢包",
@@ -659,6 +694,28 @@ private fun TestModulesConfigCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
+                        text = "并行流 (-P)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Iperf3Config.PARALLEL_STREAM_PRESETS.forEach { streams ->
+                            NetBenchSelectableChip(
+                                label = "${streams}流",
+                                selected = uiState.iperfParallelStreams == streams,
+                                enabled = !uiState.isRunning,
+                                onClick = { onIperfParallelStreamsChange(streams) },
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
                         text = "测速前需在目标 VPS 开启 iperf3 服务端",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -692,9 +749,9 @@ private fun TestModulesConfigCard(
         ModuleToggleRow(
             title = "经由代理测试",
             subtitle = if (uiState.testViaProxy) {
-                "TCPing / HTTP / iperf3 将通过当前代理/VPN 链路测试"
+                "Ping / TCPing / HTTP / iperf3 将通过当前代理/VPN 链路测试"
             } else {
-                "默认绑定非 VPN 底层真实网络直连测机，反映真实线路"
+                "TCPing / HTTP / iperf3 绑定非 VPN 底层真实网络；ping 子进程受限可能走默认路由"
             },
             icon = Icons.Rounded.VpnLock,
             checked = uiState.testViaProxy,
@@ -735,7 +792,7 @@ private fun ModuleToggleRow(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }

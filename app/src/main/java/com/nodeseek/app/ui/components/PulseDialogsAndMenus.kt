@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -86,7 +88,7 @@ enum class PulseDialogTone {
  * destructive flows, custom form/list bodies via [content], optional leading [icon] badge,
  * optional [titleTrailing] pill, and an optional tertiary [extraActionText] button.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PulseAlertDialog(
     onDismissRequest: () -> Unit,
@@ -282,30 +284,52 @@ fun PulseAlertDialog(
                                     modifier = Modifier.weight(1f),
                                 )
                             }
+                        } else if (extraActionText != null && onExtraAction != null) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                TextButton(
+                                    onClick = onExtraAction,
+                                    enabled = !confirmLoading,
+                                    shape = CircleShape,
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                ) {
+                                    Text(
+                                        text = extraActionText,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (dismissText != null) {
+                                    PulseDialogSecondaryButton(
+                                        text = dismissText,
+                                        onClick = onDismiss,
+                                        enabled = !confirmLoading,
+                                    )
+                                }
+                                if (onConfirm != null) {
+                                    PulseDialogPrimaryButton(
+                                        text = confirmText,
+                                        onClick = onConfirm,
+                                        tone = tone,
+                                        enabled = confirmEnabled,
+                                        loading = confirmLoading,
+                                        useTonal = useTonalConfirm,
+                                    )
+                                }
+                            }
                         } else {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             ) {
-                                if (extraActionText != null && onExtraAction != null) {
-                                    TextButton(
-                                        onClick = onExtraAction,
-                                        enabled = !confirmLoading,
-                                        shape = CircleShape,
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                                    ) {
-                                        Text(
-                                            text = extraActionText,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.weight(1f))
                                 if (dismissText != null) {
                                     PulseDialogSecondaryButton(
                                         text = dismissText,
@@ -496,6 +520,7 @@ fun PulseDialogSecondaryButton(
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
     }
@@ -530,6 +555,7 @@ private fun PulseDialogButtonContent(
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
     }

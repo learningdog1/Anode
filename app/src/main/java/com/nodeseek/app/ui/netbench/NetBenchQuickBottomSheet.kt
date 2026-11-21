@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
@@ -68,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
+import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.TcpPortPreset
@@ -236,7 +238,7 @@ fun NetBenchQuickBottomSheet(
                             val net = uiState.clientNetwork!!
                             "${net.carrierDisplayName} · ${net.ipFamily.label} · 隐藏本机 IP"
                         }
-                        else -> "TCPing · 原生 iperf3 · IP 原生/广播鉴定"
+                        else -> "Ping · TCPing · 原生 iperf3 · IP 原生/广播鉴定"
                     }
                     Text(
                         text = envSubtitle,
@@ -391,6 +393,13 @@ fun NetBenchQuickBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     NetBenchSelectableChip(
+                        label = "Ping",
+                        selected = uiState.enableIcmpPing,
+                        icon = Icons.Rounded.GraphicEq,
+                        enabled = !uiState.isRunning,
+                        onClick = { controller.toggleIcmpPing(!uiState.enableIcmpPing) },
+                    )
+                    NetBenchSelectableChip(
                         label = "TCPing",
                         selected = uiState.enableTcpPing,
                         icon = Icons.Rounded.NetworkCheck,
@@ -421,6 +430,12 @@ fun NetBenchQuickBottomSheet(
                         icon = Icons.Rounded.VpnLock,
                         enabled = !uiState.isRunning,
                         onClick = { controller.toggleTestViaProxy(!uiState.testViaProxy) },
+                    )
+                }
+
+                if (uiState.enableIcmpPing && uiState.clientEgress?.isVpnActive == true && !uiState.testViaProxy) {
+                    NetBenchWarningCallout(
+                        message = "提示：无法对 /system/bin/ping 子进程绑定底层网络，VPN 下 ICMP Ping 可能走默认路由，请结合 TCPing 参考。",
                     )
                 }
 
@@ -456,6 +471,26 @@ fun NetBenchQuickBottomSheet(
                             }
                         }
 
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "并行流 -P",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Iperf3Config.PARALLEL_STREAM_PRESETS.forEach { streams ->
+                                NetBenchSelectableChip(
+                                    label = "${streams}流",
+                                    selected = uiState.iperfParallelStreams == streams,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { controller.updateIperfParallelStreams(streams) },
+                                )
+                            }
+                        }
+
                         NetBenchSelectableChip(
                             label = "一键开启/停止 VPS 的 iperf3 服务端 (端口 ${uiState.effectiveIperfPort})",
                             selected = true,
@@ -486,6 +521,13 @@ fun NetBenchQuickBottomSheet(
                     ResolvedTargetBanner(
                         resolved = resolved,
                         port = uiState.effectiveTcpPort,
+                    )
+                }
+
+                uiState.icmpPingProgress?.let { pingProgress ->
+                    NetBenchIcmpPingCard(
+                        progress = pingProgress,
+                        compact = true,
                     )
                 }
 

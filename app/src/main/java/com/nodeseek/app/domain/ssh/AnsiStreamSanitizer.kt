@@ -125,20 +125,72 @@ class SanitizedBufferSnapshot(
             hasTrailingNewline = false,
         )
 
+        @JvmOverloads
         fun fromSanitizedText(
             sanitizedText: String,
             maxLines: Int = AnsiStreamSanitizer.DEFAULT_MAX_LINES,
+            maxLineChars: Int = AnsiStreamSanitizer.DEFAULT_MAX_LINE_CHARS,
         ): SanitizedBufferSnapshot {
-            if (sanitizedText.isEmpty()) return EMPTY
+            if (sanitizedText.isEmpty() || maxLines <= 0) return EMPTY
+
+            // Guard against unsanitized transcripts (e.g. raw \r progress storms, \b, or non-SGR escapes)
+            if (AnsiStreamSanitizer.containsUnsanitizedControlOrEscape(sanitizedText)) {
+                return AnsiStreamSanitizer(
+                    maxLines = maxLines,
+                    maxLineChars = maxLineChars,
+                ).apply {
+                    append(sanitizedText)
+                }.lineSnapshot()
+            }
+
             val trailingNl = sanitizedText.endsWith('\n')
-            val body = if (trailingNl) sanitizedText.substring(0, sanitizedText.length - 1) else sanitizedText
-            val rawParts = body.split('\n')
-            val dropExcess = (rawParts.size - maxLines).coerceAtLeast(0)
-            val keptParts = if (dropExcess > 0) rawParts.subList(dropExcess, rawParts.size) else rawParts
+            val endExclusive = if (trailingNl) sanitizedText.length - 1 else sanitizedText.length
+            val maxRawLineCap = (maxLineChars * 2).coerceAtLeast(maxLineChars)
+
+            // Walk backwards to locate at most `maxLines` trailing lines without splitting the entire string
+            val lineStarts = IntArray(maxLines)
+            val lineEnds = IntArray(maxLines)
+            var keptCount = 0
+            var lineEnd = endExclusive
+            var cursor = endExclusive - 1
+            while (keptCount < maxLines) {
+                val nlIdx = if (cursor >= 0) sanitizedText.lastIndexOf('\n', startIndex = cursor) else -1
+                val lineStart = nlIdx + 1
+                lineStarts[keptCount] = lineStart
+                lineEnds[keptCount] = lineEnd
+                keptCount++
+                if (nlIdx < 0) {
+                    cursor = -1
+                    break
+                }
+                lineEnd = nlIdx
+                cursor = nlIdx - 1
+            }
+
+            // Count dropped lines prior to the earliest kept line in O(droppedChars) with zero allocations
+            var dropExcess = 0
+            if (cursor >= 0) {
+                dropExcess = 1 // The newline right before lineStarts[keptCount - 1]
+                for (i in 0..cursor) {
+                    if (sanitizedText[i] == '\n') dropExcess++
+                }
+            }
+
+            fun sliceBoundedLine(start: Int, end: Int): String {
+                val len = end - start
+                if (len <= 0) return ""
+                return if (len <= maxRawLineCap) {
+                    sanitizedText.substring(start, end)
+                } else {
+                    sanitizedText.substring(start, start + maxRawLineCap) + "\u001B[0m"
+                }
+            }
+
             var nextId = 1L
             return if (trailingNl) {
-                val committed = ArrayList<SanitizedTerminalLine>(keptParts.size)
-                for (part in keptParts) {
+                val committed = ArrayList<SanitizedTerminalLine>(keptCount)
+                for (rev in (keptCount - 1) downTo 0) {
+                    val part = sliceBoundedLine(lineStarts[rev], lineEnds[rev])
                     committed.add(SanitizedTerminalLine(id = nextId++, ansiText = part))
                 }
                 SanitizedBufferSnapshot(
@@ -149,12 +201,13 @@ class SanitizedBufferSnapshot(
                     hasTrailingNewline = true,
                 )
             } else {
-                val committedCount = (keptParts.size - 1).coerceAtLeast(0)
+                val committedCount = (keptCount - 1).coerceAtLeast(0)
                 val committed = ArrayList<SanitizedTerminalLine>(committedCount)
-                for (i in 0 until committedCount) {
-                    committed.add(SanitizedTerminalLine(id = nextId++, ansiText = keptParts[i]))
+                for (rev in (keptCount - 1) downTo 1) {
+                    val part = sliceBoundedLine(lineStarts[rev], lineEnds[rev])
+                    committed.add(SanitizedTerminalLine(id = nextId++, ansiText = part))
                 }
-                val lastPart = keptParts.lastOrNull().orEmpty()
+                val lastPart = if (keptCount > 0) sliceBoundedLine(lineStarts[0], lineEnds[0]) else ""
                 val active = if (lastPart.isNotEmpty()) {
                     SanitizedTerminalLine(id = nextId, ansiText = lastPart)
                 } else {
@@ -176,19 +229,23 @@ class SanitizedBufferSnapshot(
  * Stateful streaming terminal sanitizer designed for headless SSH PTY sessions (`xterm-256color`).
  *
  * Responsibilities:
- * - Collapses carriage-return (`\r`) progress bar & spinner overwrites (`curl`, `dd`, `fio`, `yabs`)
- *   into a single clean line instead of thousands of duplicate lines.
+ * - Collapses carriage-return (`\r`) progress bar & spinner overwrites (`curl`, `dd`, `fio`, `yabs`,
+ *   `NodeQuality` / `Check.Place`) into a single clean line instead of thousands of duplicate lines.
+ * - Honors multi-line cursor-up + erase-line sequences (`\u001B[1A\u001B[2K`, `\u001B[nA\u001B[0J`)
+ *   used by `NodeQuality` (`Check.Place` `ADLines`) to clear temporary TrueColor sponsor banners
+ *   before printing the final benchmark report.
  * - Preserves standard ANSI SGR color/style sequences (`\u001B[...m`) verbatim for
  *   `AnsiAndCodeFormatter.parseAnsiTerminalText`.
  * - Strips non-SGR CSI cursor/screen control sequences (`\u001B[?25l`, `\u001B[2J`, `\u001B[K`,
- *   `\u001B[1A`, etc.), OSC title/hyperlink sequences (`\u001B]...\u0007`), charset switches, and
- *   unprintable control bytes — even when escape sequences span across TCP/PTY chunk boundaries.
- * - Bounds total buffered lines via [maxLines] and single-line length via [maxLineChars] to protect
- *   mobile memory and layout performance on runaway outputs.
+ *   etc.), OSC title/hyperlink sequences (`\u001B]...\u0007`), charset switches, and unprintable
+ *   control bytes — even when escape sequences span across TCP/PTY chunk boundaries.
+ * - Bounds total buffered lines via [maxLines], single-line length via [maxLineChars], and total
+ *   retained characters via [maxTotalChars] to protect mobile memory and layout performance.
  */
 class AnsiStreamSanitizer @JvmOverloads constructor(
     private val maxLines: Int = DEFAULT_MAX_LINES,
     private val maxLineChars: Int = DEFAULT_MAX_LINE_CHARS,
+    private val maxTotalChars: Int = DEFAULT_MAX_TOTAL_CHARS,
 ) {
     private enum class ParserState {
         NORMAL,
@@ -201,12 +258,14 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
 
     private var state: ParserState = ParserState.NORMAL
     private val completedLines = ArrayDeque<SanitizedTerminalLine>()
+    private var completedTotalChars: Int = 0
     private var cachedCompletedSnapshot: List<SanitizedTerminalLine>? = emptyList()
     private val currentLine = StringBuilder()
     private var currentLineVisibleChars: Int = 0
     private val csiBuffer = StringBuilder()
     private val pendingSgrAfterCr = StringBuilder()
     private var pendingCarriageReturn: Boolean = false
+    private var cursorRewindLines: Int = 0
     private var oscCharsConsumed: Int = 0
     private var droppedLineCount: Int = 0
     private var hasTrailingNewline: Boolean = false
@@ -268,12 +327,14 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
     fun reset() {
         state = ParserState.NORMAL
         completedLines.clear()
+        completedTotalChars = 0
         cachedCompletedSnapshot = emptyList()
         currentLine.clear()
         currentLineVisibleChars = 0
         csiBuffer.clear()
         pendingSgrAfterCr.clear()
         pendingCarriageReturn = false
+        cursorRewindLines = 0
         oscCharsConsumed = 0
         droppedLineCount = 0
         hasTrailingNewline = false
@@ -304,6 +365,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
                 pendingCarriageReturn = true
             }
             '\n' -> {
+                cursorRewindLines = 0
                 if (pendingSgrAfterCr.isNotEmpty()) {
                     if (currentLine.length < maxLineChars * 2) {
                         currentLine.append(pendingSgrAfterCr)
@@ -322,6 +384,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
                 }
             }
             '\t' -> {
+                cursorRewindLines = 0
                 applyPendingCarriageReturnOverwrite()
                 if (currentLineVisibleChars < maxLineChars) {
                     currentLine.append('\t')
@@ -334,6 +397,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
                 val code = ch.code
                 // Skip non-printable C0 control bytes and DEL
                 if (code < 0x20 || code == 0x7F) return
+                cursorRewindLines = 0
                 applyPendingCarriageReturnOverwrite()
                 if (currentLineVisibleChars < maxLineChars) {
                     currentLine.append(ch)
@@ -374,7 +438,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
             return
         }
         if (code in 0x40..0x7E) {
-            handleCsiCommand(params = csiBuffer.toString(), finalByte = ch)
+            handleCsiCommand(params = csiBuffer, finalByte = ch)
             csiBuffer.clear()
             state = ParserState.NORMAL
             return
@@ -385,28 +449,82 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
         processNormalChar(ch)
     }
 
-    private fun handleCsiCommand(params: String, finalByte: Char) {
+    private fun handleCsiCommand(params: CharSequence, finalByte: Char) {
         when (finalByte) {
             'm' -> {
-                // Preserve SGR style/color codes compatible with AnsiAndCodeFormatter
+                // Preserve SGR style/color codes compatible with AnsiAndCodeFormatter without String allocations
                 if (isStandardSgrParams(params)) {
-                    val normalizedParams = if (params.indexOf(':') >= 0) params.replace(':', ';') else params
-                    val seq = "\u001B[${normalizedParams}m"
+                    val isReset = params.isEmpty() || (params.length == 1 && params[0] == '0')
+                    val seqLen = params.length + 3
                     if (pendingCarriageReturn) {
-                        if (pendingSgrAfterCr.length < MAX_PENDING_SGR_CHARS) {
-                            pendingSgrAfterCr.append(seq)
+                        if (isReset) {
+                            pendingSgrAfterCr.clear()
+                        }
+                        if (pendingSgrAfterCr.length + seqLen <= MAX_PENDING_SGR_CHARS) {
+                            appendNormalizedSgrSequence(pendingSgrAfterCr, params)
                             mutationVersion++
                         }
-                    } else if (currentLine.length < maxLineChars * 2) {
-                        currentLine.append(seq)
+                    } else if (currentLine.length + seqLen <= maxLineChars * 2 || isReset) {
+                        appendNormalizedSgrSequence(currentLine, params)
                         mutationVersion++
                     }
                 }
             }
+            'A', 'F' -> {
+                // Cursor Up (`\u001B[<n>A`) / Cursor Previous Line (`\u001B[<n>F`)
+                val step = parsePositiveIntParam(params, defaultValue = 1)
+                if (finalByte == 'F') {
+                    pendingCarriageReturn = true
+                }
+                val maxRewind = completedLines.size.coerceAtMost(MAX_CURSOR_REWIND_LINES)
+                cursorRewindLines = (cursorRewindLines + step).coerceAtMost(maxRewind)
+            }
+            'B', 'E' -> {
+                // Cursor Down (`\u001B[<n>B`) / Cursor Next Line (`\u001B[<n>E`)
+                val step = parsePositiveIntParam(params, defaultValue = 1)
+                if (finalByte == 'E') {
+                    pendingCarriageReturn = true
+                }
+                cursorRewindLines = (cursorRewindLines - step).coerceAtLeast(0)
+            }
             'K' -> {
                 // Erase-in-line: \u001B[2K clears whole line; \r\u001B[K or \r\u001B[0K clears from col 0
-                val trimmed = params.trim()
-                if (trimmed == "2" || (pendingCarriageReturn && (trimmed.isEmpty() || trimmed == "0"))) {
+                val eraseMode = parseEraseModeParam(params)
+                if (eraseMode == 2 || ((pendingCarriageReturn || currentLine.isEmpty()) && (eraseMode == -1 || eraseMode == 0))) {
+                    if ((currentLine.isEmpty() || pendingCarriageReturn) &&
+                        cursorRewindLines == 1 &&
+                        completedLines.isNotEmpty()
+                    ) {
+                        currentLine.clear()
+                        currentLineVisibleChars = 0
+                        pendingCarriageReturn = false
+                        removeLastCompletedLine()
+                        cursorRewindLines = 0
+                        if (pendingSgrAfterCr.isNotEmpty()) {
+                            currentLine.append(pendingSgrAfterCr)
+                            pendingSgrAfterCr.clear()
+                        }
+                        mutationVersion++
+                    } else {
+                        currentLine.clear()
+                        currentLineVisibleChars = 0
+                        pendingCarriageReturn = false
+                        if (pendingSgrAfterCr.isNotEmpty()) {
+                            currentLine.append(pendingSgrAfterCr)
+                            pendingSgrAfterCr.clear()
+                        }
+                        mutationVersion++
+                    }
+                }
+            }
+            'J' -> {
+                // Erase-in-display from cursor to end (`\u001B[J` / `\u001B[0J`) after cursor-up rewind
+                val eraseMode = parseEraseModeParam(params)
+                if ((eraseMode == -1 || eraseMode == 0) && cursorRewindLines > 0) {
+                    repeat(cursorRewindLines.coerceAtMost(completedLines.size)) {
+                        removeLastCompletedLine()
+                    }
+                    cursorRewindLines = 0
                     currentLine.clear()
                     currentLineVisibleChars = 0
                     pendingCarriageReturn = false
@@ -418,9 +536,45 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
                 }
             }
             else -> {
-                // Strip cursor movement, hide/show cursor (?25l/?25h), clear screen (2J), alt buffer, etc.
+                // Strip other cursor movement, hide/show cursor (?25l/?25h), clear screen (2J/3J), alt buffer, etc.
             }
         }
+    }
+
+    private fun appendNormalizedSgrSequence(out: StringBuilder, params: CharSequence) {
+        out.append(ESC).append('[')
+        for (i in 0 until params.length) {
+            val ch = params[i]
+            out.append(if (ch == ':') ';' else ch)
+        }
+        out.append('m')
+    }
+
+    private fun parsePositiveIntParam(params: CharSequence, defaultValue: Int): Int {
+        var start = 0
+        var end = params.length
+        while (start < end && params[start] == ' ') start++
+        while (end > start && params[end - 1] == ' ') end--
+        if (start >= end) return defaultValue
+        var acc = 0
+        for (i in start until end) {
+            val ch = params[i]
+            if (ch !in '0'..'9') return defaultValue
+            acc = if (acc > 10_000) 10_000 else acc * 10 + (ch - '0')
+        }
+        return if (acc > 0) acc else defaultValue
+    }
+
+    private fun parseEraseModeParam(params: CharSequence): Int {
+        var start = 0
+        var end = params.length
+        while (start < end && params[start] == ' ') start++
+        while (end > start && params[end - 1] == ' ') end--
+        if (start >= end) return -1
+        if (end - start == 1 && params[start] in '0'..'3') {
+            return params[start] - '0'
+        }
+        return -2
     }
 
     private fun processOscChar(ch: Char) {
@@ -460,11 +614,26 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
         val lineText = currentLine.toString().trimEnd(' ')
         currentLine.clear()
         currentLineVisibleChars = 0
-        if (completedLines.size >= maxLines) {
-            completedLines.removeFirst()
+        while (completedLines.size >= maxLines ||
+            (maxTotalChars > 0 && completedLines.isNotEmpty() && completedTotalChars + lineText.length > maxTotalChars)
+        ) {
+            removeFirstCompletedLine()
             droppedLineCount++
         }
         completedLines.addLast(SanitizedTerminalLine(id = nextLineId++, ansiText = lineText))
+        completedTotalChars += lineText.length
+        cachedCompletedSnapshot = null
+    }
+
+    private fun removeFirstCompletedLine() {
+        val removed = completedLines.removeFirst()
+        completedTotalChars = (completedTotalChars - removed.ansiText.length).coerceAtLeast(0)
+        cachedCompletedSnapshot = null
+    }
+
+    private fun removeLastCompletedLine() {
+        val removed = completedLines.removeLast()
+        completedTotalChars = (completedTotalChars - removed.ansiText.length).coerceAtLeast(0)
         cachedCompletedSnapshot = null
     }
 
@@ -475,7 +644,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
         while (end > 0) {
             if (currentLine[end - 1] == 'm') {
                 val escIdx = currentLine.lastIndexOf("\u001B[", startIndex = end - 1)
-                if (escIdx >= 0 && isStandardSgrParams(currentLine.substring(escIdx + 2, end - 1))) {
+                if (escIdx >= 0 && isStandardSgrParamsRange(currentLine, escIdx + 2, end - 1)) {
                     end = escIdx
                     continue
                 }
@@ -488,9 +657,12 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
         }
     }
 
-    private fun isStandardSgrParams(params: String): Boolean {
-        for (i in params.indices) {
-            val c = params[i]
+    private fun isStandardSgrParams(params: CharSequence): Boolean =
+        isStandardSgrParamsRange(params, 0, params.length)
+
+    private fun isStandardSgrParamsRange(cs: CharSequence, start: Int, endExclusive: Int): Boolean {
+        for (i in start until endExclusive) {
+            val c = cs[i]
             if (c !in '0'..'9' && c != ';' && c != ':') return false
         }
         return true
@@ -502,11 +674,50 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
         private const val MAX_CSI_PARAM_LEN: Int = 64
         private const val MAX_OSC_LEN: Int = 2_048
         private const val MAX_PENDING_SGR_CHARS: Int = 256
+        private const val MAX_CURSOR_REWIND_LINES: Int = 256
         const val DEFAULT_MAX_LINES: Int = 8_000
         const val DEFAULT_MAX_LINE_CHARS: Int = 4_096
+        const val DEFAULT_MAX_TOTAL_CHARS: Int = 512_000
 
         fun formatDroppedLinesNotice(droppedLineCount: Int): String =
             "\u001B[2m... [已省略早期 $droppedLineCount 行终端输出] ...\u001B[0m"
+
+        /**
+         * Fast linear scan returning true if [text] contains carriage-return overwrites (`\r`),
+         * backspaces (`\b`), or non-SGR escape sequences that require state-machine sanitization.
+         */
+        internal fun containsUnsanitizedControlOrEscape(text: String): Boolean {
+            var i = 0
+            val n = text.length
+            while (i < n) {
+                when (val ch = text[i]) {
+                    '\r', '\b', BEL -> return true
+                    ESC -> {
+                        if (i + 1 >= n || text[i + 1] != '[') return true
+                        var j = i + 2
+                        var validSgr = false
+                        while (j < n && j <= i + MAX_CSI_PARAM_LEN + 2) {
+                            val c = text[j]
+                            if (c == 'm') {
+                                validSgr = true
+                                i = j
+                                break
+                            }
+                            if (c !in '0'..'9' && c != ';') return true
+                            j++
+                        }
+                        if (!validSgr) return true
+                    }
+                    else -> {
+                        if (ch != '\n' && ch != '\t' && (ch.code < 0x20 || ch.code == 0x7F)) {
+                            return true
+                        }
+                    }
+                }
+                i++
+            }
+            return false
+        }
 
         /**
          * Stateless convenience helper that sanitizes a complete raw terminal transcript.
@@ -516,9 +727,14 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
             raw: String,
             maxLines: Int = DEFAULT_MAX_LINES,
             maxLineChars: Int = DEFAULT_MAX_LINE_CHARS,
+            maxTotalChars: Int = DEFAULT_MAX_TOTAL_CHARS,
         ): String {
             if (raw.isEmpty()) return ""
-            return AnsiStreamSanitizer(maxLines = maxLines, maxLineChars = maxLineChars).apply {
+            return AnsiStreamSanitizer(
+                maxLines = maxLines,
+                maxLineChars = maxLineChars,
+                maxTotalChars = maxTotalChars,
+            ).apply {
                 append(raw)
             }.snapshot()
         }

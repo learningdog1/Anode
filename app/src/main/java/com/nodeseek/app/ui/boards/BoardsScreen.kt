@@ -2251,11 +2251,21 @@ private fun UnifiedSearchContent(
                         actions = {
                             if (uiState.isSearchChallengeRequired) {
                                 Button(onClick = onVerifyWebView, shape = CircleShape) {
-                                    Text(text = "完成网页验证 / 登录")
+                                    Text(
+                                        text = "完成网页验证 / 登录",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             }
                             OutlinedButton(onClick = onSubmitCurrentQuery, shape = CircleShape) {
-                                Text(text = "重试站内搜索")
+                                Text(
+                                    text = "重试站内搜索",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         },
                     )
@@ -2302,7 +2312,12 @@ private fun UnifiedSearchContent(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             actions = {
                                 Button(onClick = onOpenGoogleSearch, shape = CircleShape) {
-                                    Text(text = "使用 Google 站内搜索")
+                                    Text(
+                                        text = "使用 Google 站内搜索",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                             },
                         )
@@ -2658,11 +2673,20 @@ private fun InlineBoardFeedContent(
                             actions = {
                                 if (uiState.inlineBoardChallengeRequired) {
                                     Button(onClick = onVerifyWebView, shape = CircleShape) {
-                                        Text(text = "完成网页验证 / 登录")
+                                        Text(
+                                            text = "完成网页验证 / 登录",
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                     }
                                 }
                                 OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                                    Text(text = "重试")
+                                    Text(
+                                        text = "重试",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
                                 }
                             },
                         )
@@ -2758,11 +2782,21 @@ private fun InlineBoardFeedContent(
                                     actions = {
                                         if (uiState.inlineBoardChallengeRequired) {
                                             Button(onClick = onVerifyWebView, shape = CircleShape) {
-                                                Text(text = "完成网页验证")
+                                                Text(
+                                                    text = "完成网页验证",
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
                                             }
                                         }
                                         OutlinedButton(onClick = onLoadMore, shape = CircleShape) {
-                                            Text(text = "点按重试")
+                                            Text(
+                                                text = "点按重试",
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
                                         }
                                     },
                                 )
@@ -2965,22 +2999,46 @@ private fun InlineBoardRssFallbackCard(
         actions = {
             if (preferRssFallback && !isChallengeRequired) {
                 Button(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                    Text(text = "切换为完整网页流")
+                    Text(
+                        text = "切换为完整网页流",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 OutlinedButton(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "网页验证 / 登录")
+                    Text(
+                        text = "网页验证 / 登录",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             } else {
                 Button(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(text = "完成网页验证，加载完整内容")
+                    Text(
+                        text = "完成网页验证，加载完整内容",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 if (preferRssFallback) {
                     FilledTonalButton(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                        Text(text = "关闭 RSS 优先")
+                        Text(
+                            text = "关闭 RSS 优先",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 } else {
                     OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                        Text(text = "重试")
+                        Text(
+                            text = "重试",
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }

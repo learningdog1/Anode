@@ -291,6 +291,8 @@ internal fun FleetSalePostSheet(
                             text = "剩余 ${VpsValuationEngine.formatDaysNumber(valuation.remainingDays)} 天",
                             style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                         if (deal != null) {
                             Text(
@@ -298,6 +300,11 @@ internal fun FleetSalePostSheet(
                                 style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .padding(start = 8.dp),
                             )
                         }
                     }
@@ -578,6 +585,8 @@ internal fun FleetSalePostSheet(
                         text = if (copiedRecently) "已复制" else "复制",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
 
@@ -622,6 +631,9 @@ internal fun FleetSalePostSheet(
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = tint,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

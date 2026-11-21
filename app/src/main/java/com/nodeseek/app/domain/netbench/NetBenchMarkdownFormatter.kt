@@ -70,6 +70,10 @@ object NetBenchMarkdownFormatter {
             lines += "> - **目标节点**：$targetLine"
         }
 
+        report.icmpPingSummary?.let { ping ->
+            lines += "> - **Ping (${ping.sent}次)**：${formatIcmpPingCompact(ping)}"
+        }
+
         report.tcpPingSummary?.let { tcp ->
             lines += "> - **TCPing (${tcp.sent}次)**：${formatTcpPingCompact(tcp)}"
         }
@@ -78,26 +82,35 @@ object NetBenchMarkdownFormatter {
             lines += "> - **HTTP 探测**：${formatHttpCompact(http)}"
         }
 
+        val iperfStreams = listOfNotNull(
+            report.iperfDownloadResult?.parallelStreams,
+            report.iperfUploadResult?.parallelStreams,
+        )
+        val unifiedStreams = iperfStreams.distinct().singleOrNull()?.takeIf { it > 1 }
+
         val iperfParts = buildList {
             report.iperfDownloadResult?.let { dl ->
+                val dirStreams = if (unifiedStreams == null && dl.parallelStreams > 1) " (-P ${dl.parallelStreams})" else ""
                 if (dl.success) {
-                    add("下载 **${formatMbps(dl.effectiveMbps)}**")
+                    add("下载$dirStreams **${formatMbps(dl.effectiveMbps)}**")
                 } else {
                     val reason = truncateByDisplayWidth(sanitizeInline(dl.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
-                    add("下载失败 ($reason)")
+                    add("下载$dirStreams 失败 ($reason)")
                 }
             }
             report.iperfUploadResult?.let { ul ->
+                val dirStreams = if (unifiedStreams == null && ul.parallelStreams > 1) " (-P ${ul.parallelStreams})" else ""
                 if (ul.success) {
-                    add("上传 **${formatMbps(ul.effectiveMbps)}**")
+                    add("上传$dirStreams **${formatMbps(ul.effectiveMbps)}**")
                 } else {
                     val reason = truncateByDisplayWidth(sanitizeInline(ul.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
-                    add("上传失败 ($reason)")
+                    add("上传$dirStreams 失败 ($reason)")
                 }
             }
         }
         if (iperfParts.isNotEmpty()) {
-            lines += "> - **iperf3 测速**：${iperfParts.joinToString(" ｜ ")}"
+            val streamSuffix = if (unifiedStreams != null) " (-P $unifiedStreams)" else ""
+            lines += "> - **iperf3 测速$streamSuffix**：${iperfParts.joinToString(" ｜ ")}"
         }
 
         report.ipIntelligence?.let { intel ->
@@ -124,25 +137,37 @@ object NetBenchMarkdownFormatter {
 
         buildTargetTableRow(report, options.maskTargetIp)?.let { rows += it }
 
+        report.icmpPingSummary?.let { ping ->
+            rows += buildLatencyTableRow(
+                label = "Ping 延迟",
+                sent = ping.sent,
+                received = ping.received,
+                lossPercent = ping.lossPercent,
+                minMs = ping.minMs,
+                avgMs = ping.avgMs,
+                maxMs = ping.maxMs,
+                jitterMdevMs = ping.jitterMdevMs,
+                errorMessage = ping.errorMessage,
+                failureResultLabel = if (ping.sent == 0) "**执行失败**" else "**超时 / 禁 Ping**",
+                fallbackErrorReason = if (ping.sent == 0) "无法执行 ICMP Ping" else "全部超时或目标禁 Ping",
+                extraNote = if (ping.bindingMode == IcmpNetworkBindingMode.UNBOUND_SUBPROCESS_FALLBACK) "默认路由" else null,
+            )
+        }
+
         report.tcpPingSummary?.let { tcp ->
-            if (tcp.hasValidLatency) {
-                val main = "**${formatMs(tcp.avgMs!!)}**"
-                val minStr = String.format(Locale.US, "%.1f", tcp.minMs!!)
-                val maxStr = String.format(Locale.US, "%.1f ms", tcp.maxMs!!)
-                val note = listOf(
-                    "丢包 ${formatPercent(tcp.lossPercent)}",
-                    "抖动 ${formatMs(tcp.jitterMdevMs ?: 0.0)}",
-                    "范围 $minStr~$maxStr (${tcp.received}/${tcp.sent})",
-                ).joinToString(" · ")
-                rows += listOf("TCPing 延迟", main, note)
-            } else {
-                val reason = truncateByDisplayWidth(
-                    sanitizeInline(tcp.errorMessage ?: "全部超时或端口不可达"),
-                    MAX_ERROR_DISPLAY_WIDTH,
-                )
-                val note = "丢包 ${formatPercent(tcp.lossPercent)} · ${reason.ifBlank { EMPTY_CELL_PLACEHOLDER }}"
-                rows += listOf("TCPing 延迟", "**超时 / 不可达**", note)
-            }
+            rows += buildLatencyTableRow(
+                label = "TCPing 延迟",
+                sent = tcp.sent,
+                received = tcp.received,
+                lossPercent = tcp.lossPercent,
+                minMs = tcp.minMs,
+                avgMs = tcp.avgMs,
+                maxMs = tcp.maxMs,
+                jitterMdevMs = tcp.jitterMdevMs,
+                errorMessage = tcp.errorMessage,
+                failureResultLabel = "**超时 / 不可达**",
+                fallbackErrorReason = "全部超时或端口不可达",
+            )
         }
 
         report.httpLatencyResult?.let { http ->
@@ -172,8 +197,9 @@ object NetBenchMarkdownFormatter {
                     buildIperfTableNote(dl),
                 )
             } else {
+                val streamPrefix = if (dl.parallelStreams > 1) "-P ${dl.parallelStreams} 并发 · " else ""
                 val reason = truncateByDisplayWidth(
-                    sanitizeInline(dl.errorMessage ?: "连接失败"),
+                    streamPrefix + sanitizeInline(dl.errorMessage ?: "连接失败"),
                     MAX_NOTE_CELL_DISPLAY_WIDTH,
                 )
                 rows += listOf("iperf3 下载 (-R)", "测速失败", reason.ifBlank { EMPTY_CELL_PLACEHOLDER })
@@ -188,8 +214,9 @@ object NetBenchMarkdownFormatter {
                     buildIperfTableNote(ul),
                 )
             } else {
+                val streamPrefix = if (ul.parallelStreams > 1) "-P ${ul.parallelStreams} 并发 · " else ""
                 val reason = truncateByDisplayWidth(
-                    sanitizeInline(ul.errorMessage ?: "连接失败"),
+                    streamPrefix + sanitizeInline(ul.errorMessage ?: "连接失败"),
                     MAX_NOTE_CELL_DISPLAY_WIDTH,
                 )
                 rows += listOf("iperf3 上传", "测速失败", reason.ifBlank { EMPTY_CELL_PLACEHOLDER })
@@ -355,17 +382,88 @@ object NetBenchMarkdownFormatter {
         return if (maskTargetIp) "`$cleaned`" else "`$cleaned:${report.tcpPort}`"
     }
 
-    private fun formatTcpPingCompact(tcp: TcpPingSummary): String {
-        if (!tcp.hasValidLatency) {
-            return "全部超时/不可达 ｜ 丢包 **${formatPercent(tcp.lossPercent)}**"
+    private fun formatIcmpPingCompact(ping: IcmpPingSummary): String {
+        if (!ping.hasValidLatency && ping.sent == 0) {
+            val reason = truncateByDisplayWidth(
+                sanitizeInline(ping.errorMessage ?: "无法执行"),
+                MAX_ERROR_DISPLAY_WIDTH,
+            )
+            return "不可用 ($reason)"
+        }
+        return formatLatencyCompact(
+            hasValidLatency = ping.hasValidLatency,
+            avgMs = ping.avgMs,
+            minMs = ping.minMs,
+            maxMs = ping.maxMs,
+            jitterMdevMs = ping.jitterMdevMs,
+            lossPercent = ping.lossPercent,
+            failureLabel = "全部超时/禁 Ping",
+        )
+    }
+
+    private fun formatTcpPingCompact(tcp: TcpPingSummary): String = formatLatencyCompact(
+        hasValidLatency = tcp.hasValidLatency,
+        avgMs = tcp.avgMs,
+        minMs = tcp.minMs,
+        maxMs = tcp.maxMs,
+        jitterMdevMs = tcp.jitterMdevMs,
+        lossPercent = tcp.lossPercent,
+        failureLabel = "全部超时/不可达",
+    )
+
+    private fun formatLatencyCompact(
+        hasValidLatency: Boolean,
+        avgMs: Double?,
+        minMs: Double?,
+        maxMs: Double?,
+        jitterMdevMs: Double?,
+        lossPercent: Double,
+        failureLabel: String,
+    ): String {
+        if (!hasValidLatency || avgMs == null || minMs == null || maxMs == null) {
+            return "$failureLabel ｜ 丢包 **${formatPercent(lossPercent)}**"
         }
         return buildString {
-            append("均 **${formatMs(tcp.avgMs!!)}**")
-            append(" ｜ 最小 `${formatMs(tcp.minMs!!)}`")
-            append(" ｜ 最大 `${formatMs(tcp.maxMs!!)}`")
-            append(" ｜ 抖动 `${formatMs(tcp.jitterMdevMs ?: 0.0)}`")
-            append(" ｜ 丢包 `${formatPercent(tcp.lossPercent)}`")
+            append("均 **${formatMs(avgMs)}**")
+            append(" ｜ 最小 `${formatMs(minMs)}`")
+            append(" ｜ 最大 `${formatMs(maxMs)}`")
+            append(" ｜ 抖动 `${formatMs(jitterMdevMs ?: 0.0)}`")
+            append(" ｜ 丢包 `${formatPercent(lossPercent)}`")
         }
+    }
+
+    private fun buildLatencyTableRow(
+        label: String,
+        sent: Int,
+        received: Int,
+        lossPercent: Double,
+        minMs: Double?,
+        avgMs: Double?,
+        maxMs: Double?,
+        jitterMdevMs: Double?,
+        errorMessage: String?,
+        failureResultLabel: String,
+        fallbackErrorReason: String,
+        extraNote: String? = null,
+    ): List<String> {
+        if (received > 0 && avgMs != null && minMs != null && maxMs != null) {
+            val main = "**${formatMs(avgMs)}**"
+            val minStr = String.format(Locale.US, "%.1f", minMs)
+            val maxStr = String.format(Locale.US, "%.1f ms", maxMs)
+            val note = listOfNotNull(
+                "丢包 ${formatPercent(lossPercent)}",
+                "抖动 ${formatMs(jitterMdevMs ?: 0.0)}",
+                "范围 $minStr~$maxStr ($received/$sent)",
+                extraNote,
+            ).joinToString(" · ")
+            return listOf(label, main, note)
+        }
+        val reason = truncateByDisplayWidth(
+            sanitizeInline(errorMessage ?: fallbackErrorReason),
+            MAX_ERROR_DISPLAY_WIDTH,
+        )
+        val note = "丢包 ${formatPercent(lossPercent)} · ${reason.ifBlank { EMPTY_CELL_PLACEHOLDER }}"
+        return listOf(label, failureResultLabel, note)
     }
 
     private fun formatHttpCompact(http: HttpLatencyResult): String {
@@ -410,6 +508,9 @@ object NetBenchMarkdownFormatter {
 
     private fun buildIperfTableNote(result: Iperf3Result): String {
         val parts = mutableListOf<String>()
+        if (result.parallelStreams > 1) {
+            parts += "-P ${result.parallelStreams} 并发"
+        }
         parts += "耗时 ${formatSeconds(result.durationSec)}"
         parts += "传输 ${formatBytes(result.bytesTransferred)}"
         if (result.peakMbps > result.effectiveMbps * 1.05) {

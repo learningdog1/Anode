@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -100,5 +101,63 @@ class NetBenchHistoryStoreTest {
         val reloaded = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
         assertFalse(reloaded.preferences.value.maskTargetIp)
         assertFalse(reloaded.preferences.value.includeClientNetwork)
+    }
+
+    @Test
+    fun `loads legacy json without ping fields and persists new ping latency fields`() = runBlocking {
+        val file = File(tempFolder.root, "legacy_${NetBenchHistoryStore.HISTORY_FILE_NAME}")
+        file.writeText(
+            """
+            {
+              "version": 2,
+              "entries": [
+                {
+                  "host": "legacy.example.com",
+                  "port": 443,
+                  "iperfPort": 5201,
+                  "resolvedIp": "45.12.34.56",
+                  "ipFamily": "IPV4",
+                  "lastAvgMs": 41.2,
+                  "lastOriginType": "BROADCAST",
+                  "lastRegionSummary": "日本 Tokyo",
+                  "testedAtEpochMillis": 1700000000000
+                }
+              ],
+              "preferences": {
+                "maskTargetIp": true,
+                "includeClientNetwork": true,
+                "markdownStyle": "REPLY_CARD"
+              }
+            }
+            """.trimIndent(),
+        )
+
+        val store = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+        assertEquals(1, store.entries.value.size)
+        val legacyEntry = store.entries.value.single()
+        assertEquals("legacy.example.com", legacyEntry.host)
+        assertEquals(41.2, legacyEntry.lastAvgMs!!, 0.01)
+        assertNull(legacyEntry.lastPingAvgMs)
+        assertNull(legacyEntry.lastPingLossPercent)
+
+        store.record(
+            NetBenchHistoryEntry(
+                host = "icmp.example.com",
+                port = 443,
+                resolvedIp = "1.1.1.1",
+                ipFamily = IpFamily.IPV4,
+                lastAvgMs = 38.0,
+                lastPingAvgMs = 31.5,
+                lastPingLossPercent = 0.0,
+                testedAtEpochMillis = 1800000000000,
+            ),
+        )
+
+        val reloaded = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+        assertEquals(2, reloaded.entries.value.size)
+        val newest = reloaded.entries.value.first()
+        assertEquals("icmp.example.com", newest.host)
+        assertEquals(31.5, newest.lastPingAvgMs!!, 0.01)
+        assertEquals(0.0, newest.lastPingLossPercent!!, 0.01)
     }
 }

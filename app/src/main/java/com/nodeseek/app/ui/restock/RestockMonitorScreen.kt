@@ -771,7 +771,11 @@ private fun NotificationPermissionBanner(
             shape = PulseArchitecturalShapes.SmallChip,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
         ) {
-            Text("去开启")
+            Text(
+                text = "去开启",
+                maxLines = 1,
+                softWrap = false,
+            )
         }
     }
 }
@@ -828,7 +832,11 @@ private fun RestockHeroSummaryCard(
                         strokeWidth = 2.dp,
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("巡检中")
+                    Text(
+                        text = "巡检中",
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 } else {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
@@ -836,7 +844,11 @@ private fun RestockHeroSummaryCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("立即巡检")
+                    Text(
+                        text = "立即巡检",
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
         }
@@ -939,7 +951,12 @@ private fun QuickAddUrlBarCard(
                 onClick = onOpenAdvanced,
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
             ) {
-                Text("高级配置", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    text = "高级配置",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
         }
 
@@ -987,6 +1004,7 @@ private fun QuickAddUrlBarCard(
                 onClick = onProbe,
                 enabled = urlInput.isNotBlank() && !isProbing,
                 shape = PulseArchitecturalShapes.MediumBadge,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 modifier = Modifier.weight(1f),
             ) {
                 if (isProbing) {
@@ -995,7 +1013,12 @@ private fun QuickAddUrlBarCard(
                         strokeWidth = 2.dp,
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("检测中…")
+                    Text(
+                        text = "检测中…",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 } else {
                     Icon(
                         imageVector = Icons.Rounded.Science,
@@ -1003,7 +1026,12 @@ private fun QuickAddUrlBarCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(5.dp))
-                    Text("测试检测")
+                    Text(
+                        text = "测试检测",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
 
@@ -1011,6 +1039,7 @@ private fun QuickAddUrlBarCard(
                 onClick = onQuickAdd,
                 enabled = urlInput.isNotBlank() && !isProbing,
                 shape = PulseArchitecturalShapes.MediumBadge,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                 modifier = Modifier.weight(1f),
             ) {
                 Icon(
@@ -1019,7 +1048,12 @@ private fun QuickAddUrlBarCard(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(modifier = Modifier.width(5.dp))
-                Text("一键蹲守")
+                Text(
+                    text = "一键蹲守",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
 
@@ -1231,6 +1265,9 @@ private fun RestockWatchCard(
                     text = if (isInStock) "立即抢购" else "打开下单页",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -1257,11 +1294,19 @@ private fun RestockWatchCard(
                     )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("巡检", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    text = "巡检",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
 
             if (onImportToServerLedger != null) {
-                IconButton(onClick = onImportToServerLedger) {
+                IconButton(
+                    onClick = onImportToServerLedger,
+                    modifier = Modifier.size(36.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.AccountBalanceWallet,
                         contentDescription = "记入服务器账本",
@@ -1273,14 +1318,20 @@ private fun RestockWatchCard(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            IconButton(onClick = onEdit) {
+            IconButton(
+                onClick = onEdit,
+                modifier = Modifier.size(36.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Rounded.Edit,
                     contentDescription = "编辑",
                     modifier = Modifier.size(18.dp),
                 )
             }
-            IconButton(onClick = onDelete) {
+            IconButton(
+                onClick = onDelete,
+                modifier = Modifier.size(36.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Rounded.DeleteOutline,
                     contentDescription = "删除",
@@ -1340,7 +1391,11 @@ private fun EmptyWatchesPlaceholder(
                 modifier = Modifier.size(16.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("手动添加监控")
+            Text(
+                text = "手动添加监控",
+                maxLines = 1,
+                softWrap = false,
+            )
         }
     }
 }
@@ -1376,20 +1431,32 @@ private fun RestockHistoryTabContent(
                         text = if (unreadCount > 0) "共 ${events.size} 条 · $unreadCount 条未读" else "共 ${events.size} 条补货记录",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
                     if (unreadCount > 0) {
-                        TextButton(onClick = onMarkAllRead) {
+                        TextButton(
+                            onClick = onMarkAllRead,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        ) {
                             Icon(
                                 imageVector = Icons.Rounded.DoneAll,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("全部已读")
+                            Text(
+                                text = "全部已读",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
                         }
                     }
-                    TextButton(onClick = onClearHistory) {
+                    TextButton(
+                        onClick = onClearHistory,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.DeleteSweep,
                             contentDescription = null,
@@ -1397,7 +1464,12 @@ private fun RestockHistoryTabContent(
                             modifier = Modifier.size(16.dp),
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("清空", color = MaterialTheme.colorScheme.error)
+                        Text(
+                            text = "清空",
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }
@@ -1535,7 +1607,14 @@ private fun RestockEventHistoryCard(
                     modifier = Modifier.size(15.dp),
                 )
                 Spacer(modifier = Modifier.width(5.dp))
-                Text("直达下单页", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    text = "直达下单页",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
 
             if (onOpenTopic != null) {
@@ -1550,7 +1629,13 @@ private fun RestockEventHistoryCard(
                         modifier = Modifier.size(14.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("查看原帖", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = "查看原帖",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
 

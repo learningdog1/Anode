@@ -990,9 +990,10 @@ private fun ContentBlockRuleEditorSheet(
                 TextButton(
                     onClick = onDismiss,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("取消")
+                    Text("取消", maxLines = 1, softWrap = false)
                 }
                 Button(
                     onClick = {
@@ -1009,11 +1010,14 @@ private fun ContentBlockRuleEditorSheet(
                     },
                     enabled = canSave,
                     shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                     modifier = Modifier.weight(2f),
                 ) {
                     Text(
                         text = if (initialRule == null) "保存并启用" else "保存修改",
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }

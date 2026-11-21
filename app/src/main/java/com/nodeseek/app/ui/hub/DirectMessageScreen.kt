@@ -1102,6 +1102,8 @@ private fun DirectMessageComposerBar(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (isMarkdownMode) FontWeight.Bold else FontWeight.Medium,
                         color = modeFg,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
 
@@ -1124,6 +1126,8 @@ private fun DirectMessageComposerBar(
                             text = "草稿已自动保存",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.secondary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }

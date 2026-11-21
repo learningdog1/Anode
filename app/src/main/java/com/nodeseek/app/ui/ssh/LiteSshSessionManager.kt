@@ -13,6 +13,7 @@ import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
+import com.nodeseek.app.domain.ssh.SshMergeLayout
 import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
 import com.nodeseek.app.domain.ssh.SshJumpHostConnectionException
 import com.nodeseek.app.domain.ssh.SshJumpHostCycleException
@@ -20,6 +21,9 @@ import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPtyResizeCallbackContext
+import com.nodeseek.app.domain.ssh.SshPtyResizer
+import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
@@ -28,6 +32,7 @@ import com.nodeseek.app.domain.ssh.SshStageDetector
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -38,10 +43,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
@@ -91,6 +98,12 @@ class LiteSshSessionManager(
     private var runGenerationCounter: Long = 0L
     @Volatile
     private var latestOutputTimestampMillis: Long? = null
+    @Volatile
+    private var desiredPtySize: SshPtySize? = null
+    @Volatile
+    private var activePtyResizer: SshPtyResizer? = null
+    @Volatile
+    private var activePtyResizerGeneration: Long = 0L
 
     init {
         externalScope.launch {
@@ -329,6 +342,7 @@ class LiteSshSessionManager(
         val activeJob = executionJob ?: return
         val state = _uiState.value
         executionJob = null
+        activePtyResizer = null
         elapsedTickerJob?.cancel()
         elapsedTickerJob = null
         activeJob.cancel()
@@ -406,18 +420,73 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(maskServerIp = enabled) }
     }
 
-    fun adjustConsoleFontScale(delta: Float) {
+    fun adjustConsoleFontScale(
+        delta: Float,
+        autoFitStartScale: Float? = null,
+    ) {
         _uiState.update { state ->
-            val next = (state.consoleFontScale + delta).coerceIn(
+            val baseScale = if (state.terminalAutoFitEnabled && autoFitStartScale != null) {
+                autoFitStartScale.coerceIn(
+                    LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                    LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+                )
+            } else {
+                state.consoleFontScale
+            }
+            val next = (baseScale + delta).coerceIn(
                 LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
                 LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
             )
-            state.copy(consoleFontScale = next)
+            state.copy(
+                terminalAutoFitEnabled = false,
+                consoleFontScale = next,
+            )
         }
     }
 
+    fun pinchConsoleFontScale(
+        zoomFactor: Float,
+        autoFitStartScale: Float? = null,
+    ) {
+        if (!zoomFactor.isFinite() || zoomFactor <= 0f) return
+        _uiState.update { state ->
+            val baseScale = if (state.terminalAutoFitEnabled && autoFitStartScale != null) {
+                autoFitStartScale.coerceIn(
+                    LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                    LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+                )
+            } else {
+                state.consoleFontScale
+            }
+            val next = (baseScale * zoomFactor).coerceIn(
+                LiteSshUiState.MIN_CONSOLE_FONT_SCALE,
+                LiteSshUiState.MAX_CONSOLE_FONT_SCALE,
+            )
+            state.copy(
+                terminalAutoFitEnabled = false,
+                consoleFontScale = next,
+            )
+        }
+    }
+
+    fun setTerminalAutoFitEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(terminalAutoFitEnabled = enabled) }
+    }
+
     fun resetConsoleFontScale() {
-        _uiState.update { it.copy(consoleFontScale = LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE) }
+        _uiState.update {
+            it.copy(
+                terminalAutoFitEnabled = true,
+                consoleFontScale = LiteSshUiState.DEFAULT_CONSOLE_FONT_SCALE,
+            )
+        }
+    }
+
+    fun updateTerminalPtySize(ptySize: SshPtySize) {
+        val normalized = ptySize.normalized()
+        if (desiredPtySize == normalized) return
+        desiredPtySize = normalized
+        activePtyResizer?.resize(normalized)
     }
 
     fun toggleAutoScrollConsole(enabled: Boolean) {
@@ -436,6 +505,37 @@ class LiteSshSessionManager(
                 state.selectedRunIdsForExport + runId
             }
             state.copy(selectedRunIdsForExport = next)
+        }
+    }
+
+    fun toggleCandidateRunForExport(record: SshExecutionRecord) {
+        _uiState.update { state ->
+            val inSession = state.sessionRuns.any { it.id == record.id }
+            val nextSession = if (inSession) state.sessionRuns else state.sessionRuns + record
+            val nextSelected = if (record.id in state.selectedRunIdsForExport) {
+                state.selectedRunIdsForExport - record.id
+            } else {
+                state.selectedRunIdsForExport + record.id
+            }
+            state.copy(
+                sessionRuns = nextSession,
+                selectedRunIdsForExport = nextSelected,
+            )
+        }
+    }
+
+    fun setSelectedRunsForExport(records: List<SshExecutionRecord>) {
+        _uiState.update { state ->
+            val existingIds = state.sessionRuns.map { it.id }.toSet()
+            val chronologicalNew = records
+                .filter { it.hasOutput && it.id !in existingIds }
+                .sortedBy { it.startedAtEpochMillis }
+            val nextSession = state.sessionRuns + chronologicalNew
+            val nextSelected = records.filter { it.hasOutput }.map { it.id }.toSet()
+            state.copy(
+                sessionRuns = nextSession,
+                selectedRunIdsForExport = nextSelected,
+            )
         }
     }
 
@@ -517,6 +617,10 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(showExportPreviewSheet = false) }
     }
 
+    fun setMergeLayout(layout: SshMergeLayout) {
+        _uiState.update { it.copy(mergeLayout = layout) }
+    }
+
     fun openHistorySheet() {
         _uiState.update { it.copy(showHistorySheet = true) }
     }
@@ -526,6 +630,22 @@ class LiteSshSessionManager(
     }
 
     fun buildExportPayload(): SshFormattedPost? = _uiState.value.exportPreviewPost
+
+    suspend fun buildExportPayloadAsync(): SshFormattedPost? {
+        val stateSnapshot = _uiState.value
+        return withContext(Dispatchers.Default) {
+            val runs = stateSnapshot.exportableRuns
+            if (runs.isEmpty()) {
+                null
+            } else {
+                com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter.format(
+                    runs = runs,
+                    maskIp = stateSnapshot.maskServerIp,
+                    mergeLayout = stateSnapshot.mergeLayout,
+                )
+            }
+        }
+    }
 
     fun consumeStatusMessage() {
         _uiState.update { it.copy(statusMessage = null) }
@@ -907,17 +1027,36 @@ class LiteSshSessionManager(
         executionJob = externalScope.launch {
             var completedNormallyOrFailed = false
             try {
-                val request: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
+                val baseRequest: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
                     vaultRepository = vaultRepository,
                     server = server,
                     allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
                     mismatchOverrideServerId = mismatchOverrideServerId,
                 )
+                val initialPty = desiredPtySize
+                val request = if (initialPty != null) {
+                    baseRequest.copy(
+                        ptyCols = initialPty.cols,
+                        ptyRows = initialPty.rows,
+                        ptyWidthPx = initialPty.widthPx,
+                        ptyHeightPx = initialPty.heightPx,
+                    )
+                } else {
+                    baseRequest
+                }
 
                 executor.runCommand(
                     request = request,
                     command = command,
                     autoRespondConfig = SshAutoRespondConfig(enabled = autoRespondEnabled),
+                ).flowOn(
+                    SshPtyResizeCallbackContext { resizer ->
+                        if (activePtyResizerGeneration <= currentRunGeneration) {
+                            activePtyResizerGeneration = currentRunGeneration
+                            activePtyResizer = resizer
+                            desiredPtySize?.let(resizer::resize)
+                        }
+                    },
                 ).collect { event ->
                     when (event) {
                         LiteSshExecutionEvent.Connecting -> {
@@ -1152,6 +1291,9 @@ class LiteSshSessionManager(
                     dispatchCompletionNotices(record = failedRecord, errorDetail = friendlyError)
                 }
             } finally {
+                if (activePtyResizerGeneration == currentRunGeneration) {
+                    activePtyResizer = null
+                }
                 elapsedTickerJob?.cancel()
                 elapsedTickerJob = null
                 executionJob = null

@@ -387,7 +387,7 @@ class SellerTrustResilienceAndHttpTest {
                 profileCalls.incrementAndGet()
                 sampleProfile(uid = uid, username = "GuestCheckedSeller", topicCount = 0)
             },
-            onSearch = {
+            onFetchExposeBoard = {
                 throw TopicAccessException.SignInRequired
             },
         )
@@ -479,7 +479,11 @@ class SellerTrustResilienceAndHttpTest {
             val emptySearchHtml =
                 """<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$configB64</script></body></html>"""
 
-            // Enqueue: 1) /api/account/getInfo/42 (nPost = 0 -> skips list-discussions!), 2) two /search pages
+            // Enqueue:
+            // 1) /api/account/getInfo/42 (nPost = 0 -> skips list-discussions!)
+            // 2) single /categories/expose?sortBy=replyTime page (zero /search traffic by default!)
+            // 3) /api/account/getInfo/43 (reuses shared expose board snapshot!)
+            // 4) single /search?q=ZeroPostSeller... only when user explicitly invokes deep search!
             server.enqueue(
                 MockResponse()
                     .setResponseCode(200)
@@ -489,6 +493,14 @@ class SellerTrustResilienceAndHttpTest {
                     ),
             )
             server.enqueue(MockResponse().setResponseCode(200).setBody(emptySearchHtml))
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "application/json")
+                    .setBody(
+                        """{"success":true,"detail":{"member_id":43,"member_name":"SecondSeller","created_at":"2024-02-01T00:00:00Z","coin":1700,"stardust":60,"nPost":0,"nComment":8}}""",
+                    ),
+            )
             server.enqueue(MockResponse().setResponseCode(200).setBody(emptySearchHtml))
 
             val dispatcher = StandardTestDispatcher(testScheduler)
@@ -503,7 +515,7 @@ class SellerTrustResilienceAndHttpTest {
                     clockMillis = clock,
                     jitterFraction = { 0.0 },
                 ),
-                searchExtraIntervalMillis = 0L,
+                searchMinIntervalMillis = 0L,
                 zoneId = shanghaiZone,
             )
 
@@ -511,11 +523,12 @@ class SellerTrustResilienceAndHttpTest {
             assertTrue(report.profileSucceeded)
             assertTrue(report.topicsSucceeded)
             assertTrue(report.searchSucceeded)
+            assertFalse(report.isDeepSearchVerified)
             assertEquals(0, report.totalTopicsCount)
             assertEquals(0, report.historicalTradeTopicCount)
 
-            // Only 3 HTTP requests total: NO /api/block-list/list, NO ?readme=1, NO /api/content/list-discussions!
-            assertEquals(3, server.requestCount)
+            // Only 2 HTTP requests total: NO /api/block-list/list, NO ?readme=1, NO list-discussions, NO /search!
+            assertEquals(2, server.requestCount)
             val reqProfile = server.takeRequest()
             assertEquals("/api/account/getInfo/42", reqProfile.path)
             assertEquals(customUa, reqProfile.getHeader("User-Agent"))
@@ -523,10 +536,23 @@ class SellerTrustResilienceAndHttpTest {
             assertNotNull(reqProfile.getHeader("Accept-Language"))
             assertTrue(reqProfile.getHeader("Referer").orEmpty().contains("/space/42"))
 
-            val reqSearch1 = server.takeRequest()
-            val reqSearch2 = server.takeRequest()
-            assertTrue(reqSearch1.path!!.startsWith("/search?"))
-            assertTrue(reqSearch2.path!!.startsWith("/search?"))
+            val reqExposeBoard = server.takeRequest()
+            assertEquals("/categories/expose?sortBy=replyTime", reqExposeBoard.path)
+
+            // Second seller reuses the shared /categories/expose snapshot -> only 1 getInfo call!
+            val secondReport = repo.inspectSeller(uid = 43L, usernameHint = "SecondSeller")
+            assertTrue(secondReport.profileSucceeded)
+            assertTrue(secondReport.searchSucceeded)
+            assertEquals(3, server.requestCount)
+            val reqProfile2 = server.takeRequest()
+            assertEquals("/api/account/getInfo/43", reqProfile2.path)
+
+            // Explicit on-demand deep search issues exactly ONE /search query
+            val deepReport = repo.searchSellerExposureDeep(uid = 42L, usernameHint = "ZeroPostSeller")
+            assertTrue(deepReport.isDeepSearchVerified)
+            assertEquals(4, server.requestCount)
+            val reqDeepSearch = server.takeRequest()
+            assertTrue(reqDeepSearch.path!!.startsWith("/search?q=ZeroPostSeller"))
 
             // Verify raw HTTP 429 with Retry-After header puts repository into cooldown
             server.enqueue(
@@ -538,7 +564,7 @@ class SellerTrustResilienceAndHttpTest {
             val rateLimitedReport = repo.inspectSeller(uid = 99L, usernameHint = "AnotherSeller")
             assertEquals(TrustFetchStatus.RATE_LIMITED, rateLimitedReport.fetchStatus)
             assertEquals(clock() + 25_000L, rateLimitedReport.cooldownUntilEpochMillis)
-            assertEquals(4, server.requestCount) // Did NOT fire list-discussions or /search after 429!
+            assertEquals(5, server.requestCount) // Did NOT fire list-discussions or /categories/expose after 429!
         } finally {
             server.shutdown()
         }
@@ -574,11 +600,16 @@ class SellerTrustResilienceAndHttpTest {
         private val onResolveUid: suspend (String) -> Long? = { null },
         private val onFetchProfile: suspend (Long) -> UserProfile,
         private val onFetchTopics: suspend (Long) -> List<TopicSummary> = { emptyList() },
-        private val onSearch: suspend (String) -> FeedPageResult = { FeedPageResult(topics = emptyList()) },
+        private val onFetchExposeBoard: suspend () -> FeedPageResult = { FeedPageResult(topics = emptyList()) },
+        private val onSearch: suspend (String, String) -> FeedPageResult = { _, _ -> FeedPageResult(topics = emptyList()) },
     ) : SellerTrustRemoteDataSource {
         override suspend fun resolveUidByUsername(username: String): Long? = onResolveUid(username)
         override suspend fun fetchSellerProfile(uid: Long): UserProfile = onFetchProfile(uid)
         override suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary> = onFetchTopics(uid)
-        override suspend fun searchExposureTopicsPage1(query: String): FeedPageResult = onSearch(query)
+        override suspend fun fetchExposeBoardPage1(): FeedPageResult = onFetchExposeBoard()
+        override suspend fun searchExposureTopicsPage1(
+            query: String,
+            categorySlug: String,
+        ): FeedPageResult = onSearch(query, categorySlug)
     }
 }

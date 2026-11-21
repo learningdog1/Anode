@@ -76,6 +76,99 @@ enum class TcpPortPreset(val port: Int, val label: String) {
 }
 
 /**
+ * How the ICMP ping subprocess handled OS network routing/binding.
+ */
+enum class IcmpNetworkBindingMode(val label: String) {
+    /** System default route (used when no VPN/proxy is active, or when proxy test is chosen). */
+    SYSTEM_DEFAULT("系统默认路由"),
+
+    /** Bound to the underlying physical interface via `-I <iface>`. */
+    INTERFACE_BOUND("已指定底层网卡"),
+
+    /** Direct non-VPN mode was requested, but the ping subprocess could not bind to the physical network. */
+    UNBOUND_SUBPROCESS_FALLBACK("进程未绑定底层网卡（跟随系统路由）"),
+}
+
+/**
+ * Configuration for [com.nodeseek.app.data.netbench.IcmpPingRunner].
+ */
+data class IcmpPingConfig(
+    val target: String,
+    val probeCount: Int = DEFAULT_PROBE_COUNT,
+    val timeoutMs: Int = DEFAULT_TIMEOUT_MS,
+    val intervalMs: Long = DEFAULT_INTERVAL_MS,
+    val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+    val useProxy: Boolean = false,
+) {
+    val normalizedProbeCount: Int
+        get() = probeCount.coerceIn(MIN_PROBE_COUNT, MAX_PROBE_COUNT)
+
+    val normalizedTimeoutSec: Int
+        get() = ((timeoutMs + 999) / 1000).coerceIn(1, 15)
+
+    val normalizedIntervalMs: Long
+        get() = intervalMs.coerceIn(200L, 5_000L)
+
+    companion object {
+        const val DEFAULT_PROBE_COUNT = 10
+        const val MIN_PROBE_COUNT = 4
+        const val MAX_PROBE_COUNT = 50
+        const val DEFAULT_TIMEOUT_MS = 2_000
+        const val DEFAULT_INTERVAL_MS = 250L
+    }
+}
+
+/**
+ * Result of a single ICMP Ping probe packet.
+ */
+data class IcmpPingSample(
+    val seq: Int,
+    val success: Boolean,
+    val rttMs: Double? = null,
+    val ttl: Int? = null,
+    val errorMessage: String? = null,
+    val timestampEpochMs: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Aggregated ICMP Ping statistics (`min / avg / max / mdev`, packet loss, and binding status).
+ */
+data class IcmpPingSummary(
+    val resolvedTarget: ResolvedTarget?,
+    val sent: Int,
+    val received: Int,
+    val lossPercent: Double,
+    val minMs: Double?,
+    val avgMs: Double?,
+    val maxMs: Double?,
+    val jitterMdevMs: Double?,
+    val samples: List<IcmpPingSample> = emptyList(),
+    val bindingMode: IcmpNetworkBindingMode = IcmpNetworkBindingMode.SYSTEM_DEFAULT,
+    val boundInterfaceName: String? = null,
+    val networkBindingNote: String? = null,
+    val errorMessage: String? = null,
+) {
+    val lost: Int get() = (sent - received).coerceAtLeast(0)
+    val hasValidLatency: Boolean get() = received > 0 && avgMs != null
+}
+
+/**
+ * Real-time progress event emitted by [com.nodeseek.app.data.netbench.IcmpPingRunner].
+ */
+data class IcmpPingProgress(
+    val resolvedTarget: ResolvedTarget?,
+    val totalPlanned: Int,
+    val latestSample: IcmpPingSample?,
+    val samples: List<IcmpPingSample>,
+    val summary: IcmpPingSummary,
+    val isFinished: Boolean,
+    val errorMessage: String? = null,
+) {
+    val completedFraction: Float
+        get() = if (totalPlanned <= 0) 0f else (samples.size.toFloat() / totalPlanned.toFloat()).coerceIn(0f, 1f)
+}
+
+/**
  * Configuration for [com.nodeseek.app.data.netbench.TcpPingRunner].
  */
 data class TcpPingConfig(
@@ -200,16 +293,22 @@ data class Iperf3Config(
     val connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
     val useProxy: Boolean = false,
+    val parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
 ) {
     val normalizedPort: Int get() = port.coerceIn(1, 65535)
     val normalizedDurationSec: Int get() = durationSec.coerceIn(1, 60)
     val normalizedChunkSize: Int get() = chunkSizeBytes.coerceIn(4096, 1024 * 1024)
+    val normalizedParallelStreams: Int get() = parallelStreams.coerceIn(MIN_PARALLEL_STREAMS, MAX_PARALLEL_STREAMS)
 
     companion object {
         const val DEFAULT_PORT = 5201
         const val DEFAULT_DURATION_SEC = 5
         const val DEFAULT_CHUNK_SIZE = 131_072 // 128 KiB
         const val DEFAULT_CONNECT_TIMEOUT_MS = 4_000
+        const val DEFAULT_PARALLEL_STREAMS = 1
+        const val MIN_PARALLEL_STREAMS = 1
+        const val MAX_PARALLEL_STREAMS = 16
+        val PARALLEL_STREAM_PRESETS = listOf(1, 2, 4, 8)
     }
 }
 
@@ -257,6 +356,7 @@ data class Iperf3Result(
     val success: Boolean,
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
+    val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
 ) {
     /**
      * Best-available throughput value in Mbps (prefers measured client rate, falls back to server rate).
@@ -281,6 +381,7 @@ data class Iperf3Progress(
     val finalResult: Iperf3Result? = null,
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
+    val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
 ) {
     val progressFraction: Float
         get() = if (stage == Iperf3Stage.COMPLETED) {
@@ -440,6 +541,7 @@ data class NetBenchReport(
     val resolvedTarget: ResolvedTarget? = null,
     val tcpPort: Int = TcpPingConfig.DEFAULT_PORT,
     val clientNetwork: ClientNetworkInfo? = null,
+    val icmpPingSummary: IcmpPingSummary? = null,
     val tcpPingSummary: TcpPingSummary? = null,
     val httpLatencyResult: HttpLatencyResult? = null,
     val ipIntelligence: IpIntelligenceReport? = null,
@@ -449,7 +551,8 @@ data class NetBenchReport(
     val proxyNetwork: ClientNetworkInfo? = null,
 ) {
     val hasAnyResult: Boolean
-        get() = tcpPingSummary != null ||
+        get() = icmpPingSummary != null ||
+            tcpPingSummary != null ||
             httpLatencyResult != null ||
             ipIntelligence != null ||
             iperfDownloadResult != null ||
@@ -467,6 +570,8 @@ data class NetBenchHistoryEntry(
     val resolvedIp: String? = null,
     val ipFamily: IpFamily = IpFamily.UNKNOWN,
     val lastAvgMs: Double? = null,
+    val lastPingAvgMs: Double? = null,
+    val lastPingLossPercent: Double? = null,
     val lastOriginType: IpOriginType? = null,
     val lastRegionSummary: String? = null,
     val testedAtEpochMillis: Long = System.currentTimeMillis(),
