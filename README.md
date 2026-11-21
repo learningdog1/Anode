@@ -7,7 +7,7 @@
 **Cool Mist Light & Slate Steel Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v2.5.0-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.5.1-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.10-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202025.02.00-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,12 +26,12 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v2.5.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.5.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v2.5.1`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.5.1-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v2.5.0`（`versionCode = 12`） |
+| **当前版本** | `v2.5.1`（`versionCode = 13`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
 | **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与活动预留页 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针监控与 VPS 资产账本 · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
@@ -300,7 +300,7 @@
 - **手机端测机 (`MobileNetBenchScreen`)**：
   - **内核级物理绑定 ICMP Ping + TCPing 双重探测**：采用原生非阻塞 `AF_INET/AF_INET6` `SOCK_DGRAM` `IPPROTO_ICMP` 套接字配合 `Network.bindSocket` 真正绕过 VPN/代理直连物理蜂窝/Wi-Fi 网卡（外部 `/system/bin/ping` 仅作权限降级兜底），搭配防 Fake-IP 物理链路 DoH 解析与 `Proxy.NO_PROXY` TCPing，协同绘制零分配 `Canvas` 波形。
   - **双出口 IP 解析与物理网络绑定 (`NetBenchNetworkSelection` / `NetBenchNetworkBinding`)**：支持通过 `ConnectivityManager` 将 ICMP Ping、TCPing、iperf3 与 IP 查询绑定至真实蜂窝/Wi-Fi 物理网卡，清晰对照**真实本机出口 IP** 与**代理/VPN 出口 IP**。
-  - **原生 `iperf3` `-P` 并发流、逐秒区间采集与论坛 Markdown 报告**：内置 `-P`（`1 / 2 / 4 / 8` 快捷档位与协议 `1..16` 流）并发测速与逐秒吞吐分段（per-second intervals）波动统计，联动 GeoIP / RIR RDAP 鉴定原生/广播 IP，一键导出带物理路由标签、逐秒速率明细表与网络诊断的标准论坛 Markdown 报告。
+  - **原生 `iperf3` `-P` 并发流、逐秒区间采集与图文混排论坛报告**：内置 `-P`（`1 / 2 / 4 / 8` 快捷档位与协议 `1..16` 流）并发测速与逐秒吞吐分段（per-second intervals）波动统计，联动 GeoIP / RIR RDAP 鉴定原生/广播 IP；支持离屏渲染适配论坛列宽的横版可视化卡片（IP 原生鉴定卡、Ping/TCPing 波形卡、iperf3 仪表盘与逐秒明细卡），通过官方 **NodeImage 图床**（`api.nodeimage.com`）自动上传并按章节嵌入完整 Markdown 报告（支持按单卡指纹缓存复用与脱敏同步）。
 - **轻量 SSH：一键跑测评脚本与自适应终端 (`LiteSshScreen`)**：
   - **安全凭据、搜索分组与多跳跳板 (`ProxyJump`)**：内置 Android Keystore `AES-256-GCM` 主机保险库（支持主机/预设搜索、分组筛选与快捷选择器）、`TOFU` SHA-256 指纹校验、**`SshJumpHostResolver` 多跳跳板机链路**（含成环检测）与后台前台服务 (`LiteSshForegroundService`) 保活。
   - **非交互自动应答与独立通道联动测速**：支持预设脚本自动应答引擎（`SshPromptAutoResponder` 回显去重、防抖与静默进度检测）、分组执行历史，以及通过独立 SSH 通道并发装/启/停远端 VPS `iperf3 -s`。
@@ -443,8 +443,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.5.0-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v2.5.0-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.5.1-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v2.5.1-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 
