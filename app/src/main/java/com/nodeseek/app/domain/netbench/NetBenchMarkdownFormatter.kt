@@ -47,16 +47,47 @@ object NetBenchMarkdownFormatter {
         report: NetBenchReport,
         options: NetBenchMarkdownOptions = NetBenchMarkdownOptions(),
     ): String {
+        val protectedImageUrls = LinkedHashMap<String, String>()
         val rawMarkdown = when (options.style) {
             NetBenchMarkdownStyle.REPLY_CARD -> formatReplyCard(report, options)
-            NetBenchMarkdownStyle.FULL_TABLE -> formatFullTable(report, options)
+            NetBenchMarkdownStyle.FULL_TABLE -> formatFullTable(report, options, protectedImageUrls)
         }
         val targetSafe = if (options.maskTargetIp) {
             scrubTargetEndpointIfNeeded(rawMarkdown, report)
         } else {
             rawMarkdown
         }
-        return scrubClientIpIfNeeded(targetSafe, report)
+        var clientSafe = scrubClientIpIfNeeded(targetSafe, report)
+        for ((token, cleanUrl) in protectedImageUrls) {
+            clientSafe = clientSafe.replace(token, cleanUrl)
+        }
+        return clientSafe
+    }
+
+    internal fun sanitizeMarkdownImageUrl(rawUrl: String?): String? {
+        val trimmed = rawUrl?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        if (!trimmed.startsWith("https://", ignoreCase = true) &&
+            !trimmed.startsWith("http://", ignoreCase = true)
+        ) {
+            return null
+        }
+        if (trimmed.any { it == '\n' || it == '\r' || it.isISOControl() }) return null
+        return trimmed
+            .replace(" ", "%20")
+            .replace("(", "%28")
+            .replace(")", "%29")
+    }
+
+    private fun buildMarkdownImageEmbed(
+        kind: NetBenchReportCardKind,
+        uploadedImages: NetBenchUploadedImages,
+        protectedUrls: MutableMap<String, String>,
+    ): String? {
+        val cleanUrl = sanitizeMarkdownImageUrl(uploadedImages.urlFor(kind)) ?: return null
+        val token = "__NETBENCH_NODEIMAGE_URL_${protectedUrls.size}__"
+        protectedUrls[token] = cleanUrl
+        return "![${kind.altTitle}]($token)"
     }
 
     // ── Style 1: Reply Card (Rich Blockquote + iperf3 Interval Log) ──────────────────────────
@@ -176,6 +207,7 @@ object NetBenchMarkdownFormatter {
     private fun formatFullTable(
         report: NetBenchReport,
         options: NetBenchMarkdownOptions,
+        protectedImageUrls: MutableMap<String, String> = LinkedHashMap(),
     ): String {
         val timestamp = resolveTimestampLabel(options)
         val sb = StringBuilder()
@@ -210,34 +242,77 @@ object NetBenchMarkdownFormatter {
             return sb.toString()
         }
 
-        // 2. Target Node & IP Intelligence Table
+        // 2. Target Node & IP Intelligence Table + Visual Card
         val targetAndIpRows = buildTargetAndIpTableRows(report, options)
-        if (targetAndIpRows.isNotEmpty()) {
+        val ipCardEmbed = if (report.ipIntelligence != null) {
+            buildMarkdownImageEmbed(
+                kind = NetBenchReportCardKind.IP_INTELLIGENCE,
+                uploadedImages = options.uploadedImages,
+                protectedUrls = protectedImageUrls,
+            )
+        } else {
+            null
+        }
+        if (targetAndIpRows.isNotEmpty() || ipCardEmbed != null) {
             sb.appendLine()
             sb.appendLine("### 🌐 目标节点与 IP 质量鉴定")
-            sb.appendLine()
-            sb.appendLine(
-                renderAlignedMarkdownTable(
-                    headers = listOf("测试项目", "实测结果", "详细说明"),
-                    rows = targetAndIpRows,
-                    cellPreprocessor = cellScrubber,
-                ),
-            )
+            if (ipCardEmbed != null) {
+                sb.appendLine()
+                sb.appendLine(ipCardEmbed)
+            }
+            if (targetAndIpRows.isNotEmpty()) {
+                sb.appendLine()
+                sb.appendLine(
+                    renderAlignedMarkdownTable(
+                        headers = listOf("测试项目", "实测结果", "详细说明"),
+                        rows = targetAndIpRows,
+                        cellPreprocessor = cellScrubber,
+                    ),
+                )
+            }
         }
 
-        // 3. Network Latency & Link Stability Analysis
+        // 3. Network Latency & Link Stability Analysis + Visual Waveform Cards
         val latencyRows = buildLatencyAnalysisRows(report, options.maskTargetIp)
-        if (latencyRows.isNotEmpty()) {
+        val icmpCardEmbed = if (report.icmpPingSummary != null && report.icmpPingSummary.sent > 0) {
+            buildMarkdownImageEmbed(
+                kind = NetBenchReportCardKind.ICMP_PING,
+                uploadedImages = options.uploadedImages,
+                protectedUrls = protectedImageUrls,
+            )
+        } else {
+            null
+        }
+        val tcpCardEmbed = if (report.tcpPingSummary != null && report.tcpPingSummary.sent > 0) {
+            buildMarkdownImageEmbed(
+                kind = NetBenchReportCardKind.TCP_PING,
+                uploadedImages = options.uploadedImages,
+                protectedUrls = protectedImageUrls,
+            )
+        } else {
+            null
+        }
+        if (latencyRows.isNotEmpty() || icmpCardEmbed != null || tcpCardEmbed != null) {
             sb.appendLine()
             sb.appendLine("### ⚡ 网络延迟与链路稳定性分析")
-            sb.appendLine()
-            sb.appendLine(
-                renderAlignedMarkdownTable(
-                    headers = listOf("测试项目", "实测结果", "波动与分位统计", "链路与对比分析"),
-                    rows = latencyRows,
-                    cellPreprocessor = cellScrubber,
-                ),
-            )
+            if (icmpCardEmbed != null) {
+                sb.appendLine()
+                sb.appendLine(icmpCardEmbed)
+            }
+            if (tcpCardEmbed != null) {
+                sb.appendLine()
+                sb.appendLine(tcpCardEmbed)
+            }
+            if (latencyRows.isNotEmpty()) {
+                sb.appendLine()
+                sb.appendLine(
+                    renderAlignedMarkdownTable(
+                        headers = listOf("测试项目", "实测结果", "波动与分位统计", "链路与对比分析"),
+                        rows = latencyRows,
+                        cellPreprocessor = cellScrubber,
+                    ),
+                )
+            }
 
             val packetLog = buildPerPacketRttLogText(
                 icmp = report.icmpPingSummary,
@@ -252,11 +327,24 @@ object NetBenchMarkdownFormatter {
             }
         }
 
-        // 4. iperf3 Throughput & Per-Second Interval Breakdown
+        // 4. iperf3 Throughput & Per-Second Interval Breakdown + Visual Gauge Card
         val iperfResults = listOfNotNull(report.iperfDownloadResult, report.iperfUploadResult)
+        val iperfCardEmbed = if (iperfResults.any { it.success }) {
+            buildMarkdownImageEmbed(
+                kind = NetBenchReportCardKind.IPERF3,
+                uploadedImages = options.uploadedImages,
+                protectedUrls = protectedImageUrls,
+            )
+        } else {
+            null
+        }
         if (iperfResults.isNotEmpty()) {
             sb.appendLine()
             sb.appendLine("### 🚀 iperf3 带宽吞吐实测全过程")
+            if (iperfCardEmbed != null) {
+                sb.appendLine()
+                sb.appendLine(iperfCardEmbed)
+            }
             sb.appendLine()
             val iperfTableRows = iperfResults.map { buildIperfSummaryRow(it) }
             sb.appendLine(

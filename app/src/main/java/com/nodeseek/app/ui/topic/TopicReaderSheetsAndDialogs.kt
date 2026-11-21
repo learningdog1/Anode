@@ -1687,14 +1687,17 @@ internal fun PaidActionConfirmationDialog(
 internal fun NodeImageApiKeySetupDialog(
     onSaveAndContinue: (String) -> Unit,
     onDismiss: () -> Unit,
+    initialApiKey: String = "",
+    customMessage: String? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    var apiKey by rememberSaveable { mutableStateOf("") }
+    var apiKey by rememberSaveable(initialApiKey) { mutableStateOf(initialApiKey) }
 
     PulseAlertDialog(
         onDismissRequest = onDismiss,
         title = "配置 NodeImage 图床密钥",
-        message = "图片上传使用官方 NodeImage 图床（api.nodeimage.com）。请粘贴您的 X-API-Key，保存后将自动继续上传所选图片。",
+        message = customMessage
+            ?: "图片上传使用官方 NodeImage 图床（api.nodeimage.com）。请粘贴您的 X-API-Key，保存后将自动继续上传所选图片。",
         icon = Icons.Rounded.Key,
         tone = PulseDialogTone.PRIMARY,
         centerHeader = true,

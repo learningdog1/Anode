@@ -15,6 +15,7 @@ import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchTargetResolver
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
 import com.nodeseek.app.data.netbench.TcpPingRunner
+import com.nodeseek.app.data.radar.AppContainerHost
 import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
@@ -32,12 +33,17 @@ import com.nodeseek.app.domain.netbench.NetBenchMarkdownOptions
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.NetBenchReport
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
+import com.nodeseek.app.domain.netbench.NetBenchUploadedImages
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.ResolvedTarget
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPingProgress
+import com.nodeseek.app.domain.repository.ImageHostRepository
+import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -50,6 +56,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Current execution phase of the Mobile Network Tester pipeline.
@@ -86,6 +94,14 @@ data class MobileNetBenchUiState(
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
     val maskTargetIpInReport: Boolean = true,
     val includeClientNetworkInReport: Boolean = true,
+    val includeReportImages: Boolean = false,
+    val isUploadingReportImages: Boolean = false,
+    val reportImagesProgressText: String? = null,
+    val reportImagesError: String? = null,
+    val uploadedReportImages: NetBenchUploadedImages = NetBenchUploadedImages(),
+    val plannedReportCardCount: Int = 0,
+    val showNodeImageApiKeyDialog: Boolean = false,
+    val renderDarkTheme: Boolean = false,
     val showIperf3ServerPrompt: Boolean = false,
     val isRunning: Boolean = false,
     val activePhase: NetBenchPhase = NetBenchPhase.IDLE,
@@ -138,6 +154,10 @@ class NetBenchSessionController(
     private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
     private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
+    private val imageHostRepository: ImageHostRepository? = null,
+    private val settingsRepository: SettingsRepository? = null,
+    private val cardImageGenerator: NetBenchCardImageGenerator = AndroidNetBenchCardImageGenerator,
+    private val renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
     initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
 ) {
@@ -147,6 +167,7 @@ class NetBenchSessionController(
             markdownStyle = initialMarkdownStyle,
             maskTargetIpInReport = historyStore.preferences.value.maskTargetIp,
             includeClientNetworkInReport = historyStore.preferences.value.includeClientNetwork,
+            includeReportImages = historyStore.preferences.value.includeReportImages,
             recentTargets = historyStore.entries.value,
         ),
     )
@@ -157,6 +178,8 @@ class NetBenchSessionController(
 
     private var activeJob: Job? = null
     private var egressJob: Job? = null
+    private var imageUploadJob: Job? = null
+    private val uploadedUrlCache = ConcurrentHashMap<String, String>()
     private var cachedEgressSnapshot: ClientEgressSnapshot? = null
     private var lastAppliedInitialTarget: String = initialTarget.trim()
 
@@ -170,13 +193,15 @@ class NetBenchSessionController(
             historyStore.preferences.collect { prefs ->
                 _uiState.update { state ->
                     if (state.maskTargetIpInReport == prefs.maskTargetIp &&
-                        state.includeClientNetworkInReport == prefs.includeClientNetwork
+                        state.includeClientNetworkInReport == prefs.includeClientNetwork &&
+                        state.includeReportImages == prefs.includeReportImages
                     ) {
                         state
                     } else {
                         state.copy(
                             maskTargetIpInReport = prefs.maskTargetIp,
                             includeClientNetworkInReport = prefs.includeClientNetwork,
+                            includeReportImages = prefs.includeReportImages,
                         ).withRegeneratedMarkdown()
                     }
                 }
@@ -220,13 +245,30 @@ class NetBenchSessionController(
     }
 
     fun toggleTestViaProxy(useProxy: Boolean) {
+        imageUploadJob?.cancel()
         _uiState.update { state ->
             val updatedNetwork = state.clientEgress?.activeNetworkForTest(useProxy) ?: state.clientNetwork
             state.copy(
                 testViaProxy = useProxy,
                 clientNetwork = updatedNetwork,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
             ).withRegeneratedMarkdown()
         }
+        syncReportImagesIfNeeded(promptForMissingKey = false)
+    }
+
+    fun updateRenderDarkTheme(isDark: Boolean) {
+        if (_uiState.value.renderDarkTheme == isDark) return
+        imageUploadJob?.cancel()
+        _uiState.update { state ->
+            state.copy(
+                renderDarkTheme = isDark,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
+            ).withRegeneratedMarkdown()
+        }
+        syncReportImagesIfNeeded(promptForMissingKey = false)
     }
 
     fun prefillTarget(rawTarget: String) {
@@ -344,30 +386,147 @@ class NetBenchSessionController(
     }
 
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) {
+        if (style != NetBenchMarkdownStyle.FULL_TABLE) {
+            imageUploadJob?.cancel()
+        }
         _uiState.update { state ->
-            state.copy(markdownStyle = style).withRegeneratedMarkdown()
+            state.copy(
+                markdownStyle = style,
+                isUploadingReportImages = if (style == NetBenchMarkdownStyle.FULL_TABLE) state.isUploadingReportImages else false,
+                reportImagesProgressText = if (style == NetBenchMarkdownStyle.FULL_TABLE) state.reportImagesProgressText else null,
+                reportImagesError = if (style == NetBenchMarkdownStyle.FULL_TABLE) state.reportImagesError else null,
+            ).withRegeneratedMarkdown()
         }
         scope.launch {
             historyStore.updatePreferences { it.copy(markdownStyle = style) }
         }
+        if (style == NetBenchMarkdownStyle.FULL_TABLE) {
+            syncReportImagesIfNeeded(promptForMissingKey = false)
+        }
     }
 
     fun toggleMaskTargetIp(mask: Boolean) {
+        imageUploadJob?.cancel()
         _uiState.update { state ->
-            state.copy(maskTargetIpInReport = mask).withRegeneratedMarkdown()
+            state.copy(
+                maskTargetIpInReport = mask,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
+                reportImagesError = null,
+            ).withRegeneratedMarkdown()
         }
         scope.launch {
             historyStore.updatePreferences { it.copy(maskTargetIp = mask) }
         }
+        syncReportImagesIfNeeded(promptForMissingKey = false)
     }
 
     fun toggleIncludeClientNetwork(include: Boolean) {
+        imageUploadJob?.cancel()
         _uiState.update { state ->
-            state.copy(includeClientNetworkInReport = include).withRegeneratedMarkdown()
+            state.copy(
+                includeClientNetworkInReport = include,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
+                reportImagesError = null,
+            ).withRegeneratedMarkdown()
         }
         scope.launch {
             historyStore.updatePreferences { it.copy(includeClientNetwork = include) }
         }
+        syncReportImagesIfNeeded(promptForMissingKey = false)
+    }
+
+    fun toggleIncludeReportImages(include: Boolean) {
+        if (!include) {
+            imageUploadJob?.cancel()
+            _uiState.update { state ->
+                state.copy(
+                    includeReportImages = false,
+                    isUploadingReportImages = false,
+                    reportImagesProgressText = null,
+                    reportImagesError = null,
+                ).withRegeneratedMarkdown()
+            }
+            scope.launch {
+                historyStore.updatePreferences { it.copy(includeReportImages = false) }
+            }
+            return
+        }
+
+        val hasConfiguredKey = settingsRepository == null ||
+            settingsRepository.settings.value.nodeImageApiKey.trim().isNotEmpty()
+        if (!hasConfiguredKey) {
+            _uiState.update {
+                it.copy(
+                    showNodeImageApiKeyDialog = true,
+                    reportImagesError = null,
+                )
+            }
+            return
+        }
+
+        _uiState.update { state ->
+            state.copy(
+                includeReportImages = true,
+                markdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+                reportImagesError = null,
+            ).withRegeneratedMarkdown()
+        }
+        scope.launch {
+            historyStore.updatePreferences {
+                it.copy(
+                    includeReportImages = true,
+                    markdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+                )
+            }
+        }
+        syncReportImagesIfNeeded(promptForMissingKey = true)
+    }
+
+    fun openNodeImageApiKeyDialog() {
+        _uiState.update { it.copy(showNodeImageApiKeyDialog = true) }
+    }
+
+    fun dismissNodeImageApiKeyDialog() {
+        _uiState.update { it.copy(showNodeImageApiKeyDialog = false) }
+    }
+
+    fun saveNodeImageApiKeyAndUpload(rawKey: String) {
+        val trimmed = rawKey.trim()
+        if (trimmed.isEmpty()) {
+            _snackbarChannel.trySend("请输入有效的 NodeImage API Key")
+            return
+        }
+        scope.launch {
+            settingsRepository?.setNodeImageApiKey(trimmed)
+            _uiState.update { state ->
+                state.copy(
+                    showNodeImageApiKeyDialog = false,
+                    includeReportImages = true,
+                    markdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+                    reportImagesError = null,
+                ).withRegeneratedMarkdown()
+            }
+            historyStore.updatePreferences {
+                it.copy(
+                    includeReportImages = true,
+                    markdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+                )
+            }
+            syncReportImagesIfNeeded(promptForMissingKey = false)
+        }
+    }
+
+    fun retryUploadReportImages() {
+        val hasConfiguredKey = settingsRepository == null ||
+            settingsRepository.settings.value.nodeImageApiKey.trim().isNotEmpty()
+        if (!hasConfiguredKey) {
+            _uiState.update { it.copy(showNodeImageApiKeyDialog = true) }
+            return
+        }
+        _uiState.update { it.copy(reportImagesError = null) }
+        syncReportImagesIfNeeded(promptForMissingKey = true)
     }
 
     fun applyHistoryEntry(entry: NetBenchHistoryEntry) {
@@ -396,6 +555,7 @@ class NetBenchSessionController(
 
     fun clearResults() {
         stopBenchmark(silent = true)
+        imageUploadJob?.cancel()
         _uiState.update { state ->
             state.copy(
                 activePhase = NetBenchPhase.IDLE,
@@ -406,6 +566,11 @@ class NetBenchSessionController(
                 ipIntelligence = null,
                 iperfDownloadProgress = null,
                 iperfUploadProgress = null,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
+                reportImagesError = null,
+                uploadedReportImages = NetBenchUploadedImages(),
+                plannedReportCardCount = 0,
                 errorMessage = null,
                 generatedMarkdown = "",
             )
@@ -430,6 +595,7 @@ class NetBenchSessionController(
         }
 
         activeJob?.cancel()
+        imageUploadJob?.cancel()
         val effectiveTcpPort = parsed.effectivePort(snapshot.effectiveTcpPort)
         val effectiveIperfPort = snapshot.effectiveIperfPort
 
@@ -445,6 +611,11 @@ class NetBenchSessionController(
                 ipIntelligence = null,
                 iperfDownloadProgress = null,
                 iperfUploadProgress = null,
+                isUploadingReportImages = false,
+                reportImagesProgressText = null,
+                reportImagesError = null,
+                uploadedReportImages = NetBenchUploadedImages(),
+                plannedReportCardCount = 0,
                 errorMessage = null,
                 generatedMarkdown = "",
             )
@@ -667,6 +838,7 @@ class NetBenchSessionController(
                         activePhase = NetBenchPhase.COMPLETED,
                     ).withRegeneratedMarkdown()
                 }
+                syncReportImagesIfNeeded(promptForMissingKey = true)
             } catch (ce: CancellationException) {
                 _uiState.update { state ->
                     state.copy(
@@ -693,6 +865,9 @@ class NetBenchSessionController(
         val wasRunning = activeJob?.isActive == true
         activeJob?.cancel()
         activeJob = null
+        if (silent) {
+            imageUploadJob?.cancel()
+        }
         _uiState.update { state ->
             state.copy(
                 isRunning = false,
@@ -701,13 +876,163 @@ class NetBenchSessionController(
         }
         if (wasRunning && !silent) {
             _snackbarChannel.trySend("已停止测机，已保留当前测得的数据")
+            syncReportImagesIfNeeded(promptForMissingKey = false)
         }
     }
 
-    private fun MobileNetBenchUiState.withRegeneratedMarkdown(): MobileNetBenchUiState {
-        if (!hasAnyResult) return copy(generatedMarkdown = "")
+    private fun syncReportImagesIfNeeded(promptForMissingKey: Boolean) {
+        val uploader = imageHostRepository ?: return
+        val snapshot = _uiState.value
+        if (snapshot.isRunning ||
+            !snapshot.hasAnyResult ||
+            !snapshot.includeReportImages ||
+            snapshot.markdownStyle != NetBenchMarkdownStyle.FULL_TABLE
+        ) {
+            return
+        }
+
+        val report = snapshot.toNetBenchReport()
+        val planned = cardImageGenerator.planCards(
+            report = report,
+            maskTargetIp = snapshot.maskTargetIpInReport,
+            includeClientNetwork = snapshot.includeClientNetworkInReport,
+            darkTheme = snapshot.renderDarkTheme,
+        )
+        if (planned.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    isUploadingReportImages = false,
+                    reportImagesProgressText = null,
+                    reportImagesError = null,
+                ).withRegeneratedMarkdown()
+            }
+            return
+        }
+
+        val missing = planned.filter { (_, cacheKey) ->
+            uploadedUrlCache[cacheKey].isNullOrBlank()
+        }
+        if (missing.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    isUploadingReportImages = false,
+                    reportImagesProgressText = null,
+                    reportImagesError = null,
+                ).withRegeneratedMarkdown()
+            }
+            return
+        }
+
+        val hasConfiguredKey = settingsRepository == null ||
+            settingsRepository.settings.value.nodeImageApiKey.trim().isNotEmpty()
+        if (!hasConfiguredKey) {
+            _uiState.update {
+                it.copy(
+                    isUploadingReportImages = false,
+                    reportImagesProgressText = null,
+                    showNodeImageApiKeyDialog = if (promptForMissingKey) true else it.showNodeImageApiKeyDialog,
+                    reportImagesError = if (promptForMissingKey) {
+                        null
+                    } else {
+                        "尚未配置 NodeImage 图床密钥，点击配置后自动上传配图"
+                    },
+                ).withRegeneratedMarkdown()
+            }
+            return
+        }
+
+        imageUploadJob?.cancel()
+        val maskTargetIp = snapshot.maskTargetIpInReport
+        val includeClientNet = snapshot.includeClientNetworkInReport
+        val darkTheme = snapshot.renderDarkTheme
+
+        imageUploadJob = scope.launch {
+            _uiState.update {
+                it.copy(
+                    isUploadingReportImages = true,
+                    reportImagesError = null,
+                    reportImagesProgressText = "正在生成并上传测机卡片配图 (0/${planned.size})…",
+                )
+            }
+            try {
+                var uploadedSoFar = planned.size - missing.size
+                var firstError: String? = null
+
+                for ((kind, cacheKey) in missing) {
+                    _uiState.update {
+                        it.copy(
+                            isUploadingReportImages = true,
+                            reportImagesProgressText = "正在上传「${kind.altTitle}」(${uploadedSoFar + 1}/${planned.size})…",
+                        )
+                    }
+                    val rendered = withContext(renderDispatcher) {
+                        cardImageGenerator.renderCard(
+                            kind = kind,
+                            report = report,
+                            maskTargetIp = maskTargetIp,
+                            includeClientNetwork = includeClientNet,
+                            darkTheme = darkTheme,
+                        )
+                    }
+                    if (rendered == null || rendered.pngBytes.isEmpty()) {
+                        if (firstError == null) {
+                            firstError = "生成「${kind.altTitle}」卡片图片失败"
+                        }
+                        continue
+                    }
+
+                    val uploadResult = uploader.uploadImage(
+                        bytes = rendered.pngBytes,
+                        mimeType = "image/png",
+                        fileName = rendered.fileName,
+                    )
+                    uploadResult.fold(
+                        onSuccess = { url ->
+                            uploadedUrlCache[cacheKey] = url
+                            uploadedSoFar++
+                            _uiState.update { current -> current.withRegeneratedMarkdown() }
+                        },
+                        onFailure = { err ->
+                            if (firstError == null) {
+                                firstError = err.message ?: "上传至 NodeImage 图床失败"
+                            }
+                        },
+                    )
+                }
+
+                _uiState.update { current ->
+                    current.copy(
+                        isUploadingReportImages = false,
+                        reportImagesProgressText = null,
+                        reportImagesError = firstError,
+                    ).withRegeneratedMarkdown()
+                }
+                if (firstError == null) {
+                    _snackbarChannel.trySend("已上传 ${planned.size} 张测机配图至 NodeImage 图床")
+                }
+            } catch (ce: CancellationException) {
+                _uiState.update { current ->
+                    current.copy(
+                        isUploadingReportImages = false,
+                        reportImagesProgressText = null,
+                    )
+                }
+                throw ce
+            } catch (t: Throwable) {
+                _uiState.update { current ->
+                    current.copy(
+                        isUploadingReportImages = false,
+                        reportImagesProgressText = null,
+                        reportImagesError = t.message ?: "生成或上传配图失败",
+                    ).withRegeneratedMarkdown()
+                }
+            }
+        }
+    }
+
+    private fun MobileNetBenchUiState.toNetBenchReport(): NetBenchReport {
         val effectiveClientNet = clientEgress?.activeNetworkForTest(testViaProxy) ?: clientNetwork
-        val report = NetBenchReport(
+        return NetBenchReport(
             targetInput = targetInput,
             resolvedTarget = resolvedTarget,
             tcpPort = effectiveTcpPort,
@@ -721,15 +1046,46 @@ class NetBenchSessionController(
             testedViaProxy = testViaProxy,
             proxyNetwork = clientEgress?.proxyNetwork,
         )
+    }
+
+    private fun MobileNetBenchUiState.withRegeneratedMarkdown(): MobileNetBenchUiState {
+        if (!hasAnyResult) {
+            return copy(
+                generatedMarkdown = "",
+                uploadedReportImages = NetBenchUploadedImages(),
+                plannedReportCardCount = 0,
+            )
+        }
+        val report = toNetBenchReport()
+        val planned = cardImageGenerator.planCards(
+            report = report,
+            maskTargetIp = maskTargetIpInReport,
+            includeClientNetwork = includeClientNetworkInReport,
+            darkTheme = renderDarkTheme,
+        )
+        var resolvedImages = NetBenchUploadedImages()
+        if (includeReportImages && markdownStyle == NetBenchMarkdownStyle.FULL_TABLE) {
+            for ((kind, cacheKey) in planned) {
+                val cachedUrl = uploadedUrlCache[cacheKey]
+                if (!cachedUrl.isNullOrBlank()) {
+                    resolvedImages = resolvedImages.withUrl(kind, cachedUrl)
+                }
+            }
+        }
         val md = NetBenchMarkdownFormatter.format(
             report = report,
             options = NetBenchMarkdownOptions(
                 style = markdownStyle,
                 maskTargetIp = maskTargetIpInReport,
                 includeClientNetwork = includeClientNetworkInReport,
+                uploadedImages = resolvedImages,
             ),
         )
-        return copy(generatedMarkdown = md)
+        return copy(
+            generatedMarkdown = md,
+            uploadedReportImages = resolvedImages,
+            plannedReportCardCount = planned.size,
+        )
     }
 }
 
@@ -745,6 +1101,10 @@ class MobileNetBenchViewModel(
     httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
     iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
     ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
+    imageHostRepository: ImageHostRepository? = null,
+    settingsRepository: SettingsRepository? = null,
+    cardImageGenerator: NetBenchCardImageGenerator = AndroidNetBenchCardImageGenerator,
+    renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
 ) : ViewModel() {
 
@@ -758,6 +1118,10 @@ class MobileNetBenchViewModel(
         httpLatencyRunner = httpLatencyRunner,
         iperf3ClientRunner = iperf3ClientRunner,
         ipIntelligenceClient = ipIntelligenceClient,
+        imageHostRepository = imageHostRepository,
+        settingsRepository = settingsRepository,
+        cardImageGenerator = cardImageGenerator,
+        renderDispatcher = renderDispatcher,
         initialTarget = initialTarget,
     )
 
@@ -778,6 +1142,7 @@ class MobileNetBenchViewModel(
     fun openIperf3ServerPrompt() = controller.openIperf3ServerPrompt()
     fun dismissIperf3ServerPrompt() = controller.dismissIperf3ServerPrompt()
     fun toggleTestViaProxy(useProxy: Boolean) = controller.toggleTestViaProxy(useProxy)
+    fun updateRenderDarkTheme(isDark: Boolean) = controller.updateRenderDarkTheme(isDark)
     fun refreshClientEgress() = controller.refreshClientEgress()
     fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
     fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
@@ -786,6 +1151,11 @@ class MobileNetBenchViewModel(
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) = controller.selectMarkdownStyle(style)
     fun toggleMaskTargetIp(mask: Boolean) = controller.toggleMaskTargetIp(mask)
     fun toggleIncludeClientNetwork(include: Boolean) = controller.toggleIncludeClientNetwork(include)
+    fun toggleIncludeReportImages(include: Boolean) = controller.toggleIncludeReportImages(include)
+    fun openNodeImageApiKeyDialog() = controller.openNodeImageApiKeyDialog()
+    fun dismissNodeImageApiKeyDialog() = controller.dismissNodeImageApiKeyDialog()
+    fun saveNodeImageApiKeyAndUpload(rawKey: String) = controller.saveNodeImageApiKeyAndUpload(rawKey)
+    fun retryUploadReportImages() = controller.retryUploadReportImages()
     fun applyHistoryEntry(entry: NetBenchHistoryEntry) = controller.applyHistoryEntry(entry)
     fun removeHistoryEntry(entry: NetBenchHistoryEntry) = controller.removeHistoryEntry(entry)
     fun clearHistory() = controller.clearHistory()
@@ -802,13 +1172,18 @@ class MobileNetBenchViewModel(
         fun factory(
             context: Context,
             initialTarget: String = "",
+            imageHostRepository: ImageHostRepository? = null,
+            settingsRepository: SettingsRepository? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val appContainer = (context.applicationContext as? AppContainerHost)?.container
                 val bridge = AndroidNetBenchNetworkBridge(context)
                 return MobileNetBenchViewModel(
                     historyStore = NetBenchHistoryStore.forContext(context),
                     networkBridge = bridge,
+                    imageHostRepository = imageHostRepository ?: appContainer?.imageHostRepository,
+                    settingsRepository = settingsRepository ?: appContainer?.settingsRepository,
                     initialTarget = initialTarget,
                 ) as T
             }

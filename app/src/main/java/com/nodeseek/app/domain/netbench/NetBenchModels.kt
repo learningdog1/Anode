@@ -600,6 +600,58 @@ enum class NetBenchMarkdownStyle(val label: String, val shortLabel: String) {
 }
 
 /**
+ * Identifiers for visual benchmark cards rendered and uploaded to NodeImage for
+ * embedding into [NetBenchMarkdownStyle.FULL_TABLE] reports.
+ */
+enum class NetBenchReportCardKind(
+    val fileSlug: String,
+    val altTitle: String,
+) {
+    IP_INTELLIGENCE(fileSlug = "netbench_ip_intel", altTitle = "IP 归属与原生/广播鉴定"),
+    ICMP_PING(fileSlug = "netbench_icmp_ping", altTitle = "Ping 延迟探测波形"),
+    TCP_PING(fileSlug = "netbench_tcp_ping", altTitle = "TCPing 延迟探测波形"),
+    IPERF3(fileSlug = "netbench_iperf3", altTitle = "原生 iperf3 吞吐测速"),
+}
+
+/**
+ * Uploaded NodeImage direct URLs mapped to each visual section of the Full Benchmark Report.
+ */
+data class NetBenchUploadedImages(
+    val ipIntelligenceUrl: String? = null,
+    val icmpPingUrl: String? = null,
+    val tcpPingUrl: String? = null,
+    val iperf3Url: String? = null,
+) {
+    val hasAnyUrl: Boolean
+        get() = !ipIntelligenceUrl.isNullOrBlank() ||
+            !icmpPingUrl.isNullOrBlank() ||
+            !tcpPingUrl.isNullOrBlank() ||
+            !iperf3Url.isNullOrBlank()
+
+    val uploadedCount: Int
+        get() = listOfNotNull(
+            ipIntelligenceUrl?.takeIf { it.isNotBlank() },
+            icmpPingUrl?.takeIf { it.isNotBlank() },
+            tcpPingUrl?.takeIf { it.isNotBlank() },
+            iperf3Url?.takeIf { it.isNotBlank() },
+        ).size
+
+    fun urlFor(kind: NetBenchReportCardKind): String? = when (kind) {
+        NetBenchReportCardKind.IP_INTELLIGENCE -> ipIntelligenceUrl
+        NetBenchReportCardKind.ICMP_PING -> icmpPingUrl
+        NetBenchReportCardKind.TCP_PING -> tcpPingUrl
+        NetBenchReportCardKind.IPERF3 -> iperf3Url
+    }
+
+    fun withUrl(kind: NetBenchReportCardKind, url: String?): NetBenchUploadedImages = when (kind) {
+        NetBenchReportCardKind.IP_INTELLIGENCE -> copy(ipIntelligenceUrl = url)
+        NetBenchReportCardKind.ICMP_PING -> copy(icmpPingUrl = url)
+        NetBenchReportCardKind.TCP_PING -> copy(tcpPingUrl = url)
+        NetBenchReportCardKind.IPERF3 -> copy(iperf3Url = url)
+    }
+}
+
+/**
  * Formatting options for [NetBenchMarkdownFormatter].
  */
 data class NetBenchMarkdownOptions(
@@ -607,6 +659,7 @@ data class NetBenchMarkdownOptions(
     val maskTargetIp: Boolean = true,
     val includeClientNetwork: Boolean = true,
     val timestampLabel: String? = null,
+    val uploadedImages: NetBenchUploadedImages = NetBenchUploadedImages(),
 )
 
 /**

@@ -25,6 +25,7 @@ data class NetBenchReportPreferences(
     val maskTargetIp: Boolean = true,
     val includeClientNetwork: Boolean = true,
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    val includeReportImages: Boolean = false,
 )
 
 @Serializable

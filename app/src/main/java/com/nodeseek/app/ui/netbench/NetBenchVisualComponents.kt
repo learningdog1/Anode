@@ -39,6 +39,8 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
@@ -1084,7 +1086,7 @@ private fun NetBenchLatencyResultCard(
                 label = "平均延迟",
                 value = avgDisplay,
                 valueColor = if (avgMs == null && isFinished) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(0.98f),
             )
             NetBenchTelemetryStatColumn(
                 label = "最小/最大",
@@ -1094,19 +1096,19 @@ private fun NetBenchLatencyResultCard(
                     "—"
                 },
                 valueColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1.28f),
             )
             NetBenchTelemetryStatColumn(
                 label = "抖动",
                 value = jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—",
                 valueColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(0.92f),
             )
             NetBenchTelemetryStatColumn(
                 label = "丢包率",
                 value = NetBenchMarkdownFormatter.formatPercent(lossPercent),
                 valueColor = if (hasLoss) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(0.84f),
             )
         }
 
@@ -1138,6 +1140,11 @@ private fun NetBenchTelemetryStatColumn(
     valueColor: Color,
     modifier: Modifier = Modifier,
 ) {
+    val adaptiveValueFontSize = when {
+        value.length >= 11 -> 11.5.sp
+        value.length >= 9 -> 12.2.sp
+        else -> 13.5.sp
+    }
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1146,11 +1153,12 @@ private fun NetBenchTelemetryStatColumn(
         Text(
             text = value,
             style = MaterialTheme.typography.titleSmall.copy(
-                fontSize = 13.5.sp,
+                fontSize = adaptiveValueFontSize,
                 fontWeight = FontWeight.Bold,
             ).withTabularNumbers(),
             color = valueColor,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
@@ -1158,6 +1166,7 @@ private fun NetBenchTelemetryStatColumn(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
+            softWrap = false,
         )
     }
 }
@@ -1769,9 +1778,18 @@ internal fun NetBenchMarkdownReportCard(
     selectedStyle: NetBenchMarkdownStyle,
     maskTargetIp: Boolean,
     includeClientNetwork: Boolean = true,
+    includeReportImages: Boolean = false,
+    isUploadingReportImages: Boolean = false,
+    reportImagesProgressText: String? = null,
+    reportImagesError: String? = null,
+    uploadedImageCount: Int = 0,
+    plannedImageCount: Int = 0,
     onSelectStyle: (NetBenchMarkdownStyle) -> Unit,
     onToggleMaskTargetIp: (Boolean) -> Unit,
     onToggleIncludeClientNetwork: (Boolean) -> Unit = {},
+    onToggleIncludeReportImages: ((Boolean) -> Unit)? = null,
+    onRetryUploadReportImages: (() -> Unit)? = null,
+    onConfigureNodeImageApiKey: (() -> Unit)? = null,
     onCopyMarkdown: () -> Unit,
     onInsertMarkdown: ((String) -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
@@ -1872,6 +1890,54 @@ internal fun NetBenchMarkdownReportCard(
                     onCheckedChange = onToggleIncludeClientNetwork,
                 )
             }
+
+            if (onToggleIncludeReportImages != null) {
+                PulseGradientDivider()
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                    ) {
+                        Text(
+                            text = "附带可视化卡片图 (NodeImage)",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = if (selectedStyle == NetBenchMarkdownStyle.REPLY_CARD && includeReportImages) {
+                                "仅在「完整测机报告」中嵌入横版卡片图（切换标签即可查看）"
+                            } else {
+                                "在完整报告各章节嵌入紧凑横版卡片图，直链托管于官方 NodeImage"
+                            },
+                            style = NodePulseThemeTokens.extraTypography.microLabel,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = includeReportImages,
+                        onCheckedChange = onToggleIncludeReportImages,
+                    )
+                }
+            }
+        }
+
+        if (includeReportImages && selectedStyle == NetBenchMarkdownStyle.FULL_TABLE) {
+            NetBenchReportImagesStatusBanner(
+                isUploading = isUploadingReportImages,
+                progressText = reportImagesProgressText,
+                errorMessage = reportImagesError,
+                uploadedCount = uploadedImageCount,
+                plannedCount = plannedImageCount,
+                onRetry = onRetryUploadReportImages,
+                onConfigureKey = onConfigureNodeImageApiKey,
+            )
         }
 
         if (showRawSource) {
@@ -1916,6 +1982,7 @@ internal fun NetBenchMarkdownReportCard(
         }
 
         // Action Buttons Row
+        val actionsEnabled = !isUploadingReportImages
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1924,8 +1991,12 @@ internal fun NetBenchMarkdownReportCard(
                 modifier = Modifier
                     .weight(1f)
                     .clip(PulseArchitecturalShapes.MediumBadge)
-                    .background(MaterialTheme.colorScheme.secondaryContainer)
-                    .pulseBouncyClickable(onClick = onCopyMarkdown)
+                    .background(
+                        MaterialTheme.colorScheme.secondaryContainer.copy(
+                            alpha = if (actionsEnabled) 1f else 0.58f,
+                        ),
+                    )
+                    .pulseBouncyClickable(enabled = actionsEnabled, onClick = onCopyMarkdown)
                     .padding(horizontal = 12.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
@@ -1938,7 +2009,7 @@ internal fun NetBenchMarkdownReportCard(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "复制 Markdown",
+                    text = if (isUploadingReportImages) "配图上传中…" else "复制 Markdown",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     maxLines = 1,
@@ -1952,8 +2023,15 @@ internal fun NetBenchMarkdownReportCard(
                     modifier = Modifier
                         .weight(1.15f)
                         .clip(PulseArchitecturalShapes.MediumBadge)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .pulseBouncyClickable(onClick = { onInsertMarkdown(markdown) })
+                        .background(
+                            MaterialTheme.colorScheme.primary.copy(
+                                alpha = if (actionsEnabled) 1f else 0.58f,
+                            ),
+                        )
+                        .pulseBouncyClickable(
+                            enabled = actionsEnabled,
+                            onClick = { onInsertMarkdown(markdown) },
+                        )
                         .padding(horizontal = 12.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
@@ -1966,7 +2044,7 @@ internal fun NetBenchMarkdownReportCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = insertActionLabel,
+                        text = if (isUploadingReportImages) "等待配图完成…" else insertActionLabel,
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onPrimary,
                         maxLines = 1,
@@ -1974,6 +2052,115 @@ internal fun NetBenchMarkdownReportCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NetBenchReportImagesStatusBanner(
+    isUploading: Boolean,
+    progressText: String?,
+    errorMessage: String?,
+    uploadedCount: Int,
+    plannedCount: Int,
+    onRetry: (() -> Unit)?,
+    onConfigureKey: (() -> Unit)?,
+) {
+    if (!isUploading && errorMessage.isNullOrBlank() && uploadedCount <= 0) return
+
+    val hasError = !errorMessage.isNullOrBlank()
+    val containerColor = when {
+        hasError -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+        isUploading -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+        else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.36f)
+    }
+    val borderColor = when {
+        hasError -> MaterialTheme.colorScheme.error.copy(alpha = 0.40f)
+        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(containerColor)
+            .border(0.8.dp, borderColor, PulseArchitecturalShapes.SmallChip)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        when {
+            isUploading -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 1.8.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = progressText ?: "正在生成并上传测机卡片配图…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            hasError -> {
+                Icon(
+                    imageVector = Icons.Rounded.ErrorOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = errorMessage ?: "上传失败",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (onConfigureKey != null &&
+                    (errorMessage?.contains("密钥") == true || errorMessage?.contains("API Key", ignoreCase = true) == true)
+                ) {
+                    NetBenchSelectableChip(
+                        label = "配置密钥",
+                        selected = true,
+                        icon = Icons.Rounded.Key,
+                        onClick = onConfigureKey,
+                    )
+                }
+                if (onRetry != null) {
+                    NetBenchSelectableChip(
+                        label = "重试",
+                        selected = false,
+                        icon = Icons.Rounded.Refresh,
+                        onClick = onRetry,
+                    )
+                }
+            }
+            else -> {
+                Icon(
+                    imageVector = Icons.Rounded.Image,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(15.dp),
+                )
+                val countLabel = if (plannedCount > 0) {
+                    "已生成并嵌入 $uploadedCount/$plannedCount 张 NodeImage 测机配图"
+                } else {
+                    "已嵌入 $uploadedCount 张 NodeImage 测机配图"
+                }
+                Text(
+                    text = countLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

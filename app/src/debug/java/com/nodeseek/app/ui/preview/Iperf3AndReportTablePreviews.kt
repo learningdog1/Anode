@@ -1,12 +1,17 @@
 package com.nodeseek.app.ui.preview
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.nodeseek.app.data.ssh.JSchSshTransport
@@ -31,8 +36,11 @@ import com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownOptions
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.NetBenchReport
+import com.nodeseek.app.domain.netbench.NetBenchReportCardKind
 import com.nodeseek.app.domain.netbench.ResolvedTarget
+import com.nodeseek.app.domain.netbench.TcpPingSample
 import com.nodeseek.app.domain.netbench.TcpPingSummary
+import com.nodeseek.app.ui.netbench.AndroidNetBenchCardImageGenerator
 import com.nodeseek.app.domain.ssh.Iperf3MissingProbeResult
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.LinuxDistroFamily
@@ -210,9 +218,13 @@ private fun PreviewNetBenchFullTableCardFrame(themeMode: PulseThemeMode) {
                 selectedStyle = NetBenchMarkdownStyle.FULL_TABLE,
                 maskTargetIp = true,
                 includeClientNetwork = true,
+                includeReportImages = true,
+                uploadedImageCount = 4,
+                plannedImageCount = 4,
                 onSelectStyle = {},
                 onToggleMaskTargetIp = {},
                 onToggleIncludeClientNetwork = {},
+                onToggleIncludeReportImages = {},
                 onCopyMarkdown = {},
                 onInsertMarkdown = {},
                 insertActionLabel = "一键发测评帖",
@@ -404,3 +416,121 @@ fun Preview07NetBenchIperf3PrepDialog() {
         )
     }
 }
+
+@Preview(device = "spec:width=540dp,height=980dp,dpi=320", showBackground = true)
+@Composable
+fun Preview08RenderedNodeImageCardsLight() {
+    val bitmaps = remember {
+        val target = ResolvedTarget(
+            displayHost = "hk-gia.example.net",
+            resolvedIp = "203.0.113.42",
+            ipFamily = IpFamily.IPV4,
+            dnsDurationMs = 14.2,
+        )
+        val report = NetBenchReport(
+            targetInput = "hk-gia.example.net",
+            resolvedTarget = target,
+            tcpPort = 5201,
+            clientNetwork = ClientNetworkInfo(
+                carrier = ClientCarrier.CHINA_TELECOM,
+                carrierDisplayName = "中国电信",
+                ipFamily = IpFamily.IPV4,
+                regionName = "上海",
+                maskedIp = "180.168.*.*",
+                rawIp = "180.168.12.88",
+            ),
+            icmpPingSummary = IcmpPingSummary(
+                resolvedTarget = target,
+                sent = 10,
+                received = 10,
+                lossPercent = 0.0,
+                minMs = 107.0,
+                avgMs = 127.3,
+                maxMs = 162.0,
+                jitterMdevMs = 21.4,
+                boundInterfaceName = "wlan0",
+                samples = listOf(107.0, 114.2, 108.5, 112.0, 148.6, 154.0, 162.0, 108.0, 109.5, 149.2)
+                    .mapIndexed { idx, rtt -> IcmpPingSample(idx + 1, true, rtt, ttl = 54) },
+            ),
+            tcpPingSummary = TcpPingSummary(
+                resolvedTarget = target,
+                port = 5201,
+                sent = 10,
+                received = 10,
+                lossPercent = 0.0,
+                minMs = 106.0,
+                avgMs = 150.6,
+                maxMs = 253.0,
+                jitterMdevMs = 52.5,
+                samples = listOf(115.0, 124.0, 253.0, 121.0, 178.0, 120.0, 108.0, 109.0, 106.0, 245.0)
+                    .mapIndexed { idx, rtt -> TcpPingSample(idx + 1, true, rtt) },
+            ),
+            iperfDownloadResult = Iperf3Result(
+                direction = Iperf3Direction.DOWNLOAD,
+                port = 5201,
+                resolvedTarget = target,
+                durationSec = 5.0,
+                bytesTransferred = 129_062_500L,
+                clientMbps = 206.5,
+                serverMbps = 208.2,
+                peakMbps = 224.8,
+                retransmits = 0L,
+                success = true,
+                intervals = listOf(
+                    Iperf3IntervalSample(1, 0.0, 1.0, 23_875_000L, 191.0),
+                    Iperf3IntervalSample(2, 1.0, 2.0, 26_125_000L, 209.0),
+                    Iperf3IntervalSample(3, 2.0, 3.0, 28_100_000L, 224.8),
+                    Iperf3IntervalSample(4, 3.0, 4.0, 25_625_000L, 205.0),
+                    Iperf3IntervalSample(5, 4.0, 5.0, 25_337_500L, 202.7),
+                ),
+            ),
+            ipIntelligence = IpIntelligenceReport(
+                ip = "203.0.113.42",
+                ipFamily = IpFamily.IPV4,
+                countryCode = "HK",
+                countryName = "Hong Kong",
+                regionName = "Central",
+                cityName = "Central",
+                asn = "AS4809",
+                orgName = "China Telecom CN2 / DMIT HK",
+                ispName = "DMIT",
+                usageType = IpUsageType.HOSTING_DATACENTER,
+                originType = IpOriginType.NATIVE,
+                rirCountryCode = "HK",
+                rirAuthority = "APNIC",
+                originEvidence = "RIR 注册国 HK 与 GeoIP 落地国 HK 一致，判定为香港原生 IP",
+                geoSource = "ipwho.is",
+                whoisSource = "RIPEstat",
+            ),
+        )
+        NetBenchReportCardKind.entries.mapNotNull { kind ->
+            val rendered = AndroidNetBenchCardImageGenerator.renderCard(
+                kind = kind,
+                report = report,
+                maskTargetIp = true,
+                includeClientNetwork = true,
+                darkTheme = false,
+            ) ?: return@mapNotNull null
+            BitmapFactory.decodeByteArray(rendered.pngBytes, 0, rendered.pngBytes.size)?.asImageBitmap()
+        }
+    }
+
+    PreviewPhoneFrame(themeMode = PulseThemeMode.PAPER_LIGHT) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            bitmaps.forEach { bmp ->
+                Image(
+                    bitmap = bmp,
+                    contentDescription = null,
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+

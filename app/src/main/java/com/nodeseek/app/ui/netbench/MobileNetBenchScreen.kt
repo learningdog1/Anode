@@ -75,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
@@ -82,6 +83,7 @@ import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPortPreset
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
+import com.nodeseek.app.ui.topic.NodeImageApiKeySetupDialog
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -116,16 +118,25 @@ fun MobileNetBenchScreen(
         factory = MobileNetBenchViewModel.factory(
             context = LocalContext.current,
             initialTarget = initialTarget,
+            imageHostRepository = LocalAppContainer.current.imageHostRepository,
+            settingsRepository = LocalAppContainer.current.settingsRepository,
         ),
     ),
 ) {
     val context = LocalContext.current
+    val appContainer = LocalAppContainer.current
+    val appSettings by appContainer.settingsRepository.settings.collectAsStateWithLifecycle()
+    val isDark = NodePulseThemeTokens.isDark
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uiState = previewUiState ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
+
+    LaunchedEffect(isDark) {
+        viewModel.updateRenderDarkTheme(isDark)
+    }
 
     LaunchedEffect(initialTarget) {
         if (initialTarget.isNotBlank()) {
@@ -333,9 +344,18 @@ fun MobileNetBenchScreen(
                         selectedStyle = uiState.markdownStyle,
                         maskTargetIp = uiState.maskTargetIpInReport,
                         includeClientNetwork = uiState.includeClientNetworkInReport,
+                        includeReportImages = uiState.includeReportImages,
+                        isUploadingReportImages = uiState.isUploadingReportImages,
+                        reportImagesProgressText = uiState.reportImagesProgressText,
+                        reportImagesError = uiState.reportImagesError,
+                        uploadedImageCount = uiState.uploadedReportImages.uploadedCount,
+                        plannedImageCount = uiState.plannedReportCardCount,
                         onSelectStyle = viewModel::selectMarkdownStyle,
                         onToggleMaskTargetIp = viewModel::toggleMaskTargetIp,
                         onToggleIncludeClientNetwork = viewModel::toggleIncludeClientNetwork,
+                        onToggleIncludeReportImages = viewModel::toggleIncludeReportImages,
+                        onRetryUploadReportImages = viewModel::retryUploadReportImages,
+                        onConfigureNodeImageApiKey = viewModel::openNodeImageApiKeyDialog,
                         onCopyMarkdown = {
                             val ok = copyTextToClipboard(
                                 context = context,
@@ -354,6 +374,15 @@ fun MobileNetBenchScreen(
                 }
             }
         }
+    }
+
+    if (uiState.showNodeImageApiKeyDialog) {
+        NodeImageApiKeySetupDialog(
+            initialApiKey = appSettings.nodeImageApiKey,
+            customMessage = "测机卡片配图使用官方 NodeImage 图床（api.nodeimage.com）生成直链并嵌入完整报告。请粘贴您的 X-API-Key，保存后将自动渲染并上传本次测机卡片。",
+            onSaveAndContinue = viewModel::saveNodeImageApiKeyAndUpload,
+            onDismiss = viewModel::dismissNodeImageApiKeyDialog,
+        )
     }
 
     NetBenchIperf3DialogsHost(

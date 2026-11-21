@@ -69,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
+import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
@@ -76,6 +77,7 @@ import com.nodeseek.app.domain.netbench.TcpPortPreset
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
+import com.nodeseek.app.ui.topic.NodeImageApiKeySetupDialog
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -133,6 +135,9 @@ fun NetBenchQuickBottomSheet(
     onOpenFullScreen: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val appContainer = LocalAppContainer.current
+    val appSettings by appContainer.settingsRepository.settings.collectAsStateWithLifecycle()
+    val isDark = NodePulseThemeTokens.isDark
     val isInspection = LocalInspectionMode.current
     val sheetScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -153,14 +158,20 @@ fun NetBenchQuickBottomSheet(
         if (isInspection) SystemDefaultNetworkBridge else AndroidNetBenchNetworkBridge(context)
     }
 
-    val controller = remember(historyStore, networkBridge, sheetScope) {
+    val controller = remember(historyStore, networkBridge, sheetScope, appContainer) {
         NetBenchSessionController(
             scope = sheetScope,
             historyStore = historyStore,
             networkBridge = networkBridge,
+            imageHostRepository = appContainer.imageHostRepository,
+            settingsRepository = appContainer.settingsRepository,
             initialTarget = initialTarget,
             initialMarkdownStyle = initialMarkdownStyle,
         )
+    }
+
+    LaunchedEffect(controller, isDark) {
+        controller.updateRenderDarkTheme(isDark)
     }
 
     DisposableEffect(controller) {
@@ -564,9 +575,18 @@ fun NetBenchQuickBottomSheet(
                         selectedStyle = uiState.markdownStyle,
                         maskTargetIp = uiState.maskTargetIpInReport,
                         includeClientNetwork = uiState.includeClientNetworkInReport,
+                        includeReportImages = uiState.includeReportImages,
+                        isUploadingReportImages = uiState.isUploadingReportImages,
+                        reportImagesProgressText = uiState.reportImagesProgressText,
+                        reportImagesError = uiState.reportImagesError,
+                        uploadedImageCount = uiState.uploadedReportImages.uploadedCount,
+                        plannedImageCount = uiState.plannedReportCardCount,
                         onSelectStyle = controller::selectMarkdownStyle,
                         onToggleMaskTargetIp = controller::toggleMaskTargetIp,
                         onToggleIncludeClientNetwork = controller::toggleIncludeClientNetwork,
+                        onToggleIncludeReportImages = controller::toggleIncludeReportImages,
+                        onRetryUploadReportImages = controller::retryUploadReportImages,
+                        onConfigureNodeImageApiKey = controller::openNodeImageApiKeyDialog,
                         onCopyMarkdown = {
                             val ok = copyTextToClipboard(
                                 context = context,
@@ -590,6 +610,15 @@ fun NetBenchQuickBottomSheet(
                 Spacer(modifier = Modifier.height(10.dp))
             }
         }
+    }
+
+    if (uiState.showNodeImageApiKeyDialog) {
+        NodeImageApiKeySetupDialog(
+            initialApiKey = appSettings.nodeImageApiKey,
+            customMessage = "测机卡片配图使用官方 NodeImage 图床（api.nodeimage.com）生成直链并嵌入完整报告。请粘贴您的 X-API-Key，保存后将自动渲染并上传本次测机卡片。",
+            onSaveAndContinue = controller::saveNodeImageApiKeyAndUpload,
+            onDismiss = controller::dismissNodeImageApiKeyDialog,
+        )
     }
 
     NetBenchIperf3DialogsHost(
