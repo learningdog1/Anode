@@ -280,6 +280,7 @@ fun LiteSshScreen(
                     isRunning = uiState.isRunning,
                     elapsedMillis = uiState.elapsedMillis,
                     iperf3PortLabel = uiState.iperf3ServerPortText.ifBlank { "5201" },
+                    isIperf3ServiceBusy = uiState.isIperf3ServiceBusy,
                     onSelectPreset = viewModel::selectPreset,
                     onToggleFlag = { flagId ->
                         viewModel.togglePresetFlag(uiState.selectedPreset.id, flagId)
@@ -414,7 +415,7 @@ fun LiteSshScreen(
             selectedServer = uiState.selectedServer,
             portText = uiState.iperf3ServerPortText,
             autoOpenFirewall = uiState.iperf3AutoOpenFirewall,
-            isRunning = uiState.isRunning,
+            isRunning = uiState.isIperf3ServiceBusy,
             onSelectServer = viewModel::selectServer,
             onAddServer = {
                 viewModel.dismissIperf3ServerDialog()
@@ -802,6 +803,7 @@ private fun PresetCatalogSection(
     isRunning: Boolean,
     elapsedMillis: Long,
     iperf3PortLabel: String = "5201",
+    isIperf3ServiceBusy: Boolean = false,
     onSelectPreset: (String) -> Unit,
     onToggleFlag: (String) -> Unit,
     onAddCustomPreset: () -> Unit,
@@ -836,7 +838,7 @@ private fun PresetCatalogSection(
             modifier = Modifier
                 .fillMaxWidth()
                 .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
-                .clickable(enabled = !isRunning, onClick = onOpenIperf3ServerManager)
+                .clickable(enabled = !isIperf3ServiceBusy, onClick = onOpenIperf3ServerManager)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -877,7 +879,7 @@ private fun PresetCatalogSection(
             if (selectedServer != null) {
                 OutlinedButton(
                     onClick = onQuickStopIperf3Server,
-                    enabled = !isRunning,
+                    enabled = !isIperf3ServiceBusy,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     Text(
@@ -890,7 +892,7 @@ private fun PresetCatalogSection(
             }
             FilledTonalButton(
                 onClick = onOpenIperf3ServerManager,
-                enabled = !isRunning,
+                enabled = !isIperf3ServiceBusy,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
             ) {
                 Text(

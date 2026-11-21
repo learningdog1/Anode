@@ -297,7 +297,9 @@ internal fun NetBenchIperf3DialogsHost(
             selectedServer = sshState.selectedServer,
             portText = iperfPortText.ifBlank { sshState.iperf3ServerPortText },
             autoOpenFirewall = sshState.iperf3AutoOpenFirewall,
-            isRunning = sshState.isRunning,
+            // iperf3 service commands run on an isolated SSH connection, so only gate on
+            // an in-flight iperf3 utility command, never on a running benchmark script.
+            isRunning = sshState.isIperf3ServiceBusy,
             onSelectServer = sshViewModel::selectServer,
             onAddServer = {
                 showInlineSshDialog = false

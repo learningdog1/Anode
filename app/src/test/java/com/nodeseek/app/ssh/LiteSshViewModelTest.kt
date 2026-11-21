@@ -347,5 +347,102 @@ class LiteSshViewModelTest {
         viewModel.stopIperf3Server()
         assertTrue(executedCommands.last().contains("PORT=15201"))
         assertTrue(executedCommands.last().contains("pkill"))
+
+        // iperf3 service utility runs never create local benchmark session / history records
+        assertTrue(viewModel.uiState.value.sessionRuns.isEmpty())
+        assertTrue(vault.recentRunsFlow.value.isEmpty())
+        assertFalse(viewModel.uiState.value.isIperf3ServiceBusy)
+    }
+
+    @Test
+    fun `iperf3 start and stop run concurrently with benchmark without records notifications or cancellation`() = runTest {
+        val vault = createVault()
+        vault.saveServer(
+            SshServerDraft(
+                alias = "NQ Node",
+                host = "198.51.100.90",
+                port = 22,
+                username = "root",
+                authMethod = SshAuthMethod.PASSWORD,
+                secret = "pw",
+            ),
+        )
+
+        val benchmarkGate = CompletableDeferred<Unit>()
+        val executedCommands = mutableListOf<String>()
+        val mockTransport = object : SshTransport {
+            override fun execute(request: SshConnectionRequest, command: String): Flow<SshStreamEvent> = flow {
+                executedCommands += command
+                emit(SshStreamEvent.Connected)
+                when {
+                    command.contains("已停止 VPS 上的 iperf3 服务端") -> {
+                        emit(SshStreamEvent.OutputChunk("✓ 已停止 VPS 上的 iperf3 服务端（端口 5201）\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                    command.contains(Iperf3RemoteServerCommands.MISSING_MARKER_PREFIX) -> {
+                        emit(SshStreamEvent.OutputChunk("✓ iperf3 服务端已在后台守护运行（端口 5201）\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                    else -> {
+                        emit(SshStreamEvent.OutputChunk("NodeQuality running...\n"))
+                        benchmarkGate.await()
+                        emit(SshStreamEvent.OutputChunk("NodeQuality done\n"))
+                        emit(SshStreamEvent.Completed(exitCode = 0))
+                    }
+                }
+            }
+        }
+
+        val completedNotices = mutableListOf<String>()
+        val foregroundEvents = mutableListOf<String>()
+        val foregroundController = object : com.nodeseek.app.ui.ssh.SshForegroundServiceController {
+            override fun onSessionRunning(serverAlias: String, presetName: String, statusLine: String) {
+                foregroundEvents += "running:$presetName"
+            }
+
+            override fun onSessionFinished() {
+                foregroundEvents += "finished"
+            }
+        }
+        val manager = com.nodeseek.app.ui.ssh.LiteSshSessionManager(
+            vaultRepository = vault,
+            executor = LiteSshExecutor(transport = mockTransport),
+            externalScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + testDispatcher),
+            foregroundServiceController = foregroundController,
+            onBenchmarkCompleted = { record, _ -> completedNotices += record.presetId },
+            enableElapsedTicker = false,
+        )
+        val viewModel = LiteSshViewModel(sessionManager = manager, ownsSessionManagerScope = true)
+
+        // Benchmark script is running (e.g. NodeQuality)
+        viewModel.runSelectedPreset()
+        assertTrue(viewModel.uiState.value.isRunning)
+        val benchmarkPresetId = viewModel.uiState.value.activePresetId
+        foregroundEvents.clear()
+
+        // Start + stop iperf3 while the benchmark keeps running
+        viewModel.startIperf3Server(portOverride = 5201)
+        viewModel.stopIperf3Server(portOverride = 5201)
+
+        val midState = viewModel.uiState.value
+        assertTrue("benchmark must not be cancelled", midState.isRunning)
+        assertEquals(benchmarkPresetId, midState.activePresetId)
+        assertTrue(midState.displayedConsoleOutput.contains("NodeQuality running..."))
+        assertFalse(midState.displayedConsoleOutput.contains("iperf3"))
+        assertTrue(midState.sessionRuns.isEmpty())
+        assertTrue(vault.recentRunsFlow.value.isEmpty())
+        assertTrue(completedNotices.isEmpty())
+        assertTrue("iperf3 toggles must not touch the foreground notification", foregroundEvents.isEmpty())
+        assertFalse(midState.isIperf3ServiceBusy)
+        assertEquals(3, executedCommands.size)
+
+        // Benchmark finishes normally: exactly one record + one completion notice, for the benchmark only
+        benchmarkGate.complete(Unit)
+        val finalState = viewModel.uiState.value
+        assertFalse(finalState.isRunning)
+        assertEquals(1, finalState.sessionRuns.size)
+        assertEquals(benchmarkPresetId, finalState.sessionRuns.single().presetId)
+        assertEquals(1, vault.recentRunsFlow.value.size)
+        assertEquals(listOf(benchmarkPresetId), completedNotices)
     }
 }
