@@ -943,7 +943,7 @@ private fun StandaloneHttpLatencyCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
         } else {
-            NetBenchErrorCallout(message = result.errorMessage ?: "HTTP 探测失败")
+            NetBenchErrorCallout(message = result.localDiagnosticMessage ?: "HTTP 探测失败")
         }
     }
 }

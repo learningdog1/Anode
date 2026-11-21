@@ -235,22 +235,124 @@ object NetBenchTargetParser {
     }
 
     /**
-     * Optionally masks the trailing host segment of a target VPS IP when the user enables
-     * "隐藏目标 IP 末段" in exported Markdown reports.
+     * Optionally masks the host portion of a target VPS IP when the user enables
+     * "隐藏目标 IP 末段" in exported Markdown reports and rendered card images.
+     *
+     * - IPv4 (`203.0.113.42` -> `203.0.113.*`)
+     * - IPv4-mapped IPv6 (`::ffff:203.0.113.42` -> `::ffff:203.0.113.*`)
+     * - IPv6 (`2001:db8:85a3::8a2e:370:7334` / `2001:db8:0:0:0:0:0:1` -> `2001:db8:85a3::****` / `2001:db8::****`)
      */
     fun maskTargetIpLastSegment(ip: String): String {
-        val clean = ip.trim()
+        val clean = stripIpv6Zone(ip.trim().removePrefix("[").removeSuffix("]"))
         return when (detectIpFamily(clean)) {
             IpFamily.IPV4 -> {
                 val parts = clean.split('.')
                 if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}.*" else clean
             }
             IpFamily.IPV6 -> {
+                val hextets = parseIpv6Hextets(clean)
+                if (hextets != null) {
+                    val isV4Mapped = hextets[0] == 0 &&
+                        hextets[1] == 0 &&
+                        hextets[2] == 0 &&
+                        hextets[3] == 0 &&
+                        hextets[4] == 0 &&
+                        hextets[5] == 0xFFFF
+                    if (isV4Mapped) {
+                        val a = (hextets[6] ushr 8) and 0xFF
+                        val b = hextets[6] and 0xFF
+                        val c = (hextets[7] ushr 8) and 0xFF
+                        return "::ffff:$a.$b.$c.*"
+                    }
+                    // Retain up to the first 3 routing-prefix hextets (at most /48, trimming trailing zero groups)
+                    var prefixEnd = 3
+                    while (prefixEnd > 0 && hextets[prefixEnd - 1] == 0) {
+                        prefixEnd--
+                    }
+                    return if (prefixEnd == 0) {
+                        "::****"
+                    } else {
+                        val prefix = (0 until prefixEnd).joinToString(":") { idx ->
+                            hextets[idx].toString(16)
+                        }
+                        "$prefix::****"
+                    }
+                }
                 val lastColon = clean.lastIndexOf(':')
                 if (lastColon >= 0) "${clean.substring(0, lastColon + 1)}****" else clean
             }
             IpFamily.UNKNOWN -> clean
         }
+    }
+
+    /**
+     * Returns all canonical textual representations of [ip] (for IPv6: input literal, RFC 5952
+     * compressed, Java `Inet6Address.getHostAddress()` short uncompressed, and full zero-padded
+     * uncompressed; for IPv4: clean dotted quad) to guarantee complete scrubbing across libraries.
+     */
+    fun allCanonicalIpForms(ip: String): Set<String> {
+        val clean = stripIpv6Zone(ip.trim().removePrefix("[").removeSuffix("]"))
+        if (clean.isEmpty()) return emptySet()
+        return when (detectIpFamily(clean)) {
+            IpFamily.IPV4 -> setOf(clean)
+            IpFamily.IPV6 -> {
+                val hextets = parseIpv6Hextets(clean) ?: return setOf(clean)
+                buildSet {
+                    add(clean)
+                    add(formatCanonicalIpv6Compressed(hextets))
+                    add(hextets.joinToString(":") { it.toString(16) })
+                    add(hextets.joinToString(":") { it.toString(16).padStart(4, '0') })
+                    val isV4Mapped = hextets[0] == 0 &&
+                        hextets[1] == 0 &&
+                        hextets[2] == 0 &&
+                        hextets[3] == 0 &&
+                        hextets[4] == 0 &&
+                        hextets[5] == 0xFFFF
+                    if (isV4Mapped) {
+                        val v4 = "${(hextets[6] ushr 8) and 0xFF}.${hextets[6] and 0xFF}." +
+                            "${(hextets[7] ushr 8) and 0xFF}.${hextets[7] and 0xFF}"
+                        add(v4)
+                        add("::ffff:$v4")
+                        add("0:0:0:0:0:ffff:$v4")
+                    }
+                }
+            }
+            IpFamily.UNKNOWN -> emptySet()
+        }
+    }
+
+    /**
+     * Formats 8 IPv6 16-bit hextets according to RFC 5952 canonical compression rules.
+     */
+    internal fun formatCanonicalIpv6Compressed(hextets: IntArray): String {
+        require(hextets.size == 8) { "Expected 8 IPv6 hextets" }
+        var bestStart = -1
+        var bestLen = 0
+        var curStart = -1
+        var curLen = 0
+        for (i in 0..7) {
+            if (hextets[i] == 0) {
+                if (curStart < 0) {
+                    curStart = i
+                    curLen = 1
+                } else {
+                    curLen++
+                }
+                if (curLen >= 2 && curLen > bestLen) {
+                    bestStart = curStart
+                    bestLen = curLen
+                }
+            } else {
+                curStart = -1
+                curLen = 0
+            }
+        }
+        if (bestStart < 0) {
+            return hextets.joinToString(":") { it.toString(16) }
+        }
+        val left = (0 until bestStart).joinToString(":") { hextets[it].toString(16) }
+        val right = ((bestStart + bestLen)..7).joinToString(":") { hextets[it].toString(16) }
+        return "$left::$right"
     }
 
     /**

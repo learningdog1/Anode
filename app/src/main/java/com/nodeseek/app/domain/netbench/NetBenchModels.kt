@@ -51,7 +51,8 @@ data class ResolvedTarget(
     val dnsDurationMs: Double = 0.0,
 ) {
     val isDomain: Boolean
-        get() = !displayHost.equals(resolvedIp, ignoreCase = true)
+        get() = !displayHost.equals(resolvedIp, ignoreCase = true) &&
+            NetBenchTargetParser.detectIpFamily(displayHost) == IpFamily.UNKNOWN
 
     fun formatAddressWithPort(port: Int, maskedIp: String? = null): String {
         val ip = maskedIp ?: resolvedIp
@@ -209,7 +210,33 @@ data class TcpPingConfig(
 }
 
 /**
+ * Standardized public-safe Chinese error categories for NetBench probes.
+ *
+ * SECURITY / PRIVACY: Public reports (Markdown and uploaded NodeImage PNG cards) MUST display
+ * [publicLabel] rather than raw Java/OkHttp socket exception messages, which frequently embed
+ * target `host/ip:port` or local socket endpoints.
+ */
+@Serializable
+enum class NetBenchErrorCategory(val publicLabel: String) {
+    INVALID_TARGET("目标格式无效"),
+    DNS_FAILED("DNS 解析失败"),
+    CONNECTION_REFUSED("连接被拒绝"),
+    CONNECTION_TIMEOUT("连接超时"),
+    TLS_HANDSHAKE_FAILED("TLS 握手失败"),
+    NETWORK_UNREACHABLE("网络不可达"),
+    CONNECTION_RESET("连接已重置"),
+    VPN_OR_PERMISSION_RESTRICTED("网络权限受限"),
+    SERVER_BUSY("服务端正忙"),
+    PROTOCOL_OR_SERVER_ERROR("协议或服务端异常"),
+    SERVICE_UNAVAILABLE("查询服务暂不可用"),
+    REQUEST_FAILED("请求失败"),
+}
+
+/**
  * Result of a single TCPing probe sequence.
+ *
+ * [errorMessage] / [errorCategory] hold public-safe standardized error labels, while
+ * [rawDiagnostic] is strictly for local-only inspection and MUST NEVER be exported.
  */
 data class TcpPingSample(
     val seq: Int,
@@ -217,6 +244,8 @@ data class TcpPingSample(
     val rttMs: Double? = null,
     val errorMessage: String? = null,
     val timestampEpochMs: Long = System.currentTimeMillis(),
+    val errorCategory: NetBenchErrorCategory? = null,
+    val rawDiagnostic: String? = null,
 )
 
 /**
@@ -234,6 +263,8 @@ data class TcpPingSummary(
     val jitterMdevMs: Double?,
     val samples: List<TcpPingSample> = emptyList(),
     val errorMessage: String? = null,
+    val errorCategory: NetBenchErrorCategory? = null,
+    val rawDiagnostic: String? = null,
 ) {
     val lost: Int get() = (sent - received).coerceAtLeast(0)
     val hasValidLatency: Boolean get() = received > 0 && avgMs != null
@@ -251,6 +282,8 @@ data class TcpPingProgress(
     val summary: TcpPingSummary,
     val isFinished: Boolean,
     val errorMessage: String? = null,
+    val errorCategory: NetBenchErrorCategory? = null,
+    val rawDiagnostic: String? = null,
 ) {
     val completedFraction: Float
         get() = if (totalPlanned <= 0) 0f else (samples.size.toFloat() / totalPlanned.toFloat()).coerceIn(0f, 1f)
@@ -258,6 +291,11 @@ data class TcpPingProgress(
 
 /**
  * Result of an optional HTTP/HTTPS latency probe (DNS + TCP + TLS + TTFB).
+ *
+ * SECURITY / PRIVACY:
+ * - [errorCategory] and [errorMessage] carry clean standardized Chinese categories safe for public display.
+ * - [rawDiagnostic] preserves the underlying OkHttp/socket exception detail strictly for local-only UI inspection
+ *   and MUST NEVER be written into Markdown reports or uploaded card images.
  */
 data class HttpLatencyResult(
     val url: String,
@@ -268,7 +306,24 @@ data class HttpLatencyResult(
     val protocol: String? = null,
     val success: Boolean = false,
     val errorMessage: String? = null,
-)
+    val errorCategory: NetBenchErrorCategory? = null,
+    val rawDiagnostic: String? = null,
+) {
+    val publicErrorLabel: String?
+        get() = if (success) null else (errorCategory?.publicLabel ?: errorMessage)
+
+    val localDiagnosticMessage: String?
+        get() {
+            if (success) return null
+            val primary = errorCategory?.publicLabel ?: errorMessage
+            val raw = rawDiagnostic?.trim()?.takeIf { it.isNotEmpty() }
+            return when {
+                primary.isNullOrBlank() -> raw
+                raw == null || raw.equals(primary, ignoreCase = true) -> primary
+                else -> "$primary（$raw）"
+            }
+        }
+}
 
 /**
  * Single transfer direction for iperf3 TCP protocol.

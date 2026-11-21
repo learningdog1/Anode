@@ -11,22 +11,23 @@ import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
-import com.nodeseek.app.domain.netbench.EgressRouteKind
-import com.nodeseek.app.domain.netbench.HttpLatencyResult
-import com.nodeseek.app.domain.netbench.IcmpPingSummary
-import com.nodeseek.app.domain.netbench.IpClassificationEngine
-import com.nodeseek.app.domain.netbench.IpFamily
-import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
 import com.nodeseek.app.domain.netbench.Iperf3Direction
 import com.nodeseek.app.domain.netbench.Iperf3IntervalSample
-import com.nodeseek.app.domain.netbench.Iperf3Result
+import com.nodeseek.app.domain.netbench.NetBenchErrorCategory
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownFormatter
 import com.nodeseek.app.domain.netbench.NetBenchReport
 import com.nodeseek.app.domain.netbench.NetBenchReportCardKind
+import com.nodeseek.app.domain.netbench.NetBenchReportSanitizer
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
-import com.nodeseek.app.domain.netbench.TcpPingSummary
+import com.nodeseek.app.domain.netbench.SanitizedHttpProbePresentation
+import com.nodeseek.app.domain.netbench.SanitizedIcmpPingPresentation
+import com.nodeseek.app.domain.netbench.SanitizedIpIntelPresentation
+import com.nodeseek.app.domain.netbench.SanitizedIperf3Presentation
+import com.nodeseek.app.domain.netbench.SanitizedNetBenchReport
+import com.nodeseek.app.domain.netbench.SanitizedPingSample
+import com.nodeseek.app.domain.netbench.SanitizedTcpPingPresentation
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Locale
@@ -47,6 +48,178 @@ data class RenderedNetBenchCardImage(
     val heightPx: Int,
     val cacheKey: String,
 )
+
+/**
+ * Sanitized, inspectable presentation model for each rendered NodeImage card kind.
+ * Built exclusively from [SanitizedNetBenchReport] so Markdown reports and PNG card images
+ * share a single privacy-scrubbed data source.
+ */
+sealed class NetBenchCardPresentationModel {
+    abstract val kind: NetBenchReportCardKind
+    abstract val title: String
+    abstract val subtitle: String
+    abstract val headerPillText: String
+
+    abstract fun fingerprintPayload(darkTheme: Boolean): String
+    abstract fun allDisplayTexts(): List<String>
+}
+
+data class IpIntelligenceCardModel(
+    override val title: String,
+    override val subtitle: String,
+    override val headerPillText: String,
+    val originType: IpOriginType,
+    val evidenceText: String,
+    val pills: List<Pair<String, Boolean>>,
+    val orgLineText: String?,
+    val sourceSummaryText: String?,
+    val clientFooterText: String?,
+) : NetBenchCardPresentationModel() {
+    override val kind: NetBenchReportCardKind = NetBenchReportCardKind.IP_INTELLIGENCE
+
+    override fun fingerprintPayload(darkTheme: Boolean): String = buildString {
+        append("v2|IP_INTEL|dark=").append(darkTheme)
+        append("|sub=").append(subtitle)
+        append("|origin=").append(originType.name)
+        append("|pill=").append(headerPillText)
+        append("|ev=").append(evidenceText)
+        append("|pills=").append(pills.joinToString(";") { it.first })
+        append("|org=").append(orgLineText.orEmpty())
+        append("|src=").append(sourceSummaryText.orEmpty())
+        append("|client=").append(clientFooterText.orEmpty())
+    }
+
+    override fun allDisplayTexts(): List<String> = buildList {
+        add(title)
+        add(subtitle)
+        add(headerPillText)
+        add(evidenceText)
+        pills.forEach { add(it.first) }
+        orgLineText?.takeIf { it.isNotBlank() }?.let(::add)
+        sourceSummaryText?.takeIf { it.isNotBlank() }?.let(::add)
+        clientFooterText?.takeIf { it.isNotBlank() }?.let(::add)
+    }
+}
+
+data class LatencyCardStatCell(
+    val label: String,
+    val value: String,
+    val isErrorAccent: Boolean,
+)
+
+data class LatencyCardModel(
+    override val kind: NetBenchReportCardKind,
+    override val title: String,
+    override val subtitle: String,
+    override val headerPillText: String,
+    val hasLoss: Boolean,
+    val sent: Int,
+    val avgMs: Double?,
+    val stats: List<LatencyCardStatCell>,
+    val samples: List<SanitizedPingSample>,
+    val scalePeakMs: Double,
+    val waveformLeftLabel: String?,
+    val waveformRightLabel: String?,
+    val httpFooterTitle: String?,
+    val httpFooterValueText: String?,
+    val httpFooterIsError: Boolean,
+) : NetBenchCardPresentationModel() {
+
+    override fun fingerprintPayload(darkTheme: Boolean): String = buildString {
+        append("v2|").append(kind.name).append("|dark=").append(darkTheme)
+        append("|sub=").append(subtitle)
+        append("|pill=").append(headerPillText)
+        append("|stats=").append(stats.joinToString(";") { "${it.label}=${it.value}" })
+        append("|samples=")
+        samples.forEach { s ->
+            append(s.seq).append(':').append(s.success).append(':').append(s.rttMs).append(';')
+        }
+        if (httpFooterTitle != null || httpFooterValueText != null) {
+            append("|http=").append(httpFooterIsError).append(':').append(httpFooterValueText.orEmpty())
+        }
+    }
+
+    override fun allDisplayTexts(): List<String> = buildList {
+        add(title)
+        add(subtitle)
+        add(headerPillText)
+        stats.forEach {
+            add(it.value)
+            add(it.label)
+        }
+        waveformLeftLabel?.takeIf { it.isNotBlank() }?.let(::add)
+        waveformRightLabel?.takeIf { it.isNotBlank() }?.let(::add)
+        httpFooterTitle?.takeIf { it.isNotBlank() }?.let(::add)
+        httpFooterValueText?.takeIf { it.isNotBlank() }?.let(::add)
+    }
+}
+
+data class Iperf3IntervalRowModel(
+    val timeLabel: String,
+    val bytesText: String,
+    val rateText: String,
+    val bitrateMbps: Double,
+)
+
+data class Iperf3DirectionColumnModel(
+    val direction: Iperf3Direction,
+    val directionTitle: String,
+    val effectiveMbps: Double,
+    val gaugeValueText: String,
+    val gaugeUnitLabel: String,
+    val transferredText: String,
+    val peakText: String,
+    val intervalHeaderTitle: String,
+    val intervalMetaText: String,
+    val maxScaleMbps: Double,
+    val intervalRows: List<Iperf3IntervalRowModel>,
+)
+
+data class Iperf3CardModel(
+    override val title: String,
+    override val subtitle: String,
+    override val headerPillText: String,
+    val isDual: Boolean,
+    val columns: List<Iperf3DirectionColumnModel>,
+) : NetBenchCardPresentationModel() {
+    override val kind: NetBenchReportCardKind = NetBenchReportCardKind.IPERF3
+
+    override fun fingerprintPayload(darkTheme: Boolean): String = buildString {
+        append("v2|IPERF3|dark=").append(darkTheme)
+        append("|sub=").append(subtitle)
+        append("|pill=").append(headerPillText)
+        columns.forEach { col ->
+            append("|dir=").append(col.direction.name)
+            append(",val=").append(col.gaugeValueText).append(col.gaugeUnitLabel)
+            append(",tx=").append(col.transferredText)
+            append(",pk=").append(col.peakText)
+            append(",meta=").append(col.intervalMetaText)
+            col.intervalRows.forEach { iv ->
+                append('[').append(iv.timeLabel).append(':').append(iv.rateText).append(':').append(iv.bytesText).append(']')
+            }
+        }
+    }
+
+    override fun allDisplayTexts(): List<String> = buildList {
+        add(title)
+        add(subtitle)
+        add(headerPillText)
+        columns.forEach { col ->
+            add(col.directionTitle)
+            add(col.gaugeValueText)
+            add(col.gaugeUnitLabel)
+            add(col.transferredText)
+            add(col.peakText)
+            add(col.intervalHeaderTitle)
+            col.intervalMetaText.takeIf { it.isNotBlank() }?.let(::add)
+            col.intervalRows.forEach { row ->
+                add(row.timeLabel)
+                if (!isDual) add(row.bytesText)
+                add(row.rateText)
+            }
+        }
+    }
+}
 
 /**
  * Abstraction for planning and rendering forum-proportioned benchmark report card images.
@@ -75,9 +248,12 @@ interface NetBenchCardImageGenerator {
  * horizontal forum card proportions (`~2.0:1` to `3.1:1`, zero text truncation, transparent outer corners).
  *
  * SECURITY / PRIVACY:
+ * - Consumes ONLY [SanitizedNetBenchReport] produced by [NetBenchReportSanitizer].
  * - Local client raw/masked egress IPs are NEVER drawn onto any exported image.
- * - When [maskTargetIp] is enabled, target IP last segment and benchmark ports are masked identically
- *   to [NetBenchMarkdownFormatter].
+ * - Probe failures render standardized Chinese [NetBenchErrorCategory] labels rather than raw
+ *   OkHttp/socket exception strings.
+ * - When [maskTargetIp] is enabled, target IPv4/IPv6 addresses, PTR hostnames, and benchmark ports
+ *   are masked identically to [NetBenchMarkdownFormatter].
  */
 object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
 
@@ -94,103 +270,14 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         includeClientNetwork: Boolean,
         darkTheme: Boolean,
     ): List<Pair<NetBenchReportCardKind, String>> {
-        val planned = ArrayList<Pair<NetBenchReportCardKind, String>>(4)
-
-        report.ipIntelligence?.let { intel ->
-            val clientFooter = if (includeClientNetwork) buildSafeClientFooterText(report) else null
-            val targetIpShown = formatDisplayIp(intel.ip, maskTargetIp)
-            val rawKey = buildString {
-                append("v1|IP_INTEL|dark=").append(darkTheme)
-                append("|ip=").append(targetIpShown)
-                append("|fam=").append(intel.ipFamily.name)
-                append("|cc=").append(intel.countryCode.orEmpty())
-                append("|cn=").append(intel.countryName.orEmpty())
-                append("|rn=").append(intel.regionName.orEmpty())
-                append("|city=").append(intel.cityName.orEmpty())
-                append("|asn=").append(intel.asn.orEmpty())
-                append("|org=").append(intel.orgName.orEmpty())
-                append("|isp=").append(intel.ispName.orEmpty())
-                append("|usage=").append(intel.usageType.name)
-                append("|origin=").append(intel.originType.name)
-                append("|ev=").append(scrubTargetIpInText(intel.originEvidence, report, maskTargetIp))
-                append("|geo=").append(intel.geoSource.orEmpty())
-                append("|whois=").append(intel.whoisSource.orEmpty())
-                append("|rir=").append(intel.rirAuthority.orEmpty())
-                append("|err=").append(intel.errorMessage.orEmpty())
-                append("|client=").append(clientFooter.orEmpty())
-            }
-            planned += NetBenchReportCardKind.IP_INTELLIGENCE to sha256Short(rawKey)
+        val sanitized = NetBenchReportSanitizer.sanitize(
+            report = report,
+            maskTargetIp = maskTargetIp,
+            includeClientNetwork = includeClientNetwork,
+        )
+        return buildAllCardPresentations(sanitized).map { model ->
+            model.kind to sha256Short(model.fingerprintPayload(darkTheme))
         }
-
-        report.icmpPingSummary?.takeIf { it.sent > 0 }?.let { ping ->
-            val rawKey = buildString {
-                append("v1|ICMP_PING|dark=").append(darkTheme)
-                append("|sent=").append(ping.sent)
-                append("|recv=").append(ping.received)
-                append("|loss=").append(ping.lossPercent)
-                append("|avg=").append(ping.avgMs)
-                append("|min=").append(ping.minMs)
-                append("|max=").append(ping.maxMs)
-                append("|jit=").append(ping.jitterMdevMs)
-                append("|iface=").append(ping.boundInterfaceName.orEmpty())
-                append("|samples=")
-                ping.samples.forEach { s ->
-                    append(s.seq).append(':').append(s.success).append(':').append(s.rttMs).append(';')
-                }
-            }
-            planned += NetBenchReportCardKind.ICMP_PING to sha256Short(rawKey)
-        }
-
-        report.tcpPingSummary?.takeIf { it.sent > 0 }?.let { tcp ->
-            val http = report.httpLatencyResult
-            val rawKey = buildString {
-                append("v1|TCP_PING|dark=").append(darkTheme)
-                append("|port=").append(if (maskTargetIp) "masked" else tcp.port.toString())
-                append("|sent=").append(tcp.sent)
-                append("|recv=").append(tcp.received)
-                append("|loss=").append(tcp.lossPercent)
-                append("|avg=").append(tcp.avgMs)
-                append("|min=").append(tcp.minMs)
-                append("|max=").append(tcp.maxMs)
-                append("|jit=").append(tcp.jitterMdevMs)
-                append("|samples=")
-                tcp.samples.forEach { s ->
-                    append(s.seq).append(':').append(s.success).append(':').append(s.rttMs).append(';')
-                }
-                if (http != null) {
-                    append("|http=").append(http.success).append(':').append(http.statusCode)
-                        .append(':').append(http.totalMs).append(':').append(http.tlsHandshakeMs)
-                        .append(':').append(http.ttfbMs)
-                }
-            }
-            planned += NetBenchReportCardKind.TCP_PING to sha256Short(rawKey)
-        }
-
-        val succeededIperf = listOfNotNull(report.iperfDownloadResult, report.iperfUploadResult)
-            .filter { it.success }
-        if (succeededIperf.isNotEmpty()) {
-            val rawKey = buildString {
-                append("v1|IPERF3|dark=").append(darkTheme)
-                append("|mask=").append(maskTargetIp)
-                succeededIperf.forEach { res ->
-                    append("|dir=").append(res.direction.name)
-                    append(",port=").append(if (maskTargetIp) "masked" else res.port.toString())
-                    append(",p=").append(res.parallelStreams)
-                    append(",bytes=").append(res.bytesTransferred)
-                    append(",avg=").append(res.effectiveMbps)
-                    append(",peak=").append(res.maxIntervalMbps)
-                    append(",srv=").append(res.serverMbps)
-                    append(",retr=").append(res.retransmits)
-                    res.intervals.forEach { iv ->
-                        append('[').append(iv.index).append(':').append(iv.bitrateMbps)
-                            .append(':').append(iv.bytesTransferred).append(']')
-                    }
-                }
-            }
-            planned += NetBenchReportCardKind.IPERF3 to sha256Short(rawKey)
-        }
-
-        return planned
     }
 
     override fun renderCard(
@@ -200,50 +287,19 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         includeClientNetwork: Boolean,
         darkTheme: Boolean,
     ): RenderedNetBenchCardImage? {
-        val plannedKey = planCards(
+        val sanitized = NetBenchReportSanitizer.sanitize(
             report = report,
             maskTargetIp = maskTargetIp,
             includeClientNetwork = includeClientNetwork,
-            darkTheme = darkTheme,
-        ).firstOrNull { it.first == kind }?.second ?: return null
-
+        )
+        val model = buildCardPresentation(kind, sanitized) ?: return null
+        val plannedKey = sha256Short(model.fingerprintPayload(darkTheme))
         val palette = if (darkTheme) CardPalette.Dark else CardPalette.Light
-        val bitmap = when (kind) {
-            NetBenchReportCardKind.IP_INTELLIGENCE -> {
-                val intel = report.ipIntelligence ?: return null
-                val clientFooter = if (includeClientNetwork) buildSafeClientFooterText(report) else null
-                renderIpIntelligenceBitmap(
-                    intel = intel,
-                    report = report,
-                    maskTargetIp = maskTargetIp,
-                    clientFooter = clientFooter,
-                    palette = palette,
-                )
-            }
-            NetBenchReportCardKind.ICMP_PING -> {
-                val ping = report.icmpPingSummary?.takeIf { it.sent > 0 } ?: return null
-                renderIcmpPingBitmap(ping = ping, palette = palette)
-            }
-            NetBenchReportCardKind.TCP_PING -> {
-                val tcp = report.tcpPingSummary?.takeIf { it.sent > 0 } ?: return null
-                renderTcpPingBitmap(
-                    tcp = tcp,
-                    httpResult = report.httpLatencyResult,
-                    maskTargetIp = maskTargetIp,
-                    palette = palette,
-                )
-            }
-            NetBenchReportCardKind.IPERF3 -> {
-                val succeeded = listOfNotNull(report.iperfDownloadResult, report.iperfUploadResult)
-                    .filter { it.success }
-                if (succeeded.isEmpty()) return null
-                renderIperf3Bitmap(
-                    results = succeeded,
-                    maskTargetIp = maskTargetIp,
-                    palette = palette,
-                )
-            }
-        } ?: return null
+
+        val textScrubber: (String) -> String = { text ->
+            NetBenchReportSanitizer.scrubPublicText(text, report, maskTargetIp)
+        }
+        val bitmap = renderModelToBitmap(model, palette, textScrubber) ?: return null
 
         return try {
             val stream = ByteArrayOutputStream(32_768)
@@ -265,194 +321,128 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         }
     }
 
-    // ── Card 1: IP Intelligence & Native / Broadcast Classifier ──────────────────────────────
+    /**
+     * Builds all applicable sanitized card presentation models from [sanitized].
+     */
+    fun buildAllCardPresentations(sanitized: SanitizedNetBenchReport): List<NetBenchCardPresentationModel> =
+        NetBenchReportCardKind.entries.mapNotNull { kind ->
+            buildCardPresentation(kind, sanitized)
+        }
 
-    private fun renderIpIntelligenceBitmap(
-        intel: IpIntelligenceReport,
+    fun buildAllCardPresentations(
         report: NetBenchReport,
         maskTargetIp: Boolean,
-        clientFooter: String?,
-        palette: CardPalette,
-    ): Bitmap? {
+        includeClientNetwork: Boolean,
+    ): List<NetBenchCardPresentationModel> = buildAllCardPresentations(
+        NetBenchReportSanitizer.sanitize(
+            report = report,
+            maskTargetIp = maskTargetIp,
+            includeClientNetwork = includeClientNetwork,
+        ),
+    )
+
+    fun buildCardPresentation(
+        kind: NetBenchReportCardKind,
+        sanitized: SanitizedNetBenchReport,
+    ): NetBenchCardPresentationModel? {
+        return when (kind) {
+            NetBenchReportCardKind.IP_INTELLIGENCE -> {
+                val intel = sanitized.ipIntelligence ?: return null
+                buildIpIntelligenceCardModel(intel, sanitized.clientEnv?.cardFooterText)
+            }
+            NetBenchReportCardKind.ICMP_PING -> {
+                val ping = sanitized.icmpPing?.takeIf { it.sent > 0 } ?: return null
+                buildIcmpPingCardModel(ping)
+            }
+            NetBenchReportCardKind.TCP_PING -> {
+                val tcp = sanitized.tcpPing?.takeIf { it.sent > 0 } ?: return null
+                buildTcpPingCardModel(tcp, sanitized.httpProbe)
+            }
+            NetBenchReportCardKind.IPERF3 -> {
+                val succeeded = listOfNotNull(sanitized.iperfDownload, sanitized.iperfUpload)
+                    .filter { it.success }
+                if (succeeded.isEmpty()) return null
+                buildIperf3CardModel(succeeded)
+            }
+        }
+    }
+
+    /**
+     * Executes the exact Canvas layout & text-drawing pipeline for [kind] against a recording
+     * text sink, returning every text element drawn onto the card (usable in plain JVM unit tests).
+     */
+    internal fun extractRenderedCardTexts(
+        kind: NetBenchReportCardKind,
+        report: NetBenchReport,
+        maskTargetIp: Boolean,
+        includeClientNetwork: Boolean,
+        darkTheme: Boolean = false,
+    ): List<String> {
+        val sanitized = NetBenchReportSanitizer.sanitize(
+            report = report,
+            maskTargetIp = maskTargetIp,
+            includeClientNetwork = includeClientNetwork,
+        )
+        val model = buildCardPresentation(kind, sanitized) ?: return emptyList()
+        val palette = if (darkTheme) CardPalette.Dark else CardPalette.Light
+        val recorded = mutableListOf<String>()
+        val textScrubber: (String) -> String = { text ->
+            NetBenchReportSanitizer.scrubPublicText(text, report, maskTargetIp)
+        }
+        val contentLeft = OUTER_INSET_DP + CARD_PAD_H_DP
+        val contentTop = OUTER_INSET_DP + CARD_PAD_V_DP
+        val contentWidth = LOGICAL_WIDTH_DP - (OUTER_INSET_DP + CARD_PAD_H_DP) * 2f
+        drawModelContent(
+            canvas = Canvas(),
+            model = model,
+            palette = palette,
+            contentLeft = contentLeft,
+            contentTop = contentTop,
+            contentWidth = contentWidth,
+            textScrubber = textScrubber,
+            recordedTexts = recorded,
+        )
+        return recorded
+    }
+
+    // ── Sanitized Card Presentation Builders ─────────────────────────────────────────────────
+
+    private fun buildIpIntelligenceCardModel(
+        intel: SanitizedIpIntelPresentation,
+        clientFooterText: String?,
+    ): IpIntelligenceCardModel {
         val orgLabel = (intel.orgName?.takeIf { it.isNotBlank() } ?: intel.ispName)?.trim()
         val sourceSummary = listOfNotNull(
             intel.geoSource?.takeIf { it.isNotBlank() }?.let { "Geo: $it" },
             intel.whoisSource?.takeIf { it.isNotBlank() }?.let { "WHOIS: $it" },
             intel.rirAuthority?.takeIf { it.isNotBlank() }?.let { "RIR: $it" },
         ).joinToString(" · ")
-        val hasMetaLine = !orgLabel.isNullOrBlank() || sourceSummary.isNotEmpty()
-        val hasFooter = !clientFooter.isNullOrBlank()
-
-        var logicalHeight = 136f
-        if (hasMetaLine) logicalHeight += 20f
-        if (hasFooter) logicalHeight += 28f
-
-        return createCardBitmap(logicalHeight, palette) { canvas, contentLeft, contentTop, contentWidth ->
-            var y = contentTop
-
-            val displayIp = formatDisplayIp(intel.ip, maskTargetIp)
-            val subtitle = "$displayIp · ${intel.ipFamily.label}"
-            val (pillBg, pillFg) = when (intel.originType) {
-                IpOriginType.NATIVE -> palette.primaryContainer to palette.onPrimaryContainer
-                IpOriginType.BROADCAST -> palette.amberContainer to palette.onAmberContainer
-                IpOriginType.ANYCAST -> palette.secondaryContainer to palette.onSecondaryContainer
-                IpOriginType.UNKNOWN -> palette.surfaceHigh to palette.onSurfaceVariant
-            }
-
-            drawSectionHeader(
-                canvas = canvas,
-                left = contentLeft,
-                top = y,
-                width = contentWidth,
-                title = "IP 归属与原生/广播鉴定",
-                subtitle = subtitle,
-                iconType = HeaderIconType.GLOBE,
-                pillText = intel.originType.label,
-                pillBg = pillBg,
-                pillFg = pillFg,
-                palette = palette,
-            )
-            y += 44f
-
-            // Evidence box
-            val boxHeight = 32f
-            val boxRect = RectF(contentLeft, y, contentLeft + contentWidth, y + boxHeight)
-            drawFilledStrokedRoundRect(
-                canvas = canvas,
-                rect = boxRect,
-                radius = 10f,
-                fillColor = palette.surfaceLow,
-                strokeColor = palette.outlineSubtle,
-                strokeWidth = 0.8f,
-            )
-
-            val checkCx = contentLeft + 16f
-            val checkCy = y + boxHeight / 2f
-            drawCheckCircleIcon(canvas, checkCx, checkCy, 7.2f, palette.primary, palette.cardSurface)
-
-            val safeEvidence = scrubTargetIpInText(
-                raw = intel.originEvidence.ifBlank { intel.originType.label },
-                report = report,
-                maskTargetIp = maskTargetIp,
-            )
-            drawAutoFitText(
-                canvas = canvas,
-                text = safeEvidence,
-                x = contentLeft + 30f,
-                centerY = checkCy,
-                maxWidth = contentWidth - 40f,
-                preferredSp = 11.8f,
-                minSp = 9.8f,
-                color = palette.onSurface,
-                bold = true,
-            )
-            y += boxHeight + 10f
-
-            // Pills row (Location + ASN + Usage Type)
-            val locationText = IpClassificationEngine.formatLocationSummary(
-                countryCode = intel.countryCode,
-                countryName = intel.countryName,
-                regionName = intel.regionName,
-                cityName = intel.cityName,
-            )
-            val pills = buildList {
-                if (locationText.isNotBlank()) add(locationText to palette.onSurface)
-                intel.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it to palette.onSurfaceVariant) }
-                if (intel.usageType != IpUsageType.UNKNOWN) {
-                    add(intel.usageType.label to palette.onSurfaceVariant)
-                }
-            }
-            var pillX = contentLeft
-            val pillHeight = 23f
-            for ((label, fgColor) in pills) {
-                val measured = measurePillWidth(label, textSp = 10.6f, padH = 9.5f)
-                if (pillX + measured > contentLeft + contentWidth) break
-                drawTagPill(
-                    canvas = canvas,
-                    left = pillX,
-                    top = y,
-                    width = measured,
-                    height = pillHeight,
-                    text = label,
-                    textSp = 10.6f,
-                    bgColor = palette.surfaceLow,
-                    fgColor = fgColor,
-                    borderColor = palette.outlineSubtle,
-                )
-                pillX += measured + 7f
-            }
-            y += pillHeight + 8f
-
-            // ISP/Org + Geo/WHOIS/RIR metadata line
-            if (hasMetaLine) {
-                val rightReserve = if (sourceSummary.isNotEmpty() && !orgLabel.isNullOrBlank()) 208f else 0f
-                if (!orgLabel.isNullOrBlank()) {
-                    val maxOrgW = (contentWidth - rightReserve - 8f).coerceAtLeast(150f)
-                    drawEllipsizedText(
-                        canvas = canvas,
-                        text = "运营商 / 机构：$orgLabel",
-                        x = contentLeft,
-                        centerY = y + 7f,
-                        maxWidth = maxOrgW,
-                        textSp = 10.8f,
-                        color = palette.onSurfaceVariant,
-                        bold = false,
-                    )
-                }
-                if (sourceSummary.isNotEmpty()) {
-                    val alignRight = !orgLabel.isNullOrBlank()
-                    if (alignRight) {
-                        drawRightAlignedText(
-                            canvas = canvas,
-                            text = sourceSummary,
-                            rightX = contentLeft + contentWidth,
-                            centerY = y + 7f,
-                            maxWidth = 206f,
-                            textSp = 9.5f,
-                            color = palette.onSurfaceMuted,
-                        )
-                    } else {
-                        drawEllipsizedText(
-                            canvas = canvas,
-                            text = sourceSummary,
-                            x = contentLeft,
-                            centerY = y + 7f,
-                            maxWidth = contentWidth,
-                            textSp = 9.8f,
-                            color = palette.onSurfaceMuted,
-                            bold = false,
-                        )
-                    }
-                }
-                y += 18f
-            }
-
-            // Local client egress privacy strip (NEVER includes raw/masked IP)
-            if (!clientFooter.isNullOrBlank()) {
-                y += 4f
-                drawHairlineDivider(canvas, contentLeft, y, contentWidth, palette)
-                y += 13f
-                drawShieldDotIcon(canvas, contentLeft + 6.5f, y, 6.2f, palette.primary)
-                drawEllipsizedText(
-                    canvas = canvas,
-                    text = clientFooter,
-                    x = contentLeft + 18f,
-                    centerY = y,
-                    maxWidth = contentWidth - 18f,
-                    textSp = 10.2f,
-                    color = palette.onSurfaceVariant,
-                    bold = false,
-                )
+        val evidence = if (!intel.hasCoreInfo && !intel.publicErrorMessage.isNullOrBlank()) {
+            intel.publicErrorMessage
+        } else {
+            intel.originEvidence.ifBlank { intel.originType.label }
+        }
+        val pills = buildList {
+            if (intel.locationSummary.isNotBlank()) add(intel.locationSummary to true)
+            intel.asn?.takeIf { it.isNotBlank() }?.let { add(it to false) }
+            if (intel.usageType != IpUsageType.UNKNOWN) {
+                add(intel.usageType.label to false)
             }
         }
+        return IpIntelligenceCardModel(
+            title = "IP 归属与原生/广播鉴定",
+            subtitle = "${intel.displayIp} · ${intel.ipFamily.label}",
+            headerPillText = intel.originType.label,
+            originType = intel.originType,
+            evidenceText = evidence,
+            pills = pills,
+            orgLineText = orgLabel?.takeIf { it.isNotBlank() }?.let { "运营商 / 机构：$it" },
+            sourceSummaryText = sourceSummary.takeIf { it.isNotEmpty() },
+            clientFooterText = clientFooterText?.takeIf { it.isNotBlank() },
+        )
     }
 
-    // ── Card 2: ICMP Ping Latency & Waveform ─────────────────────────────────────────────────
-
-    private fun renderIcmpPingBitmap(
-        ping: IcmpPingSummary,
-        palette: CardPalette,
-    ): Bitmap? {
+    private fun buildIcmpPingCardModel(ping: SanitizedIcmpPingPresentation): LatencyCardModel {
         val subtitle = buildList {
             add("ICMP")
             ping.boundInterfaceName?.takeIf { it.isNotBlank() }?.let { add("网卡 $it") }
@@ -461,371 +451,696 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             if (ttl != null) add("TTL $ttl")
         }.joinToString(" · ")
 
-        val points = ping.samples.map {
-            LatencySamplePoint(seq = it.seq, success = it.success, rttMs = it.rttMs)
-        }
-        return renderLatencyCardBitmap(
+        return buildLatencyCardModel(
+            kind = NetBenchReportCardKind.ICMP_PING,
             title = "Ping 延迟探测",
             subtitle = subtitle,
-            iconType = HeaderIconType.WAVEFORM,
             sent = ping.sent,
             avgMs = ping.avgMs,
             minMs = ping.minMs,
             maxMs = ping.maxMs,
             jitterMdevMs = ping.jitterMdevMs,
             lossPercent = ping.lossPercent,
-            samples = points,
-            httpFooter = null,
-            palette = palette,
+            failureAvgLabel = ping.publicErrorMessage,
+            samples = ping.samples,
+            httpProbe = null,
         )
     }
 
-    // ── Card 3: TCPing Latency & Waveform (+ Optional HTTP Probe) ────────────────────────────
-
-    private fun renderTcpPingBitmap(
-        tcp: TcpPingSummary,
-        httpResult: HttpLatencyResult?,
-        maskTargetIp: Boolean,
-        palette: CardPalette,
-    ): Bitmap? {
-        val portText = if (maskTargetIp) "已隐藏端口" else "端口 ${tcp.port}"
-        val subtitle = "$portText · ${tcp.received}/${tcp.sent} 成功"
-        val points = tcp.samples.map {
-            LatencySamplePoint(seq = it.seq, success = it.success, rttMs = it.rttMs)
-        }
-        return renderLatencyCardBitmap(
+    private fun buildTcpPingCardModel(
+        tcp: SanitizedTcpPingPresentation,
+        httpProbe: SanitizedHttpProbePresentation?,
+    ): LatencyCardModel {
+        val subtitle = "${tcp.portSummaryLabel} · ${tcp.received}/${tcp.sent} 成功"
+        return buildLatencyCardModel(
+            kind = NetBenchReportCardKind.TCP_PING,
             title = "TCPing 延迟探测",
             subtitle = subtitle,
-            iconType = HeaderIconType.NETWORK_CHECK,
             sent = tcp.sent,
             avgMs = tcp.avgMs,
             minMs = tcp.minMs,
             maxMs = tcp.maxMs,
             jitterMdevMs = tcp.jitterMdevMs,
             lossPercent = tcp.lossPercent,
-            samples = points,
-            httpFooter = httpResult,
-            palette = palette,
+            failureAvgLabel = tcp.publicErrorMessage,
+            samples = tcp.samples,
+            httpProbe = httpProbe,
         )
     }
 
-    private fun renderLatencyCardBitmap(
+    private fun buildLatencyCardModel(
+        kind: NetBenchReportCardKind,
         title: String,
         subtitle: String,
-        iconType: HeaderIconType,
         sent: Int,
         avgMs: Double?,
         minMs: Double?,
         maxMs: Double?,
         jitterMdevMs: Double?,
         lossPercent: Double,
-        samples: List<LatencySamplePoint>,
-        httpFooter: HttpLatencyResult?,
-        palette: CardPalette,
-    ): Bitmap? {
-        val hasSamples = samples.isNotEmpty()
-        var logicalHeight = if (hasSamples) 224f else 128f
-        if (httpFooter != null) logicalHeight += 28f
-
+        failureAvgLabel: String?,
+        samples: List<SanitizedPingSample>,
+        httpProbe: SanitizedHttpProbePresentation?,
+    ): LatencyCardModel {
         val hasLoss = lossPercent > 0.0
         val pillText = if (hasLoss) {
             "丢包 ${NetBenchMarkdownFormatter.formatPercent(lossPercent)}"
         } else {
             "0% 丢包"
         }
-        val pillBg = if (hasLoss) palette.errorContainer else palette.primaryContainer
-        val pillFg = if (hasLoss) palette.onErrorContainer else palette.onPrimaryContainer
+        val avgText = when {
+            avgMs != null -> NetBenchMarkdownFormatter.formatMs(avgMs)
+            sent == 0 -> failureAvgLabel ?: "不可用"
+            else -> failureAvgLabel ?: "超时"
+        }
+        val minMaxText = if (minMs != null && maxMs != null) {
+            "${String.format(Locale.US, "%.0f", minMs)}/${String.format(Locale.US, "%.0f", maxMs)} ms"
+        } else {
+            "—"
+        }
+        val jitterText = jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—"
+        val lossText = NetBenchMarkdownFormatter.formatPercent(lossPercent)
 
-        return createCardBitmap(logicalHeight, palette) { canvas, contentLeft, contentTop, contentWidth ->
-            var y = contentTop
-            drawSectionHeader(
-                canvas = canvas,
-                left = contentLeft,
-                top = y,
-                width = contentWidth,
-                title = title,
-                subtitle = subtitle,
-                iconType = iconType,
-                pillText = pillText,
-                pillBg = pillBg,
-                pillFg = pillFg,
-                palette = palette,
-            )
-            y += 44f
+        val stats = listOf(
+            LatencyCardStatCell("平均延迟", avgText, isErrorAccent = avgMs == null),
+            LatencyCardStatCell("最小/最大", minMaxText, isErrorAccent = false),
+            LatencyCardStatCell("抖动", jitterText, isErrorAccent = false),
+            LatencyCardStatCell("丢包率", lossText, isErrorAccent = hasLoss),
+        )
 
-            // 4-Column Telemetry Strip (proportional widths prevent min/max truncation!)
-            val stripH = 48f
-            val stripRect = RectF(contentLeft, y, contentLeft + contentWidth, y + stripH)
-            drawFilledRoundRect(canvas, stripRect, 12f, palette.surfaceLow)
+        val maxSampleRtt = samples.asSequence()
+            .filter { it.success && it.rttMs != null }
+            .mapNotNull { it.rttMs }
+            .maxOrNull()
+        val scalePeakMs = ((maxSampleRtt ?: 100.0) * 1.22).coerceAtLeast(20.0)
+        val hasSamples = samples.isNotEmpty()
 
-            val avgText = when {
-                avgMs != null -> NetBenchMarkdownFormatter.formatMs(avgMs)
-                sent == 0 -> "不可用"
-                else -> "超时"
-            }
-            val minMaxText = if (minMs != null && maxMs != null) {
-                "${String.format(Locale.US, "%.0f", minMs)}/${String.format(Locale.US, "%.0f", maxMs)} ms"
-            } else {
-                "—"
-            }
-            val jitterText = jitterMdevMs?.let { NetBenchMarkdownFormatter.formatMs(it) } ?: "—"
-            val lossText = NetBenchMarkdownFormatter.formatPercent(lossPercent)
-
-            val weights = floatArrayOf(1.00f, 1.28f, 0.94f, 0.86f)
-            val weightSum = weights.sum()
-            val stats = listOf(
-                Triple("平均延迟", avgText, if (avgMs == null) palette.error else palette.onSurface),
-                Triple("最小/最大", minMaxText, palette.onSurface),
-                Triple("抖动", jitterText, palette.onSurface),
-                Triple("丢包率", lossText, if (hasLoss) palette.error else palette.onSurface),
-            )
-            var colX = contentLeft
-            for (idx in stats.indices) {
-                val colW = contentWidth * (weights[idx] / weightSum)
-                val (label, value, valueColor) = stats[idx]
-                drawAutoFitCenteredText(
-                    canvas = canvas,
-                    text = value,
-                    centerX = colX + colW / 2f,
-                    centerY = y + 17.5f,
-                    maxWidth = colW - 10f,
-                    preferredSp = 13.8f,
-                    minSp = 10.5f,
-                    color = valueColor,
-                    bold = true,
-                )
-                drawCenteredText(
-                    canvas = canvas,
-                    text = label,
-                    centerX = colX + colW / 2f,
-                    centerY = y + 35.5f,
-                    textSp = 10.2f,
-                    color = palette.onSurfaceVariant,
-                    bold = false,
-                )
-                if (idx < stats.lastIndex) {
-                    val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = palette.outlineSubtle
-                        strokeWidth = 0.75f
+        val httpFooterTitle = if (httpProbe != null) "HTTP 探测" else null
+        val (httpFooterValue, httpIsError) = when {
+            httpProbe == null -> null to false
+            httpProbe.success && httpProbe.totalMs != null -> {
+                val info = buildList {
+                    httpProbe.statusCode?.let { add("HTTP $it") }
+                    add(NetBenchMarkdownFormatter.formatMs(httpProbe.totalMs))
+                    httpProbe.tlsHandshakeMs?.takeIf { it > 0.0 }?.let {
+                        add("TLS ${NetBenchMarkdownFormatter.formatMs(it)}")
                     }
-                    canvas.drawLine(colX + colW, y + 10f, colX + colW, y + stripH - 10f, dividerPaint)
-                }
-                colX += colW
+                }.joinToString(" · ")
+                info to false
             }
-            y += stripH + 10f
+            else -> {
+                (httpProbe.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel) to true
+            }
+        }
 
-            // RTT Waveform Chart
-            if (hasSamples) {
-                val maxSampleRtt = samples.asSequence()
-                    .filter { it.success && it.rttMs != null }
-                    .mapNotNull { it.rttMs }
-                    .maxOrNull()
-                val scalePeakMs = ((maxSampleRtt ?: 100.0) * 1.22).coerceAtLeast(20.0)
+        return LatencyCardModel(
+            kind = kind,
+            title = title,
+            subtitle = subtitle,
+            headerPillText = pillText,
+            hasLoss = hasLoss,
+            sent = sent,
+            avgMs = avgMs,
+            stats = stats,
+            samples = samples,
+            scalePeakMs = scalePeakMs,
+            waveformLeftLabel = if (hasSamples) "实时 RTT 波形 (${samples.size}/$sent)" else null,
+            waveformRightLabel = if (hasSamples) "峰值刻度 ${NetBenchMarkdownFormatter.formatMs(scalePeakMs)}" else null,
+            httpFooterTitle = httpFooterTitle,
+            httpFooterValueText = httpFooterValue,
+            httpFooterIsError = httpIsError,
+        )
+    }
 
+    private fun buildIperf3CardModel(results: List<SanitizedIperf3Presentation>): Iperf3CardModel {
+        val primaryPortLabel = results.first().portSummaryLabel
+        val maxStreams = results.maxOfOrNull { it.parallelStreams } ?: 1
+        val streamSuffix = if (maxStreams > 1) " · -P $maxStreams 并行流" else ""
+        val subtitle = "纯 Kotlin TCP 协议 · $primaryPortLabel$streamSuffix"
+        val isDual = results.size >= 2
+        val maxRows = if (isDual) 3 else 6
+
+        val columns = results.take(2).map { res ->
+            val isDownload = res.direction == Iperf3Direction.DOWNLOAD
+            val dirArrow = if (isDownload) "↓ " else "↑ "
+            val mbps = res.effectiveMbps
+            val (valStr, unitStr) = if (mbps >= 1000.0) {
+                String.format(Locale.US, "%.2f", mbps / 1000.0) to "Gbps"
+            } else {
+                String.format(Locale.US, "%.1f", mbps) to "Mbps"
+            }
+            val displayedIntervals = selectDisplayIntervals(res, maxRows = maxRows)
+            val totalIntervals = res.intervals.size.coerceAtLeast(displayedIntervals.size)
+            val ivHeaderTitle = if (isDual) {
+                "逐秒明细 (${totalIntervals}段)"
+            } else {
+                "${res.direction.flagLabel} · 逐秒测速明细 (${totalIntervals}段)"
+            }
+            val meta = buildList {
+                res.stabilityPercent?.let { add("稳定度 ${NetBenchMarkdownFormatter.formatPercent(it)}") }
+                res.retransmits?.takeIf { it >= 0 }?.let { add("重传 $it") }
+            }.joinToString(" · ")
+            val maxMbps = maxOf(
+                res.intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
+                displayedIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
+                res.maxIntervalMbps,
+                1.0,
+            )
+            val rows = displayedIntervals.map { sample ->
+                Iperf3IntervalRowModel(
+                    timeLabel = String.format(Locale.US, "%.0f-%.0fs", sample.startSec, sample.endSec),
+                    bytesText = NetBenchMarkdownFormatter.formatBytes(sample.bytesTransferred),
+                    rateText = NetBenchMarkdownFormatter.formatMbps(sample.bitrateMbps),
+                    bitrateMbps = sample.bitrateMbps,
+                )
+            }
+            Iperf3DirectionColumnModel(
+                direction = res.direction,
+                directionTitle = "$dirArrow${res.direction.flagLabel}",
+                effectiveMbps = mbps,
+                gaugeValueText = valStr,
+                gaugeUnitLabel = "$unitStr · 平均",
+                transferredText = "已传输 ${NetBenchMarkdownFormatter.formatBytes(res.bytesTransferred)}",
+                peakText = "峰值 ${NetBenchMarkdownFormatter.formatMbps(res.maxIntervalMbps)}",
+                intervalHeaderTitle = ivHeaderTitle,
+                intervalMetaText = meta,
+                maxScaleMbps = maxMbps,
+                intervalRows = rows,
+            )
+        }
+
+        return Iperf3CardModel(
+            title = "原生 iperf3 吞吐测速",
+            subtitle = subtitle,
+            headerPillText = if (isDual) "双向测速完成" else "测速完成",
+            isDual = isDual,
+            columns = columns,
+        )
+    }
+
+    // ── Bitmap Sizing & Dispatch ─────────────────────────────────────────────────────────────
+
+    private fun computeLogicalHeightDp(model: NetBenchCardPresentationModel): Float = when (model) {
+        is IpIntelligenceCardModel -> {
+            var h = 136f
+            if (!model.orgLineText.isNullOrBlank() || !model.sourceSummaryText.isNullOrBlank()) h += 20f
+            if (!model.clientFooterText.isNullOrBlank()) h += 28f
+            h
+        }
+        is LatencyCardModel -> {
+            var h = if (model.samples.isNotEmpty()) 224f else 128f
+            if (model.httpFooterTitle != null) h += 28f
+            h
+        }
+        is Iperf3CardModel -> if (model.isDual) 266f else 216f
+    }
+
+    private fun renderModelToBitmap(
+        model: NetBenchCardPresentationModel,
+        palette: CardPalette,
+        textScrubber: (String) -> String,
+    ): Bitmap? {
+        val logicalHeight = computeLogicalHeightDp(model)
+        return createCardBitmap(logicalHeight, palette) { canvas, contentLeft, contentTop, contentWidth ->
+            drawModelContent(
+                canvas = canvas,
+                model = model,
+                palette = palette,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentWidth = contentWidth,
+                textScrubber = textScrubber,
+                recordedTexts = null,
+            )
+        }
+    }
+
+    private fun drawModelContent(
+        canvas: Canvas,
+        model: NetBenchCardPresentationModel,
+        palette: CardPalette,
+        contentLeft: Float,
+        contentTop: Float,
+        contentWidth: Float,
+        textScrubber: (String) -> String,
+        recordedTexts: MutableList<String>?,
+    ) {
+        val ctx = TextDrawSession(textScrubber, recordedTexts)
+        when (model) {
+            is IpIntelligenceCardModel -> drawIpIntelligenceCard(
+                canvas = canvas,
+                model = model,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentWidth = contentWidth,
+                palette = palette,
+                session = ctx,
+            )
+            is LatencyCardModel -> drawLatencyCard(
+                canvas = canvas,
+                model = model,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentWidth = contentWidth,
+                palette = palette,
+                session = ctx,
+            )
+            is Iperf3CardModel -> drawIperf3Card(
+                canvas = canvas,
+                model = model,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentWidth = contentWidth,
+                palette = palette,
+                session = ctx,
+            )
+        }
+    }
+
+    private class TextDrawSession(
+        private val scrubber: (String) -> String,
+        private val sink: MutableList<String>?,
+    ) {
+        fun prepare(raw: String): String {
+            val clean = scrubber(raw)
+            sink?.add(clean)
+            return clean
+        }
+    }
+
+    // ── Card 1: IP Intelligence & Native / Broadcast Classifier ──────────────────────────────
+
+    private fun drawIpIntelligenceCard(
+        canvas: Canvas,
+        model: IpIntelligenceCardModel,
+        contentLeft: Float,
+        contentTop: Float,
+        contentWidth: Float,
+        palette: CardPalette,
+        session: TextDrawSession,
+    ) {
+        var y = contentTop
+        val (pillBg, pillFg) = when (model.originType) {
+            IpOriginType.NATIVE -> palette.primaryContainer to palette.onPrimaryContainer
+            IpOriginType.BROADCAST -> palette.amberContainer to palette.onAmberContainer
+            IpOriginType.ANYCAST -> palette.secondaryContainer to palette.onSecondaryContainer
+            IpOriginType.UNKNOWN -> palette.surfaceHigh to palette.onSurfaceVariant
+        }
+
+        drawSectionHeader(
+            canvas = canvas,
+            left = contentLeft,
+            top = y,
+            width = contentWidth,
+            title = model.title,
+            subtitle = model.subtitle,
+            iconType = HeaderIconType.GLOBE,
+            pillText = model.headerPillText,
+            pillBg = pillBg,
+            pillFg = pillFg,
+            palette = palette,
+            session = session,
+        )
+        y += 44f
+
+        // Evidence box
+        val boxHeight = 32f
+        val boxRect = RectF(contentLeft, y, contentLeft + contentWidth, y + boxHeight)
+        drawFilledStrokedRoundRect(
+            canvas = canvas,
+            rect = boxRect,
+            radius = 10f,
+            fillColor = palette.surfaceLow,
+            strokeColor = palette.outlineSubtle,
+            strokeWidth = 0.8f,
+        )
+
+        val checkCx = contentLeft + 16f
+        val checkCy = y + boxHeight / 2f
+        drawCheckCircleIcon(canvas, checkCx, checkCy, 7.2f, palette.primary, palette.cardSurface)
+
+        drawAutoFitText(
+            canvas = canvas,
+            text = model.evidenceText,
+            x = contentLeft + 30f,
+            centerY = checkCy,
+            maxWidth = contentWidth - 40f,
+            preferredSp = 11.8f,
+            minSp = 9.8f,
+            color = palette.onSurface,
+            bold = true,
+            session = session,
+        )
+        y += boxHeight + 10f
+
+        // Pills row (Location + ASN + Usage Type)
+        var pillX = contentLeft
+        val pillHeight = 23f
+        for ((label, isPrimarySurface) in model.pills) {
+            val fgColor = if (isPrimarySurface) palette.onSurface else palette.onSurfaceVariant
+            val measured = measurePillWidth(label, textSp = 10.6f, padH = 9.5f)
+            if (pillX + measured > contentLeft + contentWidth) break
+            drawTagPill(
+                canvas = canvas,
+                left = pillX,
+                top = y,
+                width = measured,
+                height = pillHeight,
+                text = label,
+                textSp = 10.6f,
+                bgColor = palette.surfaceLow,
+                fgColor = fgColor,
+                borderColor = palette.outlineSubtle,
+                session = session,
+            )
+            pillX += measured + 7f
+        }
+        y += pillHeight + 8f
+
+        // ISP/Org + Geo/WHOIS/RIR metadata line
+        val orgLine = model.orgLineText
+        val sourceSummary = model.sourceSummaryText.orEmpty()
+        if (!orgLine.isNullOrBlank() || sourceSummary.isNotEmpty()) {
+            val rightReserve = if (sourceSummary.isNotEmpty() && !orgLine.isNullOrBlank()) 208f else 0f
+            if (!orgLine.isNullOrBlank()) {
+                val maxOrgW = (contentWidth - rightReserve - 8f).coerceAtLeast(150f)
                 drawEllipsizedText(
                     canvas = canvas,
-                    text = "实时 RTT 波形 (${samples.size}/$sent)",
+                    text = orgLine,
+                    x = contentLeft,
+                    centerY = y + 7f,
+                    maxWidth = maxOrgW,
+                    textSp = 10.8f,
+                    color = palette.onSurfaceVariant,
+                    bold = false,
+                    session = session,
+                )
+            }
+            if (sourceSummary.isNotEmpty()) {
+                val alignRight = !orgLine.isNullOrBlank()
+                if (alignRight) {
+                    drawRightAlignedText(
+                        canvas = canvas,
+                        text = sourceSummary,
+                        rightX = contentLeft + contentWidth,
+                        centerY = y + 7f,
+                        maxWidth = 206f,
+                        textSp = 9.5f,
+                        color = palette.onSurfaceMuted,
+                        session = session,
+                    )
+                } else {
+                    drawEllipsizedText(
+                        canvas = canvas,
+                        text = sourceSummary,
+                        x = contentLeft,
+                        centerY = y + 7f,
+                        maxWidth = contentWidth,
+                        textSp = 9.8f,
+                        color = palette.onSurfaceMuted,
+                        bold = false,
+                        session = session,
+                    )
+                }
+            }
+            y += 18f
+        }
+
+        // Local client egress privacy strip (NEVER includes raw/masked IP)
+        if (!model.clientFooterText.isNullOrBlank()) {
+            y += 4f
+            drawHairlineDivider(canvas, contentLeft, y, contentWidth, palette)
+            y += 13f
+            drawShieldDotIcon(canvas, contentLeft + 6.5f, y, 6.2f, palette.primary)
+            drawEllipsizedText(
+                canvas = canvas,
+                text = model.clientFooterText,
+                x = contentLeft + 18f,
+                centerY = y,
+                maxWidth = contentWidth - 18f,
+                textSp = 10.2f,
+                color = palette.onSurfaceVariant,
+                bold = false,
+                session = session,
+            )
+        }
+    }
+
+    // ── Cards 2 & 3: ICMP Ping / TCPing Latency & Waveform (+ Optional HTTP Probe) ───────────
+
+    private fun drawLatencyCard(
+        canvas: Canvas,
+        model: LatencyCardModel,
+        contentLeft: Float,
+        contentTop: Float,
+        contentWidth: Float,
+        palette: CardPalette,
+        session: TextDrawSession,
+    ) {
+        val iconType = if (model.kind == NetBenchReportCardKind.ICMP_PING) {
+            HeaderIconType.WAVEFORM
+        } else {
+            HeaderIconType.NETWORK_CHECK
+        }
+        val pillBg = if (model.hasLoss) palette.errorContainer else palette.primaryContainer
+        val pillFg = if (model.hasLoss) palette.onErrorContainer else palette.onPrimaryContainer
+
+        var y = contentTop
+        drawSectionHeader(
+            canvas = canvas,
+            left = contentLeft,
+            top = y,
+            width = contentWidth,
+            title = model.title,
+            subtitle = model.subtitle,
+            iconType = iconType,
+            pillText = model.headerPillText,
+            pillBg = pillBg,
+            pillFg = pillFg,
+            palette = palette,
+            session = session,
+        )
+        y += 44f
+
+        // 4-Column Telemetry Strip
+        val stripH = 48f
+        val stripRect = RectF(contentLeft, y, contentLeft + contentWidth, y + stripH)
+        drawFilledRoundRect(canvas, stripRect, 12f, palette.surfaceLow)
+
+        val weights = floatArrayOf(1.00f, 1.28f, 0.94f, 0.86f)
+        val weightSum = weights.sum()
+        var colX = contentLeft
+        for (idx in model.stats.indices) {
+            val colW = contentWidth * (weights[idx] / weightSum)
+            val cell = model.stats[idx]
+            val valueColor = if (cell.isErrorAccent) palette.error else palette.onSurface
+            drawAutoFitCenteredText(
+                canvas = canvas,
+                text = cell.value,
+                centerX = colX + colW / 2f,
+                centerY = y + 17.5f,
+                maxWidth = colW - 10f,
+                preferredSp = 13.8f,
+                minSp = 10.5f,
+                color = valueColor,
+                bold = true,
+                session = session,
+            )
+            drawCenteredText(
+                canvas = canvas,
+                text = cell.label,
+                centerX = colX + colW / 2f,
+                centerY = y + 35.5f,
+                textSp = 10.2f,
+                color = palette.onSurfaceVariant,
+                bold = false,
+                session = session,
+            )
+            if (idx < model.stats.lastIndex) {
+                val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = palette.outlineSubtle
+                    strokeWidth = 0.75f
+                }
+                canvas.drawLine(colX + colW, y + 10f, colX + colW, y + stripH - 10f, dividerPaint)
+            }
+            colX += colW
+        }
+        y += stripH + 10f
+
+        // RTT Waveform Chart
+        if (model.samples.isNotEmpty()) {
+            model.waveformLeftLabel?.let { leftLabel ->
+                drawEllipsizedText(
+                    canvas = canvas,
+                    text = leftLabel,
                     x = contentLeft,
                     centerY = y + 6f,
                     maxWidth = contentWidth * 0.55f,
                     textSp = 10.0f,
                     color = palette.onSurfaceVariant,
                     bold = false,
+                    session = session,
                 )
+            }
+            model.waveformRightLabel?.let { rightLabel ->
                 drawRightAlignedText(
                     canvas = canvas,
-                    text = "峰值刻度 ${NetBenchMarkdownFormatter.formatMs(scalePeakMs)}",
+                    text = rightLabel,
                     rightX = contentLeft + contentWidth,
                     centerY = y + 6f,
                     maxWidth = contentWidth * 0.45f,
                     textSp = 10.0f,
                     color = palette.onSurfaceVariant,
+                    session = session,
                 )
-                y += 16f
-
-                val chartH = 74f
-                val chartRect = RectF(contentLeft, y, contentLeft + contentWidth, y + chartH)
-                drawFilledRoundRect(canvas, chartRect, 10f, palette.surfaceLow)
-                drawLatencyWaveformInside(
-                    canvas = canvas,
-                    box = chartRect,
-                    samples = samples,
-                    plannedCount = max(sent, samples.size),
-                    avgMs = avgMs,
-                    maxRtt = scalePeakMs,
-                    palette = palette,
-                )
-                y += chartH
             }
+            y += 16f
 
-            // Optional HTTP probe strip
-            if (httpFooter != null) {
-                y += 9f
-                drawHairlineDivider(canvas, contentLeft, y, contentWidth, palette)
-                y += 12.5f
-                drawEllipsizedText(
-                    canvas = canvas,
-                    text = "HTTP 探测",
-                    x = contentLeft,
-                    centerY = y,
-                    maxWidth = 100f,
-                    textSp = 10.8f,
-                    color = palette.onSurface,
-                    bold = true,
-                )
-                if (httpFooter.success && httpFooter.totalMs != null) {
-                    val info = buildList {
-                        httpFooter.statusCode?.let { add("HTTP $it") }
-                        add(NetBenchMarkdownFormatter.formatMs(httpFooter.totalMs))
-                        httpFooter.tlsHandshakeMs?.takeIf { it > 0.0 }?.let {
-                            add("TLS ${NetBenchMarkdownFormatter.formatMs(it)}")
-                        }
-                    }.joinToString(" · ")
-                    drawRightAlignedText(
-                        canvas = canvas,
-                        text = info,
-                        rightX = contentLeft + contentWidth,
-                        centerY = y,
-                        maxWidth = contentWidth - 108f,
-                        textSp = 10.8f,
-                        color = palette.primary,
-                        bold = true,
-                    )
-                } else {
-                    drawRightAlignedText(
-                        canvas = canvas,
-                        text = httpFooter.errorMessage ?: "探测失败",
-                        rightX = contentLeft + contentWidth,
-                        centerY = y,
-                        maxWidth = contentWidth - 108f,
-                        textSp = 10.4f,
-                        color = palette.error,
-                    )
-                }
-            }
+            val chartH = 74f
+            val chartRect = RectF(contentLeft, y, contentLeft + contentWidth, y + chartH)
+            drawFilledRoundRect(canvas, chartRect, 10f, palette.surfaceLow)
+            drawLatencyWaveformInside(
+                canvas = canvas,
+                box = chartRect,
+                samples = model.samples,
+                plannedCount = max(model.sent, model.samples.size),
+                avgMs = model.avgMs,
+                maxRtt = model.scalePeakMs,
+                palette = palette,
+            )
+            y += chartH
+        }
+
+        // Optional HTTP probe strip (standardized category on failure, never raw exception!)
+        if (model.httpFooterTitle != null && model.httpFooterValueText != null) {
+            y += 9f
+            drawHairlineDivider(canvas, contentLeft, y, contentWidth, palette)
+            y += 12.5f
+            drawEllipsizedText(
+                canvas = canvas,
+                text = model.httpFooterTitle,
+                x = contentLeft,
+                centerY = y,
+                maxWidth = 100f,
+                textSp = 10.8f,
+                color = palette.onSurface,
+                bold = true,
+                session = session,
+            )
+            drawRightAlignedText(
+                canvas = canvas,
+                text = model.httpFooterValueText,
+                rightX = contentLeft + contentWidth,
+                centerY = y,
+                maxWidth = contentWidth - 108f,
+                textSp = if (model.httpFooterIsError) 10.4f else 10.8f,
+                color = if (model.httpFooterIsError) palette.error else palette.primary,
+                bold = !model.httpFooterIsError,
+                session = session,
+            )
         }
     }
 
     // ── Card 4: Native Pure-Kotlin iperf3 Throughput & Interval Breakdown ────────────────────
 
-    private fun renderIperf3Bitmap(
-        results: List<Iperf3Result>,
-        maskTargetIp: Boolean,
+    private fun drawIperf3Card(
+        canvas: Canvas,
+        model: Iperf3CardModel,
+        contentLeft: Float,
+        contentTop: Float,
+        contentWidth: Float,
         palette: CardPalette,
-    ): Bitmap? {
-        val primaryPort = results.first().port
-        val maxStreams = results.maxOfOrNull { it.parallelStreams } ?: 1
-        val portText = if (maskTargetIp) "已隐藏端口" else "端口 $primaryPort"
-        val streamSuffix = if (maxStreams > 1) " · -P $maxStreams 并行流" else ""
-        val subtitle = "纯 Kotlin TCP 协议 · $portText$streamSuffix"
-        val isDual = results.size >= 2
+        session: TextDrawSession,
+    ) {
+        var y = contentTop
+        drawSectionHeader(
+            canvas = canvas,
+            left = contentLeft,
+            top = y,
+            width = contentWidth,
+            title = model.title,
+            subtitle = model.subtitle,
+            iconType = HeaderIconType.SPEED,
+            pillText = model.headerPillText,
+            pillBg = palette.primaryContainer,
+            pillFg = palette.onPrimaryContainer,
+            palette = palette,
+            session = session,
+        )
+        y += 46f
 
-        if (!isDual) {
-            val res = results.first()
-            val intervals = selectDisplayIntervals(res, maxRows = 6)
-            val logicalHeight = 216f
-            return createCardBitmap(logicalHeight, palette) { canvas, contentLeft, contentTop, contentWidth ->
-                var y = contentTop
-                drawSectionHeader(
-                    canvas = canvas,
-                    left = contentLeft,
-                    top = y,
-                    width = contentWidth,
-                    title = "原生 iperf3 吞吐测速",
-                    subtitle = subtitle,
-                    iconType = HeaderIconType.SPEED,
-                    pillText = "测速完成",
-                    pillBg = palette.primaryContainer,
-                    pillFg = palette.onPrimaryContainer,
-                    palette = palette,
-                )
-                y += 46f
+        if (!model.isDual) {
+            val col = model.columns.first()
+            val leftW = 180f
+            val gap = 12f
+            val rightX = contentLeft + leftW + gap
+            val rightW = contentWidth - leftW - gap
+            val panelH = 138f
 
-                val leftW = 180f
-                val gap = 12f
-                val rightX = contentLeft + leftW + gap
-                val rightW = contentWidth - leftW - gap
-                val panelH = 138f
+            drawSingleIperfGaugeColumn(
+                canvas = canvas,
+                left = contentLeft,
+                top = y,
+                width = leftW,
+                height = panelH,
+                column = col,
+                gaugeDiameter = 98f,
+                palette = palette,
+                session = session,
+            )
 
-                // Left: Direction label + Arc Gauge + Transfer/Peak
+            val panelRect = RectF(rightX, y, rightX + rightW, y + panelH)
+            drawFilledRoundRect(canvas, panelRect, 11f, palette.surfaceLow)
+            drawIntervalBreakdownInside(
+                canvas = canvas,
+                left = rightX,
+                top = y,
+                width = rightW,
+                height = panelH,
+                column = col,
+                compactColumns = false,
+                palette = palette,
+                session = session,
+            )
+        } else {
+            val gap = 14f
+            val colW = (contentWidth - gap) / 2f
+            model.columns.take(2).forEachIndexed { idx, col ->
+                val colLeft = contentLeft + idx * (colW + gap)
                 drawSingleIperfGaugeColumn(
                     canvas = canvas,
-                    left = contentLeft,
+                    left = colLeft,
                     top = y,
-                    width = leftW,
-                    height = panelH,
-                    result = res,
-                    gaugeDiameter = 98f,
+                    width = colW,
+                    height = 112f,
+                    column = col,
+                    gaugeDiameter = 84f,
                     palette = palette,
+                    session = session,
                 )
-
-                // Right: Per-second interval breakdown panel
-                val panelRect = RectF(rightX, y, rightX + rightW, y + panelH)
-                drawFilledRoundRect(canvas, panelRect, 11f, palette.surfaceLow)
+                val ivTop = y + 118f
+                val ivH = 70f
+                val ivRect = RectF(colLeft, ivTop, colLeft + colW, ivTop + ivH)
+                drawFilledRoundRect(canvas, ivRect, 10f, palette.surfaceLow)
                 drawIntervalBreakdownInside(
                     canvas = canvas,
-                    rect = panelRect,
-                    result = res,
-                    displayedIntervals = intervals,
-                    compactColumns = false,
+                    left = colLeft,
+                    top = ivTop,
+                    width = colW,
+                    height = ivH,
+                    column = col,
+                    compactColumns = true,
                     palette = palette,
+                    session = session,
                 )
             }
-        } else {
-            val logicalHeight = 266f
-            return createCardBitmap(logicalHeight, palette) { canvas, contentLeft, contentTop, contentWidth ->
-                var y = contentTop
-                drawSectionHeader(
-                    canvas = canvas,
-                    left = contentLeft,
-                    top = y,
-                    width = contentWidth,
-                    title = "原生 iperf3 吞吐测速",
-                    subtitle = subtitle,
-                    iconType = HeaderIconType.SPEED,
-                    pillText = "双向测速完成",
-                    pillBg = palette.primaryContainer,
-                    pillFg = palette.onPrimaryContainer,
-                    palette = palette,
-                )
-                y += 46f
 
-                val gap = 14f
-                val colW = (contentWidth - gap) / 2f
-                results.take(2).forEachIndexed { idx, res ->
-                    val colLeft = contentLeft + idx * (colW + gap)
-                    drawSingleIperfGaugeColumn(
-                        canvas = canvas,
-                        left = colLeft,
-                        top = y,
-                        width = colW,
-                        height = 112f,
-                        result = res,
-                        gaugeDiameter = 84f,
-                        palette = palette,
-                    )
-                    val ivTop = y + 118f
-                    val ivH = 70f
-                    val ivRect = RectF(colLeft, ivTop, colLeft + colW, ivTop + ivH)
-                    drawFilledRoundRect(canvas, ivRect, 10f, palette.surfaceLow)
-                    drawIntervalBreakdownInside(
-                        canvas = canvas,
-                        rect = ivRect,
-                        result = res,
-                        displayedIntervals = selectDisplayIntervals(res, maxRows = 3),
-                        compactColumns = true,
-                        palette = palette,
-                    )
-                }
-
-                // Subtle center vertical divider
-                val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = palette.outlineSubtle
-                    strokeWidth = 0.8f
-                }
-                val midX = contentLeft + colW + gap / 2f
-                canvas.drawLine(midX, y + 6f, midX, y + 184f, divPaint)
+            val divPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = palette.outlineSubtle
+                strokeWidth = 0.8f
             }
+            val midX = contentLeft + colW + gap / 2f
+            canvas.drawLine(midX, y + 6f, midX, y + 184f, divPaint)
         }
     }
 
@@ -892,6 +1207,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         pillBg: Int,
         pillFg: Int,
         palette: CardPalette,
+        session: TextDrawSession,
     ) {
         val tileSize = 34f
         val tileRect = RectF(left, top, left + tileSize, top + tileSize)
@@ -905,8 +1221,8 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         )
         drawHeaderVectorIcon(
             canvas = canvas,
-            cx = tileRect.centerX(),
-            cy = tileRect.centerY(),
+            cx = left + tileSize / 2f,
+            cy = top + tileSize / 2f,
             type = iconType,
             color = palette.primary,
         )
@@ -928,6 +1244,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             borderColor = Color.TRANSPARENT,
             bold = true,
             cornerRadius = pillH / 2f,
+            session = session,
         )
 
         val textLeft = left + tileSize + 10f
@@ -941,6 +1258,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             textSp = 14.5f,
             color = palette.onSurface,
             bold = true,
+            session = session,
         )
         drawEllipsizedText(
             canvas = canvas,
@@ -951,13 +1269,14 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             textSp = 11.0f,
             color = palette.onSurfaceVariant,
             bold = false,
+            session = session,
         )
     }
 
     private fun drawLatencyWaveformInside(
         canvas: Canvas,
         box: RectF,
-        samples: List<LatencySamplePoint>,
+        samples: List<SanitizedPingSample>,
         plannedCount: Int,
         avgMs: Double?,
         maxRtt: Double,
@@ -1067,24 +1386,24 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         top: Float,
         width: Float,
         height: Float,
-        result: Iperf3Result,
+        column: Iperf3DirectionColumnModel,
         gaugeDiameter: Float,
         palette: CardPalette,
+        session: TextDrawSession,
     ) {
-        val isDownload = result.direction == Iperf3Direction.DOWNLOAD
-        val dirArrow = if (isDownload) "↓ " else "↑ "
         drawEllipsizedText(
             canvas = canvas,
-            text = "$dirArrow${result.direction.flagLabel}",
+            text = column.directionTitle,
             x = left,
             centerY = top + 7f,
             maxWidth = width,
             textSp = 11.4f,
             color = palette.onSurface,
             bold = true,
+            session = session,
         )
 
-        val mbps = result.effectiveMbps
+        val mbps = column.effectiveMbps
         val scaleMax = when {
             mbps <= 100.0 -> 100.0
             mbps <= 300.0 -> 300.0
@@ -1114,10 +1433,10 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
                 strokeWidth = strokeW
                 strokeCap = Paint.Cap.ROUND
                 shader = LinearGradient(
-                    arcRect.left,
-                    arcRect.bottom,
-                    arcRect.right,
-                    arcRect.top,
+                    arcLeft,
+                    arcTop + gaugeDiameter,
+                    arcLeft + gaugeDiameter,
+                    arcTop,
                     palette.primary,
                     palette.secondary,
                     Shader.TileMode.CLAMP,
@@ -1126,16 +1445,11 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             canvas.drawArc(arcRect, 160f, 220f * fraction, false, activePaint)
         }
 
-        val (valStr, unitStr) = if (mbps >= 1000.0) {
-            String.format(Locale.US, "%.2f", mbps / 1000.0) to "Gbps"
-        } else {
-            String.format(Locale.US, "%.1f", mbps) to "Mbps"
-        }
-        val gaugeCenterX = arcRect.centerX()
-        val gaugeCenterY = arcRect.centerY()
+        val gaugeCenterX = arcLeft + gaugeDiameter / 2f
+        val gaugeCenterY = arcTop + gaugeDiameter / 2f
         drawAutoFitCenteredText(
             canvas = canvas,
-            text = valStr,
+            text = column.gaugeValueText,
             centerX = gaugeCenterX,
             centerY = gaugeCenterY - 2f,
             maxWidth = gaugeDiameter - 20f,
@@ -1143,96 +1457,89 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             minSp = 13.0f,
             color = palette.onSurface,
             bold = true,
+            session = session,
         )
         drawCenteredText(
             canvas = canvas,
-            text = "$unitStr · 平均",
+            text = column.gaugeUnitLabel,
             centerX = gaugeCenterX,
             centerY = gaugeCenterY + 14.5f,
             textSp = 9.8f,
             color = palette.onSurfaceVariant,
             bold = false,
+            session = session,
         )
 
         val footerY = top + height - 6f
         drawEllipsizedText(
             canvas = canvas,
-            text = "已传输 ${NetBenchMarkdownFormatter.formatBytes(result.bytesTransferred)}",
+            text = column.transferredText,
             x = left,
             centerY = footerY,
             maxWidth = width * 0.52f,
             textSp = 9.5f,
             color = palette.onSurfaceVariant,
             bold = false,
+            session = session,
         )
         drawRightAlignedText(
             canvas = canvas,
-            text = "峰值 ${NetBenchMarkdownFormatter.formatMbps(result.maxIntervalMbps)}",
+            text = column.peakText,
             rightX = left + width,
             centerY = footerY,
             maxWidth = width * 0.48f,
             textSp = 9.5f,
             color = palette.onSurfaceVariant,
+            session = session,
         )
     }
 
     private fun drawIntervalBreakdownInside(
         canvas: Canvas,
-        rect: RectF,
-        result: Iperf3Result,
-        displayedIntervals: List<Iperf3IntervalSample>,
+        left: Float,
+        top: Float,
+        width: Float,
+        height: Float,
+        column: Iperf3DirectionColumnModel,
         compactColumns: Boolean,
         palette: CardPalette,
+        session: TextDrawSession,
     ) {
         val padH = 10f
         val padV = 8f
-        val left = rect.left + padH
-        val width = rect.width() - padH * 2f
-        var y = rect.top + padV
-
-        val totalIntervals = result.intervals.size.coerceAtLeast(displayedIntervals.size)
-        val headerTitle = if (compactColumns) {
-            "逐秒明细 (${totalIntervals}段)"
-        } else {
-            "${result.direction.flagLabel} · 逐秒测速明细 (${totalIntervals}段)"
-        }
-        val meta = buildList {
-            result.stabilityPercent?.let { add("稳定度 ${NetBenchMarkdownFormatter.formatPercent(it)}") }
-            result.retransmits?.takeIf { it >= 0 }?.let { add("重传 $it") }
-        }.joinToString(" · ")
+        val innerLeft = left + padH
+        val innerWidth = width - padH * 2f
+        val bottom = top + height
+        var y = top + padV
 
         val titleShare = if (compactColumns) 0.44f else 0.54f
         drawEllipsizedText(
             canvas = canvas,
-            text = headerTitle,
-            x = left,
+            text = column.intervalHeaderTitle,
+            x = innerLeft,
             centerY = y + 6f,
-            maxWidth = if (meta.isNotEmpty()) width * titleShare else width,
+            maxWidth = if (column.intervalMetaText.isNotEmpty()) innerWidth * titleShare else innerWidth,
             textSp = if (compactColumns) 9.5f else 10.2f,
             color = palette.onSurface,
             bold = true,
+            session = session,
         )
-        if (meta.isNotEmpty()) {
+        if (column.intervalMetaText.isNotEmpty()) {
             drawRightAlignedText(
                 canvas = canvas,
-                text = meta,
-                rightX = left + width,
+                text = column.intervalMetaText,
+                rightX = innerLeft + innerWidth,
                 centerY = y + 6f,
-                maxWidth = width * (1f - titleShare),
+                maxWidth = innerWidth * (1f - titleShare),
                 textSp = 9.1f,
                 color = palette.onSurfaceVariant,
+                session = session,
             )
         }
         y += 18f
 
-        val maxMbps = maxOf(
-            result.intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
-            displayedIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
-            result.maxIntervalMbps,
-            1.0,
-        )
-        val availH = (rect.bottom - padV - y).coerceAtLeast(18f)
-        val rowCount = displayedIntervals.size.coerceAtLeast(1)
+        val availH = (bottom - padV - y).coerceAtLeast(18f)
+        val rowCount = column.intervalRows.size.coerceAtLeast(1)
         val rowStep = (availH / rowCount).coerceIn(13.5f, 18.5f)
 
         val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1244,57 +1551,58 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
             style = Paint.Style.FILL
         }
 
-        for (sample in displayedIntervals) {
+        for (sample in column.intervalRows) {
             val cy = y + rowStep / 2f
-            val timeLabel = String.format(Locale.US, "%.0f-%.0fs", sample.startSec, sample.endSec)
             val timeColW = if (compactColumns) 34f else 40f
-            val rateText = NetBenchMarkdownFormatter.formatMbps(sample.bitrateMbps)
             val rateColW = if (compactColumns) 62f else 68f
             val bytesColW = if (compactColumns) 0f else 52f
 
             drawEllipsizedText(
                 canvas = canvas,
-                text = timeLabel,
-                x = left,
+                text = sample.timeLabel,
+                x = innerLeft,
                 centerY = cy,
                 maxWidth = timeColW,
                 textSp = 9.2f,
                 color = palette.onSurfaceVariant,
                 bold = false,
+                session = session,
             )
 
-            val barLeft = left + timeColW + 4f
-            val barRight = left + width - rateColW - bytesColW - 6f
+            val barLeft = innerLeft + timeColW + 4f
+            val barRight = innerLeft + innerWidth - rateColW - bytesColW - 6f
             val barW = (barRight - barLeft).coerceAtLeast(24f)
             val barH = 5.6f
             val trackRect = RectF(barLeft, cy - barH / 2f, barLeft + barW, cy + barH / 2f)
             canvas.drawRoundRect(trackRect, barH / 2f, barH / 2f, trackPaint)
 
-            val ratio = (sample.bitrateMbps / maxMbps).toFloat().coerceIn(0.05f, 1f)
+            val ratio = (sample.bitrateMbps / column.maxScaleMbps).toFloat().coerceIn(0.05f, 1f)
             val activeRect = RectF(barLeft, cy - barH / 2f, barLeft + barW * ratio, cy + barH / 2f)
             canvas.drawRoundRect(activeRect, barH / 2f, barH / 2f, fillPaint)
 
             if (!compactColumns) {
                 drawRightAlignedText(
                     canvas = canvas,
-                    text = NetBenchMarkdownFormatter.formatBytes(sample.bytesTransferred),
-                    rightX = left + width - rateColW - 4f,
+                    text = sample.bytesText,
+                    rightX = innerLeft + innerWidth - rateColW - 4f,
                     centerY = cy,
                     maxWidth = bytesColW,
                     textSp = 9.0f,
                     color = palette.onSurfaceVariant,
+                    session = session,
                 )
             }
 
             drawRightAlignedText(
                 canvas = canvas,
-                text = rateText,
-                rightX = left + width,
+                text = sample.rateText,
+                rightX = innerLeft + innerWidth,
                 centerY = cy,
                 maxWidth = rateColW,
                 textSp = 9.5f,
                 color = palette.onSurface,
                 bold = true,
+                session = session,
             )
 
             y += rowStep
@@ -1302,7 +1610,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
     }
 
     private fun selectDisplayIntervals(
-        result: Iperf3Result,
+        result: SanitizedIperf3Presentation,
         maxRows: Int,
     ): List<Iperf3IntervalSample> {
         val raw = result.intervals
@@ -1521,6 +1829,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         borderColor: Int,
         bold: Boolean = true,
         cornerRadius: Float = 8f,
+        session: TextDrawSession,
     ) {
         val rect = RectF(left, top, left + width, top + height)
         drawFilledStrokedRoundRect(
@@ -1534,11 +1843,12 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         drawCenteredText(
             canvas = canvas,
             text = text,
-            centerX = rect.centerX(),
-            centerY = rect.centerY(),
+            centerX = left + width / 2f,
+            centerY = top + height / 2f,
             textSp = textSp,
             color = fgColor,
             bold = bold,
+            session = session,
         )
     }
 
@@ -1551,7 +1861,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         }
 
     private fun baselineForCenterY(paint: Paint, centerY: Float): Float {
-        val fm = paint.fontMetrics
+        val fm = paint.fontMetrics ?: return centerY
         return centerY - (fm.ascent + fm.descent) / 2f
     }
 
@@ -1563,11 +1873,13 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         textSp: Float,
         color: Int,
         bold: Boolean,
+        session: TextDrawSession,
     ) {
+        val safeText = session.prepare(text)
         val paint = textPaint(textSp, color, bold).apply {
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText(text, centerX, baselineForCenterY(paint, centerY), paint)
+        canvas.drawText(safeText, centerX, baselineForCenterY(paint, centerY), paint)
     }
 
     private fun drawAutoFitCenteredText(
@@ -1580,14 +1892,16 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         minSp: Float,
         color: Int,
         bold: Boolean,
+        session: TextDrawSession,
     ) {
+        val safeText = session.prepare(text)
         var sp = preferredSp
         var paint = textPaint(sp, color, bold)
-        while (sp > minSp && paint.measureText(text) > maxWidth) {
+        while (sp > minSp && paint.measureText(safeText) > maxWidth) {
             sp = (sp - 0.5f).coerceAtLeast(minSp)
             paint = textPaint(sp, color, bold)
         }
-        val fitted = ellipsizeToWidth(text, paint, maxWidth)
+        val fitted = ellipsizeToWidth(safeText, paint, maxWidth)
         paint.textAlign = Paint.Align.CENTER
         canvas.drawText(fitted, centerX, baselineForCenterY(paint, centerY), paint)
     }
@@ -1602,14 +1916,16 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         minSp: Float,
         color: Int,
         bold: Boolean,
+        session: TextDrawSession,
     ) {
+        val safeText = session.prepare(text)
         var sp = preferredSp
         var paint = textPaint(sp, color, bold)
-        while (sp > minSp && paint.measureText(text) > maxWidth) {
+        while (sp > minSp && paint.measureText(safeText) > maxWidth) {
             sp = (sp - 0.5f).coerceAtLeast(minSp)
             paint = textPaint(sp, color, bold)
         }
-        val fitted = ellipsizeToWidth(text, paint, maxWidth)
+        val fitted = ellipsizeToWidth(safeText, paint, maxWidth)
         canvas.drawText(fitted, x, baselineForCenterY(paint, centerY), paint)
     }
 
@@ -1622,9 +1938,11 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         textSp: Float,
         color: Int,
         bold: Boolean,
+        session: TextDrawSession,
     ) {
+        val safeText = session.prepare(text)
         val paint = textPaint(textSp, color, bold)
-        val fitted = ellipsizeToWidth(text, paint, maxWidth)
+        val fitted = ellipsizeToWidth(safeText, paint, maxWidth)
         canvas.drawText(fitted, x, baselineForCenterY(paint, centerY), paint)
     }
 
@@ -1637,9 +1955,11 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         textSp: Float,
         color: Int,
         bold: Boolean = false,
+        session: TextDrawSession,
     ) {
+        val safeText = session.prepare(text)
         val paint = textPaint(textSp, color, bold)
-        val fitted = ellipsizeToWidth(text, paint, maxWidth)
+        val fitted = ellipsizeToWidth(safeText, paint, maxWidth)
         paint.textAlign = Paint.Align.RIGHT
         canvas.drawText(fitted, rightX, baselineForCenterY(paint, centerY), paint)
     }
@@ -1653,7 +1973,7 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         return if (count <= 0) ellipsis else text.substring(0, count).trimEnd() + ellipsis
     }
 
-    // ── Privacy & Digest Helpers ─────────────────────────────────────────────────────────────
+    // ── Privacy & Digest Helpers (Delegating to Shared NetBenchReportSanitizer) ──────────────
 
     internal fun formatDisplayIp(rawIp: String, maskTargetIp: Boolean): String {
         val trimmed = rawIp.trim()
@@ -1664,44 +1984,15 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         raw: String,
         report: NetBenchReport,
         maskTargetIp: Boolean,
-    ): String {
-        if (!maskTargetIp) return raw
-        var out = raw
-        val ips = buildSet {
-            report.resolvedTarget?.resolvedIp?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-            report.ipIntelligence?.ip?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-        }
-        for (ip in ips) {
-            val masked = NetBenchTargetParser.maskTargetIpLastSegment(ip)
-            if (masked != ip && out.contains(ip, ignoreCase = true)) {
-                out = out.replace(ip, masked, ignoreCase = true)
-            }
-        }
-        return out
-    }
+    ): String = NetBenchReportSanitizer.scrubPublicText(raw, report, maskTargetIp)
 
-    /**
-     * Builds the client network footer strip WITHOUT ever exposing local raw or masked IP addresses.
-     */
     internal fun buildSafeClientFooterText(report: NetBenchReport): String? {
-        val client = report.clientNetwork ?: return null
-        val carrier = client.carrierDisplayName.trim().ifEmpty { "本机网络" }
-        val family = client.ipFamily.takeIf { it != IpFamily.UNKNOWN }?.label ?: "IPv4"
-        val region = client.regionName?.trim()?.takeIf {
-            it.isNotEmpty() && !carrier.contains(it, ignoreCase = true)
-        }
-        val prefix = when {
-            report.testedViaProxy -> "经由代理出口"
-            client.routeKind == EgressRouteKind.PROXY_FALLBACK -> "代理出口(直连受限)"
-            else -> "本机出口"
-        }
-        val parts = listOfNotNull(
-            "$prefix：$carrier",
-            region,
-            family,
-            "生成报告已自动隐藏本机 IP",
+        val sanitized = NetBenchReportSanitizer.sanitize(
+            report = report,
+            maskTargetIp = true,
+            includeClientNetwork = true,
         )
-        return parts.joinToString(" · ")
+        return sanitized.clientEnv?.cardFooterText?.takeIf { it.isNotBlank() }
     }
 
     private fun sha256Short(input: String): String {

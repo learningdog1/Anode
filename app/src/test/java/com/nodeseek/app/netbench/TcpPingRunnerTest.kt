@@ -3,6 +3,7 @@ package com.nodeseek.app.netbench
 import com.nodeseek.app.data.netbench.BoundNoProxySocketFactory
 import com.nodeseek.app.data.netbench.DnsWireMessageCodec
 import com.nodeseek.app.data.netbench.DohCleanDirectDnsFallback
+import com.nodeseek.app.data.netbench.HttpLatencyRunner
 import com.nodeseek.app.data.netbench.NetBenchDnsResolver
 import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchSocketChannel
@@ -12,6 +13,8 @@ import com.nodeseek.app.data.netbench.TcpPingRunner
 import com.nodeseek.app.data.netbench.TcpProbeConnector
 import com.nodeseek.app.data.netbench.createBoundNoProxySocket
 import com.nodeseek.app.domain.netbench.IpFamily
+import com.nodeseek.app.domain.netbench.NetBenchDiagnosticClassifier
+import com.nodeseek.app.domain.netbench.NetBenchErrorCategory
 import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.NetBenchTransportKind
@@ -21,6 +24,8 @@ import com.nodeseek.app.domain.netbench.TcpPingConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
@@ -31,10 +36,12 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.EOFException
 import java.io.IOException
 import java.net.ConnectException
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NoRouteToHostException
 import java.net.Proxy
 import java.net.ProxySelector
 import java.net.ServerSocket
@@ -43,9 +50,12 @@ import java.net.SocketAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URI
+import java.net.UnknownHostException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.SocketFactory
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
@@ -710,6 +720,163 @@ class TcpPingRunnerTest {
         } finally {
             runCatching { dohServer.shutdown() }
         }
+    }
+
+    @Test
+    fun `http probe and tcping classify OkHttp and socket exceptions into clean Chinese categories while isolating rawDiagnostic locally`() = runBlocking {
+        data class ErrorCase(
+            val throwable: IOException,
+            val expectedCategory: NetBenchErrorCategory,
+            val expectedLabel: String,
+            val forbiddenInPublic: String,
+        )
+
+        val cases = listOf(
+            ErrorCase(
+                throwable = ConnectException("Failed to connect to node.example.com/203.0.113.42:443"),
+                expectedCategory = NetBenchErrorCategory.CONNECTION_REFUSED,
+                expectedLabel = "连接被拒绝",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = ConnectException("Failed to connect to [2001:db8:85a3::8a2e:370:7334]:8443"),
+                expectedCategory = NetBenchErrorCategory.CONNECTION_REFUSED,
+                expectedLabel = "连接被拒绝",
+                forbiddenInPublic = "2001:db8:85a3::8a2e:370:7334",
+            ),
+            ErrorCase(
+                throwable = SocketTimeoutException("failed to connect to /203.0.113.42 (port 443) after 5000ms"),
+                expectedCategory = NetBenchErrorCategory.CONNECTION_TIMEOUT,
+                expectedLabel = "连接超时",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = SSLHandshakeException("Chain validation failed on https://203.0.113.42:443/"),
+                expectedCategory = NetBenchErrorCategory.TLS_HANDSHAKE_FAILED,
+                expectedLabel = "TLS 握手失败",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = SSLPeerUnverifiedException("Hostname 203.0.113.42 not verified"),
+                expectedCategory = NetBenchErrorCategory.TLS_HANDSHAKE_FAILED,
+                expectedLabel = "TLS 握手失败",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = UnknownHostException("Unable to resolve host \"node.example.com\": No address associated with hostname"),
+                expectedCategory = NetBenchErrorCategory.DNS_FAILED,
+                expectedLabel = "DNS 解析失败",
+                forbiddenInPublic = "node.example.com",
+            ),
+            ErrorCase(
+                throwable = NoRouteToHostException("No route to host: /203.0.113.42:443"),
+                expectedCategory = NetBenchErrorCategory.NETWORK_UNREACHABLE,
+                expectedLabel = "网络不可达",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = ConnectException("Failed to connect to node.example.com/203.0.113.42:443").apply {
+                    initCause(NoRouteToHostException("Host is unreachable (EHOSTUNREACH)"))
+                },
+                expectedCategory = NetBenchErrorCategory.NETWORK_UNREACHABLE,
+                expectedLabel = "网络不可达",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = SocketException("Connection reset by peer /203.0.113.42:443 (ECONNRESET)"),
+                expectedCategory = NetBenchErrorCategory.CONNECTION_RESET,
+                expectedLabel = "连接已重置",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = EOFException("\\n not found: unexpected end of stream on https://203.0.113.42:443/..."),
+                expectedCategory = NetBenchErrorCategory.CONNECTION_RESET,
+                expectedLabel = "连接已重置",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+            ErrorCase(
+                throwable = IOException("Cleartext HTTP traffic to 203.0.113.42 not permitted"),
+                expectedCategory = NetBenchErrorCategory.REQUEST_FAILED,
+                expectedLabel = "请求失败",
+                forbiddenInPublic = "203.0.113.42",
+            ),
+        )
+
+        for (case in cases) {
+            assertEquals(
+                "Classifier mismatch for ${case.throwable}",
+                case.expectedCategory,
+                NetBenchDiagnosticClassifier.classifyThrowable(case.throwable),
+            )
+
+            // End-to-end HttpLatencyRunner.probe with OkHttp interceptor throwing exact exception
+            val throwingClient = OkHttpClient.Builder()
+                .addInterceptor(Interceptor { throw case.throwable })
+                .build()
+            val httpRunner = HttpLatencyRunner(
+                baseHttpClient = throwingClient,
+                ioDispatcher = Dispatchers.IO,
+            )
+            val httpResult = httpRunner.probe(
+                rawTarget = "node.example.com",
+                port = 443,
+                timeoutMs = 1_500,
+            )
+            assertFalse(httpResult.success)
+            assertEquals(case.expectedCategory, httpResult.errorCategory)
+            assertEquals(case.expectedLabel, httpResult.errorMessage)
+            assertEquals(case.expectedLabel, httpResult.publicErrorLabel)
+            assertFalse(
+                "Public errorMessage must never contain ${case.forbiddenInPublic}: ${httpResult.errorMessage}",
+                httpResult.errorMessage.orEmpty().contains(case.forbiddenInPublic, ignoreCase = true),
+            )
+            assertNotNull("rawDiagnostic must be preserved for local inspection", httpResult.rawDiagnostic)
+            assertTrue(
+                "rawDiagnostic should retain original detail: ${httpResult.rawDiagnostic}",
+                httpResult.rawDiagnostic!!.contains(case.forbiddenInPublic, ignoreCase = true),
+            )
+            assertTrue(
+                "localDiagnosticMessage should combine category + raw detail for local UI",
+                httpResult.localDiagnosticMessage!!.contains(case.expectedLabel) &&
+                    httpResult.localDiagnosticMessage!!.contains(case.forbiddenInPublic, ignoreCase = true),
+            )
+        }
+
+        // Also verify TcpPingRunner never leaks target IP/port when TcpProbeConnector throws raw socket exceptions
+        val resolver = NetBenchTargetResolver(
+            dnsResolver = NetBenchDnsResolver { listOf(InetAddress.getByName("203.0.113.42")) },
+            ioDispatcher = Dispatchers.IO,
+        )
+        val probeIdx = AtomicInteger(0)
+        val leakyConnector = TcpProbeConnector { _, _, _ ->
+            when (probeIdx.incrementAndGet()) {
+                1 -> throw ConnectException("Failed to connect to node.example.com/203.0.113.42:443")
+                2 -> throw SocketTimeoutException("connect timed out to /203.0.113.42:443")
+                3 -> throw NoRouteToHostException("No route to host /203.0.113.42:443")
+                else -> throw SocketException("Connection reset on /203.0.113.42:443")
+            }
+        }
+        val tcpRunner = TcpPingRunner(
+            resolver = resolver,
+            connector = leakyConnector,
+            ioDispatcher = Dispatchers.IO,
+        )
+        val finalProgress = tcpRunner.run(
+            TcpPingConfig(
+                target = "node.example.com",
+                port = 443,
+                probeCount = 4,
+                intervalMs = 0L,
+            ),
+        ).toList().last()
+
+        val expectedSampleLabels = listOf("连接被拒绝", "连接超时", "网络不可达", "连接已重置")
+        assertEquals(expectedSampleLabels, finalProgress.samples.map { it.errorMessage })
+        assertEquals("连接已重置", finalProgress.summary.errorMessage)
+        assertEquals(NetBenchErrorCategory.CONNECTION_RESET, finalProgress.summary.errorCategory)
+        assertTrue(finalProgress.samples.none { it.errorMessage.orEmpty().contains("203.0.113.42") })
+        assertFalse(finalProgress.summary.errorMessage.orEmpty().contains("203.0.113.42"))
+        assertTrue(finalProgress.samples.all { it.rawDiagnostic.orEmpty().contains("203.0.113.42") })
     }
 
     private fun buildDnsWireResponse(

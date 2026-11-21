@@ -3,6 +3,8 @@ package com.nodeseek.app.data.netbench
 import com.nodeseek.app.domain.netbench.DirectBindFailureReason
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IpFamily
+import com.nodeseek.app.domain.netbench.NetBenchDiagnosticClassifier
+import com.nodeseek.app.domain.netbench.NetBenchErrorCategory
 import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.ParsedTarget
@@ -623,7 +625,15 @@ class TcpPingRunner(
         )
 
         val endpoint = resolvedResult.getOrElse { error ->
-            val msg = error.message ?: "无法解析测试目标"
+            val currentBinding = networkBridge.inspectCurrentNetworks()
+            val category = NetBenchDiagnosticClassifier.classifyThrowable(
+                throwable = error,
+                isVpnActive = currentBinding.plan.isVpnActive,
+                hasDirectCandidate = currentBinding.plan.hasDirectCandidate,
+                useProxy = config.useProxy,
+            )
+            val rawDiag = error.message ?: NetBenchDiagnosticClassifier.formatRawDiagnostic(error)
+            val publicMsg = category.publicLabel
             val failedSummary = TcpPingSummary(
                 resolvedTarget = null,
                 port = config.normalizedPort,
@@ -635,7 +645,9 @@ class TcpPingRunner(
                 maxMs = null,
                 jitterMdevMs = null,
                 samples = emptyList(),
-                errorMessage = msg,
+                errorMessage = publicMsg,
+                errorCategory = category,
+                rawDiagnostic = rawDiag,
             )
             emit(
                 TcpPingProgress(
@@ -646,7 +658,9 @@ class TcpPingRunner(
                     samples = emptyList(),
                     summary = failedSummary,
                     isFinished = true,
-                    errorMessage = msg,
+                    errorMessage = publicMsg,
+                    errorCategory = category,
+                    rawDiagnostic = rawDiag,
                 ),
             )
             return@flow
@@ -657,6 +671,7 @@ class TcpPingRunner(
             is ChannelSelectionResult.Selected -> initialSelection.channel
             is ChannelSelectionResult.Blocked -> {
                 val msg = initialSelection.message
+                val category = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED
                 val failedSummary = TcpPingSummary(
                     resolvedTarget = endpoint.resolvedTarget,
                     port = endpoint.effectivePort,
@@ -669,6 +684,8 @@ class TcpPingRunner(
                     jitterMdevMs = null,
                     samples = emptyList(),
                     errorMessage = msg,
+                    errorCategory = category,
+                    rawDiagnostic = msg,
                 )
                 emit(
                     TcpPingProgress(
@@ -680,6 +697,8 @@ class TcpPingRunner(
                         summary = failedSummary,
                         isFinished = true,
                         errorMessage = msg,
+                        errorCategory = category,
+                        rawDiagnostic = msg,
                     ),
                 )
                 return@flow
@@ -706,6 +725,8 @@ class TcpPingRunner(
                 port = endpoint.effectivePort,
                 samples = snapshot,
             )
+            val isFinalZeroRecv = seq == plannedCount && summary.received == 0
+            val lastFail = if (isFinalZeroRecv) samples.lastOrNull { !it.success } else null
             emit(
                 TcpPingProgress(
                     resolvedTarget = endpoint.resolvedTarget,
@@ -715,11 +736,9 @@ class TcpPingRunner(
                     samples = snapshot,
                     summary = summary,
                     isFinished = seq == plannedCount,
-                    errorMessage = if (seq == plannedCount && summary.received == 0) {
-                        samples.lastOrNull()?.errorMessage
-                    } else {
-                        null
-                    },
+                    errorMessage = lastFail?.errorMessage,
+                    errorCategory = lastFail?.errorCategory,
+                    rawDiagnostic = lastFail?.rawDiagnostic,
                 ),
             )
 
@@ -762,10 +781,13 @@ class TcpPingRunner(
             } catch (ce: CancellationException) {
                 throw ce
             } catch (e: SocketTimeoutException) {
+                val category = NetBenchErrorCategory.CONNECTION_TIMEOUT
                 return TcpPingSample(
                     seq = seq,
                     success = false,
-                    errorMessage = "连接超时 (${timeoutMs}ms)",
+                    errorMessage = category.publicLabel,
+                    errorCategory = category,
+                    rawDiagnostic = "${NetBenchDiagnosticClassifier.formatRawDiagnostic(e)} (${timeoutMs}ms)",
                 )
             } catch (e: ConnectException) {
                 if (!useProxy && connector is BoundTcpProbeConnector && attempt == 0) {
@@ -776,10 +798,13 @@ class TcpPingRunner(
                         hasDirectCandidate = refreshed.plan.hasDirectCandidate,
                     )
                     if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                        val lockdownMsg = "${reason.userHint}；请开启「经由代理测试」"
                         return TcpPingSample(
                             seq = seq,
                             success = false,
-                            errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                            errorMessage = lockdownMsg,
+                            errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
+                            rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                         )
                     }
                     val nextChannel = refreshed.directChannel
@@ -792,16 +817,22 @@ class TcpPingRunner(
                         continue
                     }
                 }
+                val category = NetBenchDiagnosticClassifier.classifyThrowable(e, useProxy = useProxy)
                 return TcpPingSample(
                     seq = seq,
                     success = false,
-                    errorMessage = "端口拒绝连接",
+                    errorMessage = category.publicLabel,
+                    errorCategory = category,
+                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                 )
             } catch (e: NoRouteToHostException) {
+                val category = NetBenchErrorCategory.NETWORK_UNREACHABLE
                 return TcpPingSample(
                     seq = seq,
                     success = false,
-                    errorMessage = "目标主机不可达",
+                    errorMessage = category.publicLabel,
+                    errorCategory = category,
+                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                 )
             } catch (e: SecurityException) {
                 val refreshed = networkBridge.inspectCurrentNetworks()
@@ -810,18 +841,25 @@ class TcpPingRunner(
                     isVpnActive = refreshed.plan.isVpnActive,
                     hasDirectCandidate = refreshed.plan.hasDirectCandidate,
                 )
+                val category = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED
                 return TcpPingSample(
                     seq = seq,
                     success = false,
                     errorMessage = if (!useProxy && refreshed.plan.isVpnActive) {
                         "${reason.userHint}；请开启「经由代理测试」"
                     } else {
-                        e.message ?: "底层网络权限受限"
+                        category.publicLabel
                     },
+                    errorCategory = category,
+                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                 )
             } catch (e: IOException) {
-                if (!useProxy && connector is BoundTcpProbeConnector) {
-                    val refreshed = networkBridge.inspectCurrentNetworks()
+                val refreshed = if (!useProxy && connector is BoundTcpProbeConnector) {
+                    networkBridge.inspectCurrentNetworks()
+                } else {
+                    null
+                }
+                if (refreshed != null) {
                     val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
                         throwable = e,
                         isVpnActive = refreshed.plan.isVpnActive,
@@ -832,6 +870,8 @@ class TcpPingRunner(
                             seq = seq,
                             success = false,
                             errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                            errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
+                            rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                         )
                     }
                     val nextChannel = refreshed.directChannel
@@ -845,17 +885,26 @@ class TcpPingRunner(
                         continue
                     }
                 }
+                val category = NetBenchDiagnosticClassifier.classifyThrowable(
+                    throwable = e,
+                    isVpnActive = refreshed?.plan?.isVpnActive == true,
+                    hasDirectCandidate = refreshed?.plan?.hasDirectCandidate == true,
+                    useProxy = useProxy,
+                )
                 return TcpPingSample(
                     seq = seq,
                     success = false,
-                    errorMessage = e.message ?: "网络 I/O 异常",
+                    errorMessage = category.publicLabel,
+                    errorCategory = category,
+                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
                 )
             }
         }
         return TcpPingSample(
             seq = seq,
             success = false,
-            errorMessage = "网络 I/O 异常",
+            errorMessage = NetBenchErrorCategory.REQUEST_FAILED.publicLabel,
+            errorCategory = NetBenchErrorCategory.REQUEST_FAILED,
         )
     }
 
@@ -879,6 +928,7 @@ class TcpPingRunner(
             }
 
             if (rtts.isEmpty()) {
+                val lastFailed = samples.lastOrNull { !it.success }
                 return TcpPingSummary(
                     resolvedTarget = resolvedTarget,
                     port = port,
@@ -890,7 +940,9 @@ class TcpPingRunner(
                     maxMs = null,
                     jitterMdevMs = null,
                     samples = samples,
-                    errorMessage = errorMessage ?: samples.lastOrNull()?.errorMessage,
+                    errorMessage = errorMessage ?: lastFailed?.errorMessage,
+                    errorCategory = lastFailed?.errorCategory,
+                    rawDiagnostic = lastFailed?.rawDiagnostic,
                 )
             }
 
@@ -954,7 +1006,9 @@ class HttpLatencyRunner(
             ?: return@withContext HttpLatencyResult(
                 url = rawTarget,
                 success = false,
-                errorMessage = "目标格式无效",
+                errorMessage = NetBenchErrorCategory.INVALID_TARGET.publicLabel,
+                errorCategory = NetBenchErrorCategory.INVALID_TARGET,
+                rawDiagnostic = "目标格式无效: $rawTarget",
             )
 
         val effectivePort = parsed.effectivePort(port).coerceIn(1, 65535)
@@ -970,10 +1024,13 @@ class HttpLatencyRunner(
         val channel = when (val selection = binding.selectChannel(useProxy)) {
             is ChannelSelectionResult.Selected -> selection.channel
             is ChannelSelectionResult.Blocked -> {
+                val category = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED
                 return@withContext HttpLatencyResult(
                     url = url,
                     success = false,
-                    errorMessage = selection.message,
+                    errorMessage = category.publicLabel,
+                    errorCategory = category,
+                    rawDiagnostic = selection.message,
                 )
             }
         }
@@ -1043,14 +1100,13 @@ class HttpLatencyRunner(
             .bindToChannel(channel, tempPool)
             .build()
 
-        val request = Request.Builder()
-            .url(url)
-            .method(method, null)
-            .header("User-Agent", "Anode-NetBench/1.0")
-            .header("Connection", "close")
-            .build()
-
         return try {
+            val request = Request.Builder()
+                .url(url)
+                .method(method, null)
+                .header("User-Agent", "Anode-NetBench/1.0")
+                .header("Connection", "close")
+                .build()
             val wallStart = System.nanoTime()
             client.newCall(request).execute().use { response: Response ->
                 val endNanos = System.nanoTime()
@@ -1078,19 +1134,12 @@ class HttpLatencyRunner(
             }
         } catch (ce: CancellationException) {
             throw ce
-        } catch (e: SocketTimeoutException) {
-            HttpLatencyResult(url = url, success = false, errorMessage = "HTTP 请求超时")
-        } catch (e: SecurityException) {
-            HttpLatencyResult(
+        } catch (t: Throwable) {
+            classifyProbeException(
                 url = url,
-                success = false,
-                errorMessage = binding.formatBindOrIoError(e, useProxy, "HTTP 权限受限"),
-            )
-        } catch (e: IOException) {
-            HttpLatencyResult(
-                url = url,
-                success = false,
-                errorMessage = binding.formatBindOrIoError(e, useProxy, e.message?.take(80) ?: "HTTP 连接失败"),
+                throwable = t,
+                binding = binding,
+                useProxy = useProxy,
             )
         } finally {
             tempPool?.evictAll()
@@ -1103,5 +1152,37 @@ class HttpLatencyRunner(
             .readTimeout(5, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
             .build()
+
+        internal fun classifyProbeException(
+            url: String,
+            throwable: Throwable,
+            binding: ResolvedNetworkBinding = SystemDefaultNetworkBridge.inspectCurrentNetworks(),
+            useProxy: Boolean = false,
+        ): HttpLatencyResult {
+            val vpnActive = binding.plan.isVpnActive
+            val category = NetBenchDiagnosticClassifier.classifyThrowable(
+                throwable = throwable,
+                isVpnActive = vpnActive,
+                hasDirectCandidate = binding.plan.hasDirectCandidate,
+                useProxy = useProxy,
+            )
+            val rawDiag = buildString {
+                val rawEx = NetBenchDiagnosticClassifier.formatRawDiagnostic(throwable)
+                if (!useProxy && vpnActive && category == NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED) {
+                    val vpnHint = binding.formatBindOrIoError(throwable, useProxy = false, fallbackMessage = "")
+                    if (vpnHint.isNotBlank()) {
+                        append(vpnHint).append(" | ")
+                    }
+                }
+                append(rawEx)
+            }
+            return HttpLatencyResult(
+                url = url,
+                success = false,
+                errorMessage = category.publicLabel,
+                errorCategory = category,
+                rawDiagnostic = rawDiag,
+            )
+        }
     }
 }

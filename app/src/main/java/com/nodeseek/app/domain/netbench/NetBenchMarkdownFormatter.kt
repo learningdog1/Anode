@@ -17,8 +17,12 @@ import kotlin.math.roundToInt
  * - [NetBenchMarkdownStyle.REPLY_CARD]: Rich structured blockquote card + per-second iperf3 log
  *   tailored for replying inside existing benchmark threads.
  *
- * SECURITY / PRIVACY: The user's own egress IP (`clientNetwork.rawIp` / `maskedIp` and
- * `proxyNetwork.rawIp` / `maskedIp`) is NEVER written into any generated public Markdown output.
+ * SECURITY / PRIVACY:
+ * - Consumes [SanitizedNetBenchReport] produced by [NetBenchReportSanitizer] (the exact same
+ *   shared presentation model used by [com.nodeseek.app.ui.netbench.AndroidNetBenchCardImageGenerator]).
+ * - Local client raw/masked egress IPs NEVER appear in generated output.
+ * - Probe failures always display standardized [NetBenchErrorCategory] labels rather than raw
+ *   Java/OkHttp socket exception messages.
  */
 object NetBenchMarkdownFormatter {
 
@@ -27,7 +31,6 @@ object NetBenchMarkdownFormatter {
     private const val MAX_HOST_DISPLAY_WIDTH: Int = 30
     private const val MAX_RESULT_CELL_DISPLAY_WIDTH: Int = 34
     private const val MAX_NOTE_CELL_DISPLAY_WIDTH: Int = 58
-    private const val MAX_ORG_DISPLAY_WIDTH: Int = 28
     private const val MAX_ERROR_DISPLAY_WIDTH: Int = 42
 
     private val SPARK_BARS: CharArray = charArrayOf('▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
@@ -38,30 +41,56 @@ object NetBenchMarkdownFormatter {
     private val DEFAULT_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
 
     private val MULTI_WHITESPACE_REGEX = Regex("""\s+""")
-    private val DBA_SPLIT_REGEX = Regex("""(?i)\bdba\s+(.+)$""")
-    private val CORPORATE_SUFFIX_REGEX = Regex(
-        """(?i)(?:,\s*|\s+)(?:llc|inc\.?|ltd\.?|limited|corp\.?|corporation|gmbh|co\.?,?\s*ltd\.?|holdings?(?:\s+corporation)?)+$""",
-    )
 
     fun format(
         report: NetBenchReport,
         options: NetBenchMarkdownOptions = NetBenchMarkdownOptions(),
     ): String {
+        val sanitized = NetBenchReportSanitizer.sanitize(
+            report = report,
+            maskTargetIp = options.maskTargetIp,
+            includeClientNetwork = options.includeClientNetwork,
+        )
+        return formatSanitized(
+            sanitized = sanitized,
+            options = options,
+            rawReportForDefenseInDepth = report,
+        )
+    }
+
+    fun formatSanitized(
+        sanitized: SanitizedNetBenchReport,
+        options: NetBenchMarkdownOptions = NetBenchMarkdownOptions(
+            maskTargetIp = sanitized.maskTargetIp,
+            includeClientNetwork = sanitized.includeClientNetwork,
+        ),
+        rawReportForDefenseInDepth: NetBenchReport? = null,
+    ): String {
         val protectedImageUrls = LinkedHashMap<String, String>()
         val rawMarkdown = when (options.style) {
-            NetBenchMarkdownStyle.REPLY_CARD -> formatReplyCard(report, options)
-            NetBenchMarkdownStyle.FULL_TABLE -> formatFullTable(report, options, protectedImageUrls)
+            NetBenchMarkdownStyle.REPLY_CARD -> formatReplyCard(sanitized, options)
+            NetBenchMarkdownStyle.FULL_TABLE -> formatFullTable(
+                sanitized = sanitized,
+                options = options,
+                protectedImageUrls = protectedImageUrls,
+                rawReport = rawReportForDefenseInDepth,
+            )
         }
-        val targetSafe = if (options.maskTargetIp) {
-            scrubTargetEndpointIfNeeded(rawMarkdown, report)
+        var scrubbed = if (rawReportForDefenseInDepth != null) {
+            NetBenchReportSanitizer.scrubFinalOutput(
+                text = rawMarkdown,
+                report = rawReportForDefenseInDepth,
+                maskTargetIp = sanitized.maskTargetIp,
+            )
+        } else if (sanitized.maskTargetIp) {
+            NetBenchReportSanitizer.maskAnyRemainingIpLiterals(rawMarkdown)
         } else {
             rawMarkdown
         }
-        var clientSafe = scrubClientIpIfNeeded(targetSafe, report)
         for ((token, cleanUrl) in protectedImageUrls) {
-            clientSafe = clientSafe.replace(token, cleanUrl)
+            scrubbed = scrubbed.replace(token, cleanUrl)
         }
-        return clientSafe
+        return scrubbed
     }
 
     internal fun sanitizeMarkdownImageUrl(rawUrl: String?): String? {
@@ -93,52 +122,52 @@ object NetBenchMarkdownFormatter {
     // ── Style 1: Reply Card (Rich Blockquote + iperf3 Interval Log) ──────────────────────────
 
     private fun formatReplyCard(
-        report: NetBenchReport,
+        sanitized: SanitizedNetBenchReport,
         options: NetBenchMarkdownOptions,
     ): String {
         val timestamp = resolveTimestampLabel(options)
         val lines = mutableListOf<String>()
 
-        if (options.includeClientNetwork) {
-            val envBadge = buildClientEnvBadge(report)
+        if (sanitized.clientEnv != null) {
+            val envBadge = buildClientEnvBadge(sanitized)
             lines += "> 📡 **本机网络实测（$envBadge）** · `$timestamp`"
-            lines += "> - **路由模式**：${buildRouteModeSummary(report, options.includeClientNetwork)}"
+            lines += "> - **路由模式**：${buildRouteModeSummary(sanitized)}"
         } else {
             lines += "> 📡 **移动端网络实测** · `$timestamp`"
         }
 
-        val targetLine = buildTargetDisplay(report, options.maskTargetIp)
+        val targetLine = buildTargetDisplay(sanitized.target, sanitized.maskTargetIp)
         if (targetLine.isNotEmpty()) {
             lines += "> - **目标节点**：$targetLine"
         }
 
-        report.ipIntelligence?.let { intel ->
+        sanitized.ipIntelligence?.let { intel ->
             lines += "> - **IP 归属与属性**：${formatIpIntelCompact(intel)}"
         }
 
-        report.icmpPingSummary?.let { ping ->
+        sanitized.icmpPing?.let { ping ->
             lines += "> - **Ping (${ping.sent}次)**：${formatIcmpPingCompact(ping)}"
         }
 
-        report.tcpPingSummary?.let { tcp ->
-            val deltaSuffix = buildTcpVsIcmpShortTag(report.icmpPingSummary, tcp)
+        sanitized.tcpPing?.let { tcp ->
+            val deltaSuffix = buildTcpVsIcmpShortTag(sanitized.icmpPing, tcp)
                 ?.let { "（$it）" }
                 .orEmpty()
             lines += "> - **TCPing (${tcp.sent}次)**：${formatTcpPingCompact(tcp)}$deltaSuffix"
         }
 
-        report.httpLatencyResult?.let { http ->
+        sanitized.httpProbe?.let { http ->
             lines += "> - **HTTP 探测**：${formatHttpCompact(http)}"
         }
 
         val iperfStreams = listOfNotNull(
-            report.iperfDownloadResult?.parallelStreams,
-            report.iperfUploadResult?.parallelStreams,
+            sanitized.iperfDownload?.parallelStreams,
+            sanitized.iperfUpload?.parallelStreams,
         )
         val unifiedStreams = iperfStreams.distinct().singleOrNull()?.takeIf { it > 1 }
 
         val iperfParts = buildList {
-            report.iperfDownloadResult?.let { dl ->
+            sanitized.iperfDownload?.let { dl ->
                 val dirStreams = if (unifiedStreams == null && dl.parallelStreams > 1) " (-P ${dl.parallelStreams})" else ""
                 if (dl.success) {
                     val extras = buildList {
@@ -148,11 +177,14 @@ object NetBenchMarkdownFormatter {
                     }.joinToString(" · ")
                     add("下载$dirStreams **${formatMbps(dl.effectiveMbps)}** ($extras)")
                 } else {
-                    val reason = truncateByDisplayWidth(sanitizeInline(dl.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
+                    val reason = truncateByDisplayWidth(
+                        sanitizeInline(dl.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
+                        MAX_ERROR_DISPLAY_WIDTH,
+                    )
                     add("下载$dirStreams 失败 ($reason)")
                 }
             }
-            report.iperfUploadResult?.let { ul ->
+            sanitized.iperfUpload?.let { ul ->
                 val dirStreams = if (unifiedStreams == null && ul.parallelStreams > 1) " (-P ${ul.parallelStreams})" else ""
                 if (ul.success) {
                     val extras = buildList {
@@ -162,7 +194,10 @@ object NetBenchMarkdownFormatter {
                     }.joinToString(" · ")
                     add("上传$dirStreams **${formatMbps(ul.effectiveMbps)}** ($extras)")
                 } else {
-                    val reason = truncateByDisplayWidth(sanitizeInline(ul.errorMessage ?: "连接异常"), MAX_ERROR_DISPLAY_WIDTH)
+                    val reason = truncateByDisplayWidth(
+                        sanitizeInline(ul.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
+                        MAX_ERROR_DISPLAY_WIDTH,
+                    )
                     add("上传$dirStreams 失败 ($reason)")
                 }
             }
@@ -172,8 +207,8 @@ object NetBenchMarkdownFormatter {
             lines += "> - **iperf3 测速$streamSuffix**：${iperfParts.joinToString(" ｜ ")}"
         }
 
-        if (report.hasAnyResult) {
-            val briefVerdict = buildOneLineVerdict(report)
+        if (sanitized.hasAnyResult) {
+            val briefVerdict = buildOneLineVerdict(sanitized)
             if (briefVerdict.isNotEmpty()) {
                 lines += "> - **综合简评**：$briefVerdict"
             }
@@ -182,19 +217,13 @@ object NetBenchMarkdownFormatter {
         val sb = StringBuilder()
         sb.append(lines.joinToString("\n"))
 
-        val successfulIperf = listOfNotNull(report.iperfDownloadResult, report.iperfUploadResult)
+        val successfulIperf = listOfNotNull(sanitized.iperfDownload, sanitized.iperfUpload)
             .filter { it.success }
         if (successfulIperf.isNotEmpty()) {
             sb.append("\n\n```text\n")
             successfulIperf.forEachIndexed { idx, res ->
                 if (idx > 0) sb.append("\n\n")
-                sb.append(
-                    buildIperf3IntervalLogText(
-                        result = res,
-                        report = report,
-                        maskTargetIp = options.maskTargetIp,
-                    ),
-                )
+                sb.append(buildIperf3IntervalLogText(res))
             }
             sb.append("\n```")
         }
@@ -205,9 +234,10 @@ object NetBenchMarkdownFormatter {
     // ── Style 2: Full Forum Benchmark Report (Default for Standalone Posts) ──────────────────
 
     private fun formatFullTable(
-        report: NetBenchReport,
+        sanitized: SanitizedNetBenchReport,
         options: NetBenchMarkdownOptions,
         protectedImageUrls: MutableMap<String, String> = LinkedHashMap(),
+        rawReport: NetBenchReport? = null,
     ): String {
         val timestamp = resolveTimestampLabel(options)
         val sb = StringBuilder()
@@ -215,18 +245,19 @@ object NetBenchMarkdownFormatter {
         // 1. Title & Test Environment Blockquote Summary Card
         sb.appendLine("## 📡 移动端网络实测报告")
         sb.appendLine()
-        sb.appendLine(buildEnvironmentBlockquote(report, options, timestamp))
+        sb.appendLine(buildEnvironmentBlockquote(sanitized, timestamp))
 
         val cellScrubber: (String) -> String = { rawCell ->
-            val targetClean = if (options.maskTargetIp) {
-                scrubTargetEndpointIfNeeded(rawCell, report)
+            if (rawReport != null) {
+                NetBenchReportSanitizer.scrubPublicText(rawCell, rawReport, sanitized.maskTargetIp)
+            } else if (sanitized.maskTargetIp) {
+                NetBenchReportSanitizer.maskAnyRemainingIpLiterals(rawCell)
             } else {
                 rawCell
             }
-            scrubClientIpIfNeeded(targetClean, report)
         }
 
-        if (!report.hasAnyResult) {
+        if (!sanitized.hasAnyResult) {
             sb.appendLine()
             sb.appendLine("### 📋 测试状态")
             sb.appendLine()
@@ -243,8 +274,8 @@ object NetBenchMarkdownFormatter {
         }
 
         // 2. Target Node & IP Intelligence Table + Visual Card
-        val targetAndIpRows = buildTargetAndIpTableRows(report, options)
-        val ipCardEmbed = if (report.ipIntelligence != null) {
+        val targetAndIpRows = buildTargetAndIpTableRows(sanitized)
+        val ipCardEmbed = if (sanitized.ipIntelligence != null) {
             buildMarkdownImageEmbed(
                 kind = NetBenchReportCardKind.IP_INTELLIGENCE,
                 uploadedImages = options.uploadedImages,
@@ -273,8 +304,8 @@ object NetBenchMarkdownFormatter {
         }
 
         // 3. Network Latency & Link Stability Analysis + Visual Waveform Cards
-        val latencyRows = buildLatencyAnalysisRows(report, options.maskTargetIp)
-        val icmpCardEmbed = if (report.icmpPingSummary != null && report.icmpPingSummary.sent > 0) {
+        val latencyRows = buildLatencyAnalysisRows(sanitized)
+        val icmpCardEmbed = if (sanitized.icmpPing != null && sanitized.icmpPing.sent > 0) {
             buildMarkdownImageEmbed(
                 kind = NetBenchReportCardKind.ICMP_PING,
                 uploadedImages = options.uploadedImages,
@@ -283,7 +314,7 @@ object NetBenchMarkdownFormatter {
         } else {
             null
         }
-        val tcpCardEmbed = if (report.tcpPingSummary != null && report.tcpPingSummary.sent > 0) {
+        val tcpCardEmbed = if (sanitized.tcpPing != null && sanitized.tcpPing.sent > 0) {
             buildMarkdownImageEmbed(
                 kind = NetBenchReportCardKind.TCP_PING,
                 uploadedImages = options.uploadedImages,
@@ -315,9 +346,8 @@ object NetBenchMarkdownFormatter {
             }
 
             val packetLog = buildPerPacketRttLogText(
-                icmp = report.icmpPingSummary,
-                tcp = report.tcpPingSummary,
-                maskTargetIp = options.maskTargetIp,
+                icmp = sanitized.icmpPing,
+                tcp = sanitized.tcpPing,
             )
             if (packetLog != null) {
                 sb.appendLine()
@@ -328,7 +358,7 @@ object NetBenchMarkdownFormatter {
         }
 
         // 4. iperf3 Throughput & Per-Second Interval Breakdown + Visual Gauge Card
-        val iperfResults = listOfNotNull(report.iperfDownloadResult, report.iperfUploadResult)
+        val iperfResults = listOfNotNull(sanitized.iperfDownload, sanitized.iperfUpload)
         val iperfCardEmbed = if (iperfResults.any { it.success }) {
             buildMarkdownImageEmbed(
                 kind = NetBenchReportCardKind.IPERF3,
@@ -368,20 +398,14 @@ object NetBenchMarkdownFormatter {
                     sb.appendLine(dirTitle)
                     sb.appendLine()
                     sb.appendLine("```text")
-                    sb.appendLine(
-                        buildIperf3IntervalLogText(
-                            result = res,
-                            report = report,
-                            maskTargetIp = options.maskTargetIp,
-                        ),
-                    )
+                    sb.appendLine(buildIperf3IntervalLogText(res))
                     sb.appendLine("```")
                 }
             }
         }
 
         // 5. Comprehensive Objective Verdict & Signature Footer
-        val verdictBullets = buildComprehensiveVerdict(report)
+        val verdictBullets = buildComprehensiveVerdict(sanitized)
         if (verdictBullets.isNotEmpty()) {
             sb.appendLine()
             sb.appendLine("### 🩺 综合线路体检结论")
@@ -404,57 +428,47 @@ object NetBenchMarkdownFormatter {
             ?: LocalDateTime.now(DEFAULT_ZONE).format(DISPLAY_TIME_FORMATTER)
 
     private fun buildEnvironmentBlockquote(
-        report: NetBenchReport,
-        options: NetBenchMarkdownOptions,
+        sanitized: SanitizedNetBenchReport,
         timestamp: String,
     ): String {
         val lines = mutableListOf<String>()
         lines += "> - **测试时间**：`$timestamp`（北京时间）"
 
-        if (options.includeClientNetwork) {
-            lines += "> - **测试终端网络**：${buildDetailedClientEnvSummary(report)}"
+        if (sanitized.clientEnv != null) {
+            lines += "> - **测试终端网络**：${buildDetailedClientEnvSummary(sanitized.clientEnv)}"
         }
 
-        lines += "> - **测试路由模式**：${buildRouteModeSummary(report, options.includeClientNetwork)}"
+        lines += "> - **测试路由模式**：${buildRouteModeSummary(sanitized)}"
 
-        buildDnsResolutionSummary(report, options.maskTargetIp)?.let { dnsLine ->
+        buildDnsResolutionSummary(sanitized.target)?.let { dnsLine ->
             lines += "> - **域名解析与协议栈**：$dnsLine"
         }
 
         return lines.joinToString("\n")
     }
 
-    private fun buildDetailedClientEnvSummary(report: NetBenchReport): String {
-        val client = report.clientNetwork
-        if (client == null) {
-            val fallbackFamily = report.resolvedTarget?.ipFamily?.takeIf { it != IpFamily.UNKNOWN } ?: IpFamily.IPV4
-            return "本机移动终端 · ${fallbackFamily.label}（已自动隐藏本机出口 IP）"
+    private fun buildDetailedClientEnvSummary(client: SanitizedClientEnvPresentation): String {
+        if (!client.hasDetectedClientInfo) {
+            return "本机移动终端 · ${client.ipFamily.label}（已自动隐藏本机出口 IP）"
         }
 
         val parts = mutableListOf<String>()
         val carrier = sanitizeInline(client.carrierDisplayName).ifBlank { "本机网络" }
         parts += "**$carrier**"
 
-        val region = client.regionName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }
-            ?: IpClassificationEngine.countryNameZh(client.countryCode)
-        if (!region.isNullOrBlank() && !carrier.contains(region, ignoreCase = true)) {
-            parts += region
+        client.regionOrCountry?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let {
+            parts += it
         }
 
-        client.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { rawAsn ->
-            val normAsn = IpClassificationEngine.normalizeAsn(rawAsn) ?: sanitizeCodeInline(rawAsn)
-            parts += "`$normAsn`"
+        client.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { normAsn ->
+            parts += "`${sanitizeCodeInline(normAsn)}`"
         }
 
-        val isp = compactOrgName(client.ispName)
-        if (isp != null && !isp.equals(carrier, ignoreCase = true)) {
-            parts += isp
+        client.compactIspName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let {
+            parts += it
         }
 
-        val family = client.ipFamily.takeIf { it != IpFamily.UNKNOWN }
-            ?: report.resolvedTarget?.ipFamily?.takeIf { it != IpFamily.UNKNOWN }
-            ?: IpFamily.IPV4
-        parts += family.label
+        parts += client.ipFamily.label
 
         client.transportLabel?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let {
             parts += it
@@ -464,23 +478,16 @@ object NetBenchMarkdownFormatter {
         return parts.joinToString(" · ")
     }
 
-    private fun buildRouteModeSummary(
-        report: NetBenchReport,
-        includeClientNetwork: Boolean,
-    ): String {
-        val client = report.clientNetwork
-        val ping = report.icmpPingSummary
+    private fun buildRouteModeSummary(sanitized: SanitizedNetBenchReport): String {
+        val client = sanitized.clientEnv
+        val ping = sanitized.icmpPing
         val ifaceSuffix = ping?.boundInterfaceName?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { "（绑定网卡 `${sanitizeCodeInline(it)}`）" }
             .orEmpty()
 
         return when {
-            report.testedViaProxy -> {
-                val proxyCarrier = if (includeClientNetwork) {
-                    report.proxyNetwork?.carrierDisplayName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }
-                } else {
-                    null
-                }
+            sanitized.testedViaProxy -> {
+                val proxyCarrier = client?.proxyCarrierDisplayName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }
                 if (proxyCarrier != null) {
                     "经由代理/VPN 链路测试（代理节点：$proxyCarrier · 已隐藏代理 IP）"
                 } else {
@@ -496,83 +503,64 @@ object NetBenchMarkdownFormatter {
         }
     }
 
-    private fun buildDnsResolutionSummary(
-        report: NetBenchReport,
-        maskTargetIp: Boolean,
-    ): String? {
-        val resolved = report.resolvedTarget
-        if (resolved != null) {
-            val maskedOrRawIp = formatTargetEndpoint(
-                ip = resolved.resolvedIp,
-                ipFamily = resolved.ipFamily,
-                port = report.tcpPort,
-                maskTargetIp = maskTargetIp,
-            )
-            return if (resolved.isDomain) {
-                val safeHost = sanitizeCodeInline(truncateByDisplayWidth(resolved.displayHost.trim(), MAX_HOST_DISPLAY_WIDTH))
+    private fun buildDnsResolutionSummary(target: SanitizedTargetPresentation): String? {
+        if (target.hasResolvedTarget && target.formattedEndpoint != null) {
+            return if (target.isDomain && !target.displayHost.isNullOrBlank()) {
+                val safeHost = sanitizeCodeInline(truncateByDisplayWidth(target.displayHost, MAX_HOST_DISPLAY_WIDTH))
                 val parts = mutableListOf<String>()
-                parts += "域名 `$safeHost` → `$maskedOrRawIp`"
-                parts += resolved.ipFamily.label
-                if (resolved.dnsDurationMs > 0.0) {
-                    parts += "DNS 解析耗时 `${formatMs(resolved.dnsDurationMs)}`"
+                parts += "域名 `$safeHost` → `${target.formattedEndpoint}`"
+                parts += target.ipFamily.label
+                if (target.dnsDurationMs > 0.0) {
+                    parts += "DNS 解析耗时 `${formatMs(target.dnsDurationMs)}`"
                 }
-                if (resolved.allResolvedIps.size > 1) {
-                    parts += "共 ${resolved.allResolvedIps.size} 条记录"
+                if (target.resolvedRecordCount > 1) {
+                    parts += "共 ${target.resolvedRecordCount} 条记录"
                 }
                 parts.joinToString(" · ")
             } else {
-                "直连目标 `$maskedOrRawIp` · ${resolved.ipFamily.label} 协议栈（免 DNS 解析）"
+                "直连目标 `${target.formattedEndpoint}` · ${target.ipFamily.label} 协议栈（免 DNS 解析）"
             }
         }
-        val raw = report.targetInput.trim()
-        if (raw.isEmpty()) return null
-        val parsed = NetBenchTargetParser.parse(raw)
-        val family = parsed?.literalFamily?.takeIf { it != IpFamily.UNKNOWN }?.label ?: "自动栈"
+        if (target.formattedEndpoint == null) return null
+        val family = target.ipFamily.takeIf { it != IpFamily.UNKNOWN }?.label ?: "自动栈"
         return "目标协议栈 $family"
     }
 
-    private fun buildTargetAndIpTableRows(
-        report: NetBenchReport,
-        options: NetBenchMarkdownOptions,
-    ): List<List<String>> {
+    private fun buildTargetAndIpTableRows(sanitized: SanitizedNetBenchReport): List<List<String>> {
         val rows = mutableListOf<List<String>>()
 
-        if (options.includeClientNetwork) {
-            val envBadge = buildClientEnvBadge(report).ifBlank { "本机网络" }
-            val client = report.clientNetwork
+        sanitized.clientEnv?.let { client ->
+            val envBadge = buildClientEnvBadge(sanitized).ifBlank { "本机网络" }
             val envDetail = buildList {
-                client?.regionName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let { add(it) }
-                client?.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { add("`${sanitizeCodeInline(it)}`") }
-                client?.transportLabel?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let { add(it) }
+                client.regionName?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let { add(it) }
+                client.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { add("`${sanitizeCodeInline(it)}`") }
+                client.transportLabel?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() }?.let { add(it) }
                 add("已自动隐藏本机出口 IP")
             }.joinToString(" · ")
             rows += listOf("本机网络环境", envBadge, envDetail)
         }
 
-        buildTargetTableRow(report, options.maskTargetIp)?.let { rows += it }
+        buildTargetTableRow(sanitized.target, sanitized.maskTargetIp)?.let { rows += it }
 
-        report.ipIntelligence?.let { intel ->
-            val flag = IpClassificationEngine.countryFlagEmoji(intel.countryCode)
-            val loc = IpClassificationEngine.formatLocationSummary(
-                countryCode = intel.countryCode,
-                countryName = intel.countryName,
-                regionName = intel.regionName,
-                cityName = intel.cityName,
-            ).trim()
+        sanitized.ipIntelligence?.let { intel ->
             val cleanLoc = truncateByDisplayWidth(
-                text = if (loc.isNotEmpty()) "$flag $loc" else EMPTY_CELL_PLACEHOLDER,
+                text = if (intel.locationSummary.isNotEmpty()) {
+                    "${intel.flagEmoji} ${intel.locationSummary}"
+                } else {
+                    EMPTY_CELL_PLACEHOLDER
+                },
                 maxWidth = MAX_RESULT_CELL_DISPLAY_WIDTH,
             )
             val geoMeta = buildList {
                 intel.ipFamily.takeIf { it != IpFamily.UNKNOWN }?.let { add(it.label) }
-                intel.countryCode?.trim()?.takeIf { it.isNotEmpty() }?.let { add("国家码 `${sanitizeCodeInline(it)}`") }
-                intel.geoSource?.trim()?.takeIf { it.isNotEmpty() }?.let { add("Geo: ${sanitizeInline(it)}") }
+                intel.countryCode?.let { add("国家码 `${sanitizeCodeInline(it)}`") }
+                intel.geoSource?.let { add("Geo: ${sanitizeInline(it)}") }
             }.joinToString(" · ").ifBlank { EMPTY_CELL_PLACEHOLDER }
             rows += listOf("归属地与协议栈", cleanLoc, geoMeta)
 
-            val cleanAsn = intel.asn?.trim()?.takeIf { it.isNotEmpty() }?.let { "`${sanitizeCodeInline(it)}`" }
-            val cleanOrg = compactOrgName(intel.orgName)
-            val cleanIsp = compactOrgName(intel.ispName)?.takeIf { !it.equals(cleanOrg, ignoreCase = true) }
+            val cleanAsn = intel.asn?.let { "`${sanitizeCodeInline(it)}`" }
+            val cleanOrg = intel.compactOrgName
+            val cleanIsp = intel.compactIspName
             val asnResult = cleanAsn ?: cleanOrg ?: EMPTY_CELL_PLACEHOLDER
             val orgAndUsage = buildList {
                 if (cleanAsn != null && cleanOrg != null) add(cleanOrg)
@@ -605,28 +593,24 @@ object NetBenchMarkdownFormatter {
         return rows
     }
 
-    private fun buildLatencyAnalysisRows(
-        report: NetBenchReport,
-        maskTargetIp: Boolean,
-    ): List<List<String>> {
+    private fun buildLatencyAnalysisRows(sanitized: SanitizedNetBenchReport): List<List<String>> {
         val rows = mutableListOf<List<String>>()
 
-        report.icmpPingSummary?.let { ping ->
+        sanitized.icmpPing?.let { ping ->
             rows += buildDetailedIcmpRow(ping)
         }
 
-        report.tcpPingSummary?.let { tcp ->
+        sanitized.tcpPing?.let { tcp ->
             rows += buildDetailedTcpRow(
                 tcp = tcp,
-                icmp = report.icmpPingSummary,
-                maskTargetIp = maskTargetIp,
+                icmp = sanitized.icmpPing,
             )
         }
 
-        report.httpLatencyResult?.let { http ->
+        sanitized.httpProbe?.let { http ->
             if (http.success && http.totalMs != null) {
                 val status = http.statusCode?.let { "HTTP $it" } ?: "成功"
-                val protoPart = http.protocol?.trim()?.takeIf { it.isNotEmpty() }?.let { "`${sanitizeCodeInline(it)}`" }
+                val protoPart = http.protocol?.let { "`${sanitizeCodeInline(it)}`" }
                 val timingBreakdown = buildList {
                     http.tlsHandshakeMs?.takeIf { it > 0.0 }?.let { add("TLS 握手 `${formatMs(it)}`") }
                     http.ttfbMs?.let { add("TTFB `${formatMs(it)}`") }
@@ -636,7 +620,7 @@ object NetBenchMarkdownFormatter {
                 rows += listOf("HTTP 延迟", "**${formatMs(http.totalMs)}**", timingBreakdown, detail)
             } else {
                 val reason = truncateByDisplayWidth(
-                    sanitizeInline(http.errorMessage ?: "请求失败"),
+                    sanitizeInline(http.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
                     MAX_ERROR_DISPLAY_WIDTH,
                 )
                 rows += listOf(
@@ -651,7 +635,7 @@ object NetBenchMarkdownFormatter {
         return rows
     }
 
-    private fun buildDetailedIcmpRow(ping: IcmpPingSummary): List<String> {
+    private fun buildDetailedIcmpRow(ping: SanitizedIcmpPingPresentation): List<String> {
         if (ping.received > 0 && ping.avgMs != null && ping.minMs != null && ping.maxMs != null) {
             val main = "**${formatMs(ping.avgMs)}** · 丢包 `${formatPercent(ping.lossPercent)}`"
             val sortedRtts = ping.samples.mapNotNull { s -> s.rttMs?.takeIf { s.success } }.sorted()
@@ -670,11 +654,11 @@ object NetBenchMarkdownFormatter {
             val ttlNote = extractTtlSummary(ping.samples)
             val routeNote = when (ping.bindingMode) {
                 IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND -> {
-                    val iface = ping.boundInterfaceName?.trim()?.takeIf { it.isNotEmpty() }
+                    val iface = ping.boundInterfaceName
                     if (iface != null) "物理网卡直连 `${sanitizeCodeInline(iface)}`" else "已绑定底层物理网络"
                 }
                 IcmpNetworkBindingMode.INTERFACE_BOUND -> {
-                    val iface = ping.boundInterfaceName?.trim()?.takeIf { it.isNotEmpty() }
+                    val iface = ping.boundInterfaceName
                     if (iface != null) "网卡 `${sanitizeCodeInline(iface)}`" else "已指定底层网卡"
                 }
                 IcmpNetworkBindingMode.UNBOUND_SUBPROCESS_FALLBACK -> "默认路由"
@@ -690,9 +674,9 @@ object NetBenchMarkdownFormatter {
         }
 
         val failureLabel = if (ping.sent == 0) "**执行失败**" else "**超时 / 禁 Ping**"
-        val fallbackReason = if (ping.sent == 0) "无法执行 ICMP Ping" else "全部超时或目标禁 Ping"
+        val fallbackReason = if (ping.sent == 0) "请求失败" else "连接超时"
         val reason = truncateByDisplayWidth(
-            sanitizeInline(ping.errorMessage ?: fallbackReason),
+            sanitizeInline(ping.publicErrorMessage ?: fallbackReason),
             MAX_ERROR_DISPLAY_WIDTH,
         )
         val routeNote = if (ping.bindingMode == IcmpNetworkBindingMode.UNBOUND_SUBPROCESS_FALLBACK) "默认路由" else null
@@ -703,12 +687,11 @@ object NetBenchMarkdownFormatter {
     }
 
     private fun buildDetailedTcpRow(
-        tcp: TcpPingSummary,
-        icmp: IcmpPingSummary?,
-        maskTargetIp: Boolean,
+        tcp: SanitizedTcpPingPresentation,
+        icmp: SanitizedIcmpPingPresentation?,
     ): List<String> {
         val successPct = if (tcp.sent > 0) (tcp.received.toDouble() * 100.0 / tcp.sent.toDouble()) else 0.0
-        val portDesc = if (maskTargetIp) "已隐藏端口" else "TCP ${tcp.port}"
+        val portDesc = tcp.tablePortLabel
 
         if (tcp.received > 0 && tcp.avgMs != null && tcp.minMs != null && tcp.maxMs != null) {
             val main = "**${formatMs(tcp.avgMs)}** · 丢包 `${formatPercent(tcp.lossPercent)}`"
@@ -735,14 +718,14 @@ object NetBenchMarkdownFormatter {
         }
 
         val reason = truncateByDisplayWidth(
-            sanitizeInline(tcp.errorMessage ?: "全部超时或端口不可达"),
+            sanitizeInline(tcp.publicErrorMessage ?: NetBenchErrorCategory.CONNECTION_TIMEOUT.publicLabel),
             MAX_ERROR_DISPLAY_WIDTH,
         )
         val detail = "$portDesc · 成功率 ${formatPercent(successPct)} · ${reason.ifBlank { EMPTY_CELL_PLACEHOLDER }}"
         return listOf("TCPing 延迟", "**超时 / 不可达**", "丢包 `${formatPercent(tcp.lossPercent)}`", detail)
     }
 
-    private fun buildIperfSummaryRow(result: Iperf3Result): List<String> {
+    private fun buildIperfSummaryRow(result: SanitizedIperf3Presentation): List<String> {
         val dirLabel = if (result.direction == Iperf3Direction.DOWNLOAD) {
             "iperf3 下载 (-R)"
         } else {
@@ -752,7 +735,7 @@ object NetBenchMarkdownFormatter {
         if (!result.success) {
             val streamPrefix = if (result.parallelStreams > 1) "-P ${result.parallelStreams} 并发 · " else ""
             val reason = truncateByDisplayWidth(
-                streamPrefix + sanitizeInline(result.errorMessage ?: "连接失败"),
+                streamPrefix + sanitizeInline(result.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
                 MAX_NOTE_CELL_DISPLAY_WIDTH,
             )
             return listOf(
@@ -808,12 +791,8 @@ object NetBenchMarkdownFormatter {
 
     // ── Per-Second iperf3 Interval Log Formatter ─────────────────────────────────────────────
 
-    internal fun buildIperf3IntervalLogText(
-        result: Iperf3Result,
-        report: NetBenchReport,
-        maskTargetIp: Boolean,
-    ): String {
-        val targetSummary = buildIperfTargetHeader(result, report, maskTargetIp)
+    internal fun buildIperf3IntervalLogText(result: SanitizedIperf3Presentation): String {
+        val targetSummary = result.targetHeaderText
         val modeDesc = if (result.direction == Iperf3Direction.DOWNLOAD) {
             "Reverse mode (-R, Server -> Client)"
         } else {
@@ -931,41 +910,6 @@ object NetBenchMarkdownFormatter {
         val receiverRole: String,
     )
 
-    private fun buildIperfTargetHeader(
-        result: Iperf3Result,
-        report: NetBenchReport,
-        maskTargetIp: Boolean,
-    ): String {
-        val resolved = result.resolvedTarget ?: report.resolvedTarget
-        if (resolved != null) {
-            val ipText = if (maskTargetIp) {
-                val masked = NetBenchTargetParser.maskTargetIpLastSegment(resolved.resolvedIp)
-                if (resolved.ipFamily == IpFamily.IPV6) "[$masked]" else masked
-            } else {
-                if (resolved.ipFamily == IpFamily.IPV6) "[${resolved.resolvedIp}]" else resolved.resolvedIp
-            }
-            val portPart = if (maskTargetIp) "" else ", port ${result.port}"
-            return if (resolved.isDomain) {
-                val safeHost = sanitizeCodeInline(truncateByDisplayWidth(resolved.displayHost.trim(), MAX_HOST_DISPLAY_WIDTH))
-                "host $safeHost ($ipText)$portPart"
-            } else {
-                "host $ipText$portPart"
-            }
-        }
-        val raw = report.targetInput.trim()
-        val parsed = NetBenchTargetParser.parse(raw)
-        if (parsed != null) {
-            val shown = if (parsed.isLiteralIp) {
-                if (maskTargetIp) NetBenchTargetParser.maskTargetIpLastSegment(parsed.host) else parsed.host
-            } else {
-                sanitizeCodeInline(truncateByDisplayWidth(parsed.host, MAX_HOST_DISPLAY_WIDTH))
-            }
-            val portPart = if (maskTargetIp) "" else ", port ${result.port}"
-            return "host $shown$portPart"
-        }
-        return "target host"
-    }
-
     internal fun formatIperfTransferField(bytes: Long): String {
         val safe = bytes.coerceAtLeast(0L)
         val d = safe.toDouble()
@@ -1012,9 +956,8 @@ object NetBenchMarkdownFormatter {
     // ── Per-Packet RTT Waveform & Sequence Formatter ─────────────────────────────────────────
 
     private fun buildPerPacketRttLogText(
-        icmp: IcmpPingSummary?,
-        tcp: TcpPingSummary?,
-        maskTargetIp: Boolean,
+        icmp: SanitizedIcmpPingPresentation?,
+        tcp: SanitizedTcpPingPresentation?,
     ): String? {
         val sections = mutableListOf<String>()
 
@@ -1032,7 +975,7 @@ object NetBenchMarkdownFormatter {
         if (tcp != null && tcp.samples.isNotEmpty()) {
             val pairs = tcp.samples.map { it.success to it.rttMs }
             val spark = buildLatencySparkline(pairs)
-            val portTag = if (maskTargetIp) "已隐藏端口" else "端口 ${tcp.port}"
+            val portTag = tcp.portSummaryLabel
             val header = "[TCPing 逐包序列] $portTag · ${tcp.sent} 发 ${tcp.received} 收 (丢包 ${formatPercent(tcp.lossPercent)}) · 波动图: $spark"
             sections += buildPacketGridSection(
                 header = header,
@@ -1104,7 +1047,7 @@ object NetBenchMarkdownFormatter {
         return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * fraction
     }
 
-    private fun extractTtlSummary(samples: List<IcmpPingSample>): String? {
+    private fun extractTtlSummary(samples: List<SanitizedPingSample>): String? {
         val ttls = samples.mapNotNull { s -> s.ttl?.takeIf { s.success && it > 0 } }
         if (ttls.isEmpty()) return null
         val minTtl = ttls.min()
@@ -1113,8 +1056,8 @@ object NetBenchMarkdownFormatter {
     }
 
     private fun buildTcpVsIcmpComparison(
-        icmp: IcmpPingSummary?,
-        tcp: TcpPingSummary,
+        icmp: SanitizedIcmpPingPresentation?,
+        tcp: SanitizedTcpPingPresentation,
     ): String? {
         if (icmp == null) return null
         if (!icmp.hasValidLatency && tcp.hasValidLatency) {
@@ -1134,8 +1077,8 @@ object NetBenchMarkdownFormatter {
     }
 
     private fun buildTcpVsIcmpShortTag(
-        icmp: IcmpPingSummary?,
-        tcp: TcpPingSummary,
+        icmp: SanitizedIcmpPingPresentation?,
+        tcp: SanitizedTcpPingPresentation,
     ): String? {
         if (icmp == null) return null
         if (!icmp.hasValidLatency && tcp.hasValidLatency) return "禁 Ping 但 TCP 正常"
@@ -1148,12 +1091,12 @@ object NetBenchMarkdownFormatter {
 
     // ── Automated Objective Health Verdict ───────────────────────────────────────────────────
 
-    private fun buildComprehensiveVerdict(report: NetBenchReport): List<String> {
+    private fun buildComprehensiveVerdict(sanitized: SanitizedNetBenchReport): List<String> {
         val bullets = mutableListOf<String>()
 
         // 1. Latency & Packet Loss Verdict
-        val icmp = report.icmpPingSummary
-        val tcp = report.tcpPingSummary
+        val icmp = sanitized.icmpPing
+        val tcp = sanitized.tcpPing
         if (icmp != null || tcp != null) {
             val primaryAvg = icmp?.avgMs?.takeIf { icmp.hasValidLatency }
                 ?: tcp?.avgMs?.takeIf { tcp.hasValidLatency }
@@ -1196,8 +1139,8 @@ object NetBenchMarkdownFormatter {
         }
 
         // 2. iperf3 Throughput & Ramp-Up Verdict
-        val dl = report.iperfDownloadResult
-        val ul = report.iperfUploadResult
+        val dl = sanitized.iperfDownload
+        val ul = sanitized.iperfUpload
         if (dl != null || ul != null) {
             if (dl?.success == true || ul?.success == true) {
                 val parts = mutableListOf<String>()
@@ -1232,7 +1175,7 @@ object NetBenchMarkdownFormatter {
                 bullets += "**带宽吞吐与稳态表现**：${parts.joinToString("；")}。"
             } else {
                 val failMsg = truncateByDisplayWidth(
-                    sanitizeInline((dl?.errorMessage ?: ul?.errorMessage).orEmpty()),
+                    sanitizeInline((dl?.publicErrorMessage ?: ul?.publicErrorMessage).orEmpty()),
                     MAX_NOTE_CELL_DISPLAY_WIDTH,
                 )
                 bullets += "**带宽吞吐表现**：iperf3 测速未能完成（${failMsg.ifBlank { "服务端未就绪或连接受阻" }}）。"
@@ -1240,14 +1183,9 @@ object NetBenchMarkdownFormatter {
         }
 
         // 3. IP Origin & Scenario Verdict
-        report.ipIntelligence?.let { intel ->
+        sanitized.ipIntelligence?.let { intel ->
             if (intel.hasCoreInfo || intel.originType != IpOriginType.UNKNOWN) {
-                val loc = IpClassificationEngine.formatLocationSummary(
-                    countryCode = intel.countryCode,
-                    countryName = intel.countryName,
-                    regionName = intel.regionName,
-                    cityName = intel.cityName,
-                )
+                val loc = intel.locationSummary.ifBlank { EMPTY_CELL_PLACEHOLDER }
                 val scenarioDesc = when {
                     intel.originType == IpOriginType.NATIVE && intel.usageType == IpUsageType.ISP_RESIDENTIAL_OR_BUSINESS ->
                         "兼具 **原生 IP** 与 **ISP 家宽/商宽** 双重属性，本土流媒体与 AI 平台风控友好度极佳"
@@ -1267,10 +1205,10 @@ object NetBenchMarkdownFormatter {
         return bullets
     }
 
-    private fun buildOneLineVerdict(report: NetBenchReport): String {
+    private fun buildOneLineVerdict(sanitized: SanitizedNetBenchReport): String {
         val segments = mutableListOf<String>()
-        val icmp = report.icmpPingSummary
-        val tcp = report.tcpPingSummary
+        val icmp = sanitized.icmpPing
+        val tcp = sanitized.tcpPing
         val avg = icmp?.avgMs?.takeIf { icmp.hasValidLatency } ?: tcp?.avgMs?.takeIf { tcp.hasValidLatency }
         val loss = when {
             tcp?.hasValidLatency == true -> tcp.lossPercent
@@ -1281,13 +1219,13 @@ object NetBenchMarkdownFormatter {
             val lossText = if (loss <= 0.0) "零丢包" else "丢包 ${formatPercent(loss)}"
             segments += "$lossText · 均延 ${formatMs(avg)}"
         }
-        report.iperfDownloadResult?.takeIf { it.success }?.let { dl ->
+        sanitized.iperfDownload?.takeIf { it.success }?.let { dl ->
             segments += "下行 ${formatMbps(dl.effectiveMbps)}"
         }
-        report.iperfUploadResult?.takeIf { it.success }?.let { ul ->
+        sanitized.iperfUpload?.takeIf { it.success }?.let { ul ->
             segments += "上行 ${formatMbps(ul.effectiveMbps)}"
         }
-        report.ipIntelligence?.takeIf { it.originType != IpOriginType.UNKNOWN }?.let { intel ->
+        sanitized.ipIntelligence?.takeIf { it.originType != IpOriginType.UNKNOWN }?.let { intel ->
             segments += intel.originType.label
         }
         return segments.joinToString(" · ")
@@ -1299,26 +1237,19 @@ object NetBenchMarkdownFormatter {
     // ── Shared Formatting Helpers ────────────────────────────────────────────────────────────
 
     private fun buildTargetTableRow(
-        report: NetBenchReport,
+        target: SanitizedTargetPresentation,
         maskTargetIp: Boolean,
     ): List<String>? {
-        val resolved = report.resolvedTarget
-        if (resolved != null) {
-            val formattedIp = formatTargetEndpoint(
-                ip = resolved.resolvedIp,
-                ipFamily = resolved.ipFamily,
-                port = report.tcpPort,
-                maskTargetIp = maskTargetIp,
-            )
-            if (resolved.isDomain) {
+        if (target.hasResolvedTarget && target.formattedEndpoint != null) {
+            if (target.isDomain && !target.displayHost.isNullOrBlank()) {
                 val safeHost = sanitizeCodeInline(
-                    truncateByDisplayWidth(resolved.displayHost.trim(), MAX_HOST_DISPLAY_WIDTH),
+                    truncateByDisplayWidth(target.displayHost, MAX_HOST_DISPLAY_WIDTH),
                 )
                 val noteParts = mutableListOf<String>()
-                noteParts += "IP `$formattedIp`"
-                noteParts += resolved.ipFamily.label
-                if (resolved.dnsDurationMs > 0.0) {
-                    noteParts += "DNS ${formatMs(resolved.dnsDurationMs)}"
+                noteParts += "IP `${target.formattedEndpoint}`"
+                noteParts += target.ipFamily.label
+                if (target.dnsDurationMs > 0.0) {
+                    noteParts += "DNS ${formatMs(target.dnsDurationMs)}"
                 }
                 if (maskTargetIp) {
                     noteParts += "已隐藏完整 IP/端口"
@@ -1326,106 +1257,59 @@ object NetBenchMarkdownFormatter {
                 return listOf("目标节点", "`$safeHost`", noteParts.joinToString(" · "))
             } else {
                 val note = if (maskTargetIp) {
-                    "${resolved.ipFamily.label} · 已隐藏完整 IP/端口"
+                    "${target.ipFamily.label} · 已隐藏完整 IP/端口"
                 } else {
-                    "${resolved.ipFamily.label} · 端口 ${report.tcpPort}"
+                    "${target.ipFamily.label} · ${target.portSummaryLabel}"
                 }
-                return listOf("目标节点", "`$formattedIp`", note)
+                return listOf("目标节点", "`${target.formattedEndpoint}`", note)
             }
         }
 
-        val raw = report.targetInput.trim()
-        if (raw.isEmpty()) return null
-        val parsed = NetBenchTargetParser.parse(raw)
-        return if (parsed != null) {
-            val effectivePort = parsed.effectivePort(report.tcpPort)
-            if (parsed.isLiteralIp) {
-                val endpoint = formatTargetEndpoint(
-                    ip = parsed.host,
-                    ipFamily = parsed.literalFamily,
-                    port = effectivePort,
-                    maskTargetIp = maskTargetIp,
-                )
-                val familyLabel = parsed.literalFamily.takeIf { it != IpFamily.UNKNOWN }?.label ?: "目标主机"
-                val note = if (maskTargetIp) "$familyLabel · 已隐藏完整 IP/端口" else "$familyLabel · 端口 $effectivePort"
-                listOf("目标节点", "`$endpoint`", note)
-            } else {
-                val safeHost = sanitizeCodeInline(truncateByDisplayWidth(parsed.host, MAX_HOST_DISPLAY_WIDTH))
-                val shownTarget = if (maskTargetIp) safeHost else "$safeHost:$effectivePort"
-                val note = if (maskTargetIp) "已隐藏测速端口" else "端口 $effectivePort"
-                listOf("目标节点", "`$shownTarget`", note)
-            }
+        val endpoint = target.formattedEndpoint ?: return null
+        return if (!target.isDomain) {
+            val familyLabel = target.ipFamily.takeIf { it != IpFamily.UNKNOWN }?.label ?: "目标主机"
+            val note = if (maskTargetIp) "$familyLabel · 已隐藏完整 IP/端口" else "$familyLabel · ${target.portSummaryLabel}"
+            listOf("目标节点", "`$endpoint`", note)
         } else {
-            val cleaned = sanitizeCodeInline(truncateByDisplayWidth(raw, MAX_HOST_DISPLAY_WIDTH))
-            val note = if (maskTargetIp) "已隐藏测速端口" else "端口 ${report.tcpPort}"
-            listOf("目标节点", "`$cleaned`", note)
+            val safeShown = sanitizeCodeInline(truncateByDisplayWidth(endpoint, MAX_HOST_DISPLAY_WIDTH))
+            val note = if (maskTargetIp) "已隐藏测速端口" else target.portSummaryLabel
+            listOf("目标节点", "`$safeShown`", note)
         }
     }
 
-    private fun formatTargetEndpoint(
-        ip: String,
-        ipFamily: IpFamily,
-        port: Int,
+    private fun buildTargetDisplay(
+        target: SanitizedTargetPresentation,
         maskTargetIp: Boolean,
     ): String {
-        return if (maskTargetIp) {
-            val masked = NetBenchTargetParser.maskTargetIpLastSegment(ip)
-            if (ipFamily == IpFamily.IPV6) "[$masked]" else masked
-        } else {
-            if (ipFamily == IpFamily.IPV6) "[$ip]:$port" else "$ip:$port"
-        }
-    }
-
-    private fun buildTargetDisplay(report: NetBenchReport, maskTargetIp: Boolean): String {
-        val resolved = report.resolvedTarget
-        if (resolved != null) {
-            val endpoint = formatTargetEndpoint(
-                ip = resolved.resolvedIp,
-                ipFamily = resolved.ipFamily,
-                port = report.tcpPort,
-                maskTargetIp = maskTargetIp,
-            )
-            val dnsSuffix = if (resolved.isDomain && resolved.dnsDurationMs > 0.0) {
-                " · DNS `${formatMs(resolved.dnsDurationMs)}`"
+        if (target.hasResolvedTarget && target.formattedEndpoint != null) {
+            val dnsSuffix = if (target.isDomain && target.dnsDurationMs > 0.0) {
+                " · DNS `${formatMs(target.dnsDurationMs)}`"
             } else {
                 ""
             }
-            return if (resolved.isDomain) {
+            return if (target.isDomain && !target.displayHost.isNullOrBlank()) {
                 val safeHost = sanitizeCodeInline(
-                    truncateByDisplayWidth(resolved.displayHost.trim(), MAX_HOST_DISPLAY_WIDTH),
+                    truncateByDisplayWidth(target.displayHost, MAX_HOST_DISPLAY_WIDTH),
                 )
-                "`$safeHost` (`$endpoint` · ${resolved.ipFamily.label}$dnsSuffix)"
+                "`$safeHost` (`${target.formattedEndpoint}` · ${target.ipFamily.label}$dnsSuffix)"
             } else {
-                "`$endpoint` (${resolved.ipFamily.label})"
+                "`${target.formattedEndpoint}` (${target.ipFamily.label})"
             }
         }
 
-        val raw = report.targetInput.trim()
-        if (raw.isEmpty()) return ""
-        val parsed = NetBenchTargetParser.parse(raw)
-        if (parsed != null) {
-            val effectivePort = parsed.effectivePort(report.tcpPort)
-            return if (parsed.isLiteralIp) {
-                val endpoint = formatTargetEndpoint(
-                    ip = parsed.host,
-                    ipFamily = parsed.literalFamily,
-                    port = effectivePort,
-                    maskTargetIp = maskTargetIp,
-                )
-                "`$endpoint`"
-            } else {
-                val safeHost = sanitizeCodeInline(truncateByDisplayWidth(parsed.host, MAX_HOST_DISPLAY_WIDTH))
-                if (maskTargetIp) "`$safeHost`" else "`$safeHost:$effectivePort`"
-            }
+        val endpoint = target.formattedEndpoint ?: return ""
+        val safeShown = if (target.isDomain) {
+            sanitizeCodeInline(truncateByDisplayWidth(endpoint, MAX_HOST_DISPLAY_WIDTH))
+        } else {
+            endpoint
         }
-        val cleaned = sanitizeCodeInline(truncateByDisplayWidth(raw, MAX_HOST_DISPLAY_WIDTH))
-        return if (maskTargetIp) "`$cleaned`" else "`$cleaned:${report.tcpPort}`"
+        return "`$safeShown`"
     }
 
-    private fun formatIcmpPingCompact(ping: IcmpPingSummary): String {
+    private fun formatIcmpPingCompact(ping: SanitizedIcmpPingPresentation): String {
         if (!ping.hasValidLatency && ping.sent == 0) {
             val reason = truncateByDisplayWidth(
-                sanitizeInline(ping.errorMessage ?: "无法执行"),
+                sanitizeInline(ping.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
                 MAX_ERROR_DISPLAY_WIDTH,
             )
             return "不可用 ($reason)"
@@ -1452,7 +1336,7 @@ object NetBenchMarkdownFormatter {
         )
     }
 
-    private fun formatTcpPingCompact(tcp: TcpPingSummary): String {
+    private fun formatTcpPingCompact(tcp: SanitizedTcpPingPresentation): String {
         val sortedRtts = tcp.samples.mapNotNull { s -> s.rttMs?.takeIf { s.success } }.sorted()
         val p95 = computePercentile(sortedRtts, 95.0)
         val spark = if (tcp.samples.isNotEmpty()) {
@@ -1507,13 +1391,16 @@ object NetBenchMarkdownFormatter {
         }
     }
 
-    private fun formatHttpCompact(http: HttpLatencyResult): String {
+    private fun formatHttpCompact(http: SanitizedHttpProbePresentation): String {
         if (!http.success || http.totalMs == null) {
-            val reason = truncateByDisplayWidth(sanitizeInline(http.errorMessage ?: "请求异常"), MAX_ERROR_DISPLAY_WIDTH)
+            val reason = truncateByDisplayWidth(
+                sanitizeInline(http.publicErrorMessage ?: NetBenchErrorCategory.REQUEST_FAILED.publicLabel),
+                MAX_ERROR_DISPLAY_WIDTH,
+            )
             return "失败 ($reason)"
         }
         val parts = mutableListOf<String>()
-        val protoSuffix = http.protocol?.trim()?.takeIf { it.isNotEmpty() }?.let { " (`${sanitizeCodeInline(it)}`)" }.orEmpty()
+        val protoSuffix = http.protocol?.let { " (`${sanitizeCodeInline(it)}`)" }.orEmpty()
         http.statusCode?.let { parts += "HTTP $it$protoSuffix" }
         parts += "总计 **${formatMs(http.totalMs)}**"
         http.ttfbMs?.let { parts += "TTFB `${formatMs(it)}`" }
@@ -1521,19 +1408,12 @@ object NetBenchMarkdownFormatter {
         return parts.joinToString(" ｜ ")
     }
 
-    private fun formatIpIntelCompact(intel: IpIntelligenceReport): String {
-        val flag = IpClassificationEngine.countryFlagEmoji(intel.countryCode)
-        val loc = IpClassificationEngine.formatLocationSummary(
-            countryCode = intel.countryCode,
-            countryName = intel.countryName,
-            regionName = intel.regionName,
-            cityName = intel.cityName,
-        )
+    private fun formatIpIntelCompact(intel: SanitizedIpIntelPresentation): String {
         val parts = mutableListOf<String>()
-        parts += "$flag $loc"
+        parts += "${intel.flagEmoji} ${intel.locationSummary}".trim()
         val asnOrg = buildString {
             if (!intel.asn.isNullOrBlank()) append("`${sanitizeCodeInline(intel.asn)}`")
-            val org = compactOrgName(intel.orgName ?: intel.ispName)
+            val org = intel.compactOrgName ?: intel.compactIspName
             if (org != null) {
                 if (isNotEmpty()) append(" ")
                 append("($org)")
@@ -1548,20 +1428,7 @@ object NetBenchMarkdownFormatter {
         return parts.joinToString(" · ")
     }
 
-    private fun compactOrgName(rawOrg: String?): String? {
-        var cleaned = rawOrg?.let(::sanitizeInline)?.takeIf { it.isNotEmpty() } ?: return null
-        val dbaMatch = DBA_SPLIT_REGEX.find(cleaned)
-        if (dbaMatch != null) {
-            cleaned = dbaMatch.groupValues[1].trim()
-        }
-        cleaned = cleaned
-            .replace(CORPORATE_SUFFIX_REGEX, "")
-            .trim(' ', ',', '.')
-        if (cleaned.isEmpty()) return null
-        return truncateByDisplayWidth(cleaned, MAX_ORG_DISPLAY_WIDTH)
-    }
-
-    private fun formatFullOriginEvidence(intel: IpIntelligenceReport): String {
+    private fun formatFullOriginEvidence(intel: SanitizedIpIntelPresentation): String {
         var evidence = sanitizeInline(intel.originEvidence)
         val redundantPrefix = "${intel.originType.label} "
         if (evidence.startsWith(redundantPrefix)) {
@@ -1574,14 +1441,28 @@ object NetBenchMarkdownFormatter {
         }
         val extraParts = mutableListOf<String>()
         if (evidence.isNotEmpty()) extraParts += evidence
-        intel.rirAuthority?.trim()?.takeIf { it.isNotEmpty() && !evidence.contains(it, ignoreCase = true) }?.let {
+        intel.rirAuthority?.takeIf { !evidence.contains(it, ignoreCase = true) }?.let {
             extraParts += "RIR: ${sanitizeInline(it)}"
         }
-        intel.whoisSource?.trim()?.takeIf { it.isNotEmpty() }?.let {
+        intel.whoisSource?.let {
             extraParts += "WHOIS: ${sanitizeInline(it)}"
         }
         val joined = extraParts.joinToString(" · ")
         return truncateByDisplayWidth(joined, MAX_NOTE_CELL_DISPLAY_WIDTH).ifBlank { EMPTY_CELL_PLACEHOLDER }
+    }
+
+    private fun buildClientEnvBadge(sanitized: SanitizedNetBenchReport): String {
+        val client = sanitized.clientEnv ?: return "本机网络"
+        val carrierText = client.carrierDisplayName.ifBlank { "本机网络" }
+        val regionPart = client.regionName?.takeIf {
+            it.isNotEmpty() && !carrierText.contains(it, ignoreCase = true)
+        }
+        val base = listOfNotNull(carrierText, regionPart, client.ipFamily.label).joinToString(" · ")
+        return when {
+            sanitized.testedViaProxy -> "$base · 经由代理"
+            client.routeKind == EgressRouteKind.PROXY_FALLBACK -> "$base · 代理出口(直连受限)"
+            else -> base
+        }
     }
 
     // ── Aligned GFM Table Renderer ───────────────────────────────────────────────────────────
@@ -1725,107 +1606,6 @@ object NetBenchMarkdownFormatter {
             cp in 0x1F300..0x1FAFF ||
             cp in 0x20000..0x2FFFD -> 2
         else -> 1
-    }
-
-    // ── Defense-in-Depth Privacy & Target Masking Scrubbers ──────────────────────────────────
-
-    private fun scrubTargetEndpointIfNeeded(markdown: String, report: NetBenchReport): String {
-        var result = markdown
-        val parsedTarget = NetBenchTargetParser.parse(report.targetInput.trim())
-        val candidateTargetIps = buildSet {
-            report.resolvedTarget?.resolvedIp?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-            report.resolvedTarget?.allResolvedIps?.forEach { ip ->
-                ip.trim().takeIf { it.isNotEmpty() }?.let(::add)
-            }
-            report.ipIntelligence?.ip?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-            report.iperfDownloadResult?.resolvedTarget?.resolvedIp?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-            report.iperfUploadResult?.resolvedTarget?.resolvedIp?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
-            if (parsedTarget?.isLiteralIp == true && parsedTarget.host.isNotBlank()) {
-                add(parsedTarget.host.trim())
-            }
-        }
-
-        for (targetIp in candidateTargetIps) {
-            val maskedIp = NetBenchTargetParser.maskTargetIpLastSegment(targetIp)
-            if (maskedIp != targetIp && result.contains(targetIp, ignoreCase = true)) {
-                result = result.replace(targetIp, maskedIp, ignoreCase = true)
-            }
-        }
-
-        val portsToScrub = buildSet {
-            add(report.tcpPort)
-            report.tcpPingSummary?.port?.let(::add)
-            report.iperfDownloadResult?.port?.let(::add)
-            report.iperfUploadResult?.port?.let(::add)
-            parsedTarget?.explicitPort?.let(::add)
-        }
-        for (port in portsToScrub) {
-            if (port in 1..65535) {
-                // Scrub host/IP-suffixed ":port" without touching HH:mm timestamps (e.g. 17:30)
-                val endpointPortRegex = Regex(
-                    """(\]|(?:\d{1,3}\.){3}(?:\d{1,3}|\*)|[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+|localhost):$port\b""",
-                    RegexOption.IGNORE_CASE,
-                )
-                result = result
-                    .replace(endpointPortRegex, "$1")
-                    .replace(", port $port", "")
-                    .replace("port $port", "port ***")
-                    .replace("-p $port", "-p ***")
-                    .replace("TCP $port", "TCP 对应端口")
-                    .replace("端口 $port", "已隐藏端口")
-                    .replace(" $port 端口", " 对应端口")
-            }
-        }
-        return result
-    }
-
-    private fun buildClientEnvBadge(report: NetBenchReport): String {
-        val client = report.clientNetwork
-        val carrierText = client?.carrierDisplayName?.takeIf { it.isNotBlank() } ?: "本机网络"
-        val regionPart = client?.regionName?.let(::sanitizeInline)?.takeIf {
-            it.isNotEmpty() && !carrierText.contains(it, ignoreCase = true)
-        }
-        val family = client?.ipFamily?.takeIf { it != IpFamily.UNKNOWN }
-            ?: report.resolvedTarget?.ipFamily?.takeIf { it != IpFamily.UNKNOWN }
-            ?: IpFamily.IPV4
-        val base = listOfNotNull(carrierText, regionPart, family.label).joinToString(" · ")
-        return when {
-            report.testedViaProxy -> "$base · 经由代理"
-            client?.routeKind == EgressRouteKind.PROXY_FALLBACK -> "$base · 代理出口(直连受限)"
-            else -> base
-        }
-    }
-
-    /**
-     * Defense-in-depth safeguard ensuring the local client's raw IP or masked display IP can
-     * NEVER appear in generated Markdown output (unless the user intentionally benchmarked that
-     * exact IP as the target).
-     */
-    private fun scrubClientIpIfNeeded(markdown: String, report: NetBenchReport): String {
-        val targetIp = report.resolvedTarget?.resolvedIp?.trim()
-        val maskedTargetIp = targetIp?.let(NetBenchTargetParser::maskTargetIpLastSegment)
-        val rawTargetInput = report.targetInput.trim()
-
-        val sensitiveTokens = listOfNotNull(
-            report.clientNetwork?.rawIp?.trim(),
-            report.proxyNetwork?.rawIp?.trim(),
-            report.clientNetwork?.maskedIp?.trim(),
-            report.proxyNetwork?.maskedIp?.trim(),
-        ).filter { it.isNotEmpty() && it != "****" }.distinct()
-
-        var sanitized = markdown
-        for (token in sensitiveTokens) {
-            if (token.equals(targetIp, ignoreCase = true) ||
-                token.equals(maskedTargetIp, ignoreCase = true) ||
-                token.equals(rawTargetInput, ignoreCase = true)
-            ) {
-                continue
-            }
-            if (sanitized.contains(token, ignoreCase = true)) {
-                sanitized = sanitized.replace(token, "[已隐藏本机IP]", ignoreCase = true)
-            }
-        }
-        return sanitized
     }
 
     private fun formatNumber1(v: Double): String = String.format(Locale.US, "%.1f", v)

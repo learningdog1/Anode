@@ -987,7 +987,7 @@ internal fun NetBenchTcpPingCard(
                     )
                 } else {
                     Text(
-                        text = httpResult.errorMessage ?: "探测失败",
+                        text = httpResult.publicErrorLabel ?: "探测失败",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
                         maxLines = 1,
