@@ -1,11 +1,21 @@
 package com.nodeseek.app.data.netbench
 
+import android.os.Build
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructCmsghdr
+import android.system.StructMsghdr
+import android.system.StructPollfd
+import androidx.annotation.RequiresApi
+import com.nodeseek.app.domain.netbench.DirectBindFailureReason
 import com.nodeseek.app.domain.netbench.IcmpNetworkBindingMode
 import com.nodeseek.app.domain.netbench.IcmpPingConfig
 import com.nodeseek.app.domain.netbench.IcmpPingProgress
 import com.nodeseek.app.domain.netbench.IcmpPingSample
 import com.nodeseek.app.domain.netbench.IcmpPingSummary
 import com.nodeseek.app.domain.netbench.IpFamily
+import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.ResolvedTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -21,7 +31,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileDescriptor
 import java.io.IOException
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -592,9 +606,742 @@ object IcmpPingParser {
 }
 
 /**
- * Executes real-time ICMP ping via Android `/system/bin/ping` (and `/system/bin/ping6`),
- * complying with [NetBenchNetworkBridge] routing/DNS rules and degrading cleanly when
- * non-root subprocess restrictions or interface-binding limits apply.
+ * Pure Kotlin wire-format codec for unprivileged Linux `SOCK_DGRAM` ICMPv4 (`IPPROTO_ICMP`)
+ * and ICMPv6 (`IPPROTO_ICMPV6`) Echo Request / Echo Reply datagrams.
+ *
+ * On Android/Linux `SOCK_DGRAM` `IPPROTO_ICMP` (`net/ipv4/ping.c` & `net/ipv6/ping.c`),
+ * the kernel maps the socket's local port into the ICMP Identifier field, recomputes wire
+ * checksums, and delivers Echo Reply payloads starting directly at the 8-byte ICMP header
+ * (without an outer IPv4/IPv6 header).
+ */
+object IcmpEchoPacketCodec {
+    const val ICMPV4_ECHO_REQUEST_TYPE = 8
+    const val ICMPV4_ECHO_REPLY_TYPE = 0
+    const val ICMPV6_ECHO_REQUEST_TYPE = 128
+    const val ICMPV6_ECHO_REPLY_TYPE = 129
+    const val ICMP_HEADER_BYTES = 8
+    const val DEFAULT_PAYLOAD_BYTES = 56
+    const val MAX_PAYLOAD_BYTES = 1400
+
+    data class DecodedIcmpEchoReply(
+        val ipFamily: IpFamily,
+        val type: Int,
+        val code: Int,
+        val identifier: Int,
+        val sequence: Int,
+        val payloadBytes: Int,
+    )
+
+    /**
+     * Builds an 8-byte ICMP/ICMPv6 Echo Request header + [payloadSize]-byte payload
+     * with RFC 1071 16-bit one's-complement checksum populated.
+     */
+    fun encodeEchoRequest(
+        ipFamily: IpFamily,
+        identifier: Int,
+        sequence: Int,
+        payloadSize: Int = DEFAULT_PAYLOAD_BYTES,
+        timestampNanos: Long = System.nanoTime(),
+    ): ByteArray {
+        val safePayload = payloadSize.coerceIn(0, MAX_PAYLOAD_BYTES)
+        val packet = ByteArray(ICMP_HEADER_BYTES + safePayload)
+        val reqType = if (ipFamily == IpFamily.IPV6) ICMPV6_ECHO_REQUEST_TYPE else ICMPV4_ECHO_REQUEST_TYPE
+
+        packet[0] = reqType.toByte()
+        packet[1] = 0 // Code = 0
+        packet[2] = 0
+        packet[3] = 0
+        packet[4] = ((identifier ushr 8) and 0xFF).toByte()
+        packet[5] = (identifier and 0xFF).toByte()
+        packet[6] = ((sequence ushr 8) and 0xFF).toByte()
+        packet[7] = (sequence and 0xFF).toByte()
+
+        if (safePayload >= 8) {
+            for (b in 0 until 8) {
+                packet[8 + b] = ((timestampNanos ushr ((7 - b) * 8)) and 0xFFL).toByte()
+            }
+            for (i in 8 until safePayload) {
+                packet[ICMP_HEADER_BYTES + i] = (0x10 + ((i - 8) and 0x3F)).toByte()
+            }
+        } else {
+            for (i in 0 until safePayload) {
+                packet[ICMP_HEADER_BYTES + i] = (0x10 + (i and 0x3F)).toByte()
+            }
+        }
+
+        val checksum = computeChecksum(packet, 0, packet.size)
+        packet[2] = ((checksum ushr 8) and 0xFF).toByte()
+        packet[3] = (checksum and 0xFF).toByte()
+        return packet
+    }
+
+    /**
+     * Computes RFC 1071 16-bit one's-complement checksum over `bytes[offset .. offset + length)`.
+     */
+    fun computeChecksum(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size - offset,
+    ): Int {
+        var sum = 0
+        var idx = offset
+        val end = (offset + length).coerceAtMost(bytes.size)
+        while (idx + 1 < end) {
+            val word = ((bytes[idx].toInt() and 0xFF) shl 8) or (bytes[idx + 1].toInt() and 0xFF)
+            sum += word
+            idx += 2
+        }
+        if (idx < end) {
+            sum += (bytes[idx].toInt() and 0xFF) shl 8
+        }
+        while ((sum ushr 16) != 0) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
+        }
+        return sum.inv() and 0xFFFF
+    }
+
+    /**
+     * Verifies RFC 1071 checksum integrity of an ICMPv4 packet (`computeChecksum == 0`).
+     */
+    fun verifyIpv4Checksum(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size - offset,
+    ): Boolean {
+        if (length < ICMP_HEADER_BYTES || offset < 0 || offset + length > bytes.size) return false
+        return computeChecksum(bytes, offset, length) == 0
+    }
+
+    /**
+     * Decodes a raw `SOCK_DGRAM` `recvfrom`/`recvmsg` datagram (without outer IP header) into
+     * [DecodedIcmpEchoReply], returning `null` if truncated or if it is not an Echo Reply for [expectedFamily].
+     */
+    fun decodeEchoReply(
+        buffer: ByteArray,
+        length: Int,
+        expectedFamily: IpFamily,
+    ): DecodedIcmpEchoReply? {
+        if (length < ICMP_HEADER_BYTES || length > buffer.size) return null
+        val type = buffer[0].toInt() and 0xFF
+        val code = buffer[1].toInt() and 0xFF
+        val expectedReplyType = if (expectedFamily == IpFamily.IPV6) {
+            ICMPV6_ECHO_REPLY_TYPE
+        } else {
+            ICMPV4_ECHO_REPLY_TYPE
+        }
+        if (type != expectedReplyType || code != 0) return null
+
+        val identifier = ((buffer[4].toInt() and 0xFF) shl 8) or (buffer[5].toInt() and 0xFF)
+        val sequence = ((buffer[6].toInt() and 0xFF) shl 8) or (buffer[7].toInt() and 0xFF)
+        return DecodedIcmpEchoReply(
+            ipFamily = expectedFamily,
+            type = type,
+            code = code,
+            identifier = identifier,
+            sequence = sequence,
+            payloadBytes = length - ICMP_HEADER_BYTES,
+        )
+    }
+
+    /**
+     * Parses TTL / Hop Limit from Linux `IP_TTL` / `IPV6_HOPLIMIT` ancillary `cmsg_data`.
+     */
+    fun extractTtlFromCmsgData(
+        cmsgData: ByteArray?,
+        byteOrder: ByteOrder = ByteOrder.nativeOrder(),
+    ): Int? {
+        if (cmsgData == null || cmsgData.isEmpty()) return null
+        val raw = if (cmsgData.size >= 4) {
+            ByteBuffer.wrap(cmsgData, 0, 4).order(byteOrder).int
+        } else {
+            cmsgData[0].toInt() and 0xFF
+        }
+        return raw.takeIf { it in 1..255 }
+    }
+}
+
+/**
+ * Single datagram read from a kernel ICMP Echo socket.
+ */
+data class IcmpRawDatagram(
+    val length: Int,
+    val ttl: Int? = null,
+)
+
+/**
+ * Thin OS syscall boundary for unprivileged `SOCK_DGRAM` `IPPROTO_ICMP` / `IPPROTO_ICMPV6` sockets,
+ * allowing [KernelBoundIcmpDirectProber] to run deterministically in plain JVM unit tests.
+ */
+interface IcmpKernelDatagramOps {
+    @Throws(Exception::class)
+    fun openIcmpDatagramSocket(ipFamily: IpFamily): FileDescriptor
+
+    fun enableReceiveTtlBestEffort(fd: FileDescriptor, ipFamily: IpFamily): Boolean
+
+    @Throws(Exception::class)
+    fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress)
+
+    @Throws(Exception::class)
+    fun pollReadable(fd: FileDescriptor, timeoutMs: Int): Boolean
+
+    @Throws(Exception::class)
+    fun receivePacket(
+        fd: FileDescriptor,
+        buffer: ByteArray,
+        ipFamily: IpFamily,
+        tryReadTtl: Boolean,
+    ): IcmpRawDatagram?
+
+    fun closeQuietly(fd: FileDescriptor)
+}
+
+/**
+ * Production Android `android.system.Os` implementation of [IcmpKernelDatagramOps].
+ */
+object AndroidOsIcmpKernelDatagramOps : IcmpKernelDatagramOps {
+    private const val LINUX_IP_RECVTTL = 12
+    private const val LINUX_MSG_DONTWAIT = 0x40
+
+    override fun openIcmpDatagramSocket(ipFamily: IpFamily): FileDescriptor {
+        // When `unitTests.isReturnDefaultValues = true` on host JVM, OsConstants are 0 and Os.socket returns null
+        if (OsConstants.AF_INET == 0 && OsConstants.SOCK_DGRAM == 0) {
+            throw UnsupportedOperationException("Android OsConstants unavailable on host JVM")
+        }
+        val domain = if (ipFamily == IpFamily.IPV6) OsConstants.AF_INET6 else OsConstants.AF_INET
+        val protocol = if (ipFamily == IpFamily.IPV6) OsConstants.IPPROTO_ICMPV6 else OsConstants.IPPROTO_ICMP
+        val fd: FileDescriptor? = try {
+            Os.socket(domain, OsConstants.SOCK_DGRAM or OsConstants.SOCK_NONBLOCK, protocol)
+        } catch (_: ErrnoException) {
+            Os.socket(domain, OsConstants.SOCK_DGRAM, protocol)
+        }
+        if (fd == null || !fd.valid()) {
+            throw UnsupportedOperationException("Os.socket returned invalid FileDescriptor")
+        }
+        try {
+            val currentFlags = Os.fcntlInt(fd, OsConstants.F_GETFL, 0)
+            if ((currentFlags and OsConstants.O_NONBLOCK) == 0) {
+                Os.fcntlInt(fd, OsConstants.F_SETFL, currentFlags or OsConstants.O_NONBLOCK)
+            }
+        } catch (t: Throwable) {
+            closeQuietly(fd)
+            throw t
+        }
+        return fd
+    }
+
+    override fun enableReceiveTtlBestEffort(fd: FileDescriptor, ipFamily: IpFamily): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return runCatching {
+            if (ipFamily == IpFamily.IPV6) {
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_IPV6, OsConstants.IPV6_RECVHOPLIMIT, 1)
+            } else {
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, LINUX_IP_RECVTTL, 1)
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
+        Os.sendto(fd, packet, 0, packet.size, 0, address, 0)
+    }
+
+    override fun pollReadable(fd: FileDescriptor, timeoutMs: Int): Boolean {
+        val clampedMs = timeoutMs.coerceAtLeast(1)
+        val deadlineNanos = System.nanoTime() + clampedMs * 1_000_000L
+        val pollfd = StructPollfd().apply {
+            this.fd = fd
+            this.events = OsConstants.POLLIN.toShort()
+        }
+        val pollArray = arrayOf(pollfd)
+        while (true) {
+            val remainingMs = ((deadlineNanos - System.nanoTime() + 999_999L) / 1_000_000L).toInt()
+            if (remainingMs <= 0) return false
+            try {
+                val ready = Os.poll(pollArray, remainingMs)
+                if (ready <= 0) return false
+                val revents = pollfd.revents.toInt()
+                return (revents and (OsConstants.POLLIN or OsConstants.POLLERR)) != 0
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.EINTR) continue
+                throw e
+            }
+        }
+    }
+
+    internal enum class RecvMsgErrnoAction {
+        RETURN_NULL,
+        FALLBACK_RECVFROM,
+        RETHROW,
+    }
+
+    internal fun classifyRecvMsgErrno(
+        errno: Int,
+        eagain: Int = OsConstants.EAGAIN,
+        eintr: Int = OsConstants.EINTR,
+        einval: Int = OsConstants.EINVAL,
+        eopnotsupp: Int = OsConstants.EOPNOTSUPP,
+        enosys: Int = OsConstants.ENOSYS,
+    ): RecvMsgErrnoAction = when (errno) {
+        eagain, eintr -> RecvMsgErrnoAction.RETURN_NULL
+        einval, eopnotsupp, enosys -> RecvMsgErrnoAction.FALLBACK_RECVFROM
+        else -> RecvMsgErrnoAction.RETHROW
+    }
+
+    override fun receivePacket(
+        fd: FileDescriptor,
+        buffer: ByteArray,
+        ipFamily: IpFamily,
+        tryReadTtl: Boolean,
+    ): IcmpRawDatagram? {
+        if (tryReadTtl && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                return Api29RecvMsgHelper.receiveWithTtl(fd, buffer, ipFamily)
+            } catch (e: ErrnoException) {
+                when (classifyRecvMsgErrno(e.errno)) {
+                    RecvMsgErrnoAction.RETURN_NULL -> return null
+                    RecvMsgErrnoAction.FALLBACK_RECVFROM -> {
+                        // Kernel rejected recvmsg control buffer or syscall; fall through to non-blocking Os.recvfrom
+                    }
+                    RecvMsgErrnoAction.RETHROW -> throw e // Surface EHOSTUNREACH, ENETUNREACH, ECONNREFUSED, EACCES, EPERM immediately
+                }
+            } catch (_: LinkageError) {
+                // Fall through to Os.recvfrom
+            } catch (_: UnsupportedOperationException) {
+                // Fall through to Os.recvfrom
+            }
+        }
+        return try {
+            val bytesRead = Os.recvfrom(fd, buffer, 0, buffer.size, LINUX_MSG_DONTWAIT, null)
+            if (bytesRead <= 0) null else IcmpRawDatagram(length = bytesRead, ttl = null)
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) {
+                null
+            } else {
+                throw e
+            }
+        }
+    }
+
+    override fun closeQuietly(fd: FileDescriptor) {
+        runCatching {
+            if (fd.valid()) {
+                Os.close(fd)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private object Api29RecvMsgHelper {
+        private const val LINUX_IPV6_HOPLIMIT = 52
+
+        fun receiveWithTtl(
+            fd: FileDescriptor,
+            buffer: ByteArray,
+            ipFamily: IpFamily,
+        ): IcmpRawDatagram? {
+            val iov = arrayOf(ByteBuffer.wrap(buffer))
+            val controlSeed = arrayOf(StructCmsghdr(0, 0, ByteArray(16)))
+            val msgHdr = StructMsghdr(null, iov, controlSeed, 0)
+            val n = Os.recvmsg(fd, msgHdr, LINUX_MSG_DONTWAIT)
+            if (n <= 0) return null
+            val ttl = msgHdr.msg_control?.firstNotNullOfOrNull { cmsg ->
+                val isV4Ttl = ipFamily != IpFamily.IPV6 &&
+                    cmsg.cmsg_level == OsConstants.IPPROTO_IP &&
+                    (cmsg.cmsg_type == OsConstants.IP_TTL || cmsg.cmsg_type == LINUX_IP_RECVTTL)
+                val isV6HopLimit = ipFamily == IpFamily.IPV6 &&
+                    cmsg.cmsg_level == OsConstants.IPPROTO_IPV6 &&
+                    (cmsg.cmsg_type == LINUX_IPV6_HOPLIMIT || cmsg.cmsg_type == OsConstants.IPV6_RECVHOPLIMIT)
+                if (isV4Ttl || isV6HopLimit) {
+                    IcmpEchoPacketCodec.extractTtlFromCmsgData(cmsg.cmsg_data)
+                } else {
+                    null
+                }
+            }
+            return IcmpRawDatagram(length = n, ttl = ttl)
+        }
+    }
+}
+
+/**
+ * Outcome of attempting direct physical-network ICMP Echo probing via `Network.bindSocket(fd)`.
+ */
+sealed class IcmpDirectProbeOutcome {
+    data class Completed(
+        val samples: List<IcmpPingSample>,
+        val boundInterfaceName: String?,
+    ) : IcmpDirectProbeOutcome()
+
+    data class Unavailable(
+        val reason: String,
+        val cause: Throwable? = null,
+    ) : IcmpDirectProbeOutcome()
+
+    data class BindRejectedByLockdown(
+        val userMessage: String,
+        val cause: Throwable,
+    ) : IcmpDirectProbeOutcome()
+}
+
+/**
+ * Abstraction for executing in-process ICMP Echo probes bound directly to a physical [NetBenchSocketChannel].
+ */
+fun interface IcmpDirectProber {
+    suspend fun probe(
+        endpoint: ResolvedEndpoint,
+        plannedCount: Int,
+        timeoutMs: Int,
+        intervalMs: Long,
+        initialChannel: NetBenchSocketChannel,
+        initialInterfaceName: String?,
+        isVpnActive: Boolean,
+        networkBridge: NetBenchNetworkBridge,
+        onSample: suspend (sample: IcmpPingSample, snapshot: List<IcmpPingSample>, boundInterfaceName: String?) -> Unit,
+    ): IcmpDirectProbeOutcome
+}
+
+/**
+ * Default [IcmpDirectProber] opening an unprivileged kernel ICMP Echo datagram socket (`AF_INET`/`AF_INET6`
+ * + `SOCK_DGRAM` + `IPPROTO_ICMP`/`IPPROTO_ICMPV6`) and binding its [FileDescriptor] directly to the
+ * underlying physical [android.net.Network] (`Network.bindSocket(fd)`), 100% bypassing TUN VPN routes.
+ */
+class KernelBoundIcmpDirectProber(
+    private val ops: IcmpKernelDatagramOps = AndroidOsIcmpKernelDatagramOps,
+    private val pollSliceMs: Long = DEFAULT_POLL_SLICE_MS,
+) : IcmpDirectProber {
+
+    override suspend fun probe(
+        endpoint: ResolvedEndpoint,
+        plannedCount: Int,
+        timeoutMs: Int,
+        intervalMs: Long,
+        initialChannel: NetBenchSocketChannel,
+        initialInterfaceName: String?,
+        isVpnActive: Boolean,
+        networkBridge: NetBenchNetworkBridge,
+        onSample: suspend (sample: IcmpPingSample, snapshot: List<IcmpPingSample>, boundInterfaceName: String?) -> Unit,
+    ): IcmpDirectProbeOutcome {
+        if (!initialChannel.supportsFileDescriptorBind) {
+            return IcmpDirectProbeOutcome.Unavailable(
+                reason = "Channel ${initialChannel.networkId} does not support FileDescriptor binding",
+            )
+        }
+
+        val ipFamily = endpoint.resolvedTarget.ipFamily
+        var activeChannel = initialChannel
+        var currentInterfaceName = initialInterfaceName
+        var activeFd: FileDescriptor = try {
+            ops.openIcmpDatagramSocket(ipFamily)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            return IcmpDirectProbeOutcome.Unavailable(
+                reason = "Unprivileged ICMP socket unavailable: ${t.message ?: t.javaClass.simpleName}",
+                cause = t,
+            )
+        }
+
+        try {
+            try {
+                activeChannel.bindDatagramFileDescriptor(activeFd)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = t,
+                    isVpnActive = isVpnActive,
+                    hasDirectCandidate = true,
+                )
+                if (isVpnActive && reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                    return IcmpDirectProbeOutcome.BindRejectedByLockdown(
+                        userMessage = "${reason.userHint}；请开启「经由代理测试」",
+                        cause = t,
+                    )
+                }
+                return IcmpDirectProbeOutcome.Unavailable(
+                    reason = "Network.bindSocket(fd) failed: ${t.message ?: t.javaClass.simpleName}",
+                    cause = t,
+                )
+            }
+
+            var tryReadTtl = ops.enableReceiveTtlBestEffort(activeFd, ipFamily)
+            val sessionIdentifier = ((System.nanoTime().toInt() xor endpoint.address.hashCode()) and 0xFFFF)
+                .let { if (it == 0) 0x4E50 else it }
+            val recvBuffer = ByteArray(512)
+            val samples = ArrayList<IcmpPingSample>(plannedCount)
+
+            for (seq in 1..plannedCount) {
+                currentCoroutineContext().ensureActive()
+
+                val sample = executeSingleEcho(
+                    seq = seq,
+                    ipFamily = ipFamily,
+                    targetAddress = endpoint.address,
+                    identifier = sessionIdentifier,
+                    timeoutMs = timeoutMs,
+                    recvBuffer = recvBuffer,
+                    isVpnActive = isVpnActive,
+                    networkBridge = networkBridge,
+                    currentFd = { activeFd },
+                    currentChannel = { activeChannel },
+                    tryReadTtl = { tryReadTtl },
+                    onSwitchFdAndChannel = { nextFd, nextChannel, nextIface, nextTtl ->
+                        ops.closeQuietly(activeFd)
+                        activeFd = nextFd
+                        activeChannel = nextChannel
+                        currentInterfaceName = nextIface
+                        tryReadTtl = nextTtl
+                    },
+                )
+
+                samples += sample
+                onSample(sample, samples.toList(), currentInterfaceName)
+
+                if (seq < plannedCount && intervalMs > 0L) {
+                    delay(intervalMs)
+                }
+            }
+
+            return IcmpDirectProbeOutcome.Completed(
+                samples = samples.toList(),
+                boundInterfaceName = currentInterfaceName,
+            )
+        } finally {
+            ops.closeQuietly(activeFd)
+        }
+    }
+
+    private suspend fun executeSingleEcho(
+        seq: Int,
+        ipFamily: IpFamily,
+        targetAddress: InetAddress,
+        identifier: Int,
+        timeoutMs: Int,
+        recvBuffer: ByteArray,
+        isVpnActive: Boolean,
+        networkBridge: NetBenchNetworkBridge,
+        currentFd: () -> FileDescriptor,
+        currentChannel: () -> NetBenchSocketChannel,
+        tryReadTtl: () -> Boolean,
+        onSwitchFdAndChannel: (FileDescriptor, NetBenchSocketChannel, String?, Boolean) -> Unit,
+    ): IcmpPingSample {
+        var sendStartNanos = 0L
+        var sentOk = false
+
+        for (attempt in 0..1) {
+            currentCoroutineContext().ensureActive()
+            val sendNanos = System.nanoTime()
+            val packet = IcmpEchoPacketCodec.encodeEchoRequest(
+                ipFamily = ipFamily,
+                identifier = identifier,
+                sequence = seq,
+                payloadSize = IcmpEchoPacketCodec.DEFAULT_PAYLOAD_BYTES,
+                timestampNanos = sendNanos,
+            )
+            try {
+                sendStartNanos = System.nanoTime()
+                ops.sendTo(currentFd(), packet, targetAddress)
+                sentOk = true
+                break
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val refreshed = networkBridge.inspectCurrentNetworks()
+                val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = t,
+                    isVpnActive = isVpnActive || refreshed.plan.isVpnActive,
+                    hasDirectCandidate = refreshed.plan.hasDirectCandidate,
+                )
+                if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
+                    return IcmpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                    )
+                }
+                val nextChannel = refreshed.directChannel
+                if (attempt == 0 &&
+                    reason == DirectBindFailureReason.NETWORK_CHANGED_OR_LOST &&
+                    nextChannel != null &&
+                    nextChannel.networkId != currentChannel().networkId &&
+                    nextChannel.supportsFileDescriptorBind
+                ) {
+                    val reopened = runCatching {
+                        val newFd = ops.openIcmpDatagramSocket(ipFamily)
+                        try {
+                            nextChannel.bindDatagramFileDescriptor(newFd)
+                            val newTtl = ops.enableReceiveTtlBestEffort(newFd, ipFamily)
+                            val newIface = refreshed.plan.directUnderlying?.interfaceName?.takeIf { it.isNotBlank() }
+                            onSwitchFdAndChannel(newFd, nextChannel, newIface, newTtl)
+                            true
+                        } catch (bindErr: Throwable) {
+                            ops.closeQuietly(newFd)
+                            throw bindErr
+                        }
+                    }.getOrDefault(false)
+                    if (reopened) continue
+                }
+
+                val errLabel = when (reason) {
+                    DirectBindFailureReason.NETWORK_CHANGED_OR_LOST -> "底层网络不可达或已切换"
+                    DirectBindFailureReason.NO_UNDERLYING_NETWORK -> reason.userHint
+                    else -> "发送 ICMP 请求失败 (${t.message?.take(48) ?: t.javaClass.simpleName})"
+                }
+                return IcmpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = errLabel,
+                )
+            }
+        }
+
+        if (!sentOk) {
+            return IcmpPingSample(seq = seq, success = false, errorMessage = "发送 ICMP 请求失败")
+        }
+
+        val deadlineNanos = sendStartNanos + timeoutMs.coerceAtLeast(100) * 1_000_000L
+        val expectedSeq16 = seq and 0xFFFF
+        val sliceCapMs = pollSliceMs.coerceIn(10L, 250L)
+
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            if (remainingNanos <= 0L) {
+                return IcmpPingSample(
+                    seq = seq,
+                    success = false,
+                    rttMs = null,
+                    errorMessage = "请求超时",
+                )
+            }
+
+            val waitMs = ((remainingNanos + 999_999L) / 1_000_000L).coerceIn(1L, sliceCapMs).toInt()
+            val readable = try {
+                ops.pollReadable(currentFd(), waitMs)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                return IcmpPingSample(
+                    seq = seq,
+                    success = false,
+                    errorMessage = "接收等待异常 (${t.message?.take(40) ?: t.javaClass.simpleName})",
+                )
+            }
+
+            if (!readable) continue
+
+            val datagram = try {
+                ops.receivePacket(currentFd(), recvBuffer, ipFamily, tryReadTtl())
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                return IcmpPingSample(
+                    seq = seq,
+                    success = false,
+                    rttMs = null,
+                    errorMessage = classifyReceiveError(
+                        throwable = t,
+                        isVpnActive = isVpnActive,
+                    ),
+                )
+            } ?: continue
+
+            val recvEndNanos = System.nanoTime()
+            val decoded = IcmpEchoPacketCodec.decodeEchoReply(
+                buffer = recvBuffer,
+                length = datagram.length,
+                expectedFamily = ipFamily,
+            ) ?: continue
+
+            // Ignore late replies belonging to earlier timed-out sequences and keep polling until deadline
+            if (decoded.sequence != expectedSeq16) {
+                continue
+            }
+
+            val rawRttMs = (recvEndNanos - sendStartNanos) / 1_000_000.0
+            if (!rawRttMs.isFinite() || rawRttMs < 0.0 || rawRttMs > IcmpPingParser.MAX_VALID_RTT_MS) {
+                return IcmpPingSample(
+                    seq = seq,
+                    success = true,
+                    rttMs = null,
+                    ttl = datagram.ttl,
+                    errorMessage = "RTT 异常已忽略",
+                )
+            }
+
+            return IcmpPingSample(
+                seq = seq,
+                success = true,
+                rttMs = rawRttMs.coerceAtLeast(0.01),
+                ttl = datagram.ttl,
+            )
+        }
+    }
+
+    private fun classifyReceiveError(
+        throwable: Throwable,
+        isVpnActive: Boolean,
+    ): String {
+        val errno = (throwable as? ErrnoException)?.errno ?: 0
+        val combined = generateSequence(throwable) { it.cause }
+            .take(6)
+            .joinToString(" | ") { "${it.javaClass.simpleName}:${it.message.orEmpty()}" }
+            .lowercase(Locale.US)
+
+        val isPermDenied = (errno != 0 && (errno == OsConstants.EPERM || errno == OsConstants.EACCES)) ||
+            "eperm" in combined ||
+            "operation not permitted" in combined ||
+            "eacces" in combined ||
+            "permission denied" in combined
+        if (isPermDenied) {
+            return if (isVpnActive) {
+                "${DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED.userHint}；请开启「经由代理测试」"
+            } else {
+                "ICMP 接收权限受限"
+            }
+        }
+
+        val isHostUnreach = (errno != 0 && errno == OsConstants.EHOSTUNREACH) ||
+            "ehostunreach" in combined ||
+            "no route to host" in combined ||
+            "host unreachable" in combined
+        if (isHostUnreach) {
+            return "目标主机不可达"
+        }
+
+        val isNetUnreach = (errno != 0 && errno == OsConstants.ENETUNREACH) ||
+            "enetunreach" in combined ||
+            "network is unreachable" in combined
+        if (isNetUnreach) {
+            return "底层网络不可达"
+        }
+
+        val isRefused = (errno != 0 && errno == OsConstants.ECONNREFUSED) ||
+            "econnrefused" in combined ||
+            "connection refused" in combined ||
+            "port unreachable" in combined ||
+            "prohibited" in combined ||
+            "filtered" in combined
+        if (isRefused) {
+            return "目标拒绝或过滤 ICMP 请求"
+        }
+
+        return "接收 ICMP 响应失败 (${throwable.message?.take(48) ?: throwable.javaClass.simpleName})"
+    }
+
+    companion object {
+        const val DEFAULT_POLL_SLICE_MS = 50L
+    }
+}
+
+/**
+ * Executes real-time ICMP ping with a multi-stage VPN/proxy bypass architecture:
+ * 1. **Stage 1 (`PHYSICAL_NETWORK_BOUND`)**: When bypassing proxy (`!useProxy`), opens an unprivileged
+ *    kernel ICMP Echo datagram socket (`Os.socket` `SOCK_DGRAM` `IPPROTO_ICMP`/`IPPROTO_ICMPV6`) and
+ *    binds it directly to the physical Wi-Fi/Cellular [android.net.Network] via `Network.bindSocket(fd)`.
+ * 2. **Stage 2 (`INTERFACE_BOUND`)**: Falls back to `/system/bin/ping -I <iface>` if the kernel disables
+ *    `ping_group_range` or FD binding is unavailable.
+ * 3. **Stage 3 (`UNBOUND_SUBPROCESS_FALLBACK` / `SYSTEM_DEFAULT`)**: Degrades cleanly to unbound `/system/bin/ping`
+ *    (with explicit routing warning if VPN is active, unless blocked by strict VPN lockdown).
  */
 class IcmpPingRunner(
     private val resolver: NetBenchTargetResolver = NetBenchTargetResolver(),
@@ -602,10 +1349,12 @@ class IcmpPingRunner(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
     private val ping6BinaryAvailable: () -> Boolean = { File(IcmpPingParser.DEFAULT_PING6_BINARY).exists() },
+    private val directProber: IcmpDirectProber = KernelBoundIcmpDirectProber(),
 ) {
 
     fun run(config: IcmpPingConfig): Flow<IcmpPingProgress> = flow {
         val plannedCount = config.normalizedProbeCount
+        val timeoutMs = config.normalizedTimeoutMs
         val timeoutSec = config.normalizedTimeoutSec
         val initialIntervalMs = config.normalizedIntervalMs
 
@@ -644,8 +1393,102 @@ class IcmpPingRunner(
         val directDescriptor = binding.plan.directUnderlying
         val vpnActive = binding.plan.isVpnActive
         val wantDirectPhysical = !config.useProxy && selectedChannel.isDirectPhysical
+        val directInterfaceName = directDescriptor?.interfaceName?.takeIf { it.isNotBlank() }
+
+        // Stage 1: Kernel unprivileged ICMP Echo socket bound via Network.bindSocket(fd)
+        var lockdownRejectionMessage: String? = null
+        if (wantDirectPhysical) {
+            val directOutcome = directProber.probe(
+                endpoint = endpoint,
+                plannedCount = plannedCount,
+                timeoutMs = timeoutMs,
+                intervalMs = initialIntervalMs,
+                initialChannel = selectedChannel,
+                initialInterfaceName = directInterfaceName,
+                isVpnActive = vpnActive,
+                networkBridge = networkBridge,
+                onSample = { sample, snapshot, liveIface ->
+                    val liveSummary = IcmpPingParser.computeSummary(
+                        resolvedTarget = endpoint.resolvedTarget,
+                        samples = snapshot,
+                        bindingMode = IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND,
+                        boundInterfaceName = liveIface,
+                        networkBindingNote = null,
+                    )
+                    emit(
+                        IcmpPingProgress(
+                            resolvedTarget = endpoint.resolvedTarget,
+                            totalPlanned = plannedCount,
+                            latestSample = sample,
+                            samples = snapshot,
+                            summary = liveSummary,
+                            isFinished = false,
+                        ),
+                    )
+                },
+            )
+
+            when (directOutcome) {
+                is IcmpDirectProbeOutcome.Completed -> {
+                    val finalSamples = IcmpPingParser.reconcileSamples(directOutcome.samples, plannedCount)
+                    val receivedCount = finalSamples.count { it.success }
+                    val finalError = if (receivedCount == 0) {
+                        val specific = directOutcome.samples.firstOrNull {
+                            !it.errorMessage.isNullOrBlank() && it.errorMessage != "请求超时"
+                        }?.errorMessage
+                        specific ?: "全部请求超时或目标禁 Ping（100% 丢包）"
+                    } else {
+                        null
+                    }
+                    val finalSummary = IcmpPingParser.computeSummary(
+                        resolvedTarget = endpoint.resolvedTarget,
+                        samples = finalSamples,
+                        packetStats = IcmpPingParser.PingPacketStats(
+                            sent = plannedCount,
+                            received = receivedCount,
+                            lossPercent = ((plannedCount - receivedCount) * 100.0) / plannedCount.toDouble(),
+                        ),
+                        bindingMode = IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND,
+                        boundInterfaceName = directOutcome.boundInterfaceName,
+                        networkBindingNote = null,
+                        errorMessage = finalError,
+                    )
+                    emit(
+                        IcmpPingProgress(
+                            resolvedTarget = endpoint.resolvedTarget,
+                            totalPlanned = plannedCount,
+                            latestSample = finalSamples.lastOrNull(),
+                            samples = finalSamples,
+                            summary = finalSummary,
+                            isFinished = true,
+                            errorMessage = finalSummary.errorMessage,
+                        ),
+                    )
+                    return@flow
+                }
+
+                is IcmpDirectProbeOutcome.BindRejectedByLockdown -> {
+                    lockdownRejectionMessage = directOutcome.userMessage
+                    if (directInterfaceName == null) {
+                        emit(
+                            failedProgress(
+                                resolvedTarget = endpoint.resolvedTarget,
+                                plannedCount = plannedCount,
+                                errorMessage = directOutcome.userMessage,
+                            ),
+                        )
+                        return@flow
+                    }
+                }
+
+                is IcmpDirectProbeOutcome.Unavailable -> {
+                    // Proceed smoothly to Stage 2 (/system/bin/ping -I <iface>) -> Stage 3 (/system/bin/ping)
+                }
+            }
+        }
+
         val candidateInterface = if (wantDirectPhysical && (vpnActive || binding.plan.activeDefault?.networkId != selectedChannel.networkId)) {
-            directDescriptor?.interfaceName?.takeIf { it.isNotBlank() }
+            directInterfaceName
         } else {
             null
         }
@@ -801,6 +1644,22 @@ class IcmpPingRunner(
                 hadNumericFlag = includeNumericFlag,
                 throwable = streamException,
             )
+
+            // If Network.bindSocket(fd) was already denied by strict VPN lockdown AND -I <iface> also failed,
+            // do NOT fall back to unbound /system/bin/ping (which would route into VPN tun0 and fake 1ms RTT).
+            if (lockdownRejectionMessage != null &&
+                (failureKind == IcmpPingParser.PingFailureKind.INTERFACE_BIND_REJECTED ||
+                    failureKind == IcmpPingParser.PingFailureKind.PERMISSION_DENIED)
+            ) {
+                emit(
+                    failedProgress(
+                        resolvedTarget = endpoint.resolvedTarget,
+                        plannedCount = plannedCount,
+                        errorMessage = lockdownRejectionMessage,
+                    ),
+                )
+                return@flow
+            }
 
             if (attempt < maxAttempts) {
                 when (failureKind) {

@@ -76,11 +76,14 @@ enum class TcpPortPreset(val port: Int, val label: String) {
 }
 
 /**
- * How the ICMP ping subprocess handled OS network routing/binding.
+ * How the ICMP ping engine handled OS network routing/binding.
  */
 enum class IcmpNetworkBindingMode(val label: String) {
     /** System default route (used when no VPN/proxy is active, or when proxy test is chosen). */
     SYSTEM_DEFAULT("系统默认路由"),
+
+    /** Kernel unprivileged ICMP Echo socket bound directly to the underlying physical [android.net.Network] via `Network.bindSocket(fd)`. */
+    PHYSICAL_NETWORK_BOUND("已绑定底层物理网络（绕过代理）"),
 
     /** Bound to the underlying physical interface via `-I <iface>`. */
     INTERFACE_BOUND("已指定底层网卡"),
@@ -102,6 +105,9 @@ data class IcmpPingConfig(
 ) {
     val normalizedProbeCount: Int
         get() = probeCount.coerceIn(MIN_PROBE_COUNT, MAX_PROBE_COUNT)
+
+    val normalizedTimeoutMs: Int
+        get() = timeoutMs.coerceIn(200, 15_000)
 
     val normalizedTimeoutSec: Int
         get() = ((timeoutMs + 999) / 1000).coerceIn(1, 15)

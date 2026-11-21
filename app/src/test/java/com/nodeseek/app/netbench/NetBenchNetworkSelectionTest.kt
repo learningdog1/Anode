@@ -3,9 +3,11 @@ package com.nodeseek.app.netbench
 import com.nodeseek.app.domain.netbench.DirectBindFailureReason
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
 import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
+import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.NetBenchTransportKind
 import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import com.nodeseek.app.domain.netbench.ProxyPresence
+import com.nodeseek.app.domain.netbench.SuspectResolvedIpKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -277,5 +279,121 @@ class NetBenchNetworkSelectionTest {
         assertEquals("TW", IpClassificationEngine.countryCodeFromZhOrName("中国", "台湾"))
         assertEquals("JP", IpClassificationEngine.countryCodeFromZhOrName("日本"))
         assertEquals("US", IpClassificationEngine.countryCodeFromZhOrName("美国"))
+    }
+
+    @Test
+    fun `mergeNetworkCandidates recovers underlying physical network when allNetworks lags under VPN and backfills interfaceName`() {
+        val liveVpnOnly = listOf(
+            NetworkDescriptor(
+                token = "vpn-tun0",
+                networkId = "200",
+                isVpn = true,
+                hasInternet = true,
+                isValidated = true,
+                isActiveDefault = true,
+                transports = setOf(NetBenchTransportKind.VPN),
+                interfaceName = "tun0",
+            ),
+        )
+        val cachedPreVpnWifi = listOf(
+            NetworkDescriptor(
+                token = "wifi-101",
+                networkId = "101",
+                isVpn = false,
+                hasInternet = true,
+                isValidated = true,
+                isActiveDefault = true, // Was active default prior to VPN coming up
+                transports = setOf(NetBenchTransportKind.WIFI),
+                interfaceName = "wlan0",
+            ),
+            NetworkDescriptor(
+                token = "stale-vpn",
+                networkId = "199",
+                isVpn = true,
+                hasInternet = true,
+                transports = setOf(NetBenchTransportKind.VPN),
+                interfaceName = "tun1",
+            ),
+        )
+
+        val merged = NetBenchNetworkSelector.mergeNetworkCandidates(
+            liveCandidates = liveVpnOnly,
+            cachedDirectCandidates = cachedPreVpnWifi,
+        )
+        val plan = NetBenchNetworkSelector.selectNetworkPlan(merged)
+        assertTrue(plan.isVpnActive)
+        assertEquals("vpn-tun0", plan.activeDefault?.token)
+        assertEquals("wifi-101", plan.directUnderlying?.token)
+        assertEquals("wlan0", plan.directUnderlying?.interfaceName)
+        assertFalse(merged.any { it.networkId == "199" })
+
+        // Backfills missing interfaceName when live LinkProperties transiently returns null
+        val liveWifiMissingIface = listOf(
+            NetworkDescriptor(
+                token = "vpn-tun0",
+                networkId = "200",
+                isVpn = true,
+                hasInternet = true,
+                isActiveDefault = true,
+                transports = setOf(NetBenchTransportKind.VPN),
+                interfaceName = "tun0",
+            ),
+            NetworkDescriptor(
+                token = "wifi-live",
+                networkId = "101",
+                isVpn = false,
+                hasInternet = true,
+                isValidated = true,
+                transports = setOf(NetBenchTransportKind.WIFI),
+                interfaceName = null,
+            ),
+        )
+        val backfilled = NetBenchNetworkSelector.mergeNetworkCandidates(
+            liveCandidates = liveWifiMissingIface,
+            cachedDirectCandidates = cachedPreVpnWifi,
+        )
+        val backfilledPlan = NetBenchNetworkSelector.selectNetworkPlan(backfilled)
+        assertEquals("wifi-live", backfilledPlan.directUnderlying?.token)
+        assertEquals("wlan0", backfilledPlan.directUnderlying?.interfaceName)
+    }
+
+    @Test
+    fun `classifySuspectIp detects RFC2544 Fake-IPv4 Fake-IPv6 sinkholes and loopback hijacks accurately`() {
+        // RFC 2544 / Clash / Sing-box Fake-IPv4 range 198.18.0.0/15
+        assertEquals(SuspectResolvedIpKind.PROXY_FAKE_IP_V4, NetBenchTargetParser.classifySuspectIp("198.18.0.1", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.PROXY_FAKE_IP_V4, NetBenchTargetParser.classifySuspectIp("198.19.255.254", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.PROXY_FAKE_IP_V4, NetBenchTargetParser.classifySuspectIp("::ffff:198.18.2.9", "vps.example.com"))
+        assertTrue(NetBenchTargetParser.isFakeIpLiteral("198.18.0.88"))
+        assertEquals(SuspectResolvedIpKind.NONE, NetBenchTargetParser.classifySuspectIp("198.17.255.255", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.NONE, NetBenchTargetParser.classifySuspectIp("198.20.0.1", "vps.example.com"))
+
+        // Sing-box / Mihomo Fake-IPv6 range fc00::/18 vs legitimate RFC 4193 fd00::/8 ULA & public v6
+        assertEquals(SuspectResolvedIpKind.PROXY_FAKE_IP_V6, NetBenchTargetParser.classifySuspectIp("fc00::1234", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.PROXY_FAKE_IP_V6, NetBenchTargetParser.classifySuspectIp("fc3f:ffff::1", "vps.example.com"))
+        assertTrue(NetBenchTargetParser.isFakeIpLiteral("fc00::5"))
+        assertEquals(SuspectResolvedIpKind.NONE, NetBenchTargetParser.classifySuspectIp("fd00::1", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.NONE, NetBenchTargetParser.classifySuspectIp("2606:4700:4700::1111", "vps.example.com"))
+
+        // Unspecified / DNS sinkhole
+        assertEquals(SuspectResolvedIpKind.UNSPECIFIED_SINKHOLE, NetBenchTargetParser.classifySuspectIp("0.0.0.0", "vps.example.com"))
+        assertEquals(SuspectResolvedIpKind.UNSPECIFIED_SINKHOLE, NetBenchTargetParser.classifySuspectIp("::", "vps.example.com"))
+
+        // Public host vs localhost loopback rules
+        assertEquals(
+            SuspectResolvedIpKind.LOOPBACK_HIJACK,
+            NetBenchTargetParser.classifySuspectIp("127.0.0.1", targetHost = "vps.example.com", checkLoopbackForPublicHost = true),
+        )
+        assertEquals(
+            SuspectResolvedIpKind.LOOPBACK_HIJACK,
+            NetBenchTargetParser.classifySuspectIp("::1", targetHost = "vps.example.com", checkLoopbackForPublicHost = true),
+        )
+        assertEquals(
+            SuspectResolvedIpKind.NONE,
+            NetBenchTargetParser.classifySuspectIp("127.0.0.1", targetHost = "localhost", checkLoopbackForPublicHost = true),
+        )
+        assertEquals(
+            SuspectResolvedIpKind.NONE,
+            NetBenchTargetParser.classifySuspectIp("::1", targetHost = "dev.localhost", checkLoopbackForPublicHost = true),
+        )
     }
 }

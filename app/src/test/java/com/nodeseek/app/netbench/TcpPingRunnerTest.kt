@@ -1,5 +1,8 @@
 package com.nodeseek.app.netbench
 
+import com.nodeseek.app.data.netbench.BoundNoProxySocketFactory
+import com.nodeseek.app.data.netbench.DnsWireMessageCodec
+import com.nodeseek.app.data.netbench.DohCleanDirectDnsFallback
 import com.nodeseek.app.data.netbench.NetBenchDnsResolver
 import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchSocketChannel
@@ -7,6 +10,7 @@ import com.nodeseek.app.data.netbench.NetBenchTargetResolver
 import com.nodeseek.app.data.netbench.ResolvedNetworkBinding
 import com.nodeseek.app.data.netbench.TcpPingRunner
 import com.nodeseek.app.data.netbench.TcpProbeConnector
+import com.nodeseek.app.data.netbench.createBoundNoProxySocket
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
@@ -17,18 +21,28 @@ import com.nodeseek.app.domain.netbench.TcpPingConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.ConnectException
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.ProxySelector
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.SocketFactory
@@ -446,5 +460,289 @@ class TcpPingRunnerTest {
             runCatching { server.close() }
             acceptThread.join(500)
         }
+    }
+
+    @Test
+    fun `tcping and BoundNoProxySocketFactory enforce Proxy NO_PROXY and bind before connect under global SOCKS hijack`() = runBlocking {
+        val running = AtomicBoolean(true)
+        val server = ServerSocket(0, 32, InetAddress.getByName("127.0.0.1"))
+        val acceptThread = thread(isDaemon = true) {
+            while (running.get()) {
+                try {
+                    server.accept().close()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }
+
+        // Reserve and close a port so any socket routed through the hostile SOCKS proxy fails immediately
+        val deadSocksPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val proxySelectCount = AtomicInteger(0)
+        val originalSelector = ProxySelector.getDefault()
+        val hostileSocksSelector = object : ProxySelector() {
+            override fun select(uri: URI?): List<Proxy> {
+                proxySelectCount.incrementAndGet()
+                return listOf(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", deadSocksPort)))
+            }
+
+            override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) = Unit
+        }
+
+        try {
+            ProxySelector.setDefault(hostileSocksSelector)
+
+            // 1. Default direct mode (DirectSystemRouteChannel) must bypass global SOCKS ProxySelector
+            val defaultDirectRunner = TcpPingRunner(ioDispatcher = Dispatchers.IO)
+            val directDefaultResult = defaultDirectRunner.run(
+                TcpPingConfig(
+                    target = "127.0.0.1",
+                    port = server.localPort,
+                    probeCount = 4,
+                    timeoutMs = 1_000,
+                    intervalMs = 0L,
+                    useProxy = false,
+                ),
+            ).toList().last()
+            assertEquals(4, directDefaultResult.summary.received)
+            assertEquals(0, proxySelectCount.get())
+
+            // 2. Bound physical channel using BoundNoProxySocketFactory / createBoundNoProxySocket binds unconnected socket before connect
+            val boundBeforeConnectCount = AtomicInteger(0)
+            val boundNoProxyFactory = BoundNoProxySocketFactory { unconnectedSocket ->
+                assertFalse("Socket must not be connected yet when network.bindSocket(socket) runs", unconnectedSocket.isConnected)
+                boundBeforeConnectCount.incrementAndGet()
+            }
+            val directPhysicalChannel: NetBenchSocketChannel = object : NetBenchSocketChannel {
+                override val networkId: String = "wifi-noproxy"
+                override val transportLabel: String = "Wi-Fi"
+                override val isVpn: Boolean = false
+                override val isDirectPhysical: Boolean = true
+                override val bypassSystemHttpProxy: Boolean = true
+                override val socketFactory: SocketFactory = boundNoProxyFactory
+                override fun createSocket(): Socket = createBoundNoProxySocket { sock ->
+                    assertFalse(sock.isConnected)
+                    boundBeforeConnectCount.incrementAndGet()
+                }
+                override fun resolveAllByName(hostname: String): List<InetAddress> =
+                    listOf(InetAddress.getByName("127.0.0.1"))
+            }
+            val bridge = object : NetBenchNetworkBridge {
+                override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                    val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                        listOf(
+                            NetworkDescriptor(directPhysicalChannel, "wifi-noproxy", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                        ),
+                    )
+                    return ResolvedNetworkBinding(plan, directPhysicalChannel, directPhysicalChannel)
+                }
+            }
+            val boundRunner = TcpPingRunner(
+                resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO, networkBridge = bridge),
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+            )
+            val boundResult = boundRunner.run(
+                TcpPingConfig(
+                    target = "127.0.0.1",
+                    port = server.localPort,
+                    probeCount = 4,
+                    timeoutMs = 1_000,
+                    intervalMs = 0L,
+                    useProxy = false,
+                ),
+            ).toList().last()
+            assertEquals(4, boundResult.summary.received)
+            assertEquals(4, boundBeforeConnectCount.get())
+            assertEquals("Proxy.NO_PROXY must never consult global ProxySelector", 0, proxySelectCount.get())
+        } finally {
+            ProxySelector.setDefault(originalSelector)
+            running.set(false)
+            runCatching { server.close() }
+            acceptThread.join(500)
+        }
+    }
+
+    @Test
+    fun `resolver intercepts Fake-IP DNS pollution recovers via bound DoH fallback and blocks literal Fake-IP in direct mode`() = runBlocking {
+        // Pure RFC 1035 wireformat codec verification (A + AAAA + error safety)
+        val queryA = DnsWireMessageCodec.encodeQuery("node.example.com", DnsWireMessageCodec.QTYPE_A)
+        val respA = buildDnsWireResponse(queryA, DnsWireMessageCodec.QTYPE_A, byteArrayOf(93, 184.toByte(), 216.toByte(), 34))
+        val decodedA = DnsWireMessageCodec.decodeAddressRecords(respA, DnsWireMessageCodec.QTYPE_A)
+        assertEquals(1, decodedA.size)
+        assertEquals("93.184.216.34", decodedA.first().hostAddress)
+
+        val queryAAAA = DnsWireMessageCodec.encodeQuery("node.example.com", DnsWireMessageCodec.QTYPE_AAAA)
+        val v6Bytes = InetAddress.getByName("2606:4700:4700::1111").address
+        val respAAAA = buildDnsWireResponse(queryAAAA, DnsWireMessageCodec.QTYPE_AAAA, v6Bytes)
+        val decodedAAAA = DnsWireMessageCodec.decodeAddressRecords(respAAAA, DnsWireMessageCodec.QTYPE_AAAA)
+        assertEquals(1, decodedAAAA.size)
+        assertEquals(InetAddress.getByName("2606:4700:4700::1111"), decodedAAAA.first())
+        assertTrue(DnsWireMessageCodec.decodeAddressRecords(ByteArray(5), DnsWireMessageCodec.QTYPE_A).isEmpty())
+
+        // End-to-end DoH recovery over directChannel when router/system DNS returns Clash Fake-IP 198.18.0.55
+        val dohServer = MockWebServer()
+        dohServer.start(InetAddress.getByName("127.0.0.1"), 0)
+        val directDohSockets = AtomicInteger(0)
+        val vpnSockets = AtomicInteger(0)
+
+        try {
+            dohServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .addHeader("Content-Type", "application/dns-message")
+                    .setBody(Buffer().write(respA)),
+            )
+
+            val poisonedWifiChannel = object : NetBenchSocketChannel {
+                override val networkId: String = "wifi-router-fakeip"
+                override val transportLabel: String = "Wi-Fi"
+                override val isVpn: Boolean = false
+                override val isDirectPhysical: Boolean = true
+                override val bypassSystemHttpProxy: Boolean = true
+                override val rejectLoopbackDnsForPublicHosts: Boolean = true
+                override val supportsCleanDohFallback: Boolean = true
+                override val socketFactory: SocketFactory = BoundNoProxySocketFactory {
+                    directDohSockets.incrementAndGet()
+                }
+                override fun createSocket(): Socket = socketFactory.createSocket()
+                override fun resolveAllByName(hostname: String): List<InetAddress> =
+                    if (hostname == "127.0.0.1") {
+                        listOf(InetAddress.getByName("127.0.0.1"))
+                    } else {
+                        // Router Clash Fake-IP pollution!
+                        listOf(InetAddress.getByName("198.18.0.55"))
+                    }
+            }
+            val vpnChannel = object : NetBenchSocketChannel {
+                override val networkId: String = "vpn-200"
+                override val transportLabel: String = "VPN 代理"
+                override val isVpn: Boolean = true
+                override val isDirectPhysical: Boolean = false
+                override val bypassSystemHttpProxy: Boolean = false
+                override val socketFactory: SocketFactory = BoundNoProxySocketFactory {
+                    vpnSockets.incrementAndGet()
+                }
+                override fun createSocket(): Socket = socketFactory.createSocket()
+                override fun resolveAllByName(hostname: String): List<InetAddress> =
+                    listOf(InetAddress.getByName("198.18.0.55"))
+            }
+            val bridge = object : NetBenchNetworkBridge {
+                override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                    val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                        listOf(
+                            NetworkDescriptor(vpnChannel, "vpn-200", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                            NetworkDescriptor(poisonedWifiChannel, "wifi-router-fakeip", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                        ),
+                    )
+                    return ResolvedNetworkBinding(plan, poisonedWifiChannel, vpnChannel)
+                }
+            }
+
+            val dohFallback = DohCleanDirectDnsFallback(
+                dohEndpoints = listOf("http://127.0.0.1:${dohServer.port}/dns-query"),
+                timeoutMs = 1_500L,
+            )
+            val resolverWithDoh = NetBenchTargetResolver(
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = bridge,
+                cleanDnsFallback = dohFallback,
+            )
+            val recovered = resolverWithDoh.resolve(
+                rawTarget = "node.example.com",
+                defaultPort = 443,
+                preferredFamily = PreferredIpFamily.IPV4_ONLY,
+                useProxy = false,
+            ).getOrThrow()
+            assertEquals("93.184.216.34", recovered.resolvedTarget.resolvedIp)
+            assertTrue("DoH fallback must bind its socket to directChannel", directDohSockets.get() > 0)
+            assertEquals("DoH fallback must never touch VPN channel", 0, vpnSockets.get())
+
+            // When DoH fallback also fails, resolver MUST block Fake-IP rather than returning 198.18.0.55
+            dohServer.enqueue(MockResponse().setResponseCode(502))
+            val blockedFakeIp = resolverWithDoh.resolve(
+                rawTarget = "node.example.com",
+                defaultPort = 443,
+                preferredFamily = PreferredIpFamily.IPV4_ONLY,
+                useProxy = false,
+            )
+            assertTrue(blockedFakeIp.isFailure)
+            val errMsg = blockedFakeIp.exceptionOrNull()?.message.orEmpty()
+            assertTrue(errMsg.contains("Fake-IP"))
+            assertTrue(errMsg.contains("198.18.0.55"))
+
+            // Literal Fake-IP 198.18.0.55 is blocked when useProxy=false, but allowed when useProxy=true
+            val literalDirect = resolverWithDoh.resolve("198.18.0.55", defaultPort = 443, useProxy = false)
+            assertTrue(literalDirect.isFailure)
+            assertTrue(literalDirect.exceptionOrNull()!!.message!!.contains("Fake-IP"))
+
+            val literalViaProxy = resolverWithDoh.resolve("198.18.0.55", defaultPort = 443, useProxy = true)
+            assertTrue(literalViaProxy.isSuccess)
+            assertEquals("198.18.0.55", literalViaProxy.getOrThrow().resolvedTarget.resolvedIp)
+
+            // Loopback sinkhole on public domain is caught when channel enforces rejectLoopbackDnsForPublicHosts
+            val sinkholeChannel: NetBenchSocketChannel = object : NetBenchSocketChannel by poisonedWifiChannel {
+                override fun resolveAllByName(hostname: String): List<InetAddress> =
+                    listOf(InetAddress.getByName("127.0.0.1"))
+            }
+            val sinkholeBridge = object : NetBenchNetworkBridge {
+                override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                    val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                        listOf(
+                            NetworkDescriptor(sinkholeChannel, "wifi-sinkhole", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                        ),
+                    )
+                    return ResolvedNetworkBinding(plan, sinkholeChannel, sinkholeChannel)
+                }
+            }
+            val sinkholeResolver = NetBenchTargetResolver(
+                ioDispatcher = Dispatchers.IO,
+                networkBridge = sinkholeBridge,
+                cleanDnsFallback = { _, _, _ -> emptyList() },
+            )
+            val sinkholeRes = sinkholeResolver.resolve("public.example.com", defaultPort = 443, useProxy = false)
+            assertTrue(sinkholeRes.isFailure)
+            assertTrue(sinkholeRes.exceptionOrNull()!!.message!!.contains("127.0.0.1"))
+            // While explicit localhost still resolves to 127.0.0.1 cleanly
+            val localhostRes = sinkholeResolver.resolve("localhost", defaultPort = 443, useProxy = false)
+            assertTrue(localhostRes.isSuccess)
+            assertEquals("127.0.0.1", localhostRes.getOrThrow().resolvedTarget.resolvedIp)
+        } finally {
+            runCatching { dohServer.shutdown() }
+        }
+    }
+
+    private fun buildDnsWireResponse(
+        queryBytes: ByteArray,
+        qtype: Int,
+        rdata: ByteArray,
+    ): ByteArray {
+        val out = ByteArrayOutputStream(queryBytes.size + 32)
+        // Copy Transaction ID
+        out.write(queryBytes[0].toInt() and 0xFF)
+        out.write(queryBytes[1].toInt() and 0xFF)
+        // Flags: 0x8180 (Standard query response, No error)
+        out.write(0x81)
+        out.write(0x80)
+        // QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
+        out.write(byteArrayOf(0, 1, 0, 1, 0, 0, 0, 0))
+        // Echo Question section from queryBytes[12..]
+        out.write(queryBytes, 12, queryBytes.size - 12)
+        // Answer section: Name pointer 0xC00C -> offset 12
+        out.write(0xC0)
+        out.write(0x0C)
+        // TYPE
+        out.write((qtype ushr 8) and 0xFF)
+        out.write(qtype and 0xFF)
+        // CLASS IN (1)
+        out.write(0x00)
+        out.write(0x01)
+        // TTL = 60s
+        out.write(byteArrayOf(0, 0, 0, 60))
+        // RDLENGTH + RDATA
+        out.write((rdata.size ushr 8) and 0xFF)
+        out.write(rdata.size and 0xFF)
+        out.write(rdata)
+        return out.toByteArray()
     }
 }

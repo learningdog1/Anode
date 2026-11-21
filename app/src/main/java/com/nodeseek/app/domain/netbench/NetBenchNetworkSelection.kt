@@ -127,6 +127,7 @@ object NetBenchNetworkSelector {
                     .thenByDescending { it.isActiveDefault && !it.isVpn }
                     .thenByDescending { it.isForeground }
                     .thenByDescending { transportPriority(it.transports) }
+                    .thenByDescending { !it.interfaceName.isNullOrBlank() }
                     .thenBy { it.networkId },
             )
             .toList()
@@ -154,6 +155,47 @@ object NetBenchNetworkSelector {
             directTransportLabel = directTransportLabel,
             networkFingerprint = fingerprint,
         )
+    }
+
+    /**
+     * Merges a live OS network snapshot with short-TTL cached/probed underlying physical candidates.
+     *
+     * On several OEM Android ROMs, `ConnectivityManager.allNetworks` may briefly omit an underlying
+     * Wi-Fi/Cellular network right after a VPN tunnel activates or during callback handoff, or
+     * `getLinkProperties` may momentarily omit `interfaceName`. Merging preserves live truth while
+     * backfilling missing interface names and keeping valid physical networks reachable.
+     */
+    fun <T> mergeNetworkCandidates(
+        liveCandidates: List<NetworkDescriptor<T>>,
+        cachedDirectCandidates: List<NetworkDescriptor<T>>,
+    ): List<NetworkDescriptor<T>> {
+        if (cachedDirectCandidates.isEmpty()) return liveCandidates
+        val cachedById = cachedDirectCandidates.associateBy { it.networkId }
+        val merged = LinkedHashMap<String, NetworkDescriptor<T>>(liveCandidates.size + cachedDirectCandidates.size)
+
+        for (live in liveCandidates) {
+            val cached = cachedById[live.networkId]
+            val enriched = if (!live.isVpn && live.interfaceName.isNullOrBlank() && !cached?.interfaceName.isNullOrBlank()) {
+                live.copy(interfaceName = cached?.interfaceName)
+            } else {
+                live
+            }
+            merged[live.networkId] = enriched
+        }
+
+        val liveHasActiveDefault = liveCandidates.any { it.isActiveDefault }
+        for (cached in cachedDirectCandidates) {
+            if (cached.isVpn || !cached.hasInternet || !cached.isNotRestricted) continue
+            if (!merged.containsKey(cached.networkId)) {
+                merged[cached.networkId] = if (liveHasActiveDefault && cached.isActiveDefault) {
+                    cached.copy(isActiveDefault = false)
+                } else {
+                    cached
+                }
+            }
+        }
+
+        return merged.values.toList()
     }
 
     /**

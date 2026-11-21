@@ -1,6 +1,33 @@
 package com.nodeseek.app.domain.netbench
 
 /**
+ * Classification of Fake-IP / sinkhole / hijacked IP addresses commonly injected by
+ * transparent TUN/router proxies (Clash, Mihomo, Sing-box, Surge) or DNS blockers.
+ */
+enum class SuspectResolvedIpKind(val reasonLabel: String) {
+    NONE("正常地址"),
+
+    /** RFC 2544 `198.18.0.0/15` (`198.18.0.0`–`198.19.255.255`) Fake-IP pool used by Clash / Sing-box / Surge. */
+    PROXY_FAKE_IP_V4("代理 Fake-IP (198.18.0.0/15)"),
+
+    /** `fc00::/18` (`fc00::`–`fc3f:ffff:...`) IPv6 Fake-IP pool used by Sing-box / Mihomo / Clash. */
+    PROXY_FAKE_IP_V6("代理 Fake-IPv6 (fc00::/18)"),
+
+    /** `0.0.0.0/8` or IPv6 `::` unspecified / DNS sinkhole response. */
+    UNSPECIFIED_SINKHOLE("未指定/黑洞拦截地址"),
+
+    /** `127.0.0.0/8` or IPv6 `::1` loopback returned when resolving a non-localhost public hostname. */
+    LOOPBACK_HIJACK("本地回环劫持地址"),
+    ;
+
+    val isSuspect: Boolean
+        get() = this != NONE
+
+    val isFakeIp: Boolean
+        get() = this == PROXY_FAKE_IP_V4 || this == PROXY_FAKE_IP_V6
+}
+
+/**
  * Pure Kotlin parser & IP formatting utility for Mobile Network Tester inputs.
  *
  * Supports:
@@ -224,6 +251,144 @@ object NetBenchTargetParser {
             }
             IpFamily.UNKNOWN -> clean
         }
+    }
+
+    /**
+     * Returns `true` when [hostname] explicitly names the local loopback host (`localhost`, `*.localhost`, etc.).
+     */
+    fun isLocalhostHostname(hostname: String?): Boolean {
+        val clean = hostname?.trim()?.trimEnd('.')?.lowercase() ?: return false
+        return clean == "localhost" ||
+            clean.endsWith(".localhost") ||
+            clean == "ip6-localhost" ||
+            clean == "ip6-loopback"
+    }
+
+    /**
+     * Returns `true` when [ip] falls inside a proxy Fake-IP virtual pool (`198.18.0.0/15` or `fc00::/18`).
+     */
+    fun isFakeIpLiteral(ip: String?): Boolean =
+        classifySuspectIp(ip = ip, targetHost = null, checkLoopbackForPublicHost = false).isFakeIp
+
+    /**
+     * Classifies whether [ip] is a proxy Fake-IP (`198.18.0.0/15`, `fc00::/18`), an unspecified
+     * DNS sinkhole (`0.0.0.0/8`, `::`), or a loopback hijack (`127.0.0.0/8`, `::1` for non-localhost).
+     */
+    fun classifySuspectIp(
+        ip: String?,
+        targetHost: String? = null,
+        checkLoopbackForPublicHost: Boolean = true,
+    ): SuspectResolvedIpKind {
+        val clean = stripIpv6Zone(ip?.trim()?.removePrefix("[")?.removeSuffix("]") ?: return SuspectResolvedIpKind.NONE)
+        if (clean.isEmpty()) return SuspectResolvedIpKind.NONE
+        val allowLoopback = !checkLoopbackForPublicHost || isLocalhostHostname(targetHost)
+
+        parseIpv4Octets(clean)?.let { octets ->
+            return classifyIpv4Octets(octets, allowLoopback = allowLoopback)
+        }
+
+        parseIpv6Hextets(clean)?.let { hextets ->
+            // IPv4-mapped IPv6 ::ffff:a.b.c.d
+            val isV4Mapped = hextets[0] == 0 &&
+                hextets[1] == 0 &&
+                hextets[2] == 0 &&
+                hextets[3] == 0 &&
+                hextets[4] == 0 &&
+                hextets[5] == 0xFFFF
+            if (isV4Mapped) {
+                val mappedOctets = intArrayOf(
+                    (hextets[6] ushr 8) and 0xFF,
+                    hextets[6] and 0xFF,
+                    (hextets[7] ushr 8) and 0xFF,
+                    hextets[7] and 0xFF,
+                )
+                return classifyIpv4Octets(mappedOctets, allowLoopback = allowLoopback)
+            }
+
+            val allZeroPrefix = (0..6).all { hextets[it] == 0 }
+            if (allZeroPrefix && hextets[7] == 0) {
+                return SuspectResolvedIpKind.UNSPECIFIED_SINKHOLE
+            }
+            if (allZeroPrefix && hextets[7] == 1) {
+                return if (allowLoopback) SuspectResolvedIpKind.NONE else SuspectResolvedIpKind.LOOPBACK_HIJACK
+            }
+            // Sing-box / Mihomo / Clash IPv6 Fake-IP default range: fc00::/18 (fc00:: .. fc3f:ffff:...)
+            if ((hextets[0] and 0xFFC0) == 0xFC00) {
+                return SuspectResolvedIpKind.PROXY_FAKE_IP_V6
+            }
+        }
+
+        return SuspectResolvedIpKind.NONE
+    }
+
+    private fun classifyIpv4Octets(octets: IntArray, allowLoopback: Boolean): SuspectResolvedIpKind {
+        val b0 = octets[0]
+        val b1 = octets[1]
+        return when {
+            // RFC 2544 198.18.0.0/15 (198.18.0.0 - 198.19.255.255): standard Clash / Sing-box / Surge Fake-IP range
+            b0 == 198 && (b1 == 18 || b1 == 19) -> SuspectResolvedIpKind.PROXY_FAKE_IP_V4
+            // 0.0.0.0/8 ("this network" / DNS blocker sinkhole)
+            b0 == 0 -> SuspectResolvedIpKind.UNSPECIFIED_SINKHOLE
+            // 127.0.0.0/8 loopback hijack on public domain
+            b0 == 127 && !allowLoopback -> SuspectResolvedIpKind.LOOPBACK_HIJACK
+            else -> SuspectResolvedIpKind.NONE
+        }
+    }
+
+    internal fun parseIpv4Octets(candidate: String): IntArray? {
+        if (!isIpv4Literal(candidate)) return null
+        val parts = candidate.trim().split('.')
+        if (parts.size != 4) return null
+        val out = IntArray(4)
+        for (i in 0..3) {
+            val v = parts[i].toIntOrNull() ?: return null
+            if (v !in 0..255) return null
+            out[i] = v
+        }
+        return out
+    }
+
+    internal fun parseIpv6Hextets(candidate: String): IntArray? {
+        val raw = stripIpv6Zone(candidate.trim())
+        if (!isIpv6Literal(raw)) return null
+        val doubleColonParts = raw.split("::")
+        val hasCompression = doubleColonParts.size == 2
+        val leftGroups = if (doubleColonParts[0].isEmpty()) emptyList() else doubleColonParts[0].split(':')
+        val rightGroups = if (hasCompression && doubleColonParts[1].isNotEmpty()) {
+            doubleColonParts[1].split(':')
+        } else {
+            emptyList()
+        }
+
+        fun expandGroups(groups: List<String>): List<Int>? {
+            if (groups.isEmpty()) return emptyList()
+            val result = ArrayList<Int>(groups.size + 1)
+            for (i in groups.indices) {
+                val part = groups[i]
+                if (i == groups.lastIndex && part.contains('.')) {
+                    val v4 = parseIpv4Octets(part) ?: return null
+                    result += ((v4[0] shl 8) or v4[1])
+                    result += ((v4[2] shl 8) or v4[3])
+                } else {
+                    val v = part.toIntOrNull(16) ?: return null
+                    if (v !in 0..0xFFFF) return null
+                    result += v
+                }
+            }
+            return result
+        }
+
+        val left = expandGroups(leftGroups) ?: return null
+        val right = expandGroups(rightGroups) ?: return null
+        val zeroFill = 8 - left.size - right.size
+        if (zeroFill < 0 || (!hasCompression && zeroFill != 0)) return null
+
+        val out = IntArray(8)
+        var idx = 0
+        for (v in left) out[idx++] = v
+        repeat(zeroFill) { out[idx++] = 0 }
+        for (v in right) out[idx++] = v
+        return out
     }
 
     private fun stripIpv6Zone(raw: String): String {

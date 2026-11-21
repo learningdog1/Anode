@@ -8,6 +8,7 @@ import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.ParsedTarget
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.ResolvedTarget
+import com.nodeseek.app.domain.netbench.SuspectResolvedIpKind
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPingProgress
 import com.nodeseek.app.domain.netbench.TcpPingSample
@@ -27,11 +28,15 @@ import okhttp3.Call
 import okhttp3.ConnectionPool
 import okhttp3.EventListener
 import okhttp3.Handshake
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.ConnectException
+import java.net.IDN
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -57,6 +62,209 @@ object SystemNetBenchDnsResolver : NetBenchDnsResolver {
 }
 
 /**
+ * Clean DNS fallback executed over the bound physical [NetBenchSocketChannel] when primary DNS
+ * returns a proxy Fake-IP (`198.18.0.0/15`, `fc00::/18`) or sinkhole address (`0.0.0.0`, `::`).
+ */
+fun interface CleanDirectDnsFallback {
+    suspend fun resolveClean(
+        host: String,
+        channel: NetBenchSocketChannel,
+        preferredFamily: PreferredIpFamily,
+    ): List<InetAddress>
+}
+
+/**
+ * Minimal, bounds-safe RFC 1035 DNS wireformat encoder & decoder for RFC 8484 DoH (`application/dns-message`).
+ */
+internal object DnsWireMessageCodec {
+    const val QTYPE_A = 1
+    const val QTYPE_AAAA = 28
+    private const val QCLASS_IN = 1
+
+    fun encodeQuery(
+        hostname: String,
+        qtype: Int,
+        transactionId: Int = 0x4E50,
+    ): ByteArray {
+        val asciiHost = runCatching { IDN.toASCII(hostname.trim().trimEnd('.')) }
+            .getOrDefault(hostname.trim().trimEnd('.'))
+        val labels = asciiHost.split('.').filter { it.isNotEmpty() }
+        require(labels.isNotEmpty()) { "Invalid DNS hostname" }
+
+        val out = ByteArrayOutputStream(64)
+        // 12-byte RFC 1035 header: ID, Flags (RD=1 -> 0x0100), QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+        out.writeShort16(transactionId)
+        out.writeShort16(0x0100)
+        out.writeShort16(1)
+        out.writeShort16(0)
+        out.writeShort16(0)
+        out.writeShort16(0)
+
+        for (label in labels) {
+            val bytes = label.toByteArray(Charsets.US_ASCII)
+            require(bytes.size in 1..63) { "DNS label length out of bounds" }
+            out.write(bytes.size)
+            out.write(bytes)
+        }
+        out.write(0) // Root terminator
+        out.writeShort16(qtype)
+        out.writeShort16(QCLASS_IN)
+        return out.toByteArray()
+    }
+
+    fun decodeAddressRecords(
+        response: ByteArray,
+        expectedQtype: Int,
+    ): List<InetAddress> {
+        if (response.size < 12) return emptyList()
+        val flags = readUInt16(response, 2)
+        val isResponse = (flags and 0x8000) != 0
+        val rcode = flags and 0x000F
+        if (!isResponse || rcode != 0) return emptyList()
+
+        val qdCount = readUInt16(response, 4)
+        val anCount = readUInt16(response, 6)
+        if (anCount <= 0) return emptyList()
+
+        var offset = 12
+        repeat(qdCount) {
+            offset = skipDnsName(response, offset) ?: return emptyList()
+            if (offset + 4 > response.size) return emptyList()
+            offset += 4
+        }
+
+        val results = ArrayList<InetAddress>(anCount)
+        repeat(anCount) {
+            offset = skipDnsName(response, offset) ?: return results
+            if (offset + 10 > response.size) return results
+            val rrType = readUInt16(response, offset)
+            val rrClass = readUInt16(response, offset + 2)
+            val rdLength = readUInt16(response, offset + 8)
+            offset += 10
+            if (rdLength < 0 || offset + rdLength > response.size) return results
+
+            if (rrClass == QCLASS_IN && rrType == expectedQtype) {
+                if (expectedQtype == QTYPE_A && rdLength == 4) {
+                    runCatching {
+                        InetAddress.getByAddress(response.copyOfRange(offset, offset + 4))
+                    }.getOrNull()?.let(results::add)
+                } else if (expectedQtype == QTYPE_AAAA && rdLength == 16) {
+                    runCatching {
+                        InetAddress.getByAddress(response.copyOfRange(offset, offset + 16))
+                    }.getOrNull()?.let(results::add)
+                }
+            }
+            offset += rdLength
+        }
+        return results
+    }
+
+    private fun skipDnsName(buf: ByteArray, startOffset: Int): Int? {
+        var pos = startOffset
+        var steps = 0
+        while (pos < buf.size && steps < 128) {
+            val len = buf[pos].toInt() and 0xFF
+            when {
+                len == 0 -> return pos + 1
+                (len and 0xC0) == 0xC0 -> {
+                    // 2-byte RFC 1035 compression pointer terminates the name field in-place
+                    return if (pos + 2 <= buf.size) pos + 2 else null
+                }
+                (len and 0xC0) != 0 -> return null
+                else -> {
+                    pos += 1 + len
+                    if (pos > buf.size) return null
+                }
+            }
+            steps++
+        }
+        return null
+    }
+
+    private fun readUInt16(buf: ByteArray, offset: Int): Int =
+        ((buf[offset].toInt() and 0xFF) shl 8) or (buf[offset + 1].toInt() and 0xFF)
+
+    private fun ByteArrayOutputStream.writeShort16(value: Int) {
+        write((value ushr 8) and 0xFF)
+        write(value and 0xFF)
+    }
+}
+
+/**
+ * RFC 8484 DNS-over-HTTPS clean resolver bound strictly to the underlying physical [NetBenchSocketChannel].
+ * Uses IP-literal DoH endpoints (`223.5.5.5` AliDNS & `1.1.1.1` Cloudflare) over TLS 443 so neither
+ * phone TUN Fake-IP nor router port-53 Clash DNS redirection can poison direct-mode resolution.
+ */
+class DohCleanDirectDnsFallback(
+    private val baseHttpClient: OkHttpClient = HttpLatencyRunner.defaultHttpClient(),
+    private val dohEndpoints: List<String> = DEFAULT_DOH_ENDPOINTS,
+    private val timeoutMs: Long = 1_800L,
+) : CleanDirectDnsFallback {
+
+    override suspend fun resolveClean(
+        host: String,
+        channel: NetBenchSocketChannel,
+        preferredFamily: PreferredIpFamily,
+    ): List<InetAddress> = withContext(Dispatchers.IO) {
+        val qtypes = when (preferredFamily) {
+            PreferredIpFamily.IPV4_ONLY -> listOf(DnsWireMessageCodec.QTYPE_A)
+            PreferredIpFamily.IPV6_ONLY -> listOf(DnsWireMessageCodec.QTYPE_AAAA)
+            PreferredIpFamily.AUTO -> listOf(DnsWireMessageCodec.QTYPE_A, DnsWireMessageCodec.QTYPE_AAAA)
+        }
+
+        val tempPool = ConnectionPool(1, 5, TimeUnit.SECONDS)
+        val client = baseHttpClient.newBuilder()
+            .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout((timeoutMs * 2L).coerceAtMost(4_000L), TimeUnit.MILLISECONDS)
+            .followRedirects(false)
+            .bindToChannel(channel, tempPool)
+            .build()
+
+        try {
+            for (endpointUrl in dohEndpoints) {
+                currentCoroutineContext().ensureActive()
+                val collected = mutableListOf<InetAddress>()
+                for (qtype in qtypes) {
+                    val queryBytes = runCatching { DnsWireMessageCodec.encodeQuery(host, qtype) }.getOrNull() ?: continue
+                    val request = Request.Builder()
+                        .url(endpointUrl)
+                        .post(queryBytes.toRequestBody(DNS_MESSAGE_MEDIA_TYPE))
+                        .header("Accept", "application/dns-message")
+                        .header("User-Agent", "Anode-NetBench/1.0")
+                        .build()
+                    val decoded = runCatching {
+                        client.newCall(request).execute().use { resp ->
+                            if (!resp.isSuccessful) emptyList()
+                            else {
+                                val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
+                                DnsWireMessageCodec.decodeAddressRecords(bodyBytes, qtype)
+                            }
+                        }
+                    }.getOrDefault(emptyList())
+                    collected += decoded
+                }
+                if (collected.isNotEmpty()) {
+                    return@withContext collected
+                }
+            }
+            emptyList()
+        } finally {
+            tempPool.evictAll()
+        }
+    }
+
+    companion object {
+        private val DNS_MESSAGE_MEDIA_TYPE = "application/dns-message".toMediaType()
+        val DEFAULT_DOH_ENDPOINTS = listOf(
+            "https://223.5.5.5/dns-query",
+            "https://1.1.1.1/dns-query",
+        )
+        val Default = DohCleanDirectDnsFallback()
+    }
+}
+
+/**
  * Result of resolving a raw user target to an [InetAddress] + display metadata.
  */
 data class ResolvedEndpoint(
@@ -69,13 +277,21 @@ data class ResolvedEndpoint(
 /**
  * Resolves IPv4, bracketed/raw IPv6, domain names, and pasted URLs on [ioDispatcher].
  * When [useProxy] is false, resolves hostnames through the non-VPN underlying physical network
- * via [networkBridge] so Clash/v2rayNG Fake-IP DNS does not pollute direct probes.
+ * via [networkBridge], actively intercepts Fake-IP (`198.18.0.0/15`, `fc00::/18`) and sinkhole
+ * responses, and falls back to clean DoH bound to the physical channel so proxy Fake-IP DNS
+ * never pollutes direct Ping / TCPing / iperf3 probes.
  */
 class NetBenchTargetResolver(
     private val dnsResolver: NetBenchDnsResolver = SystemNetBenchDnsResolver,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
+    private val cleanDnsFallback: CleanDirectDnsFallback? = null,
 ) {
+    private data class ChannelDnsResult(
+        val addresses: List<InetAddress>,
+        val channel: NetBenchSocketChannel?,
+    )
+
     suspend fun resolve(
         rawTarget: String,
         defaultPort: Int,
@@ -89,18 +305,48 @@ class NetBenchTargetResolver(
         val startNanos = System.nanoTime()
 
         try {
-            val addresses = if (parsed.isLiteralIp) {
-                listOf(InetAddress.getByName(parsed.host))
-            } else if (dnsResolver !== SystemNetBenchDnsResolver) {
-                dnsResolver.resolveAll(parsed.host)
-            } else {
-                resolveViaNetworkBridge(parsed.host, useProxy)
+            if (parsed.isLiteralIp && !useProxy) {
+                val literalSuspect = NetBenchTargetParser.classifySuspectIp(
+                    ip = parsed.host,
+                    targetHost = null,
+                    checkLoopbackForPublicHost = false,
+                )
+                if (literalSuspect.isFakeIp) {
+                    return@withContext Result.failure(
+                        UnknownHostException(
+                            "目标地址 ${parsed.host} 属于${literalSuspect.reasonLabel}，无法通过底层物理网络直连探测；请输入真实域名/IP 或开启「经由代理测试」",
+                        ),
+                    )
+                }
+                if (literalSuspect == SuspectResolvedIpKind.UNSPECIFIED_SINKHOLE) {
+                    return@withContext Result.failure(
+                        IllegalArgumentException("目标地址 ${parsed.host} 为无效未指定地址"),
+                    )
+                }
             }
-            if (addresses.isEmpty()) {
+
+            val dnsOutcome = when {
+                parsed.isLiteralIp -> ChannelDnsResult(listOf(InetAddress.getByName(parsed.host)), null)
+                dnsResolver !== SystemNetBenchDnsResolver -> ChannelDnsResult(dnsResolver.resolveAll(parsed.host), null)
+                else -> resolveViaNetworkBridge(parsed.host, useProxy)
+            }
+
+            if (dnsOutcome.addresses.isEmpty()) {
                 return@withContext Result.failure(UnknownHostException("域名未返回任何解析记录"))
             }
 
-            val selected = selectAddress(addresses, preferredFamily)
+            val finalAddresses = if (!parsed.isLiteralIp && !useProxy) {
+                sanitizeDirectResolvedAddresses(
+                    host = parsed.host,
+                    rawAddresses = dnsOutcome.addresses,
+                    sourceChannel = dnsOutcome.channel,
+                    preferredFamily = preferredFamily,
+                )
+            } else {
+                dnsOutcome.addresses
+            }
+
+            val selected = selectAddress(finalAddresses, preferredFamily)
                 ?: return@withContext Result.failure(
                     UnknownHostException(
                         when (preferredFamily) {
@@ -118,7 +364,7 @@ class NetBenchTargetResolver(
                 is Inet6Address -> IpFamily.IPV6
                 else -> NetBenchTargetParser.detectIpFamily(resolvedIp)
             }
-            val allIps = addresses.map(::cleanHostAddress).distinct()
+            val allIps = finalAddresses.map(::cleanHostAddress).distinct()
 
             Result.success(
                 ResolvedEndpoint(
@@ -143,12 +389,73 @@ class NetBenchTargetResolver(
         }
     }
 
-    private fun resolveViaNetworkBridge(host: String, useProxy: Boolean): List<InetAddress> {
+    private suspend fun sanitizeDirectResolvedAddresses(
+        host: String,
+        rawAddresses: List<InetAddress>,
+        sourceChannel: NetBenchSocketChannel?,
+        preferredFamily: PreferredIpFamily,
+    ): List<InetAddress> {
+        val checkLoopback = sourceChannel?.rejectLoopbackDnsForPublicHosts == true
+        val cleanPrimary = rawAddresses.filter { addr ->
+            !NetBenchTargetParser.classifySuspectIp(
+                ip = cleanHostAddress(addr),
+                targetHost = host,
+                checkLoopbackForPublicHost = checkLoopback,
+            ).isSuspect
+        }
+
+        if (cleanPrimary.isNotEmpty() && selectAddress(cleanPrimary, preferredFamily) != null) {
+            return cleanPrimary
+        }
+
+        val firstSuspectPair = rawAddresses.firstNotNullOfOrNull { addr ->
+            val ipStr = cleanHostAddress(addr)
+            val kind = NetBenchTargetParser.classifySuspectIp(
+                ip = ipStr,
+                targetHost = host,
+                checkLoopbackForPublicHost = checkLoopback,
+            )
+            if (kind.isSuspect) ipStr to kind else null
+        } ?: return rawAddresses // No suspect IPs; let normal family mismatch message apply
+
+        // Attempt clean DNS fallback bound directly to the physical channel
+        val fallbackChannel = sourceChannel ?: networkBridge.inspectCurrentNetworks().directChannel ?: DirectSystemRouteChannel
+        val effectiveFallback = cleanDnsFallback
+            ?: DohCleanDirectDnsFallback.Default.takeIf { fallbackChannel.supportsCleanDohFallback }
+
+        if (effectiveFallback != null) {
+            val recovered = runCatching {
+                effectiveFallback.resolveClean(host, fallbackChannel, preferredFamily)
+            }.getOrDefault(emptyList()).filter { addr ->
+                !NetBenchTargetParser.classifySuspectIp(
+                    ip = cleanHostAddress(addr),
+                    targetHost = host,
+                    checkLoopbackForPublicHost = true,
+                ).isSuspect
+            }
+            if (recovered.isNotEmpty() && selectAddress(recovered, preferredFamily) != null) {
+                return recovered
+            }
+        }
+
+        val (badIp, suspectKind) = firstSuspectPair
+        val message = if (suspectKind.isFakeIp) {
+            "检测到域名 $host 解析结果为${suspectKind.reasonLabel} ($badIp)，已拦截假直连探测；请检查路由器/私人 DNS 的 Fake-IP 设置，或开启「经由代理测试」"
+        } else {
+            "检测到域名 $host 解析结果被拦截为无效地址 ($badIp，${suspectKind.reasonLabel})，无法执行直连探测"
+        }
+        throw UnknownHostException(message)
+    }
+
+    private fun resolveViaNetworkBridge(host: String, useProxy: Boolean): ChannelDnsResult {
         val binding = networkBridge.inspectCurrentNetworks()
         val plan = binding.plan
         if (useProxy) {
             return try {
-                binding.proxyOrDefaultChannel.resolveAllByName(host)
+                ChannelDnsResult(
+                    addresses = binding.proxyOrDefaultChannel.resolveAllByName(host),
+                    channel = binding.proxyOrDefaultChannel,
+                )
             } catch (_: UnknownHostException) {
                 throw UnknownHostException("DNS 解析失败：无法解析 $host")
             }
@@ -162,17 +469,35 @@ class NetBenchTargetResolver(
                 )
             }
             return try {
-                binding.proxyOrDefaultChannel.resolveAllByName(host)
+                ChannelDnsResult(
+                    addresses = binding.proxyOrDefaultChannel.resolveAllByName(host),
+                    channel = binding.proxyOrDefaultChannel,
+                )
             } catch (_: UnknownHostException) {
                 throw UnknownHostException("DNS 解析失败：无法解析 $host")
             }
         }
 
         var lastError: Throwable? = null
+        var firstFakeIpCandidate: Pair<List<InetAddress>, NetBenchSocketChannel>? = null
         for (channel in directCandidates) {
             try {
                 val resolved = channel.resolveAllByName(host)
-                if (resolved.isNotEmpty()) return resolved
+                if (resolved.isNotEmpty()) {
+                    val hasClean = resolved.any { addr ->
+                        !NetBenchTargetParser.classifySuspectIp(
+                            ip = cleanHostAddress(addr),
+                            targetHost = host,
+                            checkLoopbackForPublicHost = channel.rejectLoopbackDnsForPublicHosts,
+                        ).isSuspect
+                    }
+                    if (hasClean) {
+                        return ChannelDnsResult(addresses = resolved, channel = channel)
+                    }
+                    if (firstFakeIpCandidate == null) {
+                        firstFakeIpCandidate = resolved to channel
+                    }
+                }
             } catch (t: Throwable) {
                 lastError = t
                 val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
@@ -186,6 +511,15 @@ class NetBenchTargetResolver(
                     )
                 }
             }
+        }
+
+        // If Wi-Fi returned Fake-IP (e.g. OpenWrt router) and Cellular wasn't available or also returned Fake-IP,
+        // return the first candidate so sanitizeDirectResolvedAddresses can run clean DoH fallback or report Fake-IP!
+        if (firstFakeIpCandidate != null) {
+            return ChannelDnsResult(
+                addresses = firstFakeIpCandidate.first,
+                channel = firstFakeIpCandidate.second,
+            )
         }
 
         val reason = NetBenchNetworkSelector.classifyDirectBindFailure(
@@ -240,7 +574,7 @@ object SocketTcpProbeConnector : BoundTcpProbeConnector {
         address: InetAddress,
         port: Int,
         timeoutMs: Int,
-    ): Double = connectAndMeasureMs(address, port, timeoutMs, SystemDefaultNetworkChannel)
+    ): Double = connectAndMeasureMs(address, port, timeoutMs, DirectSystemRouteChannel)
 
     override suspend fun connectAndMeasureMs(
         address: InetAddress,
