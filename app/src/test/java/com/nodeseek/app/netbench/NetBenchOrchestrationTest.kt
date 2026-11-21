@@ -181,12 +181,15 @@ class NetBenchOrchestrationTest {
             val finalState = controller.uiState.value
             assertEquals(NetBenchPhase.COMPLETED, finalState.activePhase)
             assertFalse(finalState.isRunning)
+            assertEquals("Standalone controller must default to FULL_TABLE report", NetBenchMarkdownStyle.FULL_TABLE, finalState.markdownStyle)
             assertTrue("maskTargetIpInReport must default to true", finalState.maskTargetIpInReport)
             assertTrue("includeClientNetworkInReport must default to true", finalState.includeClientNetworkInReport)
             assertEquals(4, finalState.tcpPingProgress?.summary?.received)
             assertEquals(IpOriginType.NATIVE, finalState.ipIntelligence?.originType)
             assertTrue(finalState.generatedMarkdown.contains("中国电信"))
             assertTrue(finalState.generatedMarkdown.contains("原生 IP"))
+            assertTrue(finalState.generatedMarkdown.contains("测试项目"))
+            assertTrue(finalState.generatedMarkdown.contains("实测结果"))
             assertFalse(finalState.generatedMarkdown.contains("114.240.99.77"))
             assertTrue("Target IP last octet should be masked by default", finalState.generatedMarkdown.contains("127.0.0.*"))
 
@@ -205,10 +208,12 @@ class NetBenchOrchestrationTest {
             assertFalse(controller.uiState.value.showIperf3ServerPrompt)
             assertTrue(controller.uiState.value.enableIperf3)
 
-            // Switch style to FULL_TABLE and verify live regeneration
+            // Switch style between REPLY_CARD and FULL_TABLE and verify live regeneration
+            controller.selectMarkdownStyle(NetBenchMarkdownStyle.REPLY_CARD)
+            assertTrue(controller.uiState.value.generatedMarkdown.startsWith("> 📡"))
+            assertFalse(controller.uiState.value.generatedMarkdown.contains("114.240.99.77"))
             controller.selectMarkdownStyle(NetBenchMarkdownStyle.FULL_TABLE)
-            assertTrue(controller.uiState.value.generatedMarkdown.contains("测试项目"))
-            assertTrue(controller.uiState.value.generatedMarkdown.contains("实测结果"))
+            assertTrue(controller.uiState.value.generatedMarkdown.contains("## 📡 移动端网络实测报告"))
             assertFalse(controller.uiState.value.generatedMarkdown.contains("114.240.99.77"))
 
             // History should be persisted
@@ -470,8 +475,15 @@ class NetBenchOrchestrationTest {
             assertEquals(20.0, finalState.icmpPingProgress!!.summary.avgMs!!, 0.01)
             assertEquals(4, finalState.tcpPingProgress?.summary?.received)
 
-            val pingIdx = finalState.generatedMarkdown.indexOf("**Ping (4次)**")
-            val tcpIdx = finalState.generatedMarkdown.indexOf("**TCPing (4次)**")
+            val fullPingIdx = finalState.generatedMarkdown.indexOf("Ping 延迟")
+            val fullTcpIdx = finalState.generatedMarkdown.indexOf("TCPing 延迟")
+            assertTrue(fullPingIdx in 0 until fullTcpIdx)
+            assertTrue(finalState.generatedMarkdown.contains("[ICMP Ping 逐包序列]"))
+
+            controller.selectMarkdownStyle(NetBenchMarkdownStyle.REPLY_CARD)
+            val replyMd = controller.uiState.value.generatedMarkdown
+            val pingIdx = replyMd.indexOf("**Ping (4次)**")
+            val tcpIdx = replyMd.indexOf("**TCPing (4次)**")
             assertTrue(pingIdx in 0 until tcpIdx)
 
             val saved = historyStore.entries.value.single()
@@ -615,7 +627,10 @@ class NetBenchOrchestrationTest {
             assertTrue(receivedParamsJson.get().orEmpty().contains("\"parallel\":4"))
             assertEquals(4, finalState.iperfDownloadProgress?.parallelStreams)
             assertEquals(4, finalState.iperfDownloadProgress?.finalResult?.parallelStreams)
+            assertTrue(finalState.iperfDownloadProgress?.finalResult?.intervals?.isNotEmpty() == true)
             assertTrue(finalState.generatedMarkdown.contains("-P 4"))
+            assertTrue(finalState.generatedMarkdown.contains("[SUM]"))
+            assertTrue(finalState.generatedMarkdown.contains("receiver (client)"))
         } finally {
             scope.cancel()
             runCatching { server.close() }

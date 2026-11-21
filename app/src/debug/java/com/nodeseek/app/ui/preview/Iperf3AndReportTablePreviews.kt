@@ -14,12 +14,15 @@ import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.netbench.ClientCarrier
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
+import com.nodeseek.app.domain.netbench.IcmpPingSample
+import com.nodeseek.app.domain.netbench.IcmpPingSummary
 import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
 import com.nodeseek.app.domain.netbench.Iperf3Direction
 import com.nodeseek.app.domain.netbench.Iperf3ErrorKind
+import com.nodeseek.app.domain.netbench.Iperf3IntervalSample
 import com.nodeseek.app.domain.netbench.Iperf3Progress
 import com.nodeseek.app.domain.netbench.Iperf3Result
 import com.nodeseek.app.domain.netbench.Iperf3Stage
@@ -86,8 +89,28 @@ private fun PreviewNetBenchFullTableCardFrame(themeMode: PulseThemeMode) {
                 carrier = ClientCarrier.CHINA_TELECOM,
                 carrierDisplayName = "中国电信",
                 ipFamily = IpFamily.IPV4,
+                regionName = "上海",
+                asn = "AS4134",
                 maskedIp = "114.240.*.*",
                 rawIp = "114.240.88.123",
+            ),
+            icmpPingSummary = IcmpPingSummary(
+                resolvedTarget = target,
+                sent = 6,
+                received = 6,
+                lossPercent = 0.0,
+                minMs = 28.4,
+                avgMs = 30.2,
+                maxMs = 33.9,
+                jitterMdevMs = 1.6,
+                samples = listOf(
+                    IcmpPingSample(seq = 1, success = true, rttMs = 28.4, ttl = 54),
+                    IcmpPingSample(seq = 2, success = true, rttMs = 30.1, ttl = 54),
+                    IcmpPingSample(seq = 3, success = true, rttMs = 29.8, ttl = 54),
+                    IcmpPingSample(seq = 4, success = true, rttMs = 33.9, ttl = 54),
+                    IcmpPingSample(seq = 5, success = true, rttMs = 29.5, ttl = 54),
+                    IcmpPingSample(seq = 6, success = true, rttMs = 29.5, ttl = 54),
+                ),
             ),
             tcpPingSummary = TcpPingSummary(
                 resolvedTarget = target,
@@ -116,8 +139,17 @@ private fun PreviewNetBenchFullTableCardFrame(themeMode: PulseThemeMode) {
                 durationSec = 5.0,
                 bytesTransferred = 270_000_000L,
                 clientMbps = 432.0,
+                serverMbps = 435.2,
                 peakMbps = 460.5,
+                retransmits = 0L,
                 success = true,
+                intervals = listOf(
+                    Iperf3IntervalSample(1, 0.0, 1.0, 51_125_000L, 409.0),
+                    Iperf3IntervalSample(2, 1.0, 2.0, 55_000_000L, 440.0),
+                    Iperf3IntervalSample(3, 2.0, 3.0, 54_375_000L, 435.0),
+                    Iperf3IntervalSample(4, 3.0, 4.0, 57_562_500L, 460.5),
+                    Iperf3IntervalSample(5, 4.0, 5.0, 51_937_500L, 415.5),
+                ),
             ),
             iperfUploadResult = Iperf3Result(
                 direction = Iperf3Direction.UPLOAD,
@@ -126,9 +158,17 @@ private fun PreviewNetBenchFullTableCardFrame(themeMode: PulseThemeMode) {
                 durationSec = 5.0,
                 bytesTransferred = 55_000_000L,
                 clientMbps = 88.0,
+                serverMbps = 87.6,
                 peakMbps = 95.2,
                 retransmits = 1L,
                 success = true,
+                intervals = listOf(
+                    Iperf3IntervalSample(1, 0.0, 1.0, 10_300_000L, 82.4),
+                    Iperf3IntervalSample(2, 1.0, 2.0, 11_112_500L, 88.9),
+                    Iperf3IntervalSample(3, 2.0, 3.0, 11_900_000L, 95.2),
+                    Iperf3IntervalSample(4, 3.0, 4.0, 10_900_000L, 87.2),
+                    Iperf3IntervalSample(5, 4.0, 5.0, 10_787_500L, 86.3),
+                ),
             ),
             ipIntelligence = IpIntelligenceReport(
                 ip = "45.12.34.56",

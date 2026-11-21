@@ -347,6 +347,30 @@ enum class Iperf3ErrorKind {
 }
 
 /**
+ * Per-second (or final tail) throughput sample recorded during an iperf3 transfer.
+ */
+data class Iperf3IntervalSample(
+    val index: Int,
+    val startSec: Double,
+    val endSec: Double,
+    val bytesTransferred: Long,
+    val bitrateMbps: Double,
+    val streams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
+    val omitted: Boolean = false,
+) {
+    val durationSec: Double
+        get() = (endSec - startSec).coerceAtLeast(0.0)
+
+    val intervalLabel: String
+        get() = String.format(
+            java.util.Locale.US,
+            "%.2f-%.2fs",
+            startSec.coerceAtLeast(0.0),
+            endSec.coerceAtLeast(startSec.coerceAtLeast(0.0)),
+        )
+}
+
+/**
  * Final outcome of a single iperf3 direction test.
  */
 data class Iperf3Result(
@@ -363,12 +387,57 @@ data class Iperf3Result(
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
     val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
+    val intervals: List<Iperf3IntervalSample> = emptyList(),
 ) {
     /**
      * Best-available throughput value in Mbps (prefers measured client rate, falls back to server rate).
      */
     val effectiveMbps: Double
         get() = if (clientMbps > 0.0) clientMbps else (serverMbps ?: 0.0)
+
+    /**
+     * Minimum non-omitted per-interval bitrate in Mbps (if interval samples exist).
+     */
+    val minIntervalMbps: Double?
+        get() = intervals.filter { !it.omitted && it.durationSec > 0.0 }
+            .minOfOrNull { it.bitrateMbps }
+
+    /**
+     * Maximum bitrate in Mbps across [peakMbps] and recorded intervals.
+     */
+    val maxIntervalMbps: Double
+        get() = maxOf(
+            peakMbps,
+            intervals.filter { !it.omitted && it.durationSec > 0.0 }
+                .maxOfOrNull { it.bitrateMbps } ?: 0.0,
+        )
+
+    /**
+     * Population standard deviation of per-interval bitrates in Mbps when at least 2 intervals exist.
+     */
+    val intervalStdDevMbps: Double?
+        get() {
+            val valid = intervals.filter { !it.omitted && it.durationSec > 0.0 }
+            if (valid.size < 2) return null
+            val mean = valid.sumOf { it.bitrateMbps } / valid.size.toDouble()
+            val variance = valid.sumOf { s ->
+                val diff = s.bitrateMbps - mean
+                diff * diff
+            } / valid.size.toDouble()
+            return kotlin.math.sqrt(variance.coerceAtLeast(0.0))
+        }
+
+    /**
+     * Throughput stability score in `[0.0, 100.0]` derived from `1 - CV` (coefficient of variation).
+     */
+    val stabilityPercent: Double?
+        get() {
+            val std = intervalStdDevMbps ?: return null
+            val valid = intervals.filter { !it.omitted && it.durationSec > 0.0 }
+            val mean = valid.sumOf { it.bitrateMbps } / valid.size.toDouble()
+            if (mean <= 0.0) return null
+            return ((1.0 - (std / mean)).coerceIn(0.0, 1.0)) * 100.0
+        }
 }
 
 /**
@@ -384,6 +453,7 @@ data class Iperf3Progress(
     val averageMbps: Double,
     val peakMbps: Double,
     val throughputHistoryMbps: List<Double> = emptyList(),
+    val intervals: List<Iperf3IntervalSample> = emptyList(),
     val finalResult: Iperf3Result? = null,
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
@@ -525,15 +595,15 @@ data class IpIntelligenceReport(
  * Selectable NodeSeek Markdown report styles.
  */
 enum class NetBenchMarkdownStyle(val label: String, val shortLabel: String) {
-    REPLY_CARD("回帖精简卡", "回帖精简卡"),
-    FULL_TABLE("完整测机表格", "完整测机表格"),
+    REPLY_CARD("回帖实测卡", "回帖实测卡"),
+    FULL_TABLE("完整测机报告", "完整测机报告"),
 }
 
 /**
  * Formatting options for [NetBenchMarkdownFormatter].
  */
 data class NetBenchMarkdownOptions(
-    val style: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    val style: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
     val maskTargetIp: Boolean = true,
     val includeClientNetwork: Boolean = true,
     val timestampLabel: String? = null,

@@ -206,6 +206,10 @@ class Iperf3ClientRunnerTest {
         assertNotNull(result.serverMbps)
         assertTrue(result.serverMbps!! > 0.0)
         assertEquals(2L, result.retransmits)
+        assertEquals(1, result.intervals.size)
+        assertEquals(0.0, result.intervals.first().startSec, 1e-3)
+        assertEquals(result.durationSec, result.intervals.first().endSec, 1e-3)
+        assertEquals(result.bytesTransferred, result.intervals.sumOf { it.bytesTransferred })
     }
 
     @Test
@@ -1021,8 +1025,220 @@ class Iperf3ClientRunnerTest {
 
         val finalRes = emissions.last().finalResult!!
         assertTrue(finalRes.success)
+        assertEquals(4, finalRes.parallelStreams)
         assertEquals(cliStreams.sumOf { it.jsonObject["bytes"]!!.jsonPrimitive.long }, finalRes.bytesTransferred)
         assertEquals(4L, finalRes.retransmits)
         assertEquals(Iperf3ClientRunner.computeMbps(8_388_608L, 1.0), finalRes.serverMbps!!, 1e-3)
+        assertTrue(finalRes.intervals.isNotEmpty())
+        assertTrue(finalRes.intervals.all { it.streams == 4 })
+        assertEquals(finalRes.bytesTransferred, finalRes.intervals.sumOf { it.bytesTransferred })
+    }
+
+    @Test
+    fun `multi-second download and upload record contiguous 1-second intervals summing to exact total bytes`() = runBlocking {
+        // 1) 3-second reverse download (-R)
+        val dlServer = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        val dlServerError = AtomicReference<Throwable?>(null)
+        val dlSentBytes = AtomicLong(0L)
+
+        val dlThread = thread(isDaemon = true) {
+            try {
+                dlServer.soTimeout = 10_000
+                val ctrlSocket = dlServer.accept()
+                ctrlSocket.soTimeout = 10_000
+                val ctrlIn = DataInputStream(ctrlSocket.getInputStream())
+                val ctrlOut = DataOutputStream(ctrlSocket.getOutputStream())
+
+                ctrlIn.readFully(ByteArray(37))
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_PARAM_EXCHANGE.toInt())
+                ctrlOut.flush()
+                val paramLen = ctrlIn.readInt()
+                ctrlIn.readFully(ByteArray(paramLen))
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_CREATE_STREAMS.toInt())
+                ctrlOut.flush()
+                val dataSocket = dlServer.accept()
+                DataInputStream(dataSocket.getInputStream()).readFully(ByteArray(37))
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_START.toInt())
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_RUNNING.toInt())
+                ctrlOut.flush()
+
+                val stopSend = AtomicBoolean(false)
+                val sender = thread(isDaemon = true) {
+                    val chunk = ByteArray(65536) { 0x6A }
+                    val out = dataSocket.getOutputStream()
+                    while (!stopSend.get()) {
+                        try {
+                            out.write(chunk)
+                            dlSentBytes.addAndGet(chunk.size.toLong())
+                            Thread.sleep(6)
+                        } catch (_: Exception) {
+                            break
+                        }
+                    }
+                }
+
+                assertEquals(Iperf3ClientRunner.STATE_TEST_END, ctrlIn.readByte())
+                stopSend.set(true)
+                runCatching { dataSocket.close() }
+                sender.join(1_000)
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_EXCHANGE_RESULTS.toInt())
+                ctrlOut.flush()
+                val cliLen = ctrlIn.readInt()
+                ctrlIn.readFully(ByteArray(cliLen))
+
+                val srvJson = """
+                    {"streams":[{"id":1,"bytes":${dlSentBytes.get()},"retransmits":1,"start_time":0.0,"end_time":3.0}]}
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ctrlOut.writeInt(srvJson.size)
+                ctrlOut.write(srvJson)
+                ctrlOut.flush()
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_DISPLAY_RESULTS.toInt())
+                ctrlOut.flush()
+                runCatching { ctrlIn.readByte() }
+                ctrlSocket.close()
+            } catch (t: Throwable) {
+                dlServerError.set(t)
+            } finally {
+                runCatching { dlServer.close() }
+            }
+        }
+
+        val runner = Iperf3ClientRunner(ioDispatcher = Dispatchers.IO, progressIntervalMs = 200L)
+        val dlEmissions = runner.run(
+            Iperf3Config(
+                target = "127.0.0.1",
+                port = dlServer.localPort,
+                durationSec = 3,
+                direction = Iperf3Direction.DOWNLOAD,
+            ),
+        ).toList()
+
+        dlThread.join(6_000)
+        assertNull("3s download mock server failed: ${dlServerError.get()}", dlServerError.get())
+
+        val dlRes = dlEmissions.last().finalResult!!
+        assertTrue(dlRes.success)
+        assertEquals("3-second download must record 3 1s intervals", 3, dlRes.intervals.size)
+        assertEquals(listOf(1, 2, 3), dlRes.intervals.map { it.index })
+        assertEquals(0.0, dlRes.intervals[0].startSec, 1e-3)
+        assertEquals(dlRes.intervals[0].endSec, dlRes.intervals[1].startSec, 1e-6)
+        assertEquals(dlRes.intervals[1].endSec, dlRes.intervals[2].startSec, 1e-6)
+        assertEquals(dlRes.durationSec, dlRes.intervals[2].endSec, 1e-3)
+        for (sample in dlRes.intervals) {
+            assertTrue("Interval duration should be ~1s, got ${sample.durationSec}s", sample.durationSec in 0.75..1.35)
+            assertTrue("Interval bytes must be positive", sample.bytesTransferred > 0L)
+            assertTrue("Interval bitrate must be positive", sample.bitrateMbps > 0.0)
+        }
+        assertEquals(dlRes.bytesTransferred, dlRes.intervals.sumOf { it.bytesTransferred })
+        assertNotNull(dlRes.minIntervalMbps)
+        assertNotNull(dlRes.intervalStdDevMbps)
+        assertNotNull(dlRes.stabilityPercent)
+        assertTrue(dlRes.stabilityPercent!! in 0.0..100.0)
+        assertTrue(
+            "Running progress emissions should surface completed intermediate intervals",
+            dlEmissions.any { it.stage == Iperf3Stage.TEST_RUNNING && it.intervals.size in 1..2 },
+        )
+
+        // 2) 2-second multi-stream (-P 2) upload
+        val ulServer = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        val ulServerError = AtomicReference<Throwable?>(null)
+        val ulRecvBytes = AtomicLong(0L)
+
+        val ulThread = thread(isDaemon = true) {
+            try {
+                ulServer.soTimeout = 10_000
+                val ctrlSocket = ulServer.accept()
+                ctrlSocket.soTimeout = 10_000
+                val ctrlIn = DataInputStream(ctrlSocket.getInputStream())
+                val ctrlOut = DataOutputStream(ctrlSocket.getOutputStream())
+
+                ctrlIn.readFully(ByteArray(37))
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_PARAM_EXCHANGE.toInt())
+                ctrlOut.flush()
+                val paramLen = ctrlIn.readInt()
+                ctrlIn.readFully(ByteArray(paramLen))
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_CREATE_STREAMS.toInt())
+                ctrlOut.flush()
+                val dataSockets = (1..2).map {
+                    val s = ulServer.accept()
+                    DataInputStream(s.getInputStream()).readFully(ByteArray(37))
+                    s
+                }
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_START.toInt())
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_RUNNING.toInt())
+                ctrlOut.flush()
+
+                val stopDrain = AtomicBoolean(false)
+                val drainers = dataSockets.map { ds ->
+                    thread(isDaemon = true) {
+                        val buf = ByteArray(65536)
+                        val input = ds.getInputStream()
+                        while (!stopDrain.get()) {
+                            val n = runCatching { input.read(buf) }.getOrDefault(-1)
+                            if (n <= 0) break
+                            ulRecvBytes.addAndGet(n.toLong())
+                        }
+                    }
+                }
+
+                assertEquals(Iperf3ClientRunner.STATE_TEST_END, ctrlIn.readByte())
+                stopDrain.set(true)
+                dataSockets.forEach { runCatching { it.close() } }
+                drainers.forEach { it.join(1_000) }
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_EXCHANGE_RESULTS.toInt())
+                ctrlOut.flush()
+                val cliLen = ctrlIn.readInt()
+                ctrlIn.readFully(ByteArray(cliLen))
+
+                val half = (ulRecvBytes.get() / 2L).coerceAtLeast(65536L)
+                val srvJson = """
+                    {
+                      "streams": [
+                        {"id":1,"bytes":$half,"retransmits":0,"start_time":0.0,"end_time":2.0},
+                        {"id":3,"bytes":$half,"retransmits":1,"start_time":0.0,"end_time":2.0}
+                      ]
+                    }
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ctrlOut.writeInt(srvJson.size)
+                ctrlOut.write(srvJson)
+                ctrlOut.flush()
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_DISPLAY_RESULTS.toInt())
+                ctrlOut.flush()
+                runCatching { ctrlIn.readByte() }
+                ctrlSocket.close()
+            } catch (t: Throwable) {
+                ulServerError.set(t)
+            } finally {
+                runCatching { ulServer.close() }
+            }
+        }
+
+        val ulEmissions = runner.run(
+            config = Iperf3Config(
+                target = "127.0.0.1",
+                port = ulServer.localPort,
+                durationSec = 2,
+                direction = Iperf3Direction.UPLOAD,
+            ),
+            parallelStreams = 2,
+        ).toList()
+
+        ulThread.join(6_000)
+        assertNull("2s upload mock server failed: ${ulServerError.get()}", ulServerError.get())
+
+        val ulRes = ulEmissions.last().finalResult!!
+        assertTrue(ulRes.success)
+        assertEquals(2, ulRes.parallelStreams)
+        assertEquals(2, ulRes.intervals.size)
+        assertTrue(ulRes.intervals.all { it.streams == 2 })
+        assertEquals(ulRes.bytesTransferred, ulRes.intervals.sumOf { it.bytesTransferred })
     }
 }

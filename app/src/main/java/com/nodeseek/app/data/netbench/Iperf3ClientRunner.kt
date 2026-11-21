@@ -3,6 +3,7 @@ package com.nodeseek.app.data.netbench
 import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3Direction
 import com.nodeseek.app.domain.netbench.Iperf3ErrorKind
+import com.nodeseek.app.domain.netbench.Iperf3IntervalSample
 import com.nodeseek.app.domain.netbench.Iperf3Progress
 import com.nodeseek.app.domain.netbench.Iperf3Result
 import com.nodeseek.app.domain.netbench.Iperf3Stage
@@ -104,6 +105,7 @@ class Iperf3ClientRunner(
                 instantMbps = 0.0,
                 averageMbps = 0.0,
                 peakMbps = 0.0,
+                parallelStreams = streamsCount,
             ),
         )
 
@@ -117,7 +119,7 @@ class Iperf3ClientRunner(
         val endpoint = resolvedResult.getOrElse { err ->
             val msg = err.message ?: "无法解析 iperf3 目标主机"
             val kind = if (err is UnknownHostException) Iperf3ErrorKind.DNS_ERROR else Iperf3ErrorKind.IO_ERROR
-            emit(failedProgress(direction, config.normalizedPort, null, durationSec, kind, msg))
+            emit(failedProgress(direction, config.normalizedPort, null, durationSec, kind, msg, streamsCount))
             return@flow
         }
 
@@ -137,6 +139,7 @@ class Iperf3ClientRunner(
                         durationSec = durationSec,
                         kind = Iperf3ErrorKind.IO_ERROR,
                         message = selection.message,
+                        parallelStreams = streamsCount,
                     ),
                 )
                 return@flow
@@ -153,7 +156,7 @@ class Iperf3ClientRunner(
                 "创建测速连接失败：${t.message ?: t.javaClass.simpleName}"
             }
             val msg = binding.formatBindOrIoError(t, config.useProxy, fallbackMsg)
-            emit(failedProgress(direction, port, resolvedTarget, durationSec, Iperf3ErrorKind.IO_ERROR, msg))
+            emit(failedProgress(direction, port, resolvedTarget, durationSec, Iperf3ErrorKind.IO_ERROR, msg, streamsCount))
             return@flow
         }
 
@@ -185,6 +188,7 @@ class Iperf3ClientRunner(
             var measuredElapsedSec = 0.0
             var peakMbps = 0.0
             val throughputHistory = mutableListOf<Double>()
+            var measuredIntervals: List<Iperf3IntervalSample> = emptyList()
             var serverStats: ParsedServerResults? = null
             var testExecuted = false
 
@@ -216,6 +220,8 @@ class Iperf3ClientRunner(
                                     measuredBytes = measuredBytes,
                                     peakMbps = peakMbps,
                                     serverStats = serverStats,
+                                    parallelStreams = streamsCount,
+                                    intervals = measuredIntervals,
                                 )
                                 emit(completedProgress(finalRes, durationSec, throughputHistory))
                             } else {
@@ -227,6 +233,7 @@ class Iperf3ClientRunner(
                                         durationSec = durationSec,
                                         kind = Iperf3ErrorKind.PROTOCOL_ERROR,
                                         message = "iperf3 服务端提前断开控制连接",
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                             }
@@ -245,6 +252,7 @@ class Iperf3ClientRunner(
                                         instantMbps = 0.0,
                                         averageMbps = 0.0,
                                         peakMbps = 0.0,
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 val paramsJson = buildClientParamsJson(
@@ -268,6 +276,7 @@ class Iperf3ClientRunner(
                                         instantMbps = 0.0,
                                         averageMbps = 0.0,
                                         peakMbps = 0.0,
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 val needed = (streamsCount - dataSockets.size).coerceAtLeast(0)
@@ -303,6 +312,7 @@ class Iperf3ClientRunner(
                                         instantMbps = 0.0,
                                         averageMbps = 0.0,
                                         peakMbps = 0.0,
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                             }
@@ -338,6 +348,7 @@ class Iperf3ClientRunner(
                                 measuredBytes = transferSummary.bytesTransferred
                                 measuredPerStreamBytes = transferSummary.perStreamBytes
                                 measuredElapsedSec = transferSummary.elapsedSec
+                                measuredIntervals = transferSummary.intervals
                                 peakMbps = maxOf(peakMbps, transferSummary.peakMbps)
 
                                 if (transferSummary.sentTestEndByClient) {
@@ -352,6 +363,8 @@ class Iperf3ClientRunner(
                                             averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
                                             peakMbps = peakMbps,
                                             throughputHistoryMbps = throughputHistory.toList(),
+                                            intervals = measuredIntervals,
+                                            parallelStreams = streamsCount,
                                         ),
                                     )
                                 }
@@ -369,6 +382,8 @@ class Iperf3ClientRunner(
                                         averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
                                         peakMbps = peakMbps,
                                         throughputHistoryMbps = throughputHistory.toList(),
+                                        intervals = measuredIntervals,
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                             }
@@ -385,6 +400,8 @@ class Iperf3ClientRunner(
                                         averageMbps = computeMbps(measuredBytes, measuredElapsedSec),
                                         peakMbps = peakMbps,
                                         throughputHistoryMbps = throughputHistory.toList(),
+                                        intervals = measuredIntervals,
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 val clientResultsJson = buildClientResultsJson(
@@ -413,6 +430,8 @@ class Iperf3ClientRunner(
                                     measuredBytes = measuredBytes,
                                     peakMbps = peakMbps,
                                     serverStats = serverStats,
+                                    parallelStreams = streamsCount,
+                                    intervals = measuredIntervals,
                                 )
                                 emit(completedProgress(finalRes, durationSec, throughputHistory))
                                 break@stateLoop
@@ -427,6 +446,7 @@ class Iperf3ClientRunner(
                                         durationSec = durationSec,
                                         kind = Iperf3ErrorKind.ACCESS_DENIED,
                                         message = "服务器正忙，另一个测速正在进行，请稍后重试",
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 break@stateLoop
@@ -443,6 +463,7 @@ class Iperf3ClientRunner(
                                         durationSec = durationSec,
                                         kind = Iperf3ErrorKind.SERVER_ERROR,
                                         message = "iperf3 服务端返回错误$suffix，请确认服务端版本兼容或稍后重试",
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 break@stateLoop
@@ -457,6 +478,7 @@ class Iperf3ClientRunner(
                                         durationSec = durationSec,
                                         kind = Iperf3ErrorKind.SERVER_ERROR,
                                         message = "iperf3 服务端主动终止了本次测速连接",
+                                        parallelStreams = streamsCount,
                                     ),
                                 )
                                 break@stateLoop
@@ -479,6 +501,7 @@ class Iperf3ClientRunner(
                                             durationSec = durationSec,
                                             kind = Iperf3ErrorKind.PROTOCOL_ERROR,
                                             message = nonIperfHint,
+                                            parallelStreams = streamsCount,
                                         ),
                                     )
                                     break@stateLoop
@@ -501,6 +524,7 @@ class Iperf3ClientRunner(
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.CONNECTION_REFUSED,
                     message = "无法连接 $port 端口（连接被拒绝）：对应 VPS 尚未开启 iperf3 服务端或监听端口不一致，请先开启 iperf3 -s -p $port",
+                    parallelStreams = streamsCount,
                 ),
             )
         } catch (e: SocketTimeoutException) {
@@ -512,6 +536,7 @@ class Iperf3ClientRunner(
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.TIMEOUT,
                     message = "连接或响应超时（端口 $port）：请确认 VPS 已运行 iperf3 -s -p $port，且防火墙（ufw/firewalld/iptables）与云安全组已放行 TCP $port",
+                    parallelStreams = streamsCount,
                 ),
             )
         } catch (e: EOFException) {
@@ -523,6 +548,7 @@ class Iperf3ClientRunner(
                     durationSec = durationSec,
                     kind = Iperf3ErrorKind.PROTOCOL_ERROR,
                     message = "iperf3 协议数据流意外中断，请检查目标端口 $port 是否为标准 iperf3 服务端",
+                    parallelStreams = streamsCount,
                 ),
             )
         } catch (e: IOException) {
@@ -554,6 +580,7 @@ class Iperf3ClientRunner(
                     durationSec = durationSec,
                     kind = kind,
                     message = friendlyMsg,
+                    parallelStreams = streamsCount,
                 ),
             )
         } finally {
@@ -571,6 +598,7 @@ class Iperf3ClientRunner(
         val perStreamBytes: LongArray,
         val elapsedSec: Double,
         val peakMbps: Double,
+        val intervals: List<Iperf3IntervalSample>,
         val sentTestEndByClient: Boolean,
     )
 
@@ -680,6 +708,11 @@ class Iperf3ClientRunner(
         var peakMbps = 0.0
         val reportStepNanos = progressIntervalMs.coerceIn(50L, 1_000L) * 1_000_000L
 
+        var intervalStartNanos = startNanos
+        var intervalStartBytes = 0L
+        var nextIntervalBoundaryIdx = 1
+        val recordedIntervals = mutableListOf<Iperf3IntervalSample>()
+
         while (!allStreamsFinished()) {
             currentCoroutineContext().ensureActive()
             val now = System.nanoTime()
@@ -690,6 +723,31 @@ class Iperf3ClientRunner(
                 // Server sent an early control state (e.g. TEST_END, EXCHANGE_RESULTS, SERVER_ERROR).
                 break
             }
+
+            if (nextIntervalBoundaryIdx < durationSec) {
+                val boundaryNanos = startNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
+                if (now >= boundaryNanos && deadlineNanos - now >= MIN_TAIL_INTERVAL_NANOS) {
+                    val curBytes = sumTransferredBytes()
+                    val deltaBytes = (curBytes - intervalStartBytes).coerceAtLeast(0L)
+                    val startSec = ((intervalStartNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
+                    val endSec = ((now - startNanos) / 1_000_000_000.0).coerceAtLeast(startSec + 0.001)
+                    val segDuration = (endSec - startSec).coerceAtLeast(0.001)
+                    val segMbps = computeMbps(deltaBytes, segDuration)
+                    recordedIntervals += Iperf3IntervalSample(
+                        index = recordedIntervals.size + 1,
+                        startSec = startSec,
+                        endSec = endSec,
+                        bytesTransferred = deltaBytes,
+                        bitrateMbps = segMbps,
+                        streams = streamCount,
+                    )
+                    peakMbps = maxOf(peakMbps, segMbps)
+                    intervalStartNanos = now
+                    intervalStartBytes = curBytes
+                    nextIntervalBoundaryIdx = maxOf(nextIntervalBoundaryIdx + 1, endSec.toInt() + 1)
+                }
+            }
+
             if (now - lastReportNanos >= reportStepNanos) {
                 val curBytes = sumTransferredBytes()
                 val deltaBytes = (curBytes - lastReportBytes).coerceAtLeast(0L)
@@ -710,6 +768,8 @@ class Iperf3ClientRunner(
                         instantMbps = instantMbps,
                         averageMbps = avgMbps,
                         peakMbps = peakMbps,
+                        intervals = recordedIntervals.toList(),
+                        parallelStreams = streamCount,
                     ),
                 )
                 lastReportNanos = now
@@ -720,7 +780,13 @@ class Iperf3ClientRunner(
             val remainingToDeadlineMs = ((deadlineNanos - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
             val remainingToReportMs = ((reportStepNanos - (afterReportNanos - lastReportNanos) + 999_999L) / 1_000_000L)
                 .coerceAtLeast(1L)
-            delay(minOf(POLL_STEP_MS, remainingToDeadlineMs, remainingToReportMs))
+            val remainingToIntervalMs = if (nextIntervalBoundaryIdx < durationSec) {
+                val nextBoundaryNanos = startNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
+                ((nextBoundaryNanos - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
+            } else {
+                remainingToDeadlineMs
+            }
+            delay(minOf(POLL_STEP_MS, remainingToDeadlineMs, remainingToReportMs, remainingToIntervalMs))
         }
 
         // Freeze measurement counters immediately before any join/control-channel round-trip so
@@ -804,6 +870,35 @@ class Iperf3ClientRunner(
         val finalBytes = perStreamBytes.sum()
         val finalElapsedSec = ((snapshotNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
         val finalAvgMbps = computeMbps(finalBytes, finalElapsedSec)
+
+        val tailIntervalNanos = snapshotNanos - intervalStartNanos
+        val tailIntervalBytes = (finalBytes - intervalStartBytes).coerceAtLeast(0L)
+        if (recordedIntervals.isEmpty() || tailIntervalNanos >= MIN_TAIL_INTERVAL_NANOS) {
+            val startSec = ((intervalStartNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
+            val endSec = finalElapsedSec.coerceAtLeast(startSec + 0.001)
+            val segDuration = (endSec - startSec).coerceAtLeast(0.001)
+            val segMbps = computeMbps(tailIntervalBytes, segDuration)
+            recordedIntervals += Iperf3IntervalSample(
+                index = recordedIntervals.size + 1,
+                startSec = startSec,
+                endSec = endSec,
+                bytesTransferred = tailIntervalBytes,
+                bitrateMbps = segMbps,
+                streams = streamCount,
+            )
+        } else {
+            val lastIdx = recordedIntervals.lastIndex
+            val prev = recordedIntervals[lastIdx]
+            val mergedBytes = prev.bytesTransferred + tailIntervalBytes
+            val mergedEndSec = finalElapsedSec.coerceAtLeast(prev.startSec + 0.001)
+            val mergedDuration = (mergedEndSec - prev.startSec).coerceAtLeast(0.001)
+            recordedIntervals[lastIdx] = prev.copy(
+                endSec = mergedEndSec,
+                bytesTransferred = mergedBytes,
+                bitrateMbps = computeMbps(mergedBytes, mergedDuration),
+            )
+        }
+
         val rawTailNanos = snapshotNanos - lastReportNanos
         val tailInstantMbps = if (rawTailNanos >= MIN_TAIL_SAMPLE_NANOS) {
             val tailDeltaBytes = (finalBytes - lastReportBytes).coerceAtLeast(0L)
@@ -813,7 +908,9 @@ class Iperf3ClientRunner(
         } else {
             finalAvgMbps
         }
-        peakMbps = maxOf(peakMbps, finalAvgMbps, tailInstantMbps)
+        val maxIntervalMbps = recordedIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0
+        peakMbps = maxOf(peakMbps, finalAvgMbps, tailInstantMbps, maxIntervalMbps)
+        val finalizedIntervals = recordedIntervals.toList()
 
         onProgress(
             Iperf3Progress(
@@ -825,6 +922,8 @@ class Iperf3ClientRunner(
                 instantMbps = tailInstantMbps,
                 averageMbps = finalAvgMbps,
                 peakMbps = peakMbps,
+                intervals = finalizedIntervals,
+                parallelStreams = streamCount,
             ),
         )
 
@@ -833,6 +932,7 @@ class Iperf3ClientRunner(
             perStreamBytes = perStreamBytes,
             elapsedSec = finalElapsedSec,
             peakMbps = peakMbps,
+            intervals = finalizedIntervals,
             sentTestEndByClient = sentTestEnd,
         )
     }
@@ -985,9 +1085,12 @@ class Iperf3ClientRunner(
         measuredBytes: Long,
         peakMbps: Double,
         serverStats: ParsedServerResults?,
+        parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
+        intervals: List<Iperf3IntervalSample> = emptyList(),
     ): Iperf3Result {
         val safeDuration = measuredElapsedSec.coerceAtLeast(0.001)
         val clientMbps = computeMbps(measuredBytes, safeDuration)
+        val intervalPeak = intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0
         return Iperf3Result(
             direction = direction,
             port = port,
@@ -996,9 +1099,11 @@ class Iperf3ClientRunner(
             bytesTransferred = measuredBytes,
             clientMbps = clientMbps,
             serverMbps = serverStats?.mbps,
-            peakMbps = maxOf(peakMbps, clientMbps),
+            peakMbps = maxOf(peakMbps, clientMbps, intervalPeak),
             retransmits = serverStats?.retransmits,
             success = true,
+            parallelStreams = parallelStreams,
+            intervals = intervals,
         )
     }
 
@@ -1016,7 +1121,9 @@ class Iperf3ClientRunner(
         averageMbps = result.effectiveMbps,
         peakMbps = result.peakMbps,
         throughputHistoryMbps = history.toList(),
+        intervals = result.intervals,
         finalResult = result,
+        parallelStreams = result.parallelStreams,
     )
 
     private fun failedProgress(
@@ -1026,6 +1133,7 @@ class Iperf3ClientRunner(
         durationSec: Int,
         kind: Iperf3ErrorKind,
         message: String,
+        parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
     ): Iperf3Progress {
         val res = Iperf3Result(
             direction = direction,
@@ -1037,6 +1145,7 @@ class Iperf3ClientRunner(
             success = false,
             errorKind = kind,
             errorMessage = message,
+            parallelStreams = parallelStreams,
         )
         return Iperf3Progress(
             direction = direction,
@@ -1050,6 +1159,7 @@ class Iperf3ClientRunner(
             finalResult = res,
             errorKind = kind,
             errorMessage = message,
+            parallelStreams = parallelStreams,
         )
     }
 
@@ -1078,7 +1188,9 @@ class Iperf3ClientRunner(
         private const val COOKIE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
         private const val CONTROL_READ_TIMEOUT_MS = 10_000
         private const val POLL_STEP_MS = 50L
+        private const val INTERVAL_STEP_NANOS = 1_000_000_000L
         private const val MIN_TAIL_SAMPLE_NANOS = 50_000_000L
+        private const val MIN_TAIL_INTERVAL_NANOS = 120_000_000L
         private const val MAX_JSON_FRAME_BYTES = 4 * 1024 * 1024
         private const val MAX_HISTORY_SAMPLES = 120
 

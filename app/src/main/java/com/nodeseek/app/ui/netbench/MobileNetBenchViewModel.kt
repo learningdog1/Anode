@@ -83,7 +83,7 @@ data class MobileNetBenchUiState(
     val iperfDurationSec: Int = Iperf3Config.DEFAULT_DURATION_SEC,
     val iperfParallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
     val iperfTestMode: Iperf3TestMode = Iperf3TestMode.DOWNLOAD,
-    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
     val maskTargetIpInReport: Boolean = true,
     val includeClientNetworkInReport: Boolean = true,
     val showIperf3ServerPrompt: Boolean = false,
@@ -139,7 +139,7 @@ class NetBenchSessionController(
     private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
     initialTarget: String = "",
-    initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
 ) {
     private val _uiState = MutableStateFlow(
         MobileNetBenchUiState(
@@ -592,7 +592,10 @@ class NetBenchSessionController(
                         iperf3ClientRunner.run(dlConfig, streams).collect { progress ->
                             val enriched = progress.copy(
                                 parallelStreams = streams,
-                                finalResult = progress.finalResult?.copy(parallelStreams = streams),
+                                finalResult = progress.finalResult?.copy(
+                                    resolvedTarget = endpoint.resolvedTarget,
+                                    parallelStreams = streams,
+                                ),
                             )
                             _uiState.update { state ->
                                 state.copy(iperfDownloadProgress = enriched).withRegeneratedMarkdown()
@@ -619,7 +622,10 @@ class NetBenchSessionController(
                         iperf3ClientRunner.run(ulConfig, streams).collect { progress ->
                             val enriched = progress.copy(
                                 parallelStreams = streams,
-                                finalResult = progress.finalResult?.copy(parallelStreams = streams),
+                                finalResult = progress.finalResult?.copy(
+                                    resolvedTarget = endpoint.resolvedTarget,
+                                    parallelStreams = streams,
+                                ),
                             )
                             _uiState.update { state ->
                                 state.copy(iperfUploadProgress = enriched).withRegeneratedMarkdown()

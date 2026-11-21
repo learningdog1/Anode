@@ -93,6 +93,7 @@ import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
 import com.nodeseek.app.domain.netbench.Iperf3Direction
+import com.nodeseek.app.domain.netbench.Iperf3IntervalSample
 import com.nodeseek.app.domain.netbench.Iperf3Progress
 import com.nodeseek.app.domain.netbench.Iperf3Stage
 import com.nodeseek.app.domain.netbench.NetBenchHistoryEntry
@@ -1322,6 +1323,28 @@ internal fun NetBenchIperf3Card(
             }
         }
 
+        val progressesWithIntervals = items.filter {
+            val list = it.finalResult?.intervals?.takeIf { s -> s.isNotEmpty() } ?: it.intervals
+            list.isNotEmpty()
+        }
+        if (progressesWithIntervals.isNotEmpty()) {
+            PulseGradientDivider()
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                progressesWithIntervals.forEach { progress ->
+                    val intervals = progress.finalResult?.intervals?.takeIf { it.isNotEmpty() }
+                        ?: progress.intervals
+                    Iperf3IntervalBreakdownPanel(
+                        progress = progress,
+                        intervals = intervals,
+                        compact = compact,
+                    )
+                }
+            }
+        }
+
         if (onOpenIperf3ServerSetup != null && items.any { it.stage == Iperf3Stage.FAILED }) {
             Row(
                 modifier = Modifier
@@ -1443,6 +1466,100 @@ private fun Iperf3SingleDirectionBlock(
                     text = "峰值 ${NetBenchMarkdownFormatter.formatMbps(progress.peakMbps)}",
                     style = NodePulseThemeTokens.extraTypography.microLabel,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Iperf3IntervalBreakdownPanel(
+    progress: Iperf3Progress,
+    intervals: List<Iperf3IntervalSample>,
+    compact: Boolean,
+) {
+    if (intervals.isEmpty()) return
+    val maxMbps = remember(intervals, progress.peakMbps) {
+        maxOf(intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0, progress.peakMbps, 1.0)
+    }
+    val finalRes = progress.finalResult
+    val metaTags = buildList {
+        finalRes?.stabilityPercent?.let { add("稳定度 ${NetBenchMarkdownFormatter.formatPercent(it)}") }
+        finalRes?.retransmits?.takeIf { it >= 0 }?.let { add("重传 $it") }
+        finalRes?.serverMbps?.takeIf { it > 0.0 }?.let { add("服务端 ${NetBenchMarkdownFormatter.formatMbps(it)}") }
+    }.joinToString(" · ")
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = "${progress.direction.flagLabel} · 逐秒测速明细 (${intervals.size}段)",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (metaTags.isNotEmpty()) {
+                Text(
+                    text = metaTags,
+                    style = NodePulseThemeTokens.extraTypography.microLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        val displayed = if (compact && intervals.size > 6) intervals.takeLast(6) else intervals
+        displayed.forEach { sample ->
+            val ratio = (sample.bitrateMbps / maxMbps).toFloat().coerceIn(0.04f, 1f)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = sample.intervalLabel,
+                    style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(68.dp),
+                    maxLines = 1,
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(6.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(ratio)
+                            .height(6.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.82f)),
+                    )
+                }
+                Text(
+                    text = NetBenchMarkdownFormatter.formatBytes(sample.bytesTransferred),
+                    style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Text(
+                    text = NetBenchMarkdownFormatter.formatMbps(sample.bitrateMbps),
+                    style = NodePulseThemeTokens.extraTypography.codeLabel.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
                 )
             }
         }
@@ -1689,8 +1806,8 @@ internal fun NetBenchMarkdownReportCard(
         SortSegmentedSwitcher(
             options = remember {
                 listOf(
-                    SortSegmentItem(NetBenchMarkdownStyle.REPLY_CARD, NetBenchMarkdownStyle.REPLY_CARD.label),
                     SortSegmentItem(NetBenchMarkdownStyle.FULL_TABLE, NetBenchMarkdownStyle.FULL_TABLE.label),
+                    SortSegmentItem(NetBenchMarkdownStyle.REPLY_CARD, NetBenchMarkdownStyle.REPLY_CARD.label),
                 )
             },
             selectedValue = selectedStyle,
