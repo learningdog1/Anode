@@ -439,4 +439,59 @@ class NodeSeekHtmlAndRssParserTest {
         )
         assertTrue(relNextResult.hasNextPage)
     }
+
+    @Test
+    fun `parseThreadPage and toDomainDetailPage backfill OP uid and categorySlug on sub-pages`() {
+        val subPageConfigB64 = encodeConfig(
+            """
+            {
+              "allCategory": [{ "key": "trade", "cn_text": "交易" }],
+              "postData": {
+                "postId": 9090,
+                "postPage": 2,
+                "postPageCount": 3,
+                "title": "出 DMIT HKG Pro",
+                "category": "",
+                "categoryWord": "交易",
+                "categoryLink": "/categories/trade",
+                "views": 620,
+                "comments": [
+                  {
+                    "commentId": 81,
+                    "floorIndex": 11,
+                    "poster": { "uid": 0, "name": "BuyerReply" },
+                    "markdown": "还在吗？"
+                  },
+                  {
+                    "commentId": 82,
+                    "floorIndex": 12,
+                    "poster": { "uid": 5566, "name": "SellerOp", "isOp": true },
+                    "markdown": "在的，私信联系"
+                  }
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+
+        val html = """
+            <html><body>
+              <div id="nsk-body">
+                <div class="nsk-post"><div class="nsk-content-meta-info"><a href="/space/5566">SellerOp</a></div></div>
+                <div id="11" class="content-item"><a href="/space/7788">BuyerReply</a></div>
+              </div>
+              <script id="temp-script" type="application/json">$subPageConfigB64</script>
+            </body></html>
+        """.trimIndent()
+
+        val domainPage = NodeSeekHtmlParser
+            .parseThreadPage(html, "https://www.nodeseek.com/post-9090-2")
+            .toDomainDetailPage()
+
+        assertEquals(5566L, domainPage.author.uid)
+        assertEquals("SellerOp", domainPage.author.username)
+        assertEquals("trade", domainPage.categorySlug)
+        assertEquals("交易", domainPage.categoryName)
+        assertEquals(7788L, domainPage.replies.first { it.floorNumber == 11 }.author.uid)
+    }
 }

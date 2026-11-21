@@ -6,6 +6,7 @@ import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.ReactionResult
 import com.nodeseek.app.domain.model.ReactionType
 import com.nodeseek.app.domain.model.TopicDetailPage
+import com.nodeseek.app.domain.model.TopicSummary
 import kotlinx.coroutines.flow.Flow
 
 interface ForumRepository {
@@ -24,6 +25,12 @@ interface ForumRepository {
     ): Boolean = false
 
     fun clearRssFallbackCache() {}
+
+    /**
+     * Resolves known [TopicSummary] metadata (such as authoritative `categorySlug` and `categoryName`)
+     * from local in-memory/disk feed caches, bookmarks, and read history without making network requests.
+     */
+    suspend fun resolveKnownTopics(topicIds: Collection<Long>): Map<Long, TopicSummary> = emptyMap()
 
     suspend fun getFeed(
         categorySlug: String = "",

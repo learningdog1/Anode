@@ -379,8 +379,12 @@ class TopicDetailViewModel(
                     val activePage = state.currentPage
                     if (activePage > 1) {
                         updatedCache[activePage]?.let { subPage ->
+                            val resolvedAuthor = if (subPage.author.uid > 0L) subPage.author else page1.author
                             updatedCache[activePage] = subPage.copy(
                                 title = page1.title.ifBlank { subPage.title },
+                                categorySlug = subPage.categorySlug.ifBlank { page1.categorySlug },
+                                categoryName = subPage.categoryName.ifBlank { page1.categoryName },
+                                author = resolvedAuthor,
                                 requiredViewLevel = page1.requiredViewLevel,
                                 openingFloor = freshOpening,
                             )

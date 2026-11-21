@@ -21,6 +21,7 @@ class UserRepositoryImpl(
     private val apiClientProvider: () -> NodeSeekApiClient,
     private val sessionRepository: SessionRepositoryImpl,
     private val blockedUsersCache: BlockedUsersCache? = null,
+    private val knownTopicsResolver: (suspend (Collection<Long>) -> Map<Long, TopicSummary>)? = null,
 ) : UserRepository {
 
     override suspend fun getUserProfile(
@@ -134,21 +135,34 @@ class UserRepositoryImpl(
             val safePage = page.coerceAtLeast(1)
             val response = apiClientProvider().listUserDiscussions(uid = uid, page = safePage)
             val rows = response.resolvedDiscussions
+            val resolver = knownTopicsResolver
+            val knownById = if (rows.isNotEmpty() && resolver != null) {
+                runCatching { resolver.invoke(rows.map { it.postId }) }.getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
             val topics = rows.map { row ->
-                val catSlug = row.categorySlug?.trim().orEmpty()
+                val known = knownById[row.postId]
+                val catSlug = row.categorySlug?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: known?.categorySlug?.trim().orEmpty()
                 val catName = row.categoryTitle?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == catSlug }?.name.orEmpty()
+                    ?: known?.categoryName?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: catSlug.takeIf { it.isNotEmpty() }?.let { slug ->
+                        Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == slug }?.name
+                    }.orEmpty()
                 TopicSummary(
                     id = row.postId,
                     title = row.title,
                     categorySlug = catSlug,
                     categoryName = catName,
                     authorId = uid,
-                    authorName = row.authorName?.trim().orEmpty(),
+                    authorName = row.authorName?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: known?.authorName.orEmpty(),
                     authorAvatarUrl = avatarUrlForUid(uid),
-                    viewCount = row.viewsCount ?: 0,
-                    replyCount = row.commentsCount ?: 0,
-                    lastActivityIso = row.createdAt?.trim().orEmpty(),
+                    viewCount = row.viewsCount ?: known?.viewCount ?: 0,
+                    replyCount = row.commentsCount ?: known?.replyCount ?: 0,
+                    lastActivityIso = row.createdAt?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: known?.lastActivityIso.orEmpty(),
                     requiredViewLevel = row.rank?.takeIf { it > 0 },
                 )
             }

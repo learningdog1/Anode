@@ -48,9 +48,19 @@ class BookmarkAndHistoryRepositoryImpl(
             recentSummaryCache.clear()
         }
         for (summary in summaries) {
-            recentSummaryCache[summary.id] = summary
+            val existing = recentSummaryCache[summary.id]
+            recentSummaryCache[summary.id] = if (existing != null && summary.categorySlug.isBlank() && existing.categorySlug.isNotBlank()) {
+                summary.copy(
+                    categorySlug = existing.categorySlug,
+                    categoryName = summary.categoryName.ifBlank { existing.categoryName },
+                )
+            } else {
+                summary
+            }
         }
     }
+
+    fun getCachedTopicSummary(topicId: Long): TopicSummary? = recentSummaryCache[topicId]
 
     override suspend fun setTopicBookmarked(
         topicId: Long,

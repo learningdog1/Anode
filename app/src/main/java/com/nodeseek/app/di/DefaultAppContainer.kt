@@ -252,6 +252,7 @@ class DefaultAppContainer(
             apiClientProvider = { apiClient },
             sessionRepository = sessionRepositoryImpl,
             blockedUsersCache = blockedUsersCache,
+            knownTopicsResolver = { topicIds -> forumRepositoryImpl.resolveKnownTopics(topicIds) },
         )
     }
 

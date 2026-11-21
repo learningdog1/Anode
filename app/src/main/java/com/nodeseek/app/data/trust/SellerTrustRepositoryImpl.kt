@@ -86,6 +86,8 @@ class SellerTrustRepositoryImpl internal constructor(
     private val exposeBoardRefreshMinIntervalMillis: Long = DEFAULT_EXPOSE_BOARD_REFRESH_MIN_INTERVAL_MILLIS,
     private val exposeBoardStaleRetentionMillis: Long = DEFAULT_EXPOSE_BOARD_STALE_RETENTION_MILLIS,
     private val searchMinIntervalMillis: Long = DEFAULT_SEARCH_MIN_INTERVAL_MILLIS,
+    private val maxAutoTopicPages: Int = DEFAULT_MAX_AUTO_TOPIC_PAGES,
+    private val scanMoreTopicPages: Int = DEFAULT_SCAN_MORE_TOPIC_PAGES,
     maxMemoryCacheEntries: Int = SellerTrustCacheStore.DEFAULT_MAX_MEMORY_ENTRIES,
     maxDiskCacheEntries: Int = SellerTrustCacheStore.DEFAULT_MAX_DISK_ENTRIES,
     internal val rateLimiter: SellerTrustRateLimiter = SellerTrustRateLimiter(
@@ -164,6 +166,7 @@ class SellerTrustRepositoryImpl internal constructor(
     private val singleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
     private val exposeBoardSingleFlight = KeyedSingleFlight<String, Result<FeedPageResult>>(ioDispatcher)
     private val deepSearchSingleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
+    private val topicScanSingleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
     private val backgroundScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     private val attemptMutex = Mutex()
@@ -326,8 +329,49 @@ class SellerTrustRepositoryImpl internal constructor(
         syncWithLatestNote(updatedReport, effectiveUid)
     }
 
+    override suspend fun scanMoreSellerTradeTopics(
+        uid: Long,
+        usernameHint: String,
+    ): SellerTrustReport = withContext(ioDispatcher) {
+        val baseReport = getCachedReportOnly(uid = uid, usernameHint = usernameHint)
+            ?: inspectSeller(uid = uid, usernameHint = usernameHint, forceRefresh = false)
+
+        val effectiveUid = baseReport.uid.takeIf { it > 0L } ?: uid
+        if (effectiveUid <= 0L || !baseReport.topicsSucceeded || !baseReport.hasMoreTopicPages) {
+            return@withContext baseReport.copy(
+                topicScanCooldownUntilEpochMillis = 0L,
+                topicScanNoticeMessage = null,
+            )
+        }
+
+        val siteHost = remoteDataSource.siteHost
+        val now = clockMillis()
+        val activeCooldown = rateLimiter.getActiveCooldownUntil(siteHost, now)
+        if (activeCooldown > now) {
+            val remSec = ((activeCooldown - now + 999L) / 1_000L).coerceAtLeast(1L)
+            return@withContext baseReport.copy(
+                topicScanCooldownUntilEpochMillis = activeCooldown,
+                topicScanNoticeMessage = "官网限流冷却中，请约 ${remSec} 秒后再继续扫描",
+            )
+        }
+
+        val updated = topicScanSingleFlight.execute("topics:$effectiveUid") {
+            executeScanMoreTopics(
+                fallbackBase = baseReport,
+                targetUid = effectiveUid,
+            )
+        }
+        syncWithLatestNote(updated, effectiveUid)
+    }
+
     override fun observeCachedReport(uid: Long): Flow<SellerTrustReport?> =
         cacheStore.observePositiveReportByUid(uid)
+
+    override fun observeCachedReport(
+        uid: Long,
+        usernameHint: String,
+    ): Flow<SellerTrustReport?> =
+        cacheStore.observePositiveReport(uid = uid, usernameHint = sanitizeUsernameHint(usernameHint))
 
     override suspend fun getCachedReportOnly(
         uid: Long,
@@ -510,9 +554,9 @@ class SellerTrustRepositoryImpl internal constructor(
                 activeCooldownBeforeStepC > clockMillis()
             )
 
-        // Step C: Fetch page-1 user discussions (if needed) and exposure searches via governed concurrency.
+        // Step C: Fetch paced user discussion pages (if needed) and exposure board snapshot via governed concurrency.
         val aggregated = coroutineScope {
-            val topicsDeferred: Deferred<Result<List<TopicSummary>>> = async {
+            val topicsDeferred: Deferred<Result<TopicsScanOutcome>> = async {
                 when {
                     abortedByRateLimit -> {
                         Result.failure(
@@ -538,10 +582,23 @@ class SellerTrustRepositoryImpl internal constructor(
 
                     profile != null && profile.topicCount == 0 -> {
                         // Seller has 0 posted topics — skip list-discussions HTTP roundtrip completely.
-                        Result.success(emptyList())
+                        Result.success(
+                            TopicsScanOutcome(
+                                topics = emptyList(),
+                                pagesScanned = 0,
+                                hasMorePages = false,
+                            ),
+                        )
                     }
 
-                    else -> governedCall { remoteDataSource.fetchSellerTopicsPage1(targetUid) }
+                    else -> scanSellerTopicsInitial(
+                        targetUid = targetUid,
+                        totalTopicsHint = profile?.topicCount,
+                        siteHost = siteHost,
+                        governedCall = { page ->
+                            governedCall { remoteDataSource.fetchSellerTopicsPage(targetUid, page) }
+                        },
+                    )
                 }
             }
 
@@ -770,6 +827,8 @@ class SellerTrustRepositoryImpl internal constructor(
             profileSucceeded = baseReport.profileSucceeded,
             registrationDurationLabel = baseReport.registrationDurationLabel,
             exposureCheckScope = ExposureCheckScope.DEEP_SEARCH,
+            scannedTopicsCount = baseReport.scannedTopicsCount,
+            hasMoreTopicPages = baseReport.hasMoreTopicPages,
         )
 
         val updatedReport = baseReport.copy(
@@ -835,34 +894,81 @@ class SellerTrustRepositoryImpl internal constructor(
         nowMillis: Long,
     ): SellerTrustReport {
         val prior = priorEntry?.report ?: return freshReport
-        if (!prior.isDeepSearchVerified) return freshReport
         val priorStillFresh = nowMillis < priorEntry.expiresAtEpochMillis
-        if (!priorStillFresh && prior.exposureSearchHits.isEmpty()) return freshReport
+        val hasDeepExposureToMerge = prior.isDeepSearchVerified &&
+            (priorStillFresh || prior.exposureSearchHits.isNotEmpty())
+        val hasDeeperTopicsToMerge = priorStillFresh &&
+            prior.topicsSucceeded &&
+            freshReport.topicsSucceeded &&
+            prior.scannedTopicPages > freshReport.scannedTopicPages
 
-        val mergedHits = mergeExposureHits(freshReport.exposureSearchHits, prior.exposureSearchHits)
-        val mergedScope = if (priorStillFresh && prior.searchSucceeded) {
+        if (!hasDeepExposureToMerge && !hasDeeperTopicsToMerge) return freshReport
+
+        val mergedHits = if (hasDeepExposureToMerge) {
+            mergeExposureHits(freshReport.exposureSearchHits, prior.exposureSearchHits)
+        } else {
+            freshReport.exposureSearchHits
+        }
+        val mergedScope = if (hasDeepExposureToMerge && priorStillFresh && prior.searchSucceeded) {
             ExposureCheckScope.DEEP_SEARCH
         } else {
             freshReport.exposureCheckScope
         }
-        val mergedSearchSucceeded = freshReport.searchSucceeded || (priorStillFresh && prior.searchSucceeded)
+        val mergedSearchSucceeded = freshReport.searchSucceeded ||
+            (hasDeepExposureToMerge && priorStillFresh && prior.searchSucceeded)
+
+        val mergedTradeTopics = if (hasDeeperTopicsToMerge) {
+            (freshReport.recentTradeTopics + prior.recentTradeTopics)
+                .distinctBy { it.id }
+                .take(MAX_RECENT_TRADE_TOPICS)
+        } else {
+            freshReport.recentTradeTopics
+        }
+        val mergedTradeCount = if (hasDeeperTopicsToMerge) {
+            maxOf(freshReport.historicalTradeTopicCount, prior.historicalTradeTopicCount, mergedTradeTopics.size)
+        } else {
+            freshReport.historicalTradeTopicCount
+        }
+        val mergedScannedCount = if (hasDeeperTopicsToMerge) {
+            maxOf(freshReport.scannedTopicsCount, prior.scannedTopicsCount)
+        } else {
+            freshReport.scannedTopicsCount
+        }
+        val mergedScannedPages = if (hasDeeperTopicsToMerge) {
+            prior.scannedTopicPages
+        } else {
+            freshReport.scannedTopicPages
+        }
+        val mergedHasMoreTopicPages = if (hasDeeperTopicsToMerge) {
+            prior.hasMoreTopicPages
+        } else {
+            freshReport.hasMoreTopicPages
+        }
+
         val assessment = TrustRiskEvaluator.evaluate(
             rankLevel = freshReport.rankLevel,
             registrationDays = freshReport.registrationDays,
-            historicalTradeTopicCount = freshReport.historicalTradeTopicCount,
+            historicalTradeTopicCount = mergedTradeCount,
             exposureSearchHits = mergedHits,
             searchSucceeded = mergedSearchSucceeded,
             localNote = freshReport.localNote,
             profileSucceeded = freshReport.profileSucceeded,
             registrationDurationLabel = freshReport.registrationDurationLabel,
             exposureCheckScope = mergedScope,
+            scannedTopicsCount = mergedScannedCount,
+            hasMoreTopicPages = mergedHasMoreTopicPages,
         )
         return freshReport.copy(
+            historicalTradeTopicCount = mergedTradeCount,
+            recentTradeTopics = mergedTradeTopics,
             exposureSearchHits = mergedHits,
             searchSucceeded = mergedSearchSucceeded,
             searchFailureReason = if (mergedSearchSucceeded) null else freshReport.searchFailureReason,
             exposureCheckScope = mergedScope,
             riskAssessment = assessment,
+            scannedTopicsCount = mergedScannedCount,
+            scannedTopicPages = mergedScannedPages,
+            hasMoreTopicPages = mergedHasMoreTopicPages,
         )
     }
 
@@ -1037,8 +1143,11 @@ class SellerTrustRepositoryImpl internal constructor(
         val resolvedUid = aggregated.targetUid
         val resolvedUsername = aggregated.canonicalUsername.ifBlank { fallbackUsername }
 
+        val topicsOutcome = aggregated.topicsResult.getOrNull()
         val topicsSucceeded = aggregated.topicsResult.isSuccess
-        val allUserTopics = aggregated.topicsResult.getOrNull().orEmpty()
+        val allUserTopics = topicsOutcome?.topics.orEmpty()
+        val scannedTopicPages = topicsOutcome?.pagesScanned ?: 0
+        val hasMoreTopicPages = topicsOutcome?.hasMorePages == true
         val tradeTopics = allUserTopics.filter(TrustRiskEvaluator::isTradeTopic)
 
         val candidates = mutableListOf<ExposureCandidate>()
@@ -1095,6 +1204,8 @@ class SellerTrustRepositoryImpl internal constructor(
             profileSucceeded = profileSucceeded,
             registrationDurationLabel = tenure.durationLabel,
             exposureCheckScope = exposureCheckScope,
+            scannedTopicsCount = allUserTopics.size,
+            hasMoreTopicPages = hasMoreTopicPages,
         )
 
         return SellerTrustReport(
@@ -1122,6 +1233,9 @@ class SellerTrustRepositoryImpl internal constructor(
             isFromCache = false,
             fetchStatus = TrustFetchStatus.FRESH,
             exposureCheckScope = exposureCheckScope,
+            scannedTopicsCount = allUserTopics.size,
+            scannedTopicPages = scannedTopicPages,
+            hasMoreTopicPages = hasMoreTopicPages,
         )
     }
 
@@ -1139,11 +1253,265 @@ class SellerTrustRepositoryImpl internal constructor(
             profileSucceeded = report.profileSucceeded,
             registrationDurationLabel = report.registrationDurationLabel,
             exposureCheckScope = report.exposureCheckScope,
+            scannedTopicsCount = report.scannedTopicsCount,
+            hasMoreTopicPages = report.hasMoreTopicPages,
         )
         return report.copy(
             localNote = note,
             riskAssessment = nextAssessment,
         )
+    }
+
+    private suspend fun scanSellerTopicsInitial(
+        targetUid: Long,
+        totalTopicsHint: Int?,
+        siteHost: String,
+        governedCall: suspend (Int) -> Result<SellerTopicsPage>,
+    ): Result<TopicsScanOutcome> {
+        val maxPagesBudget = maxAutoTopicPages.coerceAtLeast(1)
+        val expectedMaxPages = totalTopicsHint
+            ?.takeIf { it > 0 }
+            ?.let { (it + USER_TOPICS_PAGE_SIZE - 1) / USER_TOPICS_PAGE_SIZE }
+        val targetEndPage = if (expectedMaxPages != null) {
+            minOf(maxPagesBudget, expectedMaxPages)
+        } else {
+            maxPagesBudget
+        }.coerceAtLeast(1)
+
+        val deduped = LinkedHashMap<Long, TopicSummary>()
+        var pagesScanned = 0
+        var hasMore = false
+
+        for (page in 1..targetEndPage) {
+            if (page > 1) {
+                val now = clockMillis()
+                if (rateLimiter.getActiveCooldownUntil(siteHost, now) > now) {
+                    hasMore = true
+                    break
+                }
+            }
+
+            val pageResult = governedCall(page)
+            val pageData = pageResult.getOrNull()
+            if (pageData == null) {
+                if (page == 1) {
+                    return Result.failure(
+                        pageResult.exceptionOrNull()
+                            ?: IllegalStateException("加载卖家主题列表失败"),
+                    )
+                }
+                // Preserve already-scanned pages gracefully on transient/rate-limit failure on page >= 2
+                hasMore = true
+                break
+            }
+
+            pagesScanned = page
+            for (topic in pageData.topics) {
+                if (topic.id > 0L && !deduped.containsKey(topic.id)) {
+                    deduped[topic.id] = topic
+                }
+            }
+
+            val moreAvailable = pageData.hasMore &&
+                pageData.topics.isNotEmpty() &&
+                (expectedMaxPages == null || page < expectedMaxPages)
+            if (!moreAvailable) {
+                hasMore = false
+                break
+            }
+            hasMore = true
+        }
+
+        return Result.success(
+            TopicsScanOutcome(
+                topics = deduped.values.toList(),
+                pagesScanned = pagesScanned,
+                hasMorePages = hasMore,
+            ),
+        )
+    }
+
+    private suspend fun executeScanMoreTopics(
+        fallbackBase: SellerTrustReport,
+        targetUid: Long,
+    ): SellerTrustReport {
+        val latestBase = getCachedReportOnly(uid = targetUid, usernameHint = fallbackBase.username)
+            ?: fallbackBase
+        if (!latestBase.topicsSucceeded || !latestBase.hasMoreTopicPages) {
+            return latestBase.copy(
+                topicScanCooldownUntilEpochMillis = 0L,
+                topicScanNoticeMessage = null,
+            )
+        }
+
+        val siteHost = remoteDataSource.siteHost
+        val startPage = (latestBase.scannedTopicPages + 1).coerceAtLeast(2)
+        val batchPages = scanMoreTopicPages.coerceAtLeast(1)
+        val expectedMaxPages = latestBase.totalTopicsCount
+            ?.takeIf { it > 0 }
+            ?.let { (it + USER_TOPICS_PAGE_SIZE - 1) / USER_TOPICS_PAGE_SIZE }
+
+        if (expectedMaxPages != null && startPage > expectedMaxPages) {
+            val doneReport = latestBase.copy(
+                hasMoreTopicPages = false,
+                topicScanCooldownUntilEpochMillis = 0L,
+                topicScanNoticeMessage = null,
+            )
+            persistUpdatedTopicsReport(doneReport, clockMillis())
+            return doneReport
+        }
+
+        val targetEndPage = if (expectedMaxPages != null) {
+            minOf(startPage + batchPages - 1, expectedMaxPages)
+        } else {
+            startPage + batchPages - 1
+        }
+
+        val newlyFetched = LinkedHashMap<Long, TopicSummary>()
+        var lastSucceededPage = latestBase.scannedTopicPages
+        var stillHasMore = true
+        var stopError: Throwable? = null
+
+        for (page in startPage..targetEndPage) {
+            val now = clockMillis()
+            if (rateLimiter.getActiveCooldownUntil(siteHost, now) > now) {
+                stillHasMore = true
+                break
+            }
+            val pageData: SellerTopicsPage = try {
+                rateLimiter.execute(host = siteHost) {
+                    remoteDataSource.fetchSellerTopicsPage(targetUid, page)
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                stopError = t
+                stillHasMore = true
+                break
+            }
+
+            lastSucceededPage = page
+            for (topic in pageData.topics) {
+                if (topic.id > 0L && !newlyFetched.containsKey(topic.id)) {
+                    newlyFetched[topic.id] = topic
+                }
+            }
+
+            val moreAvailable = pageData.hasMore &&
+                pageData.topics.isNotEmpty() &&
+                (expectedMaxPages == null || page < expectedMaxPages)
+            if (!moreAvailable) {
+                stillHasMore = false
+                break
+            }
+            stillHasMore = true
+        }
+
+        val finishedNow = clockMillis()
+        val cooldownUntil = maxOf(
+            rateLimiter.getActiveCooldownUntil(siteHost, finishedNow),
+            (stopError as? SellerTrustRateLimitedException)?.cooldownUntilEpochMillis ?: 0L,
+            (stopError as? SellerTrustTimeoutException)?.cooldownUntilEpochMillis ?: 0L,
+        )
+
+        if (lastSucceededPage <= latestBase.scannedTopicPages && stopError != null) {
+            return latestBase.copy(
+                topicScanCooldownUntilEpochMillis = cooldownUntil,
+                topicScanNoticeMessage = formatTopicScanFailureReason(stopError, cooldownUntil, finishedNow),
+            )
+        }
+
+        val existingRecentIds = latestBase.recentTradeTopics.map { it.id }.toSet()
+        val newTradeTopics = newlyFetched.values
+            .filter(TrustRiskEvaluator::isTradeTopic)
+            .filterNot { it.id in existingRecentIds }
+
+        val mergedTradeCount = latestBase.historicalTradeTopicCount + newTradeTopics.size
+        val mergedRecentTrades = (latestBase.recentTradeTopics + newTradeTopics)
+            .distinctBy { it.id }
+            .take(MAX_RECENT_TRADE_TOPICS)
+        val mergedScannedCount = maxOf(
+            latestBase.scannedTopicsCount + newlyFetched.size,
+            mergedTradeCount,
+        )
+        val latestNote = if (targetUid > 0L) noteStore.getNote(targetUid) else latestBase.localNote
+        val updatedAssessment = TrustRiskEvaluator.evaluate(
+            rankLevel = latestBase.rankLevel,
+            registrationDays = latestBase.registrationDays,
+            historicalTradeTopicCount = mergedTradeCount,
+            exposureSearchHits = latestBase.exposureSearchHits,
+            searchSucceeded = latestBase.searchSucceeded,
+            localNote = latestNote,
+            profileSucceeded = latestBase.profileSucceeded,
+            registrationDurationLabel = latestBase.registrationDurationLabel,
+            exposureCheckScope = latestBase.exposureCheckScope,
+            scannedTopicsCount = mergedScannedCount,
+            hasMoreTopicPages = stillHasMore,
+        )
+
+        val partialNotice = if (stopError != null) {
+            formatTopicScanFailureReason(stopError, cooldownUntil, finishedNow)
+        } else {
+            null
+        }
+
+        val updatedReport = latestBase.copy(
+            historicalTradeTopicCount = mergedTradeCount,
+            recentTradeTopics = mergedRecentTrades,
+            localNote = latestNote,
+            riskAssessment = updatedAssessment,
+            scannedTopicsCount = mergedScannedCount,
+            scannedTopicPages = lastSucceededPage,
+            hasMoreTopicPages = stillHasMore,
+            topicScanCooldownUntilEpochMillis = cooldownUntil.takeIf { it > finishedNow } ?: 0L,
+            topicScanNoticeMessage = partialNotice,
+            fetchedAtEpochMillis = finishedNow,
+            isFromCache = false,
+            fetchStatus = TrustFetchStatus.FRESH,
+        )
+
+        persistUpdatedTopicsReport(updatedReport, finishedNow)
+        return updatedReport
+    }
+
+    private suspend fun persistUpdatedTopicsReport(
+        report: SellerTrustReport,
+        nowMillis: Long,
+    ) {
+        val keys = buildList {
+            if (report.uid > 0L) add(buildCacheKey(uid = report.uid, username = report.username))
+            if (report.username.isNotBlank()) add(buildCacheKey(uid = 0L, username = report.username))
+        }.distinct()
+        if (keys.isNotEmpty() && report.anyRemoteSucceeded) {
+            val isFullSuccess = report.profileSucceeded && report.topicsSucceeded && report.searchSucceeded
+            val ttlMillis = if (isFullSuccess) cacheTtlMillis else minOf(partialCacheTtlMillis, cacheTtlMillis)
+            cacheStore.put(
+                keys = keys,
+                report = report,
+                ttlMillis = ttlMillis,
+                isNegative = false,
+                nowMillis = nowMillis,
+            )
+        }
+    }
+
+    private fun formatTopicScanFailureReason(
+        failure: Throwable?,
+        cooldownUntil: Long,
+        nowMillis: Long,
+    ): String {
+        val remSec = ((cooldownUntil - nowMillis + 999L) / 1_000L).coerceAtLeast(1L)
+        return when (failure) {
+            is SellerTrustRateLimitedException ->
+                "触发限流保护，已保存当前进度，请约 ${remSec} 秒后继续扫描"
+            is SellerTrustTimeoutException, is SocketTimeoutException ->
+                "加载更早主题超时，已保存当前进度，可稍后继续扫描"
+            is TopicAccessException.CloudflareChallengeRequired ->
+                "触发安全验证，更早主题暂未加载完成"
+            is TopicAccessException.SignInRequired ->
+                "请先登录账号后再扫描更早主题"
+            else -> failure?.message?.takeIf { it.isNotBlank() } ?: "更早主题加载受阻，请稍后重试"
+        }
     }
 
     private fun firstRelevantException(aggregated: AggregationResult): Throwable? {
@@ -1273,11 +1641,17 @@ class SellerTrustRepositoryImpl internal constructor(
         else -> ""
     }
 
+    private data class TopicsScanOutcome(
+        val topics: List<TopicSummary>,
+        val pagesScanned: Int,
+        val hasMorePages: Boolean,
+    )
+
     private data class AggregationResult(
         val targetUid: Long,
         val canonicalUsername: String,
         val profileResult: Result<UserProfile>,
-        val topicsResult: Result<List<TopicSummary>>,
+        val topicsResult: Result<TopicsScanOutcome>,
         val exposeBoardResult: Result<FeedPageResult>?,
         val localNote: LocalSellerNote?,
     )
@@ -1316,7 +1690,14 @@ class SellerTrustRepositoryImpl internal constructor(
         /** Base cooldown on `/search` 429/503 rate limits: 30 seconds. */
         const val DEFAULT_SEARCH_BASE_COOLDOWN_MILLIS: Long = 30_000L
 
-        const val MAX_RECENT_TRADE_TOPICS: Int = 5
+        /** Default automatic `list-discussions` pages scanned on initial open: 6 pages (up to 90 topics). */
+        const val DEFAULT_MAX_AUTO_TOPIC_PAGES: Int = 6
+
+        /** Additional `list-discussions` pages scanned per explicit "继续扫描更早主题" tap: 8 pages (+120 topics). */
+        const val DEFAULT_SCAN_MORE_TOPIC_PAGES: Int = 8
+
+        private const val USER_TOPICS_PAGE_SIZE: Int = 15
+        const val MAX_RECENT_TRADE_TOPICS: Int = 10
         private const val MAX_PREFETCH_QUEUE_SIZE: Int = 16
         private const val NODESEEK_ORIGIN: String = "https://www.nodeseek.com"
         private val PLACEHOLDER_USER_REGEX = Regex("^(?:用户|成员|user)\\s*#?\\d+$", RegexOption.IGNORE_CASE)

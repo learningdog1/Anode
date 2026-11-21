@@ -725,6 +725,159 @@ class SellerTrustRepositoryImplTest {
         assertEquals("MentionedSeller", report.username)
         assertEquals(5, report.rankLevel)
         assertEquals(TrustRiskLevel.NORMAL_CLEAR, report.riskAssessment.level)
+        assertNotNull(repo.observeCachedReport(uid = 0L, usernameHint = "MentionedSeller").first())
+    }
+
+    @Test
+    fun inspectSeller_scansMultipleDiscussionPagesWithKnownCategoryEnrichment_andSupportsScanMoreContinuation() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val requestedPages = mutableListOf<Int>()
+
+        // Seller has 135 total posts (9 pages of 15):
+        // - Page 1: 14 daily chat posts + 1 categoryless post #7001 ("DMIT HKG Pro 36.9刀") known via local feed cache
+        // - Page 2: 13 daily chat posts + 2 post-sale edited / unbracketed trade posts ("已出", "出个 Claw 4刀")
+        // - Pages 3..6: daily chat posts (completes initial 6-page = 90-topic auto-scan window)
+        // - Pages 7..9: 3 older historical trade posts uncovered via scanMoreSellerTradeTopics()
+        val userRepo = FakeUserRepository(
+            onGetProfile = { uid ->
+                Result.success(
+                    sampleProfile(
+                        uid = uid,
+                        username = "ActiveTrader",
+                        coins = 2500,
+                        joinedAtIso = "2023-08-01T00:00:00Z",
+                        topicCount = 135,
+                    ),
+                )
+            },
+            onGetTopics = { uid, page ->
+                requestedPages += page
+                val baseId = page * 100L
+                val pageTopics = when (page) {
+                    1 -> listOf(
+                        sampleTopic(
+                            id = 7001L,
+                            title = "DMIT HKG Pro 36.9刀 2026-12到期",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        ),
+                    ) + (2..15).map { idx ->
+                        sampleTopic(
+                            id = baseId + idx,
+                            title = "日常水贴讨论 #$page-$idx",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        )
+                    }
+
+                    2 -> listOf(
+                        sampleTopic(
+                            id = 7002L,
+                            title = "已出",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        ),
+                        sampleTopic(
+                            id = 7003L,
+                            title = "出个 Claw Cloud JP 4刀",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        ),
+                    ) + (3..15).map { idx ->
+                        sampleTopic(
+                            id = baseId + idx,
+                            title = "Linux 内核参数调优记录 #$page-$idx",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        )
+                    }
+
+                    in 3..6 -> (1..15).map { idx ->
+                        sampleTopic(
+                            id = baseId + idx,
+                            title = "社区日常签到记录 #$page-$idx",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        )
+                    }
+
+                    in 7..9 -> listOf(
+                        sampleTopic(
+                            id = 8000L + page,
+                            title = "RN 10.99刀 65元出 #$page",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        ),
+                    ) + (2..15).map { idx ->
+                        sampleTopic(
+                            id = baseId + idx,
+                            title = "早期技术水贴 #$page-$idx",
+                            categorySlug = "",
+                            categoryName = "",
+                            authorId = uid,
+                            authorName = "ActiveTrader",
+                        )
+                    }
+
+                    else -> emptyList()
+                }
+                Result.success(pageTopics to (page < 9))
+            },
+        )
+        val forumRepo = FakeForumRepository(
+            knownTopics = mapOf(
+                7001L to sampleTopic(
+                    id = 7001L,
+                    title = "DMIT HKG Pro 36.9刀 2026-12到期",
+                    categorySlug = "trade",
+                    categoryName = "交易",
+                    authorId = 6600L,
+                    authorName = "ActiveTrader",
+                ),
+            ),
+        )
+
+        val repo = SellerTrustRepositoryImpl(
+            userRepository = userRepo,
+            forumRepository = forumRepo,
+            notesFile = File(tempFolder.root, "multi_page_notes.json"),
+            ioDispatcher = dispatcher,
+            clockMillis = { baseClockMillis + testScheduler.currentTime },
+            zoneId = shanghaiZone,
+        )
+
+        // 1. Initial inspection scans pages 1..6 (90 topics), enriching #7001 from local cache + matching #7002/#7003
+        val initial = repo.inspectSeller(uid = 6600L, usernameHint = "ActiveTrader")
+        assertEquals(listOf(1, 2, 3, 4, 5, 6), requestedPages)
+        assertEquals(6, initial.scannedTopicPages)
+        assertEquals(90, initial.scannedTopicsCount)
+        assertTrue(initial.hasMoreTopicPages)
+        assertEquals(3, initial.historicalTradeTopicCount)
+        assertEquals(listOf(7001L, 7002L, 7003L), initial.recentTradeTopics.map { it.id })
+
+        // 2. Explicit continuation resumes at page 7..9 without re-requesting pages 1..6!
+        val complete = repo.scanMoreSellerTradeTopics(uid = 6600L, usernameHint = "ActiveTrader")
+        assertEquals(listOf(1, 2, 3, 4, 5, 6, 7, 8, 9), requestedPages)
+        assertEquals(9, complete.scannedTopicPages)
+        assertEquals(135, complete.scannedTopicsCount)
+        assertFalse(complete.hasMoreTopicPages)
+        assertTrue(complete.scannedAllTopics)
+        assertEquals(6, complete.historicalTradeTopicCount)
+        assertEquals(6, complete.recentTradeTopics.size)
     }
 
     private fun sampleProfile(
@@ -795,9 +948,12 @@ class SellerTrustRepositoryImplTest {
         private val onSearch: suspend (String, String) -> Result<FeedPageResult> = { _, _ ->
             Result.success(FeedPageResult(topics = emptyList()))
         },
+        private val knownTopics: Map<Long, TopicSummary> = emptyMap(),
     ) : ForumRepository {
         override fun observeCategories(): Flow<List<Category>> = emptyFlow()
         override suspend fun refreshCategories(force: Boolean): Result<List<Category>> = Result.success(emptyList())
+        override suspend fun resolveKnownTopics(topicIds: Collection<Long>): Map<Long, TopicSummary> =
+            knownTopics.filterKeys { it in topicIds }
         override suspend fun getFeed(categorySlug: String, sort: FeedSort, page: Int, includeBlocked: Boolean, forceRefresh: Boolean): Result<FeedPageResult> =
             onGetFeed(categorySlug, sort, page)
         override suspend fun getCuratedFeed(page: Int, forceRefresh: Boolean): Result<FeedPageResult> =

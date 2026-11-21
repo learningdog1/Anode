@@ -126,18 +126,32 @@ internal fun PostCommentDto.toDomainFloorComment(topicOpUid: Long?): FloorCommen
 }
 
 internal fun ParsedThreadPageDto.toDomainDetailPage(): TopicDetailPage {
+    val opReplyPoster = replies.firstOrNull { it.poster.isOp == true }?.poster
     val opUid = postData.op?.resolvedUid?.takeIf { it > 0L }
         ?: openingComment?.poster?.resolvedUid?.takeIf { it > 0L }
+        ?: opReplyPoster?.resolvedUid?.takeIf { it > 0L }
         ?: 0L
     val opName = postData.op?.name?.takeIf { it.isNotBlank() }
-        ?: openingComment?.poster?.name.orEmpty()
+        ?: openingComment?.poster?.name?.takeIf { it.isNotBlank() }
+        ?: opReplyPoster?.name.orEmpty()
     val opAvatar = avatarUrlForUid(
         uid = opUid,
-        explicitAvatar = postData.op?.avatar ?: openingComment?.poster?.avatar,
+        explicitAvatar = postData.op?.avatar ?: openingComment?.poster?.avatar ?: opReplyPoster?.avatar,
     )
-    val opBadges = openingComment?.poster?.roles
+    val opBadges = (openingComment?.poster?.roles ?: opReplyPoster?.roles)
         ?.map { AuthorBadge(code = it.name, label = it.displayText) }
         .orEmpty()
+
+    val resolvedCategorySlug = postData.category.trim().takeIf { it.isNotEmpty() }
+        ?: postData.categoryLink?.substringAfterLast('/', missingDelimiterValue = "")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: postData.categoryWord.trim().takeIf { it.isNotEmpty() }?.let { word ->
+            Category.DEFAULT_CATEGORIES.firstOrNull { it.slug.isNotEmpty() && it.name.equals(word, ignoreCase = true) }?.slug
+        }.orEmpty()
+    val resolvedCategoryName = postData.categoryWord.trim().ifBlank {
+        resolvedCategorySlug.takeIf { it.isNotEmpty() }?.let { slug ->
+            Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == slug }?.name
+        }.orEmpty()
+    }
 
     val domainOpening = openingComment?.toDomainFloorComment(opUid)
     val domainReplies = replies.map { it.toDomainFloorComment(opUid) }
@@ -145,10 +159,8 @@ internal fun ParsedThreadPageDto.toDomainDetailPage(): TopicDetailPage {
     return TopicDetailPage(
         topicId = postData.postId,
         title = postData.title,
-        categorySlug = postData.category,
-        categoryName = postData.categoryWord.ifBlank {
-            Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == postData.category }?.name.orEmpty()
-        },
+        categorySlug = resolvedCategorySlug,
+        categoryName = resolvedCategoryName,
         author = FloorAuthor(
             uid = opUid,
             username = opName,

@@ -163,6 +163,45 @@ class TrustRiskEvaluatorTest {
         assertFalse(TrustRiskEvaluator.isTradeTopic(topic(id = 7, title = "今天天气不错水一贴", categorySlug = "daily", categoryName = "日常")))
     }
 
+    @Test
+    fun isTradeTopic_handlesCategorylessListDiscussionsTitles_includingPostSaleEditsAndRejectingFalsePositives() {
+        fun rawDiscussion(id: Long, title: String) = topic(
+            id = id,
+            title = title,
+            categorySlug = "",
+            categoryName = "",
+        )
+
+        // Real-world NodeSeek trade titles where /api/content/list-discussions omits category
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(10, "出 DMIT HKG Pro 36.9刀")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(11, "收个 Claw Cloud JP 4刀")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(12, "出一个 netcup RS1000 G11")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(13, "诚收 搬瓦工 DC6 46刀")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(14, "出瓦工 MEGABOX Pro")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(15, "RN 2024黑五 10.99刀 65元出")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(16, "DMIT LAX Pro 39.9刀 280R")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(17, "已出")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(18, "出了，封贴")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(19, "DMIT HKG Pro 36.9 已出")))
+        assertTrue(TrustRiskEvaluator.isTradeTopic(rawDiscussion(20, "（已收）谢谢老哥")))
+
+        // Non-trade tech/daily/exposure titles must NOT false-positive
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(30, "出现 502 Bad Gateway 错误怎么排查")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(31, "出海业务收款通道对比讨论")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(32, "香港三网回程与出口带宽晚高峰测评")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(33, "收到甲骨文免费号升级成功邮件")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(34, "测评结果已出，附 YABS 跑分")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(35, "本月 AWS 账单已出")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(36, "出一个难题考考大家")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(37, "曝光骗子先款原邮不给机")))
+        assertFalse(TrustRiskEvaluator.isTradeTopic(rawDiscussion(38, "2U服务器机房托管噪音实测")))
+        assertFalse(
+            TrustRiskEvaluator.isTradeTopic(
+                topic(id = 39, title = "关于先款带原邮被骗经过", categorySlug = "expose", categoryName = "曝光"),
+            ),
+        )
+    }
+
     // ── Exposure Hit Matching, Noise Filtering & Deduplication ──
 
     @Test

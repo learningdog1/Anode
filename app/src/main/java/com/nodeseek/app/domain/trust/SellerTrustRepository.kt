@@ -23,10 +23,28 @@ interface SellerTrustRepository {
     ): SellerTrustReport = inspectSeller(uid = uid, usernameHint = usernameHint, forceRefresh = true)
 
     /**
+     * Scans the next paced batch of older user discussion pages (`list-discussions`) to uncover
+     * historical trade posts beyond the initial automatic scan window without triggering rate limits.
+     */
+    suspend fun scanMoreSellerTradeTopics(
+        uid: Long,
+        usernameHint: String = "",
+    ): SellerTrustReport = inspectSeller(uid = uid, usernameHint = usernameHint, forceRefresh = false)
+
+    /**
      * Observes cached positive/partial [SellerTrustReport] snapshots for [uid] from memory/disk
      * without ever triggering remote HTTP requests. Safe for inline list/floor badges.
      */
     fun observeCachedReport(uid: Long): Flow<SellerTrustReport?> = flowOf(null)
+
+    /**
+     * Observes cached positive/partial [SellerTrustReport] snapshots by [uid] or fallback [usernameHint]
+     * without triggering remote HTTP requests.
+     */
+    fun observeCachedReport(
+        uid: Long,
+        usernameHint: String,
+    ): Flow<SellerTrustReport?> = observeCachedReport(uid)
 
     /**
      * Reads a cached [SellerTrustReport] from memory/disk if available, never making network calls.

@@ -45,6 +45,7 @@ import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.pulsePressScale
+import kotlinx.coroutines.flow.flowOf
 
 @Immutable
 internal data class TrustVisualTone(
@@ -191,22 +192,27 @@ fun SellerTrustQuickBadge(
     val isInspection = LocalInspectionMode.current
     var cachedReport: SellerTrustReport? = null
 
+    val cleanHint = usernameHint.trim()
     val resolvedTag: TrustTag = if (tagOverride != null) {
         tagOverride
-    } else if (!isInspection && uid > 0L) {
+    } else if (!isInspection && (uid > 0L || cleanHint.isNotEmpty())) {
         val repo = rememberSellerTrustRepository(override = repository)
-        val noteFlow = remember(repo, uid) { repo.observeLocalNote(uid) }
-        val cachedFlow = remember(repo, uid) { repo.observeCachedReport(uid) }
-        val localNote by noteFlow.collectAsStateWithLifecycle(initialValue = null)
+        val cachedFlow = remember(repo, uid, cleanHint) { repo.observeCachedReport(uid = uid, usernameHint = cleanHint) }
         val observedCached by cachedFlow.collectAsStateWithLifecycle(initialValue = null)
         cachedReport = observedCached
 
+        val effectiveNoteUid = if (uid > 0L) uid else (observedCached?.uid ?: 0L)
+        val noteFlow = remember(repo, effectiveNoteUid) {
+            if (effectiveNoteUid > 0L) repo.observeLocalNote(effectiveNoteUid) else flowOf(null)
+        }
+        val localNote by noteFlow.collectAsStateWithLifecycle(initialValue = null)
+
         if (enqueueIfUncached && localNote == null && observedCached == null) {
-            LaunchedEffect(repo, uid, usernameHint, enqueueIfUncached) {
-                repo.enqueueInspect(uid = uid, usernameHint = usernameHint)
+            LaunchedEffect(repo, uid, cleanHint, enqueueIfUncached) {
+                repo.enqueueInspect(uid = uid, usernameHint = cleanHint)
             }
         }
-        localNote?.tag ?: TrustTag.NONE
+        localNote?.tag ?: observedCached?.localNote?.tag ?: TrustTag.NONE
     } else {
         TrustTag.NONE
     }

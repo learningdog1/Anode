@@ -59,16 +59,77 @@ object TrustRiskEvaluator {
     private val RELATIVE_CN_REGEX = Regex("^(\\d+)\\s*(秒|分钟|分|小时|时|天|日|周|星期|个月|月|年)前$")
     private val RELATIVE_EN_REGEX = Regex("^(\\d+)\\s*(second|sec|minute|min|hour|hr|day|week|month|year)s?\\s+ago$", RegexOption.IGNORE_CASE)
 
+    private val EXPOSURE_TITLE_PREFIX_REGEX = Regex(
+        """^(?:[\[\【(（「『]\s*)?(?:曝光|挂人|避雷|维权|仲裁|被骗|骗子)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val CLOSED_TRADE_ONLY_REGEX = Regex(
+        """^(?:[\[\【(（「『]?\s*(?:已出|出了|已售|已秒|秒出|已收|收到了|已收到|已交易|交易完成)\s*[\]\】)）」』]?)(?:[\s,，.。!！~～/|\-—:：]*(?:封贴|封帖|结贴|结帖|勿念|勿扰|勿pm|谢谢|感谢|老哥|老板|mjj|bd|绑定)*)*$""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val BRACKETED_TRADE_TAG_REGEX = Regex(
+        """[\[\【(（「『]\s*(?:出|收|卖|买|交易|转|转让|已出|已收|已售|已秒|求购|诚收|急出|急收|慢收|好价出|低价出|换|互换|换鸡)\s*[\]\】)）」』]""",
+    )
+
     private val TRADE_TITLE_PHRASES: List<String> = listOf(
-        "[出]", "【出】", "[收]", "【收】",
-        "[卖]", "【卖】", "[买]", "【买】",
-        "[交易]", "【交易】", "[转]", "【转】", "[转让]", "【转让】",
-        "剩余价值", "明盘", "原邮", "原油", "带邮", "出鸡", "收鸡", "出小鸡", "收小鸡",
-        "出一台", "收一台", "折价出", "溢价出", "溢价收", "平价出",
+        "剩余价值", "明盘", "暗盘", "原邮", "原油", "带邮", "改邮",
+        "包push", "不包push", "走中介", "中介费", "先款", "先货", "口令红包",
+        "出鸡", "收鸡", "出小鸡", "收小鸡", "出母鸡", "换鸡", "出独服", "收独服",
+        "出瓦工", "收瓦工", "出搬瓦工", "收搬瓦工", "出大妈", "收大妈", "出绿云", "收绿云",
+        "出斯巴达", "收斯巴达", "出爪云", "收爪云", "出甲骨文", "收甲骨文", "出龟壳", "收龟壳",
+        "出域名", "收域名", "出米", "收米", "出邀请码", "收邀请码", "出闲置", "收闲置", "出传家宝", "收传家宝",
+        "出一台", "收一台", "出两台", "收两台", "出几台", "收几台",
+        "折价出", "折价收", "溢价出", "溢价收", "平价出", "平价收",
+        "骨折出", "亏本出", "回血出", "清仓出", "打包出", "原价出",
+        "好价出", "好价收", "低价出", "高价收", "急出", "急收", "慢收",
+        "佛系出", "佛系收", "随缘出", "随缘收", "诚收", "诚心收", "诚心出",
+        "求购", "出售", "秒出", "交易完成", "已交易",
+    )
+
+    private val QUANTIFIER_TRADE_REGEX = Regex(
+        """(?:出|收)一?(?:个|台|只|枚|套)(?!\s*(?:主意|难题|问题|教程|测评|评测|脚本|方案|视频|文章|办法|招|坑|故障|bug|error))""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val LEADING_TRADE_VERB_REGEX = Regex(
+        """^(?:继续|再|长期|大量|无限)?[出收](?:[\s:：/\-]+|[A-Za-z0-9])""",
+    )
+
+    private val LEADING_NON_TRADE_VERB_REGEX = Regex(
+        """^(?:出\s*(?:bug|error|问题|故障|事|错|状况)|收\s*(?:email|mail|sms|验证码|邮件|信件))""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val LEADING_SOLD_STATUS_REGEX = Regex(
+        """^(?:已出|已收|已售|已秒|出了|收到了)(?:[\s,，.。!！/|\-—:：]|封贴|封帖)""",
+    )
+
+    private val TRAILING_SOLD_STATUS_REGEX = Regex(
+        """(?:[\s,，.。!！/|\-—:：~～A-Za-z0-9刀元块uUrR])(?:已出|已收|已售|已秒)(?:[\s,，.。!！~～/|\-—:：]*(?:封贴|封帖|结贴|结帖|勿念|勿扰|勿pm|谢谢|感谢)*)?$""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val NON_TRADE_YICHU_REGEX = Regex(
+        """(?:结果|公告|版本|更新|补丁|名单|账单|报告|教程|评测|测评|消息|通知|政策|规定|细则|脚本|方案)\s*已出""",
+    )
+
+    private val PRICE_VERB_TRADE_REGEX = Regex(
+        """(?:¥|￥|\$)?\d+(?:\.\d+)?\s*(?:元|块|刀|u|U|r|R|rmb|RMB|cny|CNY|usd|USD|hkd|HKD|欧|镑|折)?\s*(?:包邮|包push|不包push|改邮|带邮|原邮)?\s*[出收](?![现海口发来错品席身生版差站墙狱到藏益费录入拾缩敛件信割尾官])""",
+    )
+
+    private val RMB_SLANG_PRICE_REGEX = Regex(
+        """(?<![A-Za-z0-9_-])\d{2,5}(?:\.\d{1,2})?\s*[rR](?![A-Za-z0-9_])""",
+    )
+
+    private val VPS_BILLING_CONTEXT_REGEX = Regex(
+        """(?:刀|年付|月付|季付|三年付|到期|剩余|瓦工|搬瓦工|大妈|绿云|斯巴达|爪云|dmit|bwg|racknerd|\brn\b|claw|netcup|ovh|vir|cc|vps)""",
+        RegexOption.IGNORE_CASE,
     )
 
     private val PUSH_WORD_REGEX = Regex("(?<![A-Za-z0-9_])push(?![A-Za-z0-9_])", RegexOption.IGNORE_CASE)
-    private val NON_TRADE_PUSH_REGEX = Regex("\\b(?:git|docker|branch|github|gitlab|code|commit|force)\\s+push\\b", RegexOption.IGNORE_CASE)
+    private val NON_TRADE_PUSH_REGEX = Regex("\\b(?:git|docker|branch|github|gitlab|code|commit|force|web|apns|fcm)\\s+push\\b", RegexOption.IGNORE_CASE)
 
     private val SCAMMER_SYNONYMS: List<String> = listOf("骗子", "诈骗", "被骗", "行骗", "骗钱", "骗鸡", "骗走", "老赖", "骗术")
     private val RUNAWAY_SYNONYMS: List<String> = listOf("跑路", "卷款", "失联", "收款拉黑", "删号跑")
@@ -296,15 +357,46 @@ object TrustRiskEvaluator {
 
     /**
      * Determines whether a user's posted [TopicSummary] belongs to trading activity.
+     *
+     * Note: NodeSeek's `/api/content/list-discussions` returns `{ post_id, title, rank }` without
+     * `category`, so when `categorySlug` is unknown this classifier also matches real-world NodeSeek
+     * unbracketed trade verbs (`出 DMIT...`, `收个...`), price-verb patterns (`280R出`, `60元出`),
+     * and post-sale edited titles (`已出`, `出了 封贴`, `[已出] ...`) while guarding against
+     * exposure reports and technical/daily false positives.
      */
     fun isTradeTopic(topic: TopicSummary): Boolean {
         if (topic.categorySlug.equals("trade", ignoreCase = true)) return true
         if (topic.categoryName.trim() == "交易") return true
+        if (topic.categorySlug.equals("expose", ignoreCase = true) || topic.categoryName.trim() == "曝光") {
+            return false
+        }
 
         val title = topic.title.trim()
         if (title.isEmpty()) return false
+        if (EXPOSURE_TITLE_PREFIX_REGEX.containsMatchIn(title)) return false
+
+        if (CLOSED_TRADE_ONLY_REGEX.matches(title)) return true
+        if (BRACKETED_TRADE_TAG_REGEX.containsMatchIn(title)) return true
 
         if (TRADE_TITLE_PHRASES.any { phrase -> title.contains(phrase, ignoreCase = true) }) {
+            return true
+        }
+
+        if (QUANTIFIER_TRADE_REGEX.containsMatchIn(title)) return true
+
+        if (LEADING_TRADE_VERB_REGEX.containsMatchIn(title) && !LEADING_NON_TRADE_VERB_REGEX.containsMatchIn(title)) {
+            return true
+        }
+
+        if (!NON_TRADE_YICHU_REGEX.containsMatchIn(title) &&
+            (LEADING_SOLD_STATUS_REGEX.containsMatchIn(title) || TRAILING_SOLD_STATUS_REGEX.containsMatchIn(title))
+        ) {
+            return true
+        }
+
+        if (PRICE_VERB_TRADE_REGEX.containsMatchIn(title)) return true
+
+        if (RMB_SLANG_PRICE_REGEX.containsMatchIn(title) && VPS_BILLING_CONTEXT_REGEX.containsMatchIn(title)) {
             return true
         }
 
@@ -478,10 +570,17 @@ object TrustRiskEvaluator {
         profileSucceeded: Boolean = true,
         registrationDurationLabel: String = "",
         exposureCheckScope: ExposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
+        scannedTopicsCount: Int = 0,
+        hasMoreTopicPages: Boolean = false,
     ): TrustRiskAssessment {
         val reasons = mutableListOf<String>()
         var isHighRisk = false
         var isCaution = false
+        val scopeLabel = when {
+            scannedTopicsCount > 0 && !hasMoreTopicPages -> "全部 ${scannedTopicsCount} 篇公开主题"
+            scannedTopicsCount > 0 -> "近 ${scannedTopicsCount} 篇公开主题"
+            else -> "公开主题"
+        }
 
         // ── High-risk RED triggers ──
         if (exposureSearchHits.isNotEmpty()) {
@@ -518,7 +617,7 @@ object TrustRiskEvaluator {
         val clampedRank = rankLevel.coerceIn(0, 6)
         if (clampedRank <= LOW_RANK_THRESHOLD && historicalTradeTopicCount <= 0) {
             isCaution = true
-            reasons += "会员等级较低（Lv.${clampedRank}）且近1页暂无历史交易帖记录"
+            reasons += "会员等级较低（Lv.${clampedRank}）且${scopeLabel}暂无历史交易帖记录"
         }
 
         if (!searchSucceeded) {
@@ -545,7 +644,8 @@ object TrustRiskEvaluator {
                 reasons += "注册时长 ${registrationDurationLabel}，社区存续时间较稳定"
             }
             if (historicalTradeTopicCount > 0) {
-                reasons += "近1页公开主题中存在 ${historicalTradeTopicCount} 篇历史交易帖可供参考"
+                val countDisplay = if (hasMoreTopicPages) "${historicalTradeTopicCount}+" else historicalTradeTopicCount.toString()
+                reasons += "${scopeLabel}中检出 $countDisplay 篇历史交易帖可供参考"
             }
             if (reasons.isEmpty()) {
                 reasons += if (exposureCheckScope == ExposureCheckScope.DEEP_SEARCH) {

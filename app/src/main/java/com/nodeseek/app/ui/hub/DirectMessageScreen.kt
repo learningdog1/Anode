@@ -472,9 +472,10 @@ fun DirectMessageScreen(
                     }
                 },
                 actions = {
-                    if (!isSystemThread && peerUid > 0L) {
+                    if (!isSystemThread && (peerUid > 0L || displayPeerName.isNotBlank())) {
                         SellerTrustQuickBadge(
                             uid = peerUid,
+                            usernameHint = displayPeerName,
                             compact = true,
                             onClick = { showSellerTrustSheet = true },
                             repository = appContainer.sellerTrustRepository,

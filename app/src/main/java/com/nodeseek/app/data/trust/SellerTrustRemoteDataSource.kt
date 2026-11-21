@@ -27,6 +27,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.util.concurrent.TimeUnit
 
+internal data class SellerTopicsPage(
+    val topics: List<TopicSummary>,
+    val hasMore: Boolean,
+)
+
 /**
  * Lightweight remote data source dedicated to Seller Trust checks.
  */
@@ -38,6 +43,13 @@ internal interface SellerTrustRemoteDataSource {
     suspend fun fetchSellerProfile(uid: Long): UserProfile
 
     suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary>
+
+    suspend fun fetchSellerTopicsPage(uid: Long, page: Int): SellerTopicsPage =
+        if (page <= 1) {
+            SellerTopicsPage(topics = fetchSellerTopicsPage1(uid), hasMore = false)
+        } else {
+            SellerTopicsPage(topics = emptyList(), hasMore = false)
+        }
 
     /** Returns an in-memory/disk fresh page-1 `expose` board snapshot from [ForumRepository] if present. */
     fun getCachedExposeBoardPage1(): FeedPageResult? = null
@@ -73,7 +85,35 @@ internal class RepositorySellerTrustRemoteDataSource(
         userRepository.getUserProfile(uid = uid, includeEditableSignature = false).getOrThrow()
 
     override suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary> =
-        userRepository.getUserTopics(uid = uid, page = 1).getOrThrow().first
+        fetchSellerTopicsPage(uid = uid, page = 1).topics
+
+    override suspend fun fetchSellerTopicsPage(uid: Long, page: Int): SellerTopicsPage {
+        val safePage = page.coerceAtLeast(1)
+        val (rawTopics, hasMore) = userRepository.getUserTopics(uid = uid, page = safePage).getOrThrow()
+        val missingCategoryIds = rawTopics
+            .filter { it.categorySlug.isBlank() && it.categoryName.isBlank() }
+            .map { it.id }
+        val knownById = if (missingCategoryIds.isNotEmpty()) {
+            runCatching { forumRepository.resolveKnownTopics(missingCategoryIds) }.getOrDefault(emptyMap())
+        } else {
+            emptyMap()
+        }
+        val enriched = if (knownById.isEmpty()) {
+            rawTopics
+        } else {
+            rawTopics.map { topic ->
+                val known = knownById[topic.id] ?: return@map topic
+                topic.copy(
+                    categorySlug = topic.categorySlug.ifBlank { known.categorySlug },
+                    categoryName = topic.categoryName.ifBlank { known.categoryName },
+                    viewCount = if (topic.viewCount > 0) topic.viewCount else known.viewCount,
+                    replyCount = if (topic.replyCount > 0) topic.replyCount else known.replyCount,
+                    lastActivityIso = topic.lastActivityIso.ifBlank { known.lastActivityIso },
+                )
+            }
+        }
+        return SellerTopicsPage(topics = enriched, hasMore = hasMore)
+    }
 
     override fun getCachedExposeBoardPage1(): FeedPageResult? {
         if (!forumRepository.isFeedFresh("expose", FeedSort.LATEST_REPLY, maxAgeMillis = EXPOSE_BOARD_FRESH_MS)) {
@@ -195,26 +235,48 @@ internal class HttpSellerTrustRemoteDataSource(
         )
     }
 
-    override suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary> = mapTrustRemoteExceptions {
-        val response = apiClient.listUserDiscussions(uid = uid, page = 1)
-        response.resolvedDiscussions.map { row ->
-            val catSlug = row.categorySlug?.trim().orEmpty()
+    override suspend fun fetchSellerTopicsPage1(uid: Long): List<TopicSummary> =
+        fetchSellerTopicsPage(uid = uid, page = 1).topics
+
+    override suspend fun fetchSellerTopicsPage(uid: Long, page: Int): SellerTopicsPage = mapTrustRemoteExceptions {
+        val safePage = page.coerceAtLeast(1)
+        val response = apiClient.listUserDiscussions(uid = uid, page = safePage)
+        val rows = response.resolvedDiscussions
+        val repo = forumRepository
+        val knownById = if (rows.isNotEmpty() && repo != null) {
+            runCatching { repo.resolveKnownTopics(rows.map { it.postId }) }.getOrDefault(emptyMap())
+        } else {
+            emptyMap()
+        }
+        val topics = rows.map { row ->
+            val known = knownById[row.postId]
+            val catSlug = row.categorySlug?.trim()?.takeIf { it.isNotEmpty() }
+                ?: known?.categorySlug?.trim().orEmpty()
             val catName = row.categoryTitle?.trim()?.takeIf { it.isNotEmpty() }
-                ?: Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == catSlug }?.name.orEmpty()
+                ?: known?.categoryName?.trim()?.takeIf { it.isNotEmpty() }
+                ?: catSlug.takeIf { it.isNotEmpty() }?.let { slug ->
+                    Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == slug }?.name
+                }.orEmpty()
             TopicSummary(
                 id = row.postId,
                 title = row.title,
                 categorySlug = catSlug,
                 categoryName = catName,
                 authorId = uid,
-                authorName = row.authorName?.trim().orEmpty(),
+                authorName = row.authorName?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: known?.authorName.orEmpty(),
                 authorAvatarUrl = NodeSeekUrlNormalizer.normalizeNodeSeekUrl("/avatar/$uid.png"),
-                viewCount = row.viewsCount ?: 0,
-                replyCount = row.commentsCount ?: 0,
-                lastActivityIso = row.createdAt?.trim().orEmpty(),
+                viewCount = row.viewsCount ?: known?.viewCount ?: 0,
+                replyCount = row.commentsCount ?: known?.replyCount ?: 0,
+                lastActivityIso = row.createdAt?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: known?.lastActivityIso.orEmpty(),
                 requiredViewLevel = row.rank?.takeIf { it > 0 },
             )
         }
+        SellerTopicsPage(
+            topics = topics,
+            hasMore = response.hasMorePages(currentPage = safePage, defaultPageSize = USER_TOPICS_PAGE_SIZE),
+        )
     }
 
     override fun getCachedExposeBoardPage1(): FeedPageResult? {
@@ -313,6 +375,7 @@ internal class HttpSellerTrustRemoteDataSource(
         const val DEFAULT_READ_TIMEOUT_SECONDS: Long = 10L
         const val DEFAULT_WRITE_TIMEOUT_SECONDS: Long = 10L
         const val DEFAULT_CALL_TIMEOUT_SECONDS: Long = 15L
+        internal const val USER_TOPICS_PAGE_SIZE: Int = 15
         private const val EXPOSE_BOARD_FRESH_MS: Long = 30L * 60L * 1000L
     }
 }

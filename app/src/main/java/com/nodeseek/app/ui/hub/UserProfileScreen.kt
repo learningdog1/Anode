@@ -889,35 +889,48 @@ private fun UserProfileHeroBento(
 
             // ── Primary Action Buttons ──
             if (isOwnProfile) {
-                val editInteraction = remember { MutableInteractionSource() }
-                FilledTonalButton(
-                    onClick = onEditProfile,
-                    interactionSource = editInteraction,
-                    shape = CircleShape,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-                    colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                            alpha = if (isDark) 0.78f else 0.90f,
-                        ),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .pulsePressScale(editInteraction),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Edit,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "编辑个人简介、签名与 README",
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
+                    val editInteraction = remember { MutableInteractionSource() }
+                    FilledTonalButton(
+                        onClick = onEditProfile,
+                        interactionSource = editInteraction,
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
+                                alpha = if (isDark) 0.78f else 0.90f,
+                            ),
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .pulsePressScale(editInteraction),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Edit,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "编辑个人简介、签名与 README",
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    SellerTrustQuickBadge(
+                        uid = profile.uid,
+                        usernameHint = profile.username,
+                        onClick = onInspectTrust,
+                        modifier = Modifier.height(44.dp),
                     )
                 }
             } else if (isSignedIn) {
@@ -1042,6 +1055,7 @@ private fun UserProfileHeroBento(
 
                     SellerTrustQuickBadge(
                         uid = profile.uid,
+                        usernameHint = profile.username,
                         onClick = onInspectTrust,
                         modifier = Modifier.height(44.dp),
                     )
@@ -1054,6 +1068,7 @@ private fun UserProfileHeroBento(
                 ) {
                     SellerTrustQuickBadge(
                         uid = profile.uid,
+                        usernameHint = profile.username,
                         onClick = onInspectTrust,
                         modifier = Modifier.height(40.dp),
                     )

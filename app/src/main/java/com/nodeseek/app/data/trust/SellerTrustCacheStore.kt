@@ -29,7 +29,7 @@ internal data class PersistedTrustCacheEntry(
 
 @Serializable
 private data class PersistedTrustCachePayload(
-    val version: Int = 1,
+    val version: Int = SellerTrustCacheStore.CURRENT_CACHE_SCHEMA_VERSION,
     val entries: List<PersistedTrustCacheEntry> = emptyList(),
 )
 
@@ -65,8 +65,9 @@ internal class SellerTrustCacheStore(
     // Disk index holding entries loaded from or written to disk (allows disk hit even after memory LRU eviction).
     private val diskEntries = LinkedHashMap<String, PersistedTrustCacheEntry>(64, 0.75f, false)
 
-    // Reactive positive/partial cache snapshot indexed by seller UID for zero-network QuickBadge observation.
+    // Reactive positive/partial cache snapshot indexed by seller UID & lowercase username for zero-network QuickBadge observation.
     private val positiveByUidState = MutableStateFlow<Map<Long, PersistedTrustCacheEntry>>(emptyMap())
+    private val positiveByUsernameState = MutableStateFlow<Map<String, PersistedTrustCacheEntry>>(emptyMap())
 
     suspend fun getFresh(
         key: String,
@@ -185,25 +186,48 @@ internal class SellerTrustCacheStore(
         }
     }
 
-    fun observePositiveReportByUid(uid: Long): Flow<SellerTrustReport?> = flow {
-        if (uid <= 0L) {
+    fun observePositiveReportByUid(uid: Long): Flow<SellerTrustReport?> =
+        observePositiveReport(uid = uid, usernameHint = "")
+
+    fun observePositiveReport(
+        uid: Long,
+        usernameHint: String = "",
+    ): Flow<SellerTrustReport?> = flow {
+        val normalizedName = usernameHint.trim().removePrefix("@").lowercase()
+        if (uid <= 0L && normalizedName.isEmpty()) {
             emit(null)
             return@flow
         }
         ensureLoaded()
-        emitAll(
-            positiveByUidState
-                .map { byUid ->
-                    val entry = byUid[uid] ?: return@map null
-                    val now = clockMillis()
-                    if (!entry.isNegative && entry.report.anyRemoteSucceeded && now < entry.expiresAtEpochMillis) {
-                        entry.report.copy(isFromCache = true)
-                    } else {
-                        null
+        if (uid > 0L) {
+            emitAll(
+                positiveByUidState
+                    .map { byUid ->
+                        val entry = byUid[uid] ?: return@map null
+                        val now = clockMillis()
+                        if (!entry.isNegative && entry.report.anyRemoteSucceeded && now < entry.expiresAtEpochMillis) {
+                            entry.report.copy(isFromCache = true)
+                        } else {
+                            null
+                        }
                     }
-                }
-                .distinctUntilChanged(),
-        )
+                    .distinctUntilChanged(),
+            )
+        } else {
+            emitAll(
+                positiveByUsernameState
+                    .map { byName ->
+                        val entry = byName[normalizedName] ?: return@map null
+                        val now = clockMillis()
+                        if (!entry.isNegative && entry.report.anyRemoteSucceeded && now < entry.expiresAtEpochMillis) {
+                            entry.report.copy(isFromCache = true)
+                        } else {
+                            null
+                        }
+                    }
+                    .distinctUntilChanged(),
+            )
+        }
     }
 
     internal suspend fun isInMemoryLruForTest(key: String): Boolean =
@@ -294,17 +318,28 @@ internal class SellerTrustCacheStore(
     }
 
     private fun rebuildUidSnapshotLocked(nowMillis: Long) {
-        val next = LinkedHashMap<Long, PersistedTrustCacheEntry>()
+        val nextByUid = LinkedHashMap<Long, PersistedTrustCacheEntry>()
+        val nextByName = LinkedHashMap<String, PersistedTrustCacheEntry>()
         for (entry in diskEntries.values) {
-            val uid = entry.report.uid
-            if (uid <= 0L || entry.isNegative || !entry.report.anyRemoteSucceeded) continue
+            if (entry.isNegative || !entry.report.anyRemoteSucceeded) continue
             if (nowMillis >= entry.expiresAtEpochMillis) continue
-            val existing = next[uid]
-            if (existing == null || entry.cachedAtEpochMillis >= existing.cachedAtEpochMillis) {
-                next[uid] = entry
+            val uid = entry.report.uid
+            if (uid > 0L) {
+                val existing = nextByUid[uid]
+                if (existing == null || entry.cachedAtEpochMillis >= existing.cachedAtEpochMillis) {
+                    nextByUid[uid] = entry
+                }
+            }
+            val uname = entry.report.username.trim().removePrefix("@").lowercase()
+            if (uname.isNotEmpty()) {
+                val existingByName = nextByName[uname]
+                if (existingByName == null || entry.cachedAtEpochMillis >= existingByName.cachedAtEpochMillis) {
+                    nextByName[uname] = entry
+                }
             }
         }
-        positiveByUidState.value = next.toMap()
+        positiveByUidState.value = nextByUid.toMap()
+        positiveByUsernameState.value = nextByName.toMap()
     }
 
     private fun ensureLoadedLocked(nowMillis: Long) {
@@ -323,6 +358,12 @@ internal class SellerTrustCacheStore(
             val raw = cacheFile.readText(Charsets.UTF_8)
             if (raw.isBlank()) null else json.decodeFromString<PersistedTrustCachePayload>(raw)
         }.getOrNull() ?: run {
+            runCatching { cacheFile.delete() }
+            return
+        }
+
+        // Discard pre-v2 cached entries so legacy 1-page unenriched zero-count snapshots refresh cleanly.
+        if (payload.version < CURRENT_CACHE_SCHEMA_VERSION) {
             runCatching { cacheFile.delete() }
             return
         }
@@ -349,7 +390,7 @@ internal class SellerTrustCacheStore(
         runCatching {
             cacheFile.parentFile?.mkdirs()
             val payload = PersistedTrustCachePayload(
-                version = 1,
+                version = CURRENT_CACHE_SCHEMA_VERSION,
                 entries = diskEntries.values.sortedByDescending { it.lastAccessedAtEpochMillis },
             )
             val encoded = json.encodeToString(payload)
@@ -364,6 +405,7 @@ internal class SellerTrustCacheStore(
 
     companion object {
         const val CACHE_FILE_NAME: String = "seller_trust_cache_v1.json"
+        const val CURRENT_CACHE_SCHEMA_VERSION: Int = 2
         const val DEFAULT_MAX_MEMORY_ENTRIES: Int = 128
         const val DEFAULT_MAX_DISK_ENTRIES: Int = 256
         const val DEFAULT_STALE_RETENTION_MILLIS: Long = 7L * 24L * 60L * 60L * 1000L

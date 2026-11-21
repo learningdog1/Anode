@@ -291,7 +291,7 @@ fun TopicDetailScreen(
     }
 
     val openSellerTrust: (Long, String, String) -> Unit = { uid, username, avatarUrl ->
-        if (uid > 0L) {
+        if (uid > 0L || username.isNotBlank()) {
             trustSheetTarget = TopicTrustInspectTarget(
                 uid = uid,
                 username = username,
@@ -617,7 +617,6 @@ fun TopicDetailScreen(
 
                 uiState.pageData != null -> {
                     val pageData = uiState.pageData!!
-                    val isTradeTopic = pageData.categorySlug.equals("trade", ignoreCase = true)
                     PullToRefreshBox(
                         isRefreshing = uiState.isRefreshing,
                         onRefresh = viewModel::refreshCurrentPage,
@@ -646,7 +645,7 @@ fun TopicDetailScreen(
                                     isTrackingReplies = uiState.isTrackingReplies,
                                     trackedBaselineFloor = uiState.trackedBaselineFloor,
                                     totalPages = uiState.totalPages,
-                                    showTrustQuickBadge = isTradeTopic,
+                                    showTrustQuickBadge = true,
                                     onCategoryClick = { onNavigateToCategory(pageData.categorySlug) },
                                     onAuthorClick = {
                                         onNavigateToUser(headerAuthor.uid, headerAuthor.username)
@@ -760,7 +759,7 @@ fun TopicDetailScreen(
                                         isViewerTopicAuthor = uiState.isViewerTopicAuthor,
                                         isHighlighted = uiState.highlightedFloor == reply.floorNumber,
                                         isBusy = uiState.busyCommentIds.contains(reply.commentId),
-                                        showTrustQuickBadge = isTradeTopic,
+                                        showTrustQuickBadge = true,
                                         onAuthorClick = {
                                             onNavigateToUser(reply.author.uid, reply.author.username)
                                         },
@@ -1627,9 +1626,10 @@ private fun MagazineArticleHeader(
                 }
             }
 
-            if (showTrustQuickBadge && author.uid > 0L) {
+            if (showTrustQuickBadge && (author.uid > 0L || author.username.isNotBlank())) {
                 SellerTrustQuickBadge(
                     uid = author.uid,
+                    usernameHint = author.username,
                     onClick = onInspectTrust,
                 )
             }
@@ -2149,9 +2149,10 @@ private fun ThreadedFloorReplyRow(
                         )
                     }
 
-                    if (showTrustQuickBadge && reply.author.uid > 0L) {
+                    if (showTrustQuickBadge && (reply.author.uid > 0L || reply.author.username.isNotBlank())) {
                         SellerTrustQuickBadge(
                             uid = reply.author.uid,
+                            usernameHint = reply.author.username,
                             compact = true,
                             onClick = onAvatarClick,
                             modifier = Modifier.align(Alignment.CenterVertically),

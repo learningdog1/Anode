@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.GppBad
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.Person
@@ -171,6 +172,7 @@ fun SellerTrustCardSheet(
             uiState = uiState,
             onRefresh = stateHolder::refresh,
             onRunDeepSearch = stateHolder::runDeepExposureSearch,
+            onScanMoreTopics = stateHolder::scanMoreTradeTopics,
             onToggleTag = stateHolder::toggleTag,
             onNoteTextChange = stateHolder::updateDraftNoteText,
             onSaveNote = stateHolder::saveNoteNow,
@@ -205,6 +207,7 @@ internal fun SellerTrustCardSheetContent(
     onStartDm: ((Long, String) -> Unit)?,
     onDismiss: () -> Unit,
     onRunDeepSearch: () -> Unit = {},
+    onScanMoreTopics: () -> Unit = {},
 ) {
     val scrollState = rememberScrollState()
     val report = uiState.report
@@ -371,11 +374,18 @@ internal fun SellerTrustCardSheetContent(
                             )
                         }
 
-                        // 4b. Recent Trade Threads (up to 3 by default, expandable)
+                        // 4b. Recent Trade Threads (up to 3 by default, expandable, with paced deeper history scan)
                         RecentTradeTopicsSection(
                             totalTradeCount = report.historicalTradeTopicCount,
                             recentTopics = report.recentTradeTopics,
                             topicsSucceeded = report.topicsSucceeded,
+                            scannedTopicsCount = report.scannedTopicsCount,
+                            totalTopicsCount = report.totalTopicsCount,
+                            hasMoreTopicPages = report.hasMoreTopicPages,
+                            isScanningMore = uiState.isScanningMoreTopics,
+                            scanCooldownSeconds = uiState.topicScanCooldownSeconds,
+                            scanNotice = uiState.topicScanNotice,
+                            onScanMoreTopics = onScanMoreTopics,
                             onOpenTopic = onOpenTopic,
                         )
                     }
@@ -816,10 +826,25 @@ private fun SellerMetricsGrid(
         else -> "未公开注册日期"
     }
 
+    val tradeValue = when {
+        !report.topicsSucceeded -> "--"
+        report.hasMoreTopicPages && report.historicalTradeTopicCount > 0 -> "${report.historicalTradeTopicCount}+ 篇"
+        else -> "${report.historicalTradeTopicCount} 篇"
+    }
     val tradeSubtext = when {
         !report.topicsSucceeded -> "主题列表加载失败"
-        report.historicalTradeTopicCount > 0 -> "近1页公开主题统计"
-        else -> "近1页无交易相关发帖"
+        report.totalTopicsCount == 0 || (report.scannedTopicsCount == 0 && !report.hasMoreTopicPages && report.historicalTradeTopicCount == 0) ->
+            "暂无公开主题记录"
+        report.hasMoreTopicPages -> {
+            val totalPart = report.totalTopicsCount
+                ?.takeIf { it > report.scannedTopicsCount }
+                ?.let { "/$it" }
+                .orEmpty()
+            "已扫近 ${report.scannedTopicsCount}${totalPart} 篇 · 可续扫"
+        }
+        report.scannedTopicsCount > 0 -> "全部 ${report.scannedTopicsCount} 篇公开主题统计"
+        report.historicalTradeTopicCount > 0 -> "公开主题历史统计"
+        else -> "公开主题无交易记录"
     }
 
     val exposureValue = when {
@@ -860,7 +885,7 @@ private fun SellerMetricsGrid(
         ) {
             SellerMetricTile(
                 label = "历史交易帖",
-                value = if (report.topicsSucceeded) "${report.historicalTradeTopicCount} 篇" else "--",
+                value = tradeValue,
                 subtitle = tradeSubtext,
                 icon = Icons.Rounded.Storefront,
                 modifier = Modifier.weight(1f),
@@ -1223,16 +1248,33 @@ private fun RecentTradeTopicsSection(
     totalTradeCount: Int,
     recentTopics: List<TopicSummary>,
     topicsSucceeded: Boolean,
+    scannedTopicsCount: Int = 0,
+    totalTopicsCount: Int? = null,
+    hasMoreTopicPages: Boolean = false,
+    isScanningMore: Boolean = false,
+    scanCooldownSeconds: Int = 0,
+    scanNotice: String? = null,
+    onScanMoreTopics: () -> Unit = {},
     onOpenTopic: (Long) -> Unit,
 ) {
     var showAll by rememberSaveable { mutableStateOf(false) }
     val visibleTopics = if (showAll) recentTopics else recentTopics.take(DEFAULT_VISIBLE_TRADE_TOPICS)
     val canExpandMore = recentTopics.size > DEFAULT_VISIBLE_TRADE_TOPICS
+    val countBadgeText = if (hasMoreTopicPages && totalTradeCount > 0) "$totalTradeCount+" else totalTradeCount.toString()
+    val sectionSubtitle = when {
+        !topicsSucceeded -> "查看卖家过往出/收贴历史"
+        hasMoreTopicPages && scannedTopicsCount > 0 -> {
+            val totalSuffix = totalTopicsCount?.takeIf { it > scannedTopicsCount }?.let { " / 共 $it 篇" }.orEmpty()
+            "已低频核验近 $scannedTopicsCount 篇公开主题$totalSuffix"
+        }
+        scannedTopicsCount > 0 -> "已核验全部 $scannedTopicsCount 篇公开主题"
+        else -> "查看卖家过往出/收贴历史"
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         PulseSectionHeader(
-            title = "近期交易帖 ($totalTradeCount)",
-            subtitle = "查看卖家过往出/收贴历史",
+            title = "近期交易帖 ($countBadgeText)",
+            subtitle = sectionSubtitle,
             icon = Icons.Rounded.Storefront,
             accentColor = MaterialTheme.colorScheme.primary,
             trailing = if (canExpandMore) {
@@ -1249,6 +1291,8 @@ private fun RecentTradeTopicsSection(
                             text = if (showAll) "收起" else "展开全部",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                         Icon(
                             imageVector = if (showAll) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
@@ -1277,17 +1321,36 @@ private fun RecentTradeTopicsSection(
                 )
             }
         } else if (visibleTopics.isEmpty()) {
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .pulseCard(elevation = PulseElevation.None)
                     .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                val emptyText = when {
+                    hasMoreTopicPages && scannedTopicsCount > 0 ->
+                        "近 $scannedTopicsCount 篇公开主题暂未检出交易帖，卖家更早发帖尚未扫描。"
+                    scannedTopicsCount > 0 ->
+                        "已核验全部 $scannedTopicsCount 篇公开主题，未检索到交易帖记录。"
+                    else ->
+                        "暂无公开交易帖记录。"
+                }
                 Text(
-                    text = "近 1 页公开主题中未检索到交易帖记录。",
+                    text = emptyText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (hasMoreTopicPages) {
+                    ScanMoreTradeTopicsBar(
+                        scannedTopicsCount = scannedTopicsCount,
+                        totalTopicsCount = totalTopicsCount,
+                        isScanningMore = isScanningMore,
+                        scanCooldownSeconds = scanCooldownSeconds,
+                        scanNotice = scanNotice,
+                        onScanMoreTopics = onScanMoreTopics,
+                    )
+                }
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -1297,7 +1360,75 @@ private fun RecentTradeTopicsSection(
                         onClick = { onOpenTopic(topic.id) },
                     )
                 }
+                if (hasMoreTopicPages) {
+                    ScanMoreTradeTopicsBar(
+                        scannedTopicsCount = scannedTopicsCount,
+                        totalTopicsCount = totalTopicsCount,
+                        isScanningMore = isScanningMore,
+                        scanCooldownSeconds = scanCooldownSeconds,
+                        scanNotice = scanNotice,
+                        onScanMoreTopics = onScanMoreTopics,
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun ScanMoreTradeTopicsBar(
+    scannedTopicsCount: Int,
+    totalTopicsCount: Int?,
+    isScanningMore: Boolean,
+    scanCooldownSeconds: Int,
+    scanNotice: String?,
+    onScanMoreTopics: () -> Unit,
+) {
+    val canScan = !isScanningMore && scanCooldownSeconds <= 0
+    val remainingEstimate = totalTopicsCount?.let { (it - scannedTopicsCount).coerceAtLeast(0) }
+    val buttonLabel = when {
+        isScanningMore -> "低频扫描更早主题中…"
+        scanCooldownSeconds > 0 -> "防风控间隔 ${scanCooldownSeconds}s"
+        remainingEstimate != null && remainingEstimate > 0 -> "继续扫描更早主题（剩余约 $remainingEstimate 篇）"
+        else -> "继续扫描更早历史主题"
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (!scanNotice.isNullOrBlank()) {
+            Text(
+                text = scanNotice,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                color = TrustPalette.forRiskLevel(TrustRiskLevel.CAUTION_AMBER).accent,
+            )
+        }
+        FilledTonalButton(
+            onClick = onScanMoreTopics,
+            enabled = canScan,
+            shape = PulseArchitecturalShapes.SmallChip,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (isScanningMore) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(
+                    imageVector = if (scanCooldownSeconds > 0) Icons.Rounded.Schedule else Icons.Rounded.History,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = buttonLabel,
+                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1338,8 +1469,13 @@ private fun RecentTradeTopicRow(
                     showIcon = false,
                     compact = true,
                 )
+                val metaLabel = if (topic.replyCount > 0 || topic.viewCount > 0) {
+                    "${formatCompactCount(topic.replyCount)} 回复 · ${formatCompactCount(topic.viewCount)} 浏览"
+                } else {
+                    "帖子 #${topic.id}"
+                }
                 Text(
-                    text = "${formatCompactCount(topic.replyCount)} 回复 · ${formatCompactCount(topic.viewCount)} 浏览",
+                    text = metaLabel,
                     style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

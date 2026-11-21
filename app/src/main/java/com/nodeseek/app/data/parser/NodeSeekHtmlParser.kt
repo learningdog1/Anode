@@ -303,6 +303,7 @@ object NodeSeekHtmlParser {
 
         val domSignaturesByFloor = extractDomSignaturesByFloor(document)
         val domContentMarkdownByFloor = extractDomPostMarkdownByFloor(document)
+        val domAuthorsByFloor = extractDomAuthorsByFloor(document)
 
         val visibleComments = (if (includeBlocked) {
             postData.comments
@@ -315,7 +316,18 @@ object NodeSeekHtmlParser {
                 !comment.poster.signature.isNullOrBlank()
             val fallbackSig = domSignaturesByFloor[comment.floorIndex]
             val fallbackBody = if (comment.markdown.isBlank()) domContentMarkdownByFloor[comment.floorIndex] else null
+            val domAuthor = domAuthorsByFloor[comment.floorIndex]
+            val enrichedPoster = if (comment.poster.resolvedUid <= 0L && domAuthor != null && domAuthor.resolvedUid > 0L) {
+                comment.poster.copy(
+                    uid = domAuthor.resolvedUid,
+                    name = comment.poster.name.ifBlank { domAuthor.name },
+                    avatar = comment.poster.avatar ?: domAuthor.avatar,
+                )
+            } else {
+                comment.poster
+            }
             comment.copy(
+                poster = enrichedPoster,
                 markdown = fallbackBody ?: comment.markdown,
                 signature = if (!hasStructuredSignature && !fallbackSig.isNullOrBlank()) fallbackSig else comment.signature,
             )
@@ -327,13 +339,43 @@ object NodeSeekHtmlParser {
             comment.floorIndex > 0 && seenCommentIds.add(comment.commentId)
         }
 
+        val resolvedPostData = if (postData.op == null || postData.op.resolvedUid <= 0L) {
+            val opReplyPoster = rawReplies.firstOrNull { it.poster.isOp == true }?.poster
+            val domOp = domAuthorsByFloor[0] ?: extractDomHeaderOpAuthor(document)
+            val fallbackUid = openingComment?.poster?.resolvedUid?.takeIf { it > 0L }
+                ?: opReplyPoster?.resolvedUid?.takeIf { it > 0L }
+                ?: domOp?.resolvedUid?.takeIf { it > 0L }
+                ?: 0L
+            val fallbackName = postData.op?.name?.takeIf { it.isNotBlank() }
+                ?: openingComment?.poster?.name?.takeIf { it.isNotBlank() }
+                ?: opReplyPoster?.name?.takeIf { it.isNotBlank() }
+                ?: domOp?.name.orEmpty()
+            val fallbackAvatar = postData.op?.avatar
+                ?: openingComment?.poster?.avatar
+                ?: opReplyPoster?.avatar
+                ?: domOp?.avatar
+            if (fallbackUid > 0L || fallbackName.isNotBlank()) {
+                postData.copy(
+                    op = TopicAuthorDto(
+                        uid = fallbackUid,
+                        name = fallbackName,
+                        avatar = fallbackAvatar,
+                    ),
+                )
+            } else {
+                postData
+            }
+        } else {
+            postData
+        }
+
         // Reply display ordering: pinned (`pined == true`) -> hot (`hot == true`) -> chronological floor order.
         val pinnedReplies = rawReplies.filter { it.pined == true }
         val hotReplies = rawReplies.filter { it.pined != true && it.hot == true }
         val regularReplies = rawReplies.filter { it.pined != true && it.hot != true }
 
         return ParsedThreadPageDto(
-            postData = postData,
+            postData = resolvedPostData,
             openingComment = openingComment,
             replies = pinnedReplies + hotReplies + regularReplies,
             config = config,
@@ -488,6 +530,47 @@ object NodeSeekHtmlParser {
             }
         }
         return result
+    }
+
+    private fun extractDomAuthorsByFloor(document: Document): Map<Int, TopicAuthorDto> {
+        val containers = document.select(".nsk-post, .content-item, .comment-item")
+        if (containers.isEmpty()) return emptyMap()
+
+        val result = LinkedHashMap<Int, TopicAuthorDto>()
+        for (container in containers) {
+            val floor = resolveFloorNumberForContainer(container) ?: continue
+            if (result.containsKey(floor)) continue
+            extractAuthorFromContainer(container)?.let { result[floor] = it }
+        }
+        return result
+    }
+
+    private fun extractDomHeaderOpAuthor(document: Document): TopicAuthorDto? {
+        val headerContainer = document.selectFirst(".nsk-post, #nsk-body-left .nsk-content-meta-info")
+            ?: return null
+        return extractAuthorFromContainer(headerContainer)
+    }
+
+    private fun extractAuthorFromContainer(container: Element): TopicAuthorDto? {
+        val spaceAnchors = container.select("a[href*=/space/]")
+            .filter { it.closest("article.post-content, .signature") == null }
+        val uidFromLink = spaceAnchors.firstNotNullOfOrNull { anchor ->
+            SPACE_HREF_REGEX.find(anchor.attr("href"))?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
+        }
+        val nameFromLink = spaceAnchors.firstNotNullOfOrNull { anchor ->
+            anchor.text().trim().takeIf { it.isNotEmpty() }
+        }.orEmpty()
+        val avatarEl = container.select("img[src*=/avatar/], img.avatar-normal")
+            .firstOrNull { it.closest("article.post-content, .signature") == null }
+        val avatarSrc = avatarEl?.attr("src")?.trim()?.takeIf { it.isNotEmpty() }
+        val uidFromAvatar = avatarSrc?.let { AVATAR_SRC_UID_REGEX.find(it)?.groupValues?.getOrNull(1)?.toLongOrNull() }
+        val resolvedUid = uidFromLink ?: uidFromAvatar ?: 0L
+        if (resolvedUid <= 0L && nameFromLink.isEmpty()) return null
+        return TopicAuthorDto(
+            uid = resolvedUid,
+            name = nameFromLink,
+            avatar = avatarSrc,
+        )
     }
 
     private fun resolveFloorNumberForContainer(container: Element?): Int? {

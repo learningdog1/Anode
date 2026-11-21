@@ -173,6 +173,11 @@ data class SellerTrustReport(
     val exposureCheckScope: ExposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
     val deepSearchCooldownUntilEpochMillis: Long = 0L,
     val deepSearchNoticeMessage: String? = null,
+    val scannedTopicsCount: Int = 0,
+    val scannedTopicPages: Int = 0,
+    val hasMoreTopicPages: Boolean = false,
+    val topicScanCooldownUntilEpochMillis: Long = 0L,
+    val topicScanNoticeMessage: String? = null,
 ) {
     val rankLabel: String
         get() = "Lv.${rankLevel.coerceIn(0, 6)}"
@@ -185,6 +190,9 @@ data class SellerTrustReport(
 
     val isDeepSearchVerified: Boolean
         get() = exposureCheckScope == ExposureCheckScope.DEEP_SEARCH
+
+    val scannedAllTopics: Boolean
+        get() = topicsSucceeded && !hasMoreTopicPages
 
     val isRateLimited: Boolean
         get() = fetchStatus == TrustFetchStatus.RATE_LIMITED ||

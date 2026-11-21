@@ -202,6 +202,85 @@ class ForumRepositoryImpl(
         feedDiskCache?.removeWhere { it.result.isFromRssFallback }
     }
 
+    override suspend fun resolveKnownTopics(topicIds: Collection<Long>): Map<Long, TopicSummary> {
+        val uniqueIds = topicIds.filter { it > 0L }.toSet()
+        if (uniqueIds.isEmpty()) return emptyMap()
+
+        val resolved = LinkedHashMap<Long, TopicSummary>(uniqueIds.size)
+
+        // 1. Check in-memory recent summary cache (populated by every feed, search, and topic detail view).
+        bookmarkAndHistoryRepository?.let { repo ->
+            for (id in uniqueIds) {
+                repo.getCachedTopicSummary(id)
+                    ?.takeIf { it.categorySlug.isNotBlank() || it.categoryName.isNotBlank() }
+                    ?.let { resolved[id] = it }
+            }
+        }
+        if (resolved.size >= uniqueIds.size) return resolved
+
+        // 2. Check cached feed snapshots (including persisted disk snapshots for trade & home feeds).
+        val uid = currentUid
+        runCatching {
+            getSnapshot(uid, "trade", FeedSort.LATEST_REPLY)
+            getSnapshot(uid, "trade", FeedSort.NEWEST_TOPIC)
+            getSnapshot(uid, "", FeedSort.LATEST_REPLY)
+        }
+        for (snapshot in memoryFeedSnapshots.values) {
+            for (topic in snapshot.result.pinnedTopics + snapshot.result.topics) {
+                if (topic.id in uniqueIds && !resolved.containsKey(topic.id) &&
+                    (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank())
+                ) {
+                    resolved[topic.id] = topic
+                    if (resolved.size >= uniqueIds.size) return resolved
+                }
+            }
+        }
+
+        // 3. Check local read history and bookmarks in Room for any remaining topic IDs.
+        val missingIds = uniqueIds.filterNot(resolved::containsKey)
+        if (missingIds.isNotEmpty()) {
+            runCatching {
+                readHistoryDao.observeByTopicIds(uid, missingIds.take(500)).first().forEach { entity ->
+                    val slug = entity.categorySlug.trim()
+                    val name = entity.categoryName.trim()
+                    if (slug.isNotEmpty() || name.isNotEmpty()) {
+                        resolved[entity.topicId] = TopicSummary(
+                            id = entity.topicId,
+                            title = entity.title,
+                            categorySlug = slug,
+                            categoryName = name,
+                            authorName = entity.authorName,
+                            authorAvatarUrl = entity.authorAvatarUrl,
+                        )
+                    }
+                }
+            }
+            val stillMissing = missingIds.filterNot(resolved::containsKey)
+            for (id in stillMissing) {
+                val bookmark = runCatching { bookmarkDao.getBookmark(uid, id) }.getOrNull() ?: continue
+                val slug = bookmark.categorySlug.trim()
+                val name = bookmark.categoryName.trim()
+                if (slug.isNotEmpty() || name.isNotEmpty()) {
+                    resolved[id] = TopicSummary(
+                        id = bookmark.topicId,
+                        title = bookmark.title,
+                        categorySlug = slug,
+                        categoryName = name,
+                        authorId = bookmark.authorId,
+                        authorName = bookmark.authorName,
+                        authorAvatarUrl = bookmark.authorAvatarUrl,
+                        viewCount = bookmark.viewCount,
+                        replyCount = bookmark.replyCount,
+                        lastActivityIso = bookmark.lastActivityIso,
+                        isBookmarked = true,
+                    )
+                }
+            }
+        }
+
+        return resolved
+    }
+
     override fun getCachedFeed(
         categorySlug: String,
         sort: FeedSort,

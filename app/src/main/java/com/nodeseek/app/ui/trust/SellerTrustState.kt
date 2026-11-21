@@ -134,6 +134,9 @@ data class SellerTrustUiState(
     val isDeepSearching: Boolean = false,
     val deepSearchCooldownSeconds: Int = 0,
     val deepSearchNotice: String? = null,
+    val isScanningMoreTopics: Boolean = false,
+    val topicScanCooldownSeconds: Int = 0,
+    val topicScanNotice: String? = null,
 ) {
     val resolvedUid: Long
         get() = report?.uid?.takeIf { it > 0L } ?: uid
@@ -205,11 +208,13 @@ class SellerTrustStateHolder(
 
     private var inspectJob: Job? = null
     private var deepSearchJob: Job? = null
+    private var scanMoreTopicsJob: Job? = null
     private var observeNoteJob: Job? = null
     private var autoSaveJob: Job? = null
     private var feedbackJob: Job? = null
     private var cooldownTickerJob: Job? = null
     private var deepSearchTickerJob: Job? = null
+    private var topicScanTickerJob: Job? = null
     private var lastManualRefreshAcceptedAtMillis: Long = 0L
     private var noteEditSequence: Long = 0L
     private var tagEditSequence: Long = 0L
@@ -304,6 +309,8 @@ class SellerTrustStateHolder(
                                 profileSucceeded = report.profileSucceeded,
                                 registrationDurationLabel = report.registrationDurationLabel,
                                 exposureCheckScope = report.exposureCheckScope,
+                                scannedTopicsCount = report.scannedTopicsCount,
+                                hasMoreTopicPages = report.hasMoreTopicPages,
                             ),
                         )
                     } else {
@@ -398,6 +405,8 @@ class SellerTrustStateHolder(
                                 profileSucceeded = updated.profileSucceeded,
                                 registrationDurationLabel = updated.registrationDurationLabel,
                                 exposureCheckScope = updated.exposureCheckScope,
+                                scannedTopicsCount = updated.scannedTopicsCount,
+                                hasMoreTopicPages = updated.hasMoreTopicPages,
                             ),
                         )
                     } else {
@@ -418,11 +427,82 @@ class SellerTrustStateHolder(
                 }
             } catch (c: CancellationException) {
                 throw c
+                } catch (t: Throwable) {
+                    _uiState.update { current ->
+                        current.copy(
+                            isDeepSearching = false,
+                            deepSearchNotice = t.message?.takeIf { it.isNotBlank() } ?: "历史曝光深搜失败，请稍后重试",
+                        )
+                    }
+                }
+            }
+        }
+
+    /**
+     * Scans the next paced batch of older user discussion pages (`list-discussions`) to uncover
+     * historical trade posts beyond the initial automatic scan window.
+     */
+    fun scanMoreTradeTopics() {
+        val snapshot = _uiState.value
+        val curReport = snapshot.report ?: return
+        if (!curReport.hasMoreTopicPages || snapshot.isScanningMoreTopics || snapshot.isLoading || snapshot.topicScanCooldownSeconds > 0) {
+            return
+        }
+
+        scanMoreTopicsJob?.cancel()
+        scanMoreTopicsJob = scope.launch {
+            _uiState.update { it.copy(isScanningMoreTopics = true, topicScanNotice = null) }
+            try {
+                val updated = repository.scanMoreSellerTradeTopics(
+                    uid = snapshot.resolvedUid,
+                    usernameHint = snapshot.resolvedUsername.ifBlank { snapshot.usernameHint },
+                )
+                val finishedNow = clockMillis()
+                val scanUntil = updated.topicScanCooldownUntilEpochMillis.takeIf { it > finishedNow } ?: 0L
+                val scanRemSec = computeRemainingSeconds(scanUntil, finishedNow)
+
+                _uiState.update { current ->
+                    val note = current.localNote ?: updated.localNote
+                    val synced = if (note != updated.localNote) {
+                        updated.copy(
+                            localNote = note,
+                            riskAssessment = TrustRiskEvaluator.evaluate(
+                                rankLevel = updated.rankLevel,
+                                registrationDays = updated.registrationDays,
+                                historicalTradeTopicCount = updated.historicalTradeTopicCount,
+                                exposureSearchHits = updated.exposureSearchHits,
+                                searchSucceeded = updated.searchSucceeded,
+                                localNote = note,
+                                profileSucceeded = updated.profileSucceeded,
+                                registrationDurationLabel = updated.registrationDurationLabel,
+                                exposureCheckScope = updated.exposureCheckScope,
+                                scannedTopicsCount = updated.scannedTopicsCount,
+                                hasMoreTopicPages = updated.hasMoreTopicPages,
+                            ),
+                        )
+                    } else {
+                        updated
+                    }
+                    current.copy(
+                        isScanningMoreTopics = false,
+                        report = synced,
+                        topicScanCooldownSeconds = scanRemSec,
+                        topicScanNotice = synced.topicScanNoticeMessage,
+                    )
+                }
+
+                if (scanUntil > finishedNow) {
+                    startTopicScanCooldownTicker(scanUntil)
+                } else {
+                    topicScanTickerJob?.cancel()
+                }
+            } catch (c: CancellationException) {
+                throw c
             } catch (t: Throwable) {
                 _uiState.update { current ->
                     current.copy(
-                        isDeepSearching = false,
-                        deepSearchNotice = t.message?.takeIf { it.isNotBlank() } ?: "历史曝光深搜失败，请稍后重试",
+                        isScanningMoreTopics = false,
+                        topicScanNotice = t.message?.takeIf { it.isNotBlank() } ?: "加载更早主题失败，请稍后重试",
                     )
                 }
             }
@@ -521,6 +601,29 @@ class SellerTrustStateHolder(
         }
     }
 
+    private fun startTopicScanCooldownTicker(untilMillis: Long) {
+        topicScanTickerJob?.cancel()
+        topicScanTickerJob = scope.launch {
+            while (true) {
+                val now = clockMillis()
+                val remaining = computeRemainingSeconds(untilMillis, now)
+                if (remaining <= 0) {
+                    _uiState.update { current ->
+                        current.copy(
+                            topicScanCooldownSeconds = 0,
+                            topicScanNotice = null,
+                        )
+                    }
+                    break
+                }
+                _uiState.update { current ->
+                    current.copy(topicScanCooldownSeconds = remaining)
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
     private fun computeRemainingSeconds(untilMillis: Long, nowMillis: Long): Int {
         if (untilMillis <= nowMillis) return 0
         return ((untilMillis - nowMillis + 999L) / 1_000L).coerceAtLeast(1L).toInt()
@@ -548,6 +651,8 @@ class SellerTrustStateHolder(
                                     profileSucceeded = existing.profileSucceeded,
                                     registrationDurationLabel = existing.registrationDurationLabel,
                                     exposureCheckScope = existing.exposureCheckScope,
+                                    scannedTopicsCount = existing.scannedTopicsCount,
+                                    hasMoreTopicPages = existing.hasMoreTopicPages,
                                 ),
                             )
                         }
@@ -676,6 +781,7 @@ class SellerTrustViewModel(
 
     fun refresh() = stateHolder.refresh()
     fun runDeepExposureSearch() = stateHolder.runDeepExposureSearch()
+    fun scanMoreTradeTopics() = stateHolder.scanMoreTradeTopics()
     fun toggleTag(tag: TrustTag) = stateHolder.toggleTag(tag)
     fun updateDraftNoteText(text: String) = stateHolder.updateDraftNoteText(text)
     fun saveNoteNow() = stateHolder.saveNoteNow()
