@@ -70,7 +70,7 @@ class RepositoryImplementationsTest {
         server.start()
         val baseUrl = server.url("/")
         cookieBridge = WebViewCookieBridge(forceInMemory = true)
-        val uaProvider = UserAgentProvider("NodePulseRepoTest/1.0")
+        val uaProvider = UserAgentProvider("AnodeRepoTest/1.0")
         val okHttp = NodeSeekApiClient.createDefaultHttpClient(
             cookieBridge = cookieBridge,
             userAgentProvider = uaProvider,

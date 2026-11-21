@@ -1,7 +1,7 @@
 package com.nodeseek.app.domain.backup
 
 /**
- * Coordinates exporting and restoring full NodePulse local state as a versioned JSON bundle.
+ * Coordinates exporting and restoring full Anode local state as a versioned JSON bundle.
  */
 interface BackupManager {
     suspend fun exportBackupJson(includeApiKeys: Boolean = true): Result<String>

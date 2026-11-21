@@ -66,7 +66,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Semantic board/category micro-tag using the 15-board NodePulse palette with soft gradient
+ * Semantic board/category micro-tag using the 15-board Anode palette with soft gradient
  * fill and crisp hairline accent border.
  */
 @Composable

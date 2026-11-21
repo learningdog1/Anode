@@ -33,7 +33,7 @@ class NodeSeekApiClientTest {
     private lateinit var csrfTokenStore: CsrfTokenStore
     private lateinit var client: NodeSeekApiClient
 
-    private val testUserAgent = "Mozilla/5.0 (Linux; Android 15) NodePulseUnitTest/1.0"
+    private val testUserAgent = "Mozilla/5.0 (Linux; Android 15) AnodeUnitTest/1.0"
 
     @Before
     fun setUp() {

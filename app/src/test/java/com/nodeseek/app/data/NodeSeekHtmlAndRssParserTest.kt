@@ -144,7 +144,7 @@ class NodeSeekHtmlAndRssParserTest {
                 "postId": 321,
                 "postPage": 1,
                 "postPageCount": 2,
-                "title": "NodePulse 架构讨论",
+                "title": "Anode 架构讨论",
                 "category": "dev",
                 "categoryWord": "Dev",
                 "views": 300,

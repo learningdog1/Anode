@@ -225,7 +225,7 @@ private data class TopicTrustInspectTarget(
 )
 
 /**
- * NodePulse Magazine-Grade Topic Reader Screen (`TopicDetailScreen`).
+ * Anode Magazine-Grade Topic Reader Screen (`TopicDetailScreen`).
  *
  * Visual & interaction architecture:
  * - Magazine Article Surface + Selectable `headlineSmall` title + Author Telemetry Strip

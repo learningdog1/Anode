@@ -52,7 +52,7 @@ class InboxUnreadStateTest {
         cookieBridge = WebViewCookieBridge(forceInMemory = true)
         val okHttp = NodeSeekApiClient.createDefaultHttpClient(
             cookieBridge = cookieBridge,
-            userAgentProvider = UserAgentProvider("NodePulseInboxUnreadTest/1.0"),
+            userAgentProvider = UserAgentProvider("AnodeInboxUnreadTest/1.0"),
             additionalTargetHost = baseUrl.host,
         )
 
@@ -1020,7 +1020,7 @@ class InboxUnreadStateTest {
         val baseUrl = server.url("/")
         val okHttp = NodeSeekApiClient.createDefaultHttpClient(
             cookieBridge = cookieBridge,
-            userAgentProvider = UserAgentProvider("NodePulseColdStartTest/1.0"),
+            userAgentProvider = UserAgentProvider("AnodeColdStartTest/1.0"),
             additionalTargetHost = baseUrl.host,
         )
         apiClient = NodeSeekApiClient(

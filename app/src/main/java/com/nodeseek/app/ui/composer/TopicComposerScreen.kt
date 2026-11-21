@@ -169,7 +169,7 @@ private const val TABS_MARKDOWN_TEMPLATE = """
 """
 
 /**
- * NodePulse Markdown Topic Composer Screen (`TopicComposerScreen`).
+ * Anode Markdown Topic Composer Screen (`TopicComposerScreen`).
  *
  * Supports both:
  * 1. **New Topic** (`editTopicId == null`) — Board selector sheet (excluding `adminOnly` boards,

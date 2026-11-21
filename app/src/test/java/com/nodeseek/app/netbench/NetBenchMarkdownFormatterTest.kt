@@ -164,7 +164,8 @@ class NetBenchMarkdownFormatterTest {
         assertTrue(md.contains("### ⚡ 网络延迟与链路稳定性分析"))
         assertTrue(md.contains("### 🚀 iperf3 带宽吞吐实测全过程"))
         assertTrue(md.contains("### 🩺 综合线路体检结论"))
-        assertTrue(md.contains("NodePulse 移动端网络实测"))
+        assertTrue(md.contains("Anode 移动端网络实测"))
+        assertFalse(md.contains("NodePulse", ignoreCase = true))
 
         // Environment summary card + timestamp integrity (port=30 must not corrupt 17:30!)
         assertTrue(md.contains("2026-11-20 17:30"))

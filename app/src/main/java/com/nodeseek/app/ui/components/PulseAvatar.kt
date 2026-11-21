@@ -124,7 +124,7 @@ fun normalizeNodeSeekAssetUrl(rawUrl: String?): String? {
 }
 
 /**
- * NodePulse Avatar with Lv.0–Lv.6 metallic/gemstone gradient ring, Coil 3 AsyncImage,
+ * Anode Avatar with Lv.0–Lv.6 metallic/gemstone gradient ring, Coil 3 AsyncImage,
  * deterministic tonal monogram fallback, press micro-scale, and gradient "楼主" OP pill.
  */
 @Composable

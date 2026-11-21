@@ -9,7 +9,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 
 /**
- * Material 3 Expressive spring physics & transition tokens for NodePulse.
+ * Material 3 Expressive spring physics & transition tokens for Anode.
  */
 object NodePulseMotion {
     private const val SPATIAL_DAMPING = 0.72f

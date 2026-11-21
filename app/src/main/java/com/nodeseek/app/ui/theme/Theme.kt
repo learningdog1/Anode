@@ -36,7 +36,7 @@ val LocalNodePulseDarkTheme = staticCompositionLocalOf { false }
 val LocalNodePulseDynamicColor = staticCompositionLocalOf { false }
 
 /**
- * Ergonomic accessor for extended NodePulse design tokens inside any `@Composable`.
+ * Ergonomic accessor for extended Anode design tokens inside any `@Composable`.
  */
 object NodePulseThemeTokens {
     val extendedColors: NodePulseExtendedColors

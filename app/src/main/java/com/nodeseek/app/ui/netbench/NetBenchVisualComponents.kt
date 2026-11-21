@@ -159,7 +159,7 @@ internal fun copyTextToClipboard(context: Context, label: String, text: String):
     }.getOrDefault(false)
 
 /**
- * Compact selectable chip styled consistently with NodePulse cards.
+ * Compact selectable chip styled consistently with Anode cards.
  */
 @Composable
 internal fun NetBenchSelectableChip(

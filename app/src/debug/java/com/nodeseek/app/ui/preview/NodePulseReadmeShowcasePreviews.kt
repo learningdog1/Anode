@@ -979,7 +979,7 @@ fun Preview14UserProfile() {
                     uid = 1024L,
                     username = "latency_hunter",
                     bio = "专注亚太 BGP 线路实测、WireGuard 选路与 Android 原生客户端工程化。",
-                    readmeMarkdown = "- 常驻测试点：上海电信 / 杭州联通 / 广州移动\n- 常用工具：`NextTrace` · `YABS` · `Anode Pulse Radar`",
+                    readmeMarkdown = "- 常驻测试点：上海电信 / 杭州联通 / 广州移动\n- 常用工具：`NextTrace` · `YABS` · `Anode 脉搏雷达`",
                     joinedAtIso = "2023-08-14T08:00:00Z",
                     drumsticks = 2860,
                     stardust = 42,

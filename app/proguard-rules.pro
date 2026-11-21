@@ -1,4 +1,4 @@
-# Project-specific ProGuard / R8 rules for NodePulse
+# Project-specific ProGuard / R8 rules for Anode
 
 # Kotlinx Serialization
 -keepattributes *Annotation*, InnerClasses

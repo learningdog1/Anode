@@ -59,7 +59,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
 /**
- * Standardized elevation scale for NodePulse cards, hero tiles, and floating glass bars.
+ * Standardized elevation scale for Anode cards, hero tiles, and floating glass bars.
  */
 object PulseElevation {
     val None: Dp = 0.dp
@@ -383,7 +383,7 @@ fun Modifier.pulsePressScale(
 }
 
 /**
- * Interactive press-scale + ripple clickable modifier with NodePulse spring physics.
+ * Interactive press-scale + ripple clickable modifier with Anode spring physics.
  */
 @Composable
 fun Modifier.pulseBouncyClickable(

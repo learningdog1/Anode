@@ -110,7 +110,7 @@ enum class DealSpreadStatus(val label: String) {
 }
 
 /**
- * Markdown export templates for NodePulse VPS valuation.
+ * Markdown export templates for Anode VPS valuation.
  */
 enum class ValuationMarkdownStyle(
     val label: String,

@@ -28,7 +28,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 /**
- * Manages NodePulse notification channels, Android 13+ permission & environment diagnostics
+ * Manages Anode notification channels, Android 13+ permission & environment diagnostics
  * (Battery Optimization / System Do Not Disturb), notification emission, and Intent tap routing.
  */
 open class PulseNotificationDispatcher(
