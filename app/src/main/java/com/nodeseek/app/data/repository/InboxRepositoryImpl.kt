@@ -18,6 +18,9 @@ import com.nodeseek.app.domain.repository.InboxRepository
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -113,8 +117,18 @@ class InboxRepositoryImpl(
         }
     }
 
+    internal data class RequestSessionToken(
+        val accountKey: String,
+        val uid: Long,
+        val sessionEpoch: Long,
+    ) {
+        val isAuthenticated: Boolean
+            get() = uid > 0L && accountKey != GUEST_ACCOUNT_KEY
+    }
+
     private val stateLock = Any()
     private val foregroundSyncMutex = Mutex()
+    private val sessionObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private val repliesLedger = NotificationCategoryLedger()
     private val mentionsLedger = NotificationCategoryLedger()
 
@@ -137,13 +151,17 @@ class InboxRepositoryImpl(
     private val emittedInteractionFloorKeys = LinkedHashMap<Pair<Long, Int>, Long>()
     private val emittedPopupKeys = LinkedHashSet<String>()
     private var persistedBaselineCheckedForUid: Long = 0L
+    private var persistedBaselineCheckedForEpoch: Long = -1L
     private var lastForegroundCheckMs: Long = 0L
     private var lastFullListSyncMs: Long = 0L
     private var lastDmListSyncMs: Long = 0L
     private var foregroundRateLimitUntilMs: Long = 0L
     private var foregroundBackoffUntilMs: Long = 0L
 
-    private var trackedUid: Long = sessionRepository.sessionState.value?.uid ?: 0L
+    private var trackedUid: Long = (sessionRepository.sessionState.value?.uid ?: 0L).coerceAtLeast(0L)
+    private var trackedAccountKey: String = accountKeyForUid(trackedUid)
+    private var trackedAuthVerifiedEpoch: Long = sessionRepository.authVerifiedEpoch.value
+    private var sessionEpoch: Long = 0L
     private var readMutationGeneration: Long = 0L
     private var inFlightMarkReadOps: Int = 0
     private var piggybackGuardUntilMs: Long = 0L
@@ -171,13 +189,44 @@ class InboxRepositoryImpl(
     )
     override val unreadIncreaseEvents: Flow<Int> = _unreadIncreaseEvents.asSharedFlow()
 
+    init {
+        sessionObserverScope.launch {
+            sessionRepository.sessionState.collect {
+                synchronized(stateLock) {
+                    syncAccountLocked()
+                }
+            }
+        }
+        sessionObserverScope.launch {
+            sessionRepository.authVerifiedEpoch.collect {
+                synchronized(stateLock) {
+                    syncAccountLocked()
+                }
+            }
+        }
+    }
+
+    internal fun currentSessionTokenForTesting(): RequestSessionToken = synchronized(stateLock) {
+        syncAccountLocked()
+        currentSessionTokenLocked()
+    }
+
+    internal fun cachedMessageCountForPeerForTesting(peerUid: Long): Int = synchronized(stateLock) {
+        cachedListMessagesByPeer[peerUid]?.size ?: 0
+    }
+
     fun onPiggybackedUnreadCount(count: Int) {
         val sanitized = count.coerceAtLeast(0)
         var shouldSignalIncrease = false
+        var emitToken: RequestSessionToken? = null
         synchronized(stateLock) {
             val now = clockMillis()
-            val resetHandled = syncAccountLocked()
-            if (resetHandled && sessionRepository.sessionState.value == null) {
+            syncAccountLocked()
+            val currentToken = currentSessionTokenLocked()
+            if (!currentToken.isAuthenticated) {
+                if (_unreadTotalCount.value != 0) {
+                    _unreadTotalCount.value = 0
+                }
                 return
             }
             val previousTotal = _unreadTotalCount.value
@@ -190,35 +239,35 @@ class InboxRepositoryImpl(
             val allBaselinesReady = repliesLedger.popupBaselineInitialized &&
                 mentionsLedger.popupBaselineInitialized &&
                 dmPopupBaselineInitialized
-            shouldSignalIncrease = sessionRepository.sessionState.value != null &&
-                updatedTotal > previousTotal &&
-                updatedTotal > 0 &&
-                allBaselinesReady
+            if (updatedTotal > previousTotal && updatedTotal > 0 && allBaselinesReady) {
+                shouldSignalIncrease = true
+                emitToken = currentToken
+            }
         }
-        if (shouldSignalIncrease) {
+        val expectedToken = emitToken
+        if (shouldSignalIncrease && expectedToken != null && isRequestTokenValid(expectedToken, requireAuthenticated = true)) {
             _unreadIncreaseEvents.tryEmit(sanitized)
         }
     }
 
-    override suspend fun refreshUnreadCount(): Result<Int> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            if (sessionRepository.sessionState.value == null) {
-                synchronized(stateLock) {
-                    trackedUid = 0L
-                    clearAllStateLocked(resetTotalToZero = true)
-                }
-                return@runDomainCatching 0
-            }
-            val genBeforeRequest = synchronized(stateLock) {
+    override suspend fun refreshUnreadCount(): Result<Int> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
+            val (requestToken, genBeforeRequest) = synchronized(stateLock) {
                 syncAccountLocked()
-                readMutationGeneration
+                val token = currentSessionTokenLocked()
+                capturedToken = token
+                if (!token.isAuthenticated) {
+                    clearAllStateLocked(resetTotalToZero = true)
+                    return@runSessionDomainCatching 0
+                }
+                token to readMutationGeneration
             }
             val count = apiClientProvider().getUnreadNotificationCount().coerceAtLeast(0)
             synchronized(stateLock) {
                 syncAccountLocked()
-                if (sessionRepository.sessionState.value == null) {
-                    clearAllStateLocked(resetTotalToZero = true)
-                    return@synchronized 0
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    return@synchronized _unreadTotalCount.value
                 }
                 if (genBeforeRequest != readMutationGeneration) {
                     return@synchronized _unreadTotalCount.value
@@ -231,21 +280,30 @@ class InboxRepositoryImpl(
                 _unreadTotalCount.value
             }
         }
+    }
 
     override suspend fun syncForegroundInbox(forceListSync: Boolean): Result<Unit> =
         foregroundSyncMutex.withLock {
-            runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-                val currentSession = sessionRepository.sessionState.value ?: return@runDomainCatching
-                val viewerUid = currentSession.uid
-                if (viewerUid <= 0L) return@runDomainCatching
-
+            var capturedToken: RequestSessionToken? = null
+            runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
                 val now = clockMillis()
-                val rateLimited = synchronized(stateLock) {
-                    now < foregroundRateLimitUntilMs || (!forceListSync && now < foregroundBackoffUntilMs)
+                val requestToken = synchronized(stateLock) {
+                    syncAccountLocked()
+                    val token = currentSessionTokenLocked()
+                    capturedToken = token
+                    if (!token.isAuthenticated) {
+                        return@runSessionDomainCatching
+                    }
+                    val rateLimited =
+                        now < foregroundRateLimitUntilMs || (!forceListSync && now < foregroundBackoffUntilMs)
+                    if (rateLimited) {
+                        return@runSessionDomainCatching
+                    }
+                    token
                 }
-                if (rateLimited) return@runDomainCatching
+                val viewerUid = requestToken.uid
 
-                ensurePersistedBaselineSeeded(viewerUid)
+                ensurePersistedBaselineSeeded(requestToken)
 
                 val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
                 var pendingLoadedPopups: List<InAppMessagePopup> = emptyList()
@@ -254,6 +312,9 @@ class InboxRepositoryImpl(
                 var pendingDmPersist: Map<Long, Long> = emptyMap()
                 val (initReplies, initMentions, initDm) = synchronized(stateLock) {
                     syncAccountLocked()
+                    if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
                     val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
                     if (allowEmit) {
                         val flushResult = flushPendingPopupsFromLoadedStateLocked(now = now, viewerUid = viewerUid)
@@ -269,11 +330,14 @@ class InboxRepositoryImpl(
                     )
                 }
                 if (pendingLoadedPopups.isNotEmpty()) {
+                    if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
                     for (popup in pendingLoadedPopups) {
                         _inAppPopupEvents.tryEmit(popup)
                     }
                     persistWatermarksToStore(
-                        viewerUid = viewerUid,
+                        requestToken = requestToken,
                         replyWatermark = pendingReplyPersist,
                         mentionWatermark = pendingMentionPersist,
                         dmInitialized = pendingDmPersist.isNotEmpty(),
@@ -284,9 +348,13 @@ class InboxRepositoryImpl(
 
                 if (!forceListSync && !needsBaselineInit) {
                     val tooSoon = synchronized(stateLock) {
+                        syncAccountLocked()
+                        if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                            return@runSessionDomainCatching
+                        }
                         lastForegroundCheckMs > 0L && (now - lastForegroundCheckMs) < FOREGROUND_CHECK_MIN_GAP_MS
                     }
-                    if (tooSoon) return@runDomainCatching
+                    if (tooSoon) return@runSessionDomainCatching
                 }
 
                 if (needsBaselineInit) {
@@ -294,16 +362,24 @@ class InboxRepositoryImpl(
                     val mentionsRes = if (initMentions) getNotifications(NotificationKind.MENTIONS) else null
                     val dmRes = if (initDm) getMessageThreads() else null
 
+                    if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
+
                     val firstError = repliesRes?.exceptionOrNull()
                         ?: mentionsRes?.exceptionOrNull()
                         ?: dmRes?.exceptionOrNull()
 
                     if (firstError != null) {
-                        recordForegroundSyncFailure(firstError)
+                        recordForegroundSyncFailure(firstError, requestToken)
                         throw firstError
                     }
 
                     val baselineSnapshot = synchronized(stateLock) {
+                        syncAccountLocked()
+                        if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                            return@runSessionDomainCatching
+                        }
                         BaselinePersistSnapshot(
                             replyWatermark = if (repliesLedger.popupBaselineInitialized) {
                                 repliesLedger.popupWatermarkId
@@ -320,7 +396,7 @@ class InboxRepositoryImpl(
                         )
                     }
                     persistWatermarksToStore(
-                        viewerUid = viewerUid,
+                        requestToken = requestToken,
                         replyWatermark = baselineSnapshot.replyWatermark,
                         mentionWatermark = baselineSnapshot.mentionWatermark,
                         dmInitialized = baselineSnapshot.dmInitialized,
@@ -336,17 +412,24 @@ class InboxRepositoryImpl(
                             // Non-fatal; list floor already populated.
                         }
                         synchronized(stateLock) {
-                            val ts = clockMillis()
-                            lastForegroundCheckMs = ts
-                            lastFullListSyncMs = ts
-                            lastDmListSyncMs = ts
-                            foregroundBackoffUntilMs = 0L
+                            syncAccountLocked()
+                            if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                                val ts = clockMillis()
+                                lastForegroundCheckMs = ts
+                                lastFullListSyncMs = ts
+                                lastDmListSyncMs = ts
+                                foregroundBackoffUntilMs = 0L
+                            }
                         }
-                        return@runDomainCatching
+                        return@runSessionDomainCatching
                     }
                 }
 
                 val syncState = synchronized(stateLock) {
+                    syncAccountLocked()
+                    if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
                     ForegroundSyncStateSnapshot(
                         countBeforeCheck = _unreadTotalCount.value,
                         knownLocalUnread = knownListFloorLocked(clockMillis()),
@@ -360,14 +443,17 @@ class InboxRepositoryImpl(
 
                 val effectiveCount = try {
                     if (forceListSync) {
-                        _unreadTotalCount.value
+                        syncState.countBeforeCheck
                     } else {
                         refreshUnreadCount().getOrThrow()
                     }
                 } catch (c: CancellationException) {
                     throw c
                 } catch (t: Throwable) {
-                    recordForegroundSyncFailure(t)
+                    if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
+                    recordForegroundSyncFailure(t, requestToken)
                     throw t
                 }
 
@@ -384,6 +470,10 @@ class InboxRepositoryImpl(
                     (!syncState.threadsLoaded || (checkTime - syncState.lastDmSync) >= PERIODIC_NONZERO_LIST_SYNC_MS)
 
                 synchronized(stateLock) {
+                    syncAccountLocked()
+                    if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
                     lastForegroundCheckMs = checkTime
                     foregroundBackoffUntilMs = 0L
                 }
@@ -394,6 +484,10 @@ class InboxRepositoryImpl(
                     val dmRes = getMessageThreads()
                     val finishedAt = clockMillis()
                     synchronized(stateLock) {
+                        syncAccountLocked()
+                        if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                            return@runSessionDomainCatching
+                        }
                         if (dmRes.isSuccess) {
                             lastDmListSyncMs = finishedAt
                         }
@@ -405,29 +499,36 @@ class InboxRepositoryImpl(
                         ?: mentionsRes.exceptionOrNull()
                         ?: dmRes.exceptionOrNull()
                     if (firstError != null) {
-                        recordForegroundSyncFailure(firstError)
+                        recordForegroundSyncFailure(firstError, requestToken)
                         throw firstError
                     }
                 } else if (shouldSyncDmOnly) {
                     val dmRes = getMessageThreads()
+                    if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                        return@runSessionDomainCatching
+                    }
                     dmRes.onSuccess {
                         synchronized(stateLock) {
-                            lastDmListSyncMs = clockMillis()
+                            syncAccountLocked()
+                            if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                                lastDmListSyncMs = clockMillis()
+                            }
                         }
                     }.onFailure { err ->
-                        recordForegroundSyncFailure(err)
+                        recordForegroundSyncFailure(err, requestToken)
                         throw err
                     }
                 }
             }
         }
 
-    override suspend fun getNotifications(kind: NotificationKind): Result<List<NotificationItem>> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            val currentUid = sessionRepository.sessionState.value?.uid ?: 0L
-            if (currentUid > 0L) {
-                ensurePersistedBaselineSeeded(currentUid)
-            }
+    override suspend fun getNotifications(kind: NotificationKind): Result<List<NotificationItem>> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
+            ensurePersistedBaselineSeeded(requestToken)
+            ensureRequestTokenStillCurrent(requestToken)
+
             val response = when (kind) {
                 NotificationKind.REPLIES -> apiClientProvider().listReplyNotifications()
                 NotificationKind.MENTIONS -> apiClientProvider().listMentionNotifications()
@@ -448,13 +549,14 @@ class InboxRepositoryImpl(
             }
             val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
-            var viewerUidForPersist = 0L
             var updatedWatermarkForPersist: Long? = null
             val effective = synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
-                val viewerUid = sessionRepository.sessionState.value?.uid ?: 0L
-                viewerUidForPersist = viewerUid
+                val viewerUid = requestToken.uid
                 val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
@@ -482,39 +584,46 @@ class InboxRepositoryImpl(
                 resolvedEffective
             }
             if (popupsToEmit.isNotEmpty()) {
+                if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 for (popup in popupsToEmit) {
                     _inAppPopupEvents.tryEmit(popup)
                 }
                 persistWatermarksToStore(
-                    viewerUid = viewerUidForPersist,
+                    requestToken = requestToken,
                     replyWatermark = if (kind == NotificationKind.REPLIES) updatedWatermarkForPersist else null,
                     mentionWatermark = if (kind == NotificationKind.MENTIONS) updatedWatermarkForPersist else null,
                 )
             }
             effective
         }
+    }
 
     override suspend fun markNotificationsRead(
         kind: NotificationKind,
         ids: List<Long>?,
-    ): Result<Unit> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+    ): Result<Unit> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
             if (ids != null && ids.isEmpty()) {
-                return@runDomainCatching
+                return@runSessionDomainCatching
             }
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
             val distinctIds = ids?.distinct()
             var opTimestamp = 0L
             var opGeneration = 0L
             var addedIds: List<Long> = emptyList()
             var previousWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
-
-            var viewerUidForPersist = 0L
             var markAllWatermarkForPersist: Long? = null
+
             synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
-                viewerUidForPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
@@ -574,49 +683,64 @@ class InboxRepositoryImpl(
                 }
             } catch (c: CancellationException) {
                 synchronized(stateLock) {
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    }
                 }
                 throw c
             } catch (t: Throwable) {
                 synchronized(stateLock) {
-                    val now = clockMillis()
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
-                    val ledger = ledgerFor(kind)
-                    addedIds.forEach { id ->
-                        if (ledger.locallyReadIds[id] == opTimestamp) {
-                            ledger.locallyReadIds.remove(id)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        val now = clockMillis()
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                        val ledger = ledgerFor(kind)
+                        addedIds.forEach { id ->
+                            if (ledger.locallyReadIds[id] == opTimestamp) {
+                                ledger.locallyReadIds.remove(id)
+                            }
                         }
+                        if (distinctIds == null && ledger.allReadWatermark?.second == opTimestamp) {
+                            ledger.allReadWatermark = previousWatermark
+                        }
+                        ledger.emit(now)
+                        rollbackOptimisticTotalIfCurrentLocked(
+                            now = now,
+                            opGeneration = opGeneration,
+                            appliedDelta = appliedDelta,
+                        )
                     }
-                    if (distinctIds == null && ledger.allReadWatermark?.second == opTimestamp) {
-                        ledger.allReadWatermark = previousWatermark
-                    }
-                    ledger.emit(now)
-                    rollbackOptimisticTotalIfCurrentLocked(
-                        now = now,
-                        opGeneration = opGeneration,
-                        appliedDelta = appliedDelta,
-                    )
                 }
                 throw t
             }
 
             synchronized(stateLock) {
+                syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 finishMarkPostLocked(clockMillis())
             }
-            if (markAllWatermarkForPersist != null && viewerUidForPersist > 0L) {
+            if (markAllWatermarkForPersist != null) {
                 persistWatermarksToStore(
-                    viewerUid = viewerUidForPersist,
+                    requestToken = requestToken,
                     replyWatermark = if (kind == NotificationKind.REPLIES) markAllWatermarkForPersist else null,
                     mentionWatermark = if (kind == NotificationKind.MENTIONS) markAllWatermarkForPersist else null,
                 )
             }
-            refreshUnreadAfterMutation(opGeneration)
+            refreshUnreadAfterMutation(requestToken, opGeneration)
         }
+    }
 
-    override suspend fun getMessageThreads(): Result<List<DirectMessageSummary>> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            val viewerUid = requireViewerUid()
-            ensurePersistedBaselineSeeded(viewerUid)
+    override suspend fun getMessageThreads(): Result<List<DirectMessageSummary>> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
+            val viewerUid = requestToken.uid
+            ensurePersistedBaselineSeeded(requestToken)
+            ensureRequestTokenStillCurrent(requestToken)
+
             val response = apiClientProvider().listDirectMessages()
             val allRows = response.allMessages()
             val mappedThreads = response.groupThreadsForViewer(viewerUid).map { thread ->
@@ -639,6 +763,9 @@ class InboxRepositoryImpl(
             var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
             val effective = synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
                 pruneMessageReadStateLocked(now)
 
@@ -680,22 +807,32 @@ class InboxRepositoryImpl(
                 resolvedEffective
             }
             if (popupsToEmit.isNotEmpty()) {
+                if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 for (popup in popupsToEmit) {
                     _inAppPopupEvents.tryEmit(popup)
                 }
                 persistWatermarksToStore(
-                    viewerUid = viewerUid,
+                    requestToken = requestToken,
                     dmInitialized = true,
                     dmWatermarks = dmWatermarksForPersist,
                 )
             }
             effective
         }
+    }
 
-    override suspend fun getConversation(peerUid: Long): Result<List<DirectMessage>> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            val viewerUid = requireViewerUid()
+    override suspend fun getConversation(peerUid: Long): Result<List<DirectMessage>> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
+            val viewerUid = requestToken.uid
             val cachedRows = synchronized(stateLock) {
+                syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 cachedListMessagesByPeer[peerUid].orEmpty()
             }
             val response: ConversationResponseDto? = try {
@@ -703,6 +840,9 @@ class InboxRepositoryImpl(
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
+                if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val canFallbackToCached =
                     (peerUid <= 0L || cachedRows.any { it.isSystemMessage(viewerUid) }) &&
                         cachedRows.isNotEmpty()
@@ -761,6 +901,9 @@ class InboxRepositoryImpl(
             var dmWatermarkIncreasedForPersist: Long? = null
             synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
                 pruneMessageReadStateLocked(now)
 
@@ -828,9 +971,9 @@ class InboxRepositoryImpl(
                 }
                 emitThreadsLocked(now)
             }
-            if (dmWatermarkIncreasedForPersist != null && viewerUid > 0L) {
+            if (dmWatermarkIncreasedForPersist != null) {
                 persistWatermarksToStore(
-                    viewerUid = viewerUid,
+                    requestToken = requestToken,
                     dmInitialized = true,
                     dmWatermarks = mapOf(peerUid to dmWatermarkIncreasedForPersist!!),
                 )
@@ -838,22 +981,26 @@ class InboxRepositoryImpl(
 
             conversation
         }
+    }
 
-    override suspend fun markThreadRead(peerUid: Long): Result<Unit> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+    override suspend fun markThreadRead(peerUid: Long): Result<Unit> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
             var opTimestamp = 0L
             var opGeneration = 0L
             var idsToSend: List<Long> = emptyList()
             var addedMessageIds: List<Long> = emptyList()
             var previousPeerWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
-            var viewerUidForPersist = 0L
             var watermarkForPersist: Long? = null
 
             synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
-                viewerUidForPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 pruneMessageReadStateLocked(now)
 
@@ -883,7 +1030,7 @@ class InboxRepositoryImpl(
                 idsToSend = candidateIds.toList()
 
                 if (unreadIdsForPeer.isEmpty() && !threadWasEffectiveUnread) {
-                    return@runDomainCatching
+                    return@runSessionDomainCatching
                 }
 
                 previousPeerWatermark = locallyReadPeerWatermarks[peerUid]
@@ -938,68 +1085,82 @@ class InboxRepositoryImpl(
                 }
             } catch (c: CancellationException) {
                 synchronized(stateLock) {
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    }
                 }
                 throw c
             } catch (t: Throwable) {
                 synchronized(stateLock) {
-                    val now = clockMillis()
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
-                    addedMessageIds.forEach { msgId ->
-                        if (locallyReadMessageIds[msgId] == opTimestamp) {
-                            locallyReadMessageIds.remove(msgId)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        val now = clockMillis()
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                        addedMessageIds.forEach { msgId ->
+                            if (locallyReadMessageIds[msgId] == opTimestamp) {
+                                locallyReadMessageIds.remove(msgId)
+                            }
                         }
-                    }
-                    if (locallyReadPeerWatermarks[peerUid]?.second == opTimestamp) {
-                        if (previousPeerWatermark != null) {
-                            locallyReadPeerWatermarks[peerUid] = previousPeerWatermark!!
-                        } else {
-                            locallyReadPeerWatermarks.remove(peerUid)
+                        if (locallyReadPeerWatermarks[peerUid]?.second == opTimestamp) {
+                            if (previousPeerWatermark != null) {
+                                locallyReadPeerWatermarks[peerUid] = previousPeerWatermark!!
+                            } else {
+                                locallyReadPeerWatermarks.remove(peerUid)
+                            }
                         }
+                        emitThreadsLocked(now)
+                        rollbackOptimisticTotalIfCurrentLocked(
+                            now = now,
+                            opGeneration = opGeneration,
+                            appliedDelta = appliedDelta,
+                        )
                     }
-                    emitThreadsLocked(now)
-                    rollbackOptimisticTotalIfCurrentLocked(
-                        now = now,
-                        opGeneration = opGeneration,
-                        appliedDelta = appliedDelta,
-                    )
                 }
                 throw t
             }
 
             synchronized(stateLock) {
+                syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 finishMarkPostLocked(clockMillis())
             }
-            if (watermarkForPersist != null && viewerUidForPersist > 0L) {
+            if (watermarkForPersist != null) {
                 persistWatermarksToStore(
-                    viewerUid = viewerUidForPersist,
+                    requestToken = requestToken,
                     dmInitialized = true,
                     dmWatermarks = mapOf(peerUid to watermarkForPersist!!),
                 )
             }
             if (idsToSend.isNotEmpty()) {
-                refreshUnreadAfterMutation(opGeneration)
+                refreshUnreadAfterMutation(requestToken, opGeneration)
             }
         }
+    }
 
-    override suspend fun markMessagesRead(messageIds: List<Long>?): Result<Unit> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+    override suspend fun markMessagesRead(messageIds: List<Long>?): Result<Unit> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
             if (messageIds != null && messageIds.isEmpty()) {
-                return@runDomainCatching
+                return@runSessionDomainCatching
             }
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
             val distinctIds = messageIds?.distinct()
             var opTimestamp = 0L
             var opGeneration = 0L
             var addedMessageIds: List<Long> = emptyList()
             var previousAllWatermark: Pair<Long, Long>? = null
             var appliedDelta = 0
-            var viewerUidForDmPersist = 0L
             var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
 
             synchronized(stateLock) {
                 syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 val now = clockMillis()
-                viewerUidForDmPersist = sessionRepository.sessionState.value?.uid ?: 0L
                 opTimestamp = now
                 pruneMessageReadStateLocked(now)
 
@@ -1118,63 +1279,90 @@ class InboxRepositoryImpl(
                 }
             } catch (c: CancellationException) {
                 synchronized(stateLock) {
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                    }
                 }
                 throw c
             } catch (t: Throwable) {
                 synchronized(stateLock) {
-                    val now = clockMillis()
-                    inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
-                    addedMessageIds.forEach { msgId ->
-                        if (locallyReadMessageIds[msgId] == opTimestamp) {
-                            locallyReadMessageIds.remove(msgId)
+                    syncAccountLocked()
+                    if (isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                        val now = clockMillis()
+                        inFlightMarkReadOps = (inFlightMarkReadOps - 1).coerceAtLeast(0)
+                        addedMessageIds.forEach { msgId ->
+                            if (locallyReadMessageIds[msgId] == opTimestamp) {
+                                locallyReadMessageIds.remove(msgId)
+                            }
                         }
+                        if (distinctIds == null && allMessagesReadWatermark?.second == opTimestamp) {
+                            allMessagesReadWatermark = previousAllWatermark
+                        }
+                        emitThreadsLocked(now)
+                        rollbackOptimisticTotalIfCurrentLocked(
+                            now = now,
+                            opGeneration = opGeneration,
+                            appliedDelta = appliedDelta,
+                        )
                     }
-                    if (distinctIds == null && allMessagesReadWatermark?.second == opTimestamp) {
-                        allMessagesReadWatermark = previousAllWatermark
-                    }
-                    emitThreadsLocked(now)
-                    rollbackOptimisticTotalIfCurrentLocked(
-                        now = now,
-                        opGeneration = opGeneration,
-                        appliedDelta = appliedDelta,
-                    )
                 }
                 throw t
             }
 
             synchronized(stateLock) {
+                syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
                 finishMarkPostLocked(clockMillis())
             }
-            if (dmWatermarksForPersist.isNotEmpty() && viewerUidForDmPersist > 0L) {
+            if (dmWatermarksForPersist.isNotEmpty()) {
                 persistWatermarksToStore(
-                    viewerUid = viewerUidForDmPersist,
+                    requestToken = requestToken,
                     dmInitialized = true,
                     dmWatermarks = dmWatermarksForPersist,
                 )
             }
-            refreshUnreadAfterMutation(opGeneration)
+            refreshUnreadAfterMutation(requestToken, opGeneration)
         }
+    }
 
     override suspend fun sendDirectMessage(
         receiverUid: Long,
         content: String,
         isMarkdown: Boolean,
-    ): Result<Unit> =
-        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+    ): Result<Unit> {
+        var capturedToken: RequestSessionToken? = null
+        return runSessionDomainCatching(capturedTokenProvider = { capturedToken }) {
             if (receiverUid <= 0L) {
                 throw NodeSeekApiException("系统通知不支持直接回复。")
             }
+            val requestToken = requireAuthenticatedSessionToken().also { capturedToken = it }
+            ensureRequestTokenStillCurrent(requestToken)
             apiClientProvider().sendDirectMessage(
                 receiverUid = receiverUid,
                 content = content,
                 isMarkdown = isMarkdown,
             )
+            synchronized(stateLock) {
+                syncAccountLocked()
+                if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                    throw staleSessionException()
+                }
+            }
         }
+    }
 
-    private suspend fun refreshUnreadAfterMutation(opGeneration: Long) {
+    private suspend fun refreshUnreadAfterMutation(
+        requestToken: RequestSessionToken,
+        opGeneration: Long,
+    ) {
         val shouldFetch = synchronized(stateLock) {
-            opGeneration == readMutationGeneration && inFlightMarkReadOps == 0
+            syncAccountLocked()
+            isRequestTokenValidLocked(requestToken, requireAuthenticated = true) &&
+                opGeneration == readMutationGeneration &&
+                inFlightMarkReadOps == 0
         }
         if (!shouldFetch) return
 
@@ -1188,8 +1376,7 @@ class InboxRepositoryImpl(
 
         synchronized(stateLock) {
             syncAccountLocked()
-            if (sessionRepository.sessionState.value == null) {
-                clearAllStateLocked(resetTotalToZero = true)
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
                 return
             }
             if (opGeneration != readMutationGeneration || inFlightMarkReadOps > 0) {
@@ -1209,22 +1396,42 @@ class InboxRepositoryImpl(
     }
 
     /**
-     * Synchronizes account-scoped caches whenever the active uid changes or signs out.
-     * Returns `true` if a state reset occurred.
+     * Synchronizes account-scoped caches and monotonic [sessionEpoch] whenever the active
+     * account identity (`uid` / `accountKey`) or authentication verification epoch changes.
+     * Returns `true` if the observed session changed.
      */
     private fun syncAccountLocked(): Boolean {
-        val currentUid = sessionRepository.sessionState.value?.uid ?: 0L
-        if (currentUid == trackedUid) return false
-        val previousUid = trackedUid
-        trackedUid = currentUid
-        return if (previousUid != 0L) {
-            clearAllStateLocked(resetTotalToZero = true)
-            true
-        } else {
-            // Fresh sign-in transition from signed-out state: clear stale read watermarks.
-            clearLocalReadWatermarksLocked()
-            true
+        val currentSession = sessionRepository.sessionState.value
+        val currentUid = (currentSession?.uid ?: 0L).coerceAtLeast(0L)
+        val currentAccountKey = accountKeyForUid(currentUid)
+        val currentAuthEpoch = sessionRepository.authVerifiedEpoch.value
+
+        val accountChanged = currentUid != trackedUid || currentAccountKey != trackedAccountKey
+        val authEpochChanged = currentAuthEpoch != trackedAuthVerifiedEpoch
+
+        if (!accountChanged && !authEpochChanged) {
+            return false
         }
+
+        trackedUid = currentUid
+        trackedAccountKey = currentAccountKey
+        trackedAuthVerifiedEpoch = currentAuthEpoch
+        sessionEpoch += 1L
+
+        if (accountChanged) {
+            clearAllStateLocked(resetTotalToZero = true)
+        } else {
+            // Same account identity, but session verification epoch rotated (e.g. re-sign-in / WebView auth):
+            // invalidate pre-rotation read mutations without erasing unread count just pushed by config.
+            readMutationGeneration += 1L
+            inFlightMarkReadOps = 0
+            piggybackGuardUntilMs = 0L
+            stalePiggybackCeiling = 0
+            apiCountGuardUntilMs = 0L
+            staleApiCeiling = 0
+            apiCountConfirmed = true
+        }
+        return true
     }
 
     private fun clearAllStateLocked(resetTotalToZero: Boolean) {
@@ -1261,6 +1468,7 @@ class InboxRepositoryImpl(
         emittedInteractionFloorKeys.clear()
         emittedPopupKeys.clear()
         persistedBaselineCheckedForUid = 0L
+        persistedBaselineCheckedForEpoch = -1L
         lastForegroundCheckMs = 0L
         lastFullListSyncMs = 0L
         lastDmListSyncMs = 0L
@@ -1838,10 +2046,17 @@ class InboxRepositoryImpl(
         )
     }
 
-    private suspend fun ensurePersistedBaselineSeeded(viewerUid: Long) {
-        if (viewerUid <= 0L) return
+    private suspend fun ensurePersistedBaselineSeeded(requestToken: RequestSessionToken) {
+        if (!requestToken.isAuthenticated) return
+        val viewerUid = requestToken.uid
         val alreadyChecked = synchronized(stateLock) {
-            persistedBaselineCheckedForUid == viewerUid
+            syncAccountLocked()
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                true
+            } else {
+                persistedBaselineCheckedForUid == viewerUid &&
+                    persistedBaselineCheckedForEpoch == requestToken.sessionEpoch
+            }
         }
         if (alreadyChecked) return
         val store = watermarkStore
@@ -1852,8 +2067,16 @@ class InboxRepositoryImpl(
         }
         synchronized(stateLock) {
             syncAccountLocked()
-            if (persistedBaselineCheckedForUid == viewerUid) return@synchronized
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                return@synchronized
+            }
+            if (persistedBaselineCheckedForUid == viewerUid &&
+                persistedBaselineCheckedForEpoch == requestToken.sessionEpoch
+            ) {
+                return@synchronized
+            }
             persistedBaselineCheckedForUid = viewerUid
+            persistedBaselineCheckedForEpoch = requestToken.sessionEpoch
             if (persisted != null && persisted.inboxAccountUid == viewerUid) {
                 if (!repliesLedger.popupBaselineInitialized && persisted.lastNotifiedReplyId >= 0L) {
                     repliesLedger.popupBaselineInitialized = true
@@ -1885,16 +2108,25 @@ class InboxRepositoryImpl(
     }
 
     private suspend fun persistWatermarksToStore(
-        viewerUid: Long,
+        requestToken: RequestSessionToken,
         replyWatermark: Long? = null,
         mentionWatermark: Long? = null,
         dmInitialized: Boolean = false,
         dmWatermarks: Map<Long, Long> = emptyMap(),
     ) {
         val store = watermarkStore ?: return
-        if (viewerUid <= 0L) return
+        if (!requestToken.isAuthenticated) return
+        if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) return
+        val viewerUid = requestToken.uid
         runCatching {
             store.updateWatermarks { current ->
+                val stillValid = synchronized(stateLock) {
+                    syncAccountLocked()
+                    isRequestTokenValidLocked(requestToken, requireAuthenticated = true)
+                }
+                if (!stillValid) {
+                    return@updateWatermarks current
+                }
                 val base = if (current.inboxAccountUid != 0L && current.inboxAccountUid != viewerUid) {
                     current.copy(
                         inboxAccountUid = viewerUid,
@@ -1983,9 +2215,16 @@ class InboxRepositoryImpl(
         return true
     }
 
-    private fun recordForegroundSyncFailure(t: Throwable) {
+    private fun recordForegroundSyncFailure(
+        t: Throwable,
+        requestToken: RequestSessionToken,
+    ) {
         val now = clockMillis()
         synchronized(stateLock) {
+            syncAccountLocked()
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                return@synchronized
+            }
             when (t) {
                 is NodeSeekApiException -> if (t.statusCode == 429) {
                     val safeSeconds = (t.retryAfterSeconds ?: 60L).coerceIn(15L, 600L)
@@ -1998,13 +2237,92 @@ class InboxRepositoryImpl(
         }
     }
 
-    private suspend fun requireViewerUid(): Long {
-        sessionRepository.sessionState.value?.uid?.let { return it }
-        val refreshed = sessionRepository.refreshSession().getOrNull()
-        return refreshed?.uid ?: throw NodeSeekApiException("请先登录 NodeSeek 账号。")
+    private fun accountKeyForUid(uid: Long): String =
+        if (uid > 0L) "uid:$uid" else GUEST_ACCOUNT_KEY
+
+    private fun currentSessionTokenLocked(): RequestSessionToken = RequestSessionToken(
+        accountKey = trackedAccountKey,
+        uid = trackedUid,
+        sessionEpoch = sessionEpoch,
+    )
+
+    private fun isRequestTokenValidLocked(
+        expected: RequestSessionToken,
+        requireAuthenticated: Boolean = true,
+    ): Boolean {
+        val currentSession = sessionRepository.sessionState.value
+        val liveUid = (currentSession?.uid ?: 0L).coerceAtLeast(0L)
+        if (requireAuthenticated && (currentSession == null || liveUid <= 0L || !expected.isAuthenticated)) {
+            return false
+        }
+        return liveUid == expected.uid &&
+            trackedUid == expected.uid &&
+            trackedAccountKey == expected.accountKey &&
+            sessionEpoch == expected.sessionEpoch &&
+            sessionRepository.authVerifiedEpoch.value == trackedAuthVerifiedEpoch
     }
 
+    private fun isRequestTokenValid(
+        expected: RequestSessionToken,
+        requireAuthenticated: Boolean = true,
+    ): Boolean = synchronized(stateLock) {
+        syncAccountLocked()
+        isRequestTokenValidLocked(expected, requireAuthenticated = requireAuthenticated)
+    }
+
+    private fun ensureRequestTokenStillCurrent(expected: RequestSessionToken) {
+        synchronized(stateLock) {
+            syncAccountLocked()
+            if (!isRequestTokenValidLocked(expected, requireAuthenticated = true)) {
+                throw staleSessionException()
+            }
+        }
+    }
+
+    private suspend fun requireAuthenticatedSessionToken(): RequestSessionToken {
+        synchronized(stateLock) {
+            syncAccountLocked()
+            val existing = currentSessionTokenLocked()
+            if (existing.isAuthenticated) {
+                return existing
+            }
+        }
+        sessionRepository.refreshSession().getOrNull()
+        return synchronized(stateLock) {
+            syncAccountLocked()
+            val refreshed = currentSessionTokenLocked()
+            if (!refreshed.isAuthenticated) {
+                throw NodeSeekApiException("请先登录 NodeSeek 账号。", statusCode = 401)
+            }
+            refreshed
+        }
+    }
+
+    private fun staleSessionException(): NodeSeekApiException =
+        NodeSeekApiException(
+            message = "账号会话已变更，已忽略过期响应。",
+            statusCode = 401,
+        )
+
+    private suspend inline fun <T> runSessionDomainCatching(
+        crossinline capturedTokenProvider: () -> RequestSessionToken?,
+        crossinline block: suspend () -> T,
+    ): Result<T> = runDomainCatching(
+        onChallengeDetected = {
+            val expected = capturedTokenProvider()
+            val shouldReport = synchronized(stateLock) {
+                syncAccountLocked()
+                expected == null || isRequestTokenValidLocked(expected, requireAuthenticated = false)
+            }
+            if (shouldReport) {
+                sessionRepository.reportChallengeRequired()
+            }
+        },
+        block = block,
+    )
+
     private companion object {
+        private const val GUEST_ACCOUNT_KEY = "guest"
         private const val LOCAL_READ_RETENTION_MS = 120_000L
         private const val PIGGYBACK_STALE_GUARD_MS = 15_000L
         private const val API_STALE_GUARD_MS = 10_000L
