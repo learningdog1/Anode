@@ -448,12 +448,17 @@ class NetBenchOrchestrationTest {
                 ioDispatcher = Dispatchers.IO,
             )
 
+            val offlineIpClient = IpIntelligenceClient(
+                endpoints = IpIntelligenceEndpoints(clientSelfUrls = emptyList()),
+                ioDispatcher = Dispatchers.IO,
+            )
             val controller = NetBenchSessionController(
                 scope = scope,
                 historyStore = historyStore,
                 targetResolver = resolver,
                 icmpPingRunner = icmpRunner,
                 tcpPingRunner = tcpRunner,
+                ipIntelligenceClient = offlineIpClient,
             )
 
             assertTrue(controller.uiState.value.enableIcmpPing)
@@ -587,10 +592,15 @@ class NetBenchOrchestrationTest {
                 ioDispatcher = Dispatchers.IO,
             )
             val resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO)
+            val offlineIpClient = IpIntelligenceClient(
+                endpoints = IpIntelligenceEndpoints(clientSelfUrls = emptyList()),
+                ioDispatcher = Dispatchers.IO,
+            )
             val controller = NetBenchSessionController(
                 scope = scope,
                 historyStore = historyStore,
                 targetResolver = resolver,
+                ipIntelligenceClient = offlineIpClient,
                 iperf3ClientRunner = Iperf3ClientRunner(resolver = resolver, ioDispatcher = Dispatchers.IO),
             )
 

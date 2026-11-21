@@ -581,6 +581,10 @@ object NetBenchMarkdownFormatter {
 
             val ttlNote = extractTtlSummary(ping.samples)
             val routeNote = when (ping.bindingMode) {
+                IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND -> {
+                    val iface = ping.boundInterfaceName?.trim()?.takeIf { it.isNotEmpty() }
+                    if (iface != null) "物理网卡直连 `${sanitizeCodeInline(iface)}`" else "已绑定底层物理网络"
+                }
                 IcmpNetworkBindingMode.INTERFACE_BOUND -> {
                     val iface = ping.boundInterfaceName?.trim()?.takeIf { it.isNotEmpty() }
                     if (iface != null) "网卡 `${sanitizeCodeInline(iface)}`" else "已指定底层网卡"

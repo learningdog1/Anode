@@ -577,5 +577,26 @@ class NetBenchMarkdownFormatterTest {
                 assertEquals("Table line width mismatch: $line", expectedWidth, NetBenchMarkdownFormatter.displayWidth(line))
             }
         }
+
+        val boundReport = base.copy(
+            icmpPingSummary = IcmpPingSummary(
+                resolvedTarget = base.resolvedTarget,
+                sent = 4,
+                received = 4,
+                lossPercent = 0.0,
+                minMs = 15.2,
+                avgMs = 16.5,
+                maxMs = 18.1,
+                jitterMdevMs = 1.1,
+                samples = (1..4).map { IcmpPingSample(seq = it, success = true, rttMs = 16.5, ttl = 58) },
+                bindingMode = IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND,
+                boundInterfaceName = "wlan0",
+            ),
+        )
+        val boundMd = NetBenchMarkdownFormatter.format(
+            report = boundReport,
+            options = NetBenchMarkdownOptions(style = NetBenchMarkdownStyle.FULL_TABLE, timestampLabel = "2026-11-20 20:25"),
+        )
+        assertTrue(boundMd.contains("物理网卡直连 `wlan0`"))
     }
 }
