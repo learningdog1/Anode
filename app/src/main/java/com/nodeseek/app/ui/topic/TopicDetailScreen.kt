@@ -131,6 +131,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -212,6 +213,7 @@ import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -352,22 +354,31 @@ fun TopicDetailScreen(
         }
     }
 
-    // Track visible floor from LazyListState keys for live counter pill, scrubber & ReadHistoryEntry
-    LaunchedEffect(lazyListState) {
-        snapshotFlow {
-            val visibleKeys = lazyListState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }
-            val visibleFloors = visibleKeys.mapNotNull { key ->
-                when {
-                    key == "article_header" || key == "floor_0" -> 0
-                    key.startsWith("floor_") -> {
-                        key.removePrefix("floor_").substringBefore('_').toIntOrNull()
-                    }
-                    else -> null
-                }
+    // Track the floor the user is actually reading (live counter pill, scrubber & ReadHistoryEntry).
+    // Uses the reply's own floor number from the item key and the item geometry relative to a
+    // reading line near the top of the viewport (see computeReadingFloor), instead of the
+    // bottom-most visible item. While a programmatic jump/resume scroll is pending the ViewModel
+    // already holds the target floor, so screen reports are suspended until the scroll lands.
+    // Combining with visibleFloor re-syncs the indicator whenever the ViewModel overwrites it
+    // without moving the list (e.g. refresh, page append), which a plain distinct flow would miss.
+    val pendingScrollFloorState = rememberUpdatedState(uiState.pendingScrollFloor)
+    LaunchedEffect(lazyListState, viewModel) {
+        val readingFloorFlow = snapshotFlow {
+            if (pendingScrollFloorState.value != null) {
+                null
+            } else {
+                val info = lazyListState.layoutInfo
+                computeReadingFloor(
+                    visibleItems = info.visibleItemsInfo.map { item ->
+                        ReadingListItem(key = item.key, offset = item.offset, size = item.size)
+                    },
+                    viewportStart = info.viewportStartOffset,
+                    viewportEnd = info.viewportEndOffset,
+                    canScrollForward = lazyListState.canScrollForward,
+                )
             }
-            visibleFloors.lastOrNull()
         }
-            .distinctUntilChanged()
+        combine(readingFloorFlow, viewModel.visibleFloor) { readingFloor, _ -> readingFloor }
             .collect { floor ->
                 if (floor != null) {
                     viewModel.onVisibleFloorChanged(floor)

@@ -266,12 +266,11 @@ class TopicDetailViewModel(
         val isBookmarked = state.optimisticBookmarked ?: baseBookmarked
         val effectiveBookmarkCount = ((pageData?.bookmarkCount ?: 0) + state.bookmarkCountDelta).coerceAtLeast(0)
 
-        val maxCachedTotalFloors = state.pagesCache.values.maxOfOrNull { it.estimatedTotalFloors } ?: 0
-        val estimatedTotalFloors = maxOf(pageData?.estimatedTotalFloors ?: 0, maxCachedTotalFloors)
         val totalPages = maxOf(
             pageData?.totalPages ?: 1,
             state.pagesCache.values.maxOfOrNull { it.totalPages } ?: 1,
         )
+        val estimatedTotalFloors = resolveTotalFloors(state.pagesCache.values, totalPages)
 
         TopicDetailUiState(
             topicId = topicId,
