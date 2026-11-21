@@ -965,6 +965,9 @@ class TopicDetailViewModel(
     }
 
     fun onVisibleFloorChanged(floorNumber: Int) {
+        // A programmatic jump/resume scroll is in flight: _visibleFloor already holds its target,
+        // so ignore list-position reports (still showing the old position) until it lands.
+        if (internalState.value.pendingScrollFloor != null) return
         val safeFloor = floorNumber.coerceAtLeast(0)
         if (_visibleFloor.value == safeFloor) return
         _visibleFloor.value = safeFloor
