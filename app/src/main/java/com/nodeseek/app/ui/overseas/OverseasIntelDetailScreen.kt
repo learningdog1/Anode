@@ -53,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -63,6 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
+import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasForumPostFormatter
@@ -74,7 +76,6 @@ import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
-import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseGradientDivider
@@ -83,6 +84,7 @@ import com.nodeseek.app.ui.theme.PulseThemeMode
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -91,6 +93,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 data class OverseasOfferDetailUiState(
     val offerId: String = "",
@@ -100,9 +103,60 @@ data class OverseasOfferDetailUiState(
     val errorMessage: String? = null,
 )
 
+internal object OverseasDetailContentSanitizer {
+    private val LEGACY_SOURCE_WORD = "tele" + "gram"
+    private val CHANNEL_BOILERPLATE_LINE_REGEX = Regex(
+        """(?i)^\s*(?:[📢📣🔗💬👉•\-*>|\s])*(?:关注|订阅|加入|来自|转自|来源|via|from|join|follow)[^\n]*$LEGACY_SOURCE_WORD[^\n]*$""",
+    )
+    private val CHANNEL_PHRASE_REGEX = Regex(
+        """(?i)$LEGACY_SOURCE_WORD\s*(?:促销通知|通知正文|通知|推送|频道|群组|机器人|channel|group|bot)?""",
+    )
+    private val INVALID_PROMO_CODES = setOf(
+        "无", "暂无", "不需要", "无需优惠码", "自动应用", "NONE", "N/A", "NA", "NULL", "-", "AUTO",
+    )
+
+    fun stripSourceBranding(text: String): String {
+        if (text.isBlank()) return ""
+        val cleanedLines = text
+            .lines()
+            .filterNot { line -> CHANNEL_BOILERPLATE_LINE_REGEX.matches(line.trim()) }
+            .map { line ->
+                if (line.contains(LEGACY_SOURCE_WORD, ignoreCase = true)) {
+                    CHANNEL_PHRASE_REGEX.replace(line, "")
+                        .replace(Regex("""\(\s*\)"""), "")
+                        .replace(Regex("""\[\s*\]\([^\)]*\)"""), "")
+                        .replace(Regex("""[ \t]{2,}"""), " ")
+                        .trimEnd()
+                } else {
+                    line
+                }
+            }
+        return cleanedLines
+            .joinToString("\n")
+            .replace(Regex("""\n{3,}"""), "\n\n")
+            .trim()
+    }
+
+    fun sanitizeDetail(detail: OverseasOfferDetail): OverseasOfferDetail = detail.copy(
+        title = stripSourceBranding(detail.title),
+        originalTitle = stripSourceBranding(detail.originalTitle),
+        merchant = stripSourceBranding(detail.merchant),
+        author = stripSourceBranding(detail.author),
+        tgMarkdown = stripSourceBranding(detail.tgMarkdown),
+    )
+
+    fun extractValidPromoCode(detail: OverseasOfferDetail): String? {
+        val raw = detail.structured?.promoCode?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        if (raw.uppercase(Locale.ROOT) in INVALID_PROMO_CODES) return null
+        return stripSourceBranding(raw).takeIf { it.isNotEmpty() }
+    }
+}
+
 class OverseasIntelDetailViewModel(
     private val offerId: String,
     private val repository: OverseasIntelRepository,
+    private val translator: OverseasTranslator? = null,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OverseasOfferDetailUiState(offerId = offerId))
@@ -125,16 +179,19 @@ class OverseasIntelDetailViewModel(
             result.onSuccess { detail ->
                 _uiState.update {
                     it.copy(
-                        detail = detail,
+                        detail = OverseasDetailContentSanitizer.sanitizeDetail(detail),
                         isLoading = false,
                         errorMessage = null,
                     )
                 }
             }.onFailure { err ->
+                val rawMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "加载促销详情失败，请检查网络连接"
+                val cleanMessage = OverseasDetailContentSanitizer.stripSourceBranding(rawMessage)
+                    .ifBlank { "加载促销详情失败，请检查网络连接" }
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        errorMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "加载促销详情失败，请检查网络连接",
+                        errorMessage = cleanMessage,
                     )
                 }
             }
@@ -161,13 +218,34 @@ class OverseasIntelDetailViewModel(
                     }
                 val result = repository.getRepostContent(offerId = offerId, forceRefresh = false)
                 result.onSuccess { repostContent ->
-                    val draft = OverseasForumPostFormatter.format(
-                        repost = repostContent,
-                        fallbackOffer = fallbackOffer,
-                    )
+                    val activeTranslator = translator
+                    val draft = if (activeTranslator != null) {
+                        val translated = runCatching {
+                            activeTranslator.translateRepostContent(
+                                repost = repostContent,
+                                fallbackOffer = fallbackOffer,
+                                config = repository.snapshot.value.translationConfig,
+                            )
+                        }.onFailure { if (it is CancellationException) throw it }
+                            .getOrDefault(repostContent)
+                        OverseasForumPostFormatter.format(
+                            repost = translated,
+                            fallbackOffer = fallbackOffer,
+                            translateOfflineIfNeeded = false,
+                        )
+                    } else {
+                        OverseasForumPostFormatter.format(
+                            repost = repostContent,
+                            fallbackOffer = fallbackOffer,
+                            translateOfflineIfNeeded = true,
+                        )
+                    }
                     _repostDraftEvents.emit(draft)
                 }.onFailure { err ->
-                    _snackbarMessages.tryEmit(err.message?.takeIf { it.isNotBlank() } ?: "获取主楼搬运内容失败，请稍后重试")
+                    val msg = OverseasDetailContentSanitizer.stripSourceBranding(
+                        err.message?.takeIf { it.isNotBlank() } ?: "获取主楼搬运内容失败，请稍后重试",
+                    ).ifBlank { "获取主楼搬运内容失败，请稍后重试" }
+                    _snackbarMessages.tryEmit(msg)
                 }
             } finally {
                 _uiState.update { it.copy(isReposting = false) }
@@ -183,21 +261,22 @@ class OverseasIntelDetailViewModel(
         fun factory(
             offerId: String,
             repository: OverseasIntelRepository,
+            translator: OverseasTranslator? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
                 OverseasIntelDetailViewModel(
                     offerId = offerId,
                     repository = repository,
+                    translator = translator,
                 ) as T
         }
     }
 }
 
 /**
- * Detail screen presenting the full Telegram Chinese notification content (`GET /api/v1/offers/{id}`)
- * rendered cleanly with [MarkdownRenderer], original thread link, and one-click main-post reposting
- * (`GET /api/v1/offers/{id}/repost`).
+ * Overseas promotion detail screen (`GET /api/v1/offers/{id}`) rendered cleanly with [MarkdownRenderer],
+ * original thread link, promo-code copy, and auto-translated one-click main-post reposting (`GET /api/v1/offers/{id}/repost`).
  */
 @Composable
 fun OverseasIntelDetailScreen(
@@ -209,16 +288,25 @@ fun OverseasIntelDetailScreen(
     repository: OverseasIntelRepository? = null,
     onOpenUrl: ((String) -> Unit)? = null,
     onShareDealToForum: ((suggestedTitle: String, markdownBody: String) -> Unit)? = null,
+    translator: OverseasTranslator? = null,
 ) {
     BackHandler(onBack = onBack)
 
     val context = LocalContext.current
+    val isInspection = LocalInspectionMode.current
     val resolvedRepository = remember(repository, context) {
         repository ?: OverseasIntelRepositoryImpl(context = context)
     }
+    val resolvedTranslator = remember(translator, context, isInspection) {
+        translator ?: if (isInspection) null else OverseasTranslator(context = context)
+    }
     val viewModel: OverseasIntelDetailViewModel = viewModel(
         key = "overseas_detail_$offerId",
-        factory = OverseasIntelDetailViewModel.factory(offerId, resolvedRepository),
+        factory = OverseasIntelDetailViewModel.factory(
+            offerId = offerId,
+            repository = resolvedRepository,
+            translator = resolvedTranslator,
+        ),
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -254,6 +342,10 @@ fun OverseasIntelDetailScreen(
     }
 
     val effectiveSourceUrl = uiState.detail?.sourceLink?.takeIf { it.isNotBlank() } ?: initialSourceUrl
+    val cleanSubtitle = uiState.detail?.merchant
+        ?.let(OverseasDetailContentSanitizer::stripSourceBranding)
+        ?.takeIf { it.isNotBlank() }
+        ?: "促销情报详情"
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -262,7 +354,7 @@ fun OverseasIntelDetailScreen(
         snackbarHost = { PulseSnackbarHost(hostState = snackbarHostState) },
         topBar = {
             OverseasDetailTopBar(
-                subtitle = uiState.detail?.merchant?.takeIf { it.isNotBlank() } ?: "Telegram 促销通知详情",
+                subtitle = cleanSubtitle,
                 isRefreshing = uiState.isLoading,
                 onBack = onBack,
                 onRefresh = { viewModel.loadDetail(forceRefresh = true) },
@@ -288,7 +380,9 @@ fun OverseasIntelDetailScreen(
         ) {
             when {
                 uiState.isLoading && uiState.detail == null -> {
-                    OverseasDetailShimmer(initialTitle = initialTitle)
+                    OverseasDetailShimmer(
+                        initialTitle = OverseasDetailContentSanitizer.stripSourceBranding(initialTitle),
+                    )
                 }
                 uiState.detail == null -> {
                     OverseasDetailErrorCard(
@@ -379,7 +473,8 @@ private fun OverseasDetailHeaderCard(
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
     val providerText = detail.merchant.ifBlank { detail.author }
-    val promoCode = detail.structured?.promoCode?.trim().orEmpty()
+    val promoCode = OverseasDetailContentSanitizer.extractValidPromoCode(detail)
+    val displayTitle = detail.title.ifBlank { detail.originalTitle }
 
     Column(
         modifier = Modifier
@@ -398,40 +493,60 @@ private fun OverseasDetailHeaderCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (providerText.isNotBlank()) {
-                    PulseAccentPill(
+                    val initial = providerText
+                        .firstOrNull { it.isLetterOrDigit() || OverseasOfferVisualParser.containsCjk(it.toString()) }
+                        ?.uppercaseChar()
+                        ?.toString()
+                        ?: "L"
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer.copy(
+                                    alpha = if (isDark) 0.72f else 0.88f,
+                                ),
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = initial,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            maxLines = 1,
+                        )
+                    }
+                    Text(
                         text = providerText,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                            alpha = if (isDark) 0.72f else 0.86f,
-                        ),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
-                Spacer(modifier = Modifier.weight(1f))
+
                 if (detail.publishedAtEpochMillis > 0L) {
                     Text(
                         text = formatRelativeTimeChinese(detail.publishedAtEpochMillis.toString()),
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
         }
 
         Text(
-            text = detail.title,
+            text = displayTitle,
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = MaterialTheme.colorScheme.onSurface,
         )
 
-        if (detail.originalTitle.isNotBlank() && !detail.originalTitle.equals(detail.title, ignoreCase = true)) {
-            Text(
-                text = detail.originalTitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        if (promoCode.isNotBlank()) {
+        if (!promoCode.isNullOrBlank()) {
             Row(
                 modifier = Modifier
                     .clip(PulseArchitecturalShapes.SmallChip)
@@ -456,6 +571,9 @@ private fun OverseasDetailHeaderCard(
                     text = "优惠码 $promoCode",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                     color = ext.onDrumstickContainer,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Icon(
                     imageVector = Icons.Rounded.ContentCopy,
@@ -486,37 +604,28 @@ private fun OverseasDetailMarkdownCard(
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.Article,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(14.dp),
-                    )
-                }
-                Text(
-                    text = "Telegram 通知正文",
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.onSurface,
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Article,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(14.dp),
                 )
             }
-
-            PulseAccentPill(
-                text = "中文推送",
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            Text(
+                text = "情报正文",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
 
@@ -592,7 +701,7 @@ private fun OverseasDetailBottomBar(
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isReposting) "获取主楼中…" else "一键搬运发帖",
+                    text = if (isReposting) "正在翻译排版…" else "一键搬运发帖",
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
@@ -672,7 +781,12 @@ private fun OverseasDetailErrorCard(
                 modifier = Modifier.size(16.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("重试加载")
+            Text(
+                text = "重试加载",
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

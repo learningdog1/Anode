@@ -2,7 +2,7 @@ package com.nodeseek.app.domain.overseas
 
 /**
  * Always-available, zero-network offline VPS-domain English-to-Chinese terminology engine (Tier 3)
- * and post-processor for online machine translation output (Tier 2).
+ * and post-processor for online machine translation output (Tier 2), used by one-click forum reposting.
  */
 object VpsGlossaryTranslator {
 
@@ -12,8 +12,37 @@ object VpsGlossaryTranslator {
     )
 
     // Ordered from multi-word / specific phrases down to shorter terms to avoid partial clobbering.
+    // Lookaheads keep rules idempotent if invoked on partially translated text.
     private val OFFLINE_PHRASE_RULES: List<TermRule> = listOf(
+        // Common OP section headers & CTAs
+        rule("""\bnetwork\s+information\b""", "网络与测速信息"),
+        rule("""\bnetwork\s+info\b""", "网络信息"),
+        rule("""\blooking\s+glass\b(?!\s*测速)""", "Looking Glass 测速面板"),
+        rule("""\btest\s+ipv4\b""", "测试 IPv4"),
+        rule("""\btest\s+ipv6\b""", "测试 IPv6"),
+        rule("""\btest\s+ips?\b""", "测试 IP"),
+        rule("""\btest\s+files?\b""", "测速文件"),
+        rule("""\bspeed\s*test\b""", "测速"),
+        rule("""\bkey\s+features\b""", "核心特性"),
+        rule("""\bmain\s+features\b""", "主要特性"),
+        rule("""\bfeatures\b""", "核心特性"),
+        rule("""\bspecifications\b""", "配置规格"),
+        rule("""\bhardware\s+specs?\b""", "硬件规格"),
+        rule("""\bterms\s+of\s+service\b""", "服务条款"),
+        rule("""\bacceptable\s+use\s+policy\b""", "合理使用政策"),
+        rule("""\bpayment\s+methods?\b""", "支付方式"),
+        rule("""\bavailable\s+locations?\b""", "可选机房"),
+        rule("""\bdatacenter\s+locations?\b""", "数据中心机房"),
+        rule("""\bmoney[\-\s]+back\s+guarantee\b""", "退款保证"),
+        rule("""\bclick\s+here\s+to\s+order\b""", "点击立即下单"),
+        rule("""\border\s+now\b""", "立即下单"),
+        rule("""\border\s+here\b""", "点此下单"),
+        rule("""\bbuy\s+now\b""", "立即购买"),
+        rule("""\border\s+link\b""", "下单链接"),
+        rule("""\bclick\s+here\b""", "点击直达"),
+
         // Promo & Stock phrases
+        rule("""\bblack\s+friday\b""", "黑五"),
         rule("""\bcyber\s+monday\b""", "网一大促"),
         rule("""\bflash\s+sales?\b""", "限时闪购"),
         rule("""\bflash\s+deals?\b""", "限时闪购"),
@@ -29,7 +58,9 @@ object VpsGlossaryTranslator {
         rule("""\bin\s+stock\b""", "有货"),
         rule("""\blimited\s+stock\b""", "限量发售"),
         rule("""\blimited\s+quantity\b""", "限量发售"),
+        rule("""\blimited\s+time\s+offers?\b""", "限时特惠"),
         rule("""\blimited\s+time\b""", "限时"),
+        rule("""\bspecial\s+plans?\b""", "特惠套餐"),
         rule("""\bspecial\s+offers?\b""", "特惠套餐"),
         rule("""\bexclusive\s+offers?\b""", "专属特惠"),
         rule("""\bexclusive\s+deals?\b""", "专属优惠"),
@@ -47,34 +78,40 @@ object VpsGlossaryTranslator {
         rule("""\bfrom\s+(?=[$€£¥])""", "低至 "),
         rule("""\bup\s+to\s+(\d+%)\s+off\b""", "最高立减 $1"),
         rule("""\b(\d+%)\s+off\b""", "立减 $1"),
-        rule("""\bcomment\s+(?:your\s+)?order\s+(?:number|id)\b""", "回复订单号"),
+        rule("""\bcomment\s+(?:your\s+)?order\s+(?:number|id|#)\b""", "回帖附订单号"),
         rule("""\bopen\s+a\s+ticket\b""", "提交工单"),
         rule("""\binstant\s+setup\b""", "即时开通"),
         rule("""\binstant\s+deployment\b""", "即时部署"),
         rule("""\bauto[\-\s]?backups?\b""", "自动备份"),
         rule("""\bfree\s+backups?\b""", "免费备份"),
-        rule("""\bddos\s+protection\b""", "DDoS 防护"),
-        rule("""\bbgp\s+sessions?\b""", "BGP 会话"),
+        rule("""\bddos\s+protection\b(?!\s*防护)""", "DDoS 防护"),
+        rule("""\bbgp\s+sessions?\b(?!\s*会话)""", "BGP 会话"),
         rule("""\bdedicated\s+servers?\b""", "独立服务器"),
         rule("""\bbare\s+metal\b""", "裸金属独服"),
-        rule("""\bstorage\s+vps\b""", "大盘鸡 (存储型 VPS)"),
+        rule("""\bstorage\s+vps\b(?!\s*\()""", "大盘鸡 (存储型 VPS)"),
         rule("""\bnvme\s+vps\b""", "NVMe 固态 VPS"),
         rule("""\bkvm\s+vps\b""", "KVM 架构 VPS"),
         rule("""\bcloud\s+vps\b""", "云主机 VPS"),
         rule("""\bdedicated\s+cpu\b""", "独享 CPU"),
         rule("""\bshared\s+cpu\b""", "共享 CPU"),
         rule("""\bdedicated\b""", "独享"),
-        rule("""\bunmetered\s+(?:bandwidth|traffic)\b""", "不限流量"),
-        rule("""\bunlimited\s+(?:bandwidth|traffic)\b""", "不限流量"),
+        rule("""\bunmetered\s+(?:bandwidth|traffic|transfer)\b""", "不限流量"),
+        rule("""\bunlimited\s+(?:bandwidth|traffic|transfer)\b""", "不限流量"),
         rule("""\bunmetered\b""", "不限流量"),
         rule("""\bfair\s+share\b""", "合理使用"),
+        rule("""([$€£¥]\s*\d+(?:\.\d+)?)\s*/\s*(?:yr|year)\b""", "$1/年"),
+        rule("""([$€£¥]\s*\d+(?:\.\d+)?)\s*/\s*(?:mo|month)\b""", "$1/月"),
+        rule("""([$€£¥]\s*\d+(?:\.\d+)?)\s*/\s*(?:qtr|quarter)\b""", "$1/季"),
+        rule("""\b(\d+(?:\.\d+)?)\s*(GB|MB)\s+RAM\b""", "$1$2 内存"),
         rule("""\bbandwidth\b""", "流量"),
         rule("""\btraffic\b""", "流量"),
+        rule("""\btransfer\b""", "流量"),
         rule("""\bmemory\b""", "内存"),
+        rule("""\bdisk\s+space\b""", "硬盘空间"),
         rule("""\bstorage\b""", "存储"),
-        rule("""\bnvme\s+ssd\b""", "NVMe 固态"),
-        rule("""\bnvme\b""", "NVMe 固态"),
-        rule("""\braid[\-\s]?10\b""", "RAID-10 阵列"),
+        rule("""\bnvme\s+ssd\b(?!\s*固态)""", "NVMe 固态"),
+        rule("""\bnvme\b(?!\s*固态)""", "NVMe 固态"),
+        rule("""\braid[\-\s]?10\b(?!\s*阵列)""", "RAID-10 阵列"),
         rule("""\bamd\s+ryzen\b""", "AMD 锐龙 Ryzen"),
         rule("""\bamd\s+epyc\b""", "AMD 霄龙 EPYC"),
         rule("""\bintel\s+xeon\b""", "Intel 至强 Xeon"),
@@ -99,6 +136,7 @@ object VpsGlossaryTranslator {
         rule("""\bsales?\b""", "促销"),
         rule("""\bplans?\b""", "套餐"),
         rule("""\bservers?\b""", "服务器"),
+
         // Datacenter cities & regions
         rule("""\blos\s+angeles\b""", "洛杉矶"),
         rule("""\bsan\s+jose\b""", "圣何塞"),
@@ -161,6 +199,9 @@ object VpsGlossaryTranslator {
         rule("""\bFRA\b""", "法兰克福"),
         rule("""\bAMS\b""", "阿姆斯特丹"),
         rule("""\bNYC\b""", "纽约"),
+
+        // Remaining order action prefix (e.g. "Order LA" / "Order洛杉矶" -> "立即下单 洛杉矶")
+        rule("""\border\s+(?=[A-Za-z\u4E00-\u9FFF])""", "立即下单 "),
     )
 
     // Fixes literal machine-translation awkwardness produced by Google GTX on VPS hosting text.
@@ -170,20 +211,35 @@ object VpsGlossaryTranslator {
         rule("""闪光销售|闪卖|闪电销售""", "限时闪购"),
         rule("""网络星期一""", "网一"),
         rule("""双带宽""", "双倍流量"),
-        rule("""存储\s*VPS""", "大盘鸡 (存储型 VPS)"),
+        rule("""存储\s*VPS(?!\s*\))""", "大盘鸡 (存储型 VPS)"),
+        rule("""虚拟专用服务器""", "VPS"),
         rule("""优惠券代码|促销代码|折扣代码""", "优惠码"),
         rule("""缺货了|无库存""", "已缺货"),
         rule("""打开(?:一张)?(?:门票|票据|车票)""", "提交工单"),
-        rule("""发表评论订单号""", "回帖附订单号"),
+        rule("""(?:发表)?评论(?:您的)?订单号""", "回帖附订单号"),
         rule("""专门的\s*CPU|专用\s*CPU""", "独享 CPU"),
+        rule("""窥镜""", "Looking Glass 测速面板"),
     )
 
     private val PROTECTED_MARKDOWN_SPAN_REGEX = Regex(
-        """`[^`\n]+`|\]\([^\)\s]+\)|https?://\S+""",
+        """!\[[^\]]*\]\([^\)\s]+\)|`[^`\n]+`|\]\([^\)\s]+\)|https?://[^\s<>)\]]+""",
     )
 
     private fun rule(pattern: String, replacement: String): TermRule =
         TermRule(Regex(pattern, RegexOption.IGNORE_CASE), replacement)
+
+    fun containsCjk(text: String): Boolean {
+        for (i in text.indices) {
+            val ch = text[i]
+            if (ch in '\u4E00'..'\u9FFF' || ch in '\u3400'..'\u4DBF') {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun containsAsciiWords(text: String): Boolean =
+        Regex("""[A-Za-z]{3,}""").containsMatchIn(text)
 
     fun translateTitleOffline(englishTitle: String): String {
         val trimmed = englishTitle.trim()
@@ -193,7 +249,7 @@ object VpsGlossaryTranslator {
 
     /**
      * Offline glossary translation for Markdown text while preserving fenced code blocks,
-     * inline code spans, and URL targets.
+     * inline code spans, Markdown images, and URL targets.
      */
     fun translateMarkdownOffline(markdown: String): String {
         if (markdown.isBlank()) return ""
@@ -223,6 +279,7 @@ object VpsGlossaryTranslator {
         GTX_POST_PROCESS_RULES.forEach { rule ->
             text = rule.regex.replace(text, rule.replacement)
         }
+        text = text.replace(Regex("""\*\*\s+([^*\n]+?)\s+\*\*"""), "**$1**")
         return text.replace(Regex("""[ \t]{2,}"""), " ").trim()
     }
 
@@ -231,11 +288,11 @@ object VpsGlossaryTranslator {
         val masked = PROTECTED_MARKDOWN_SPAN_REGEX.replace(line) { match ->
             val idx = placeholders.size
             placeholders += match.value
-            "__NS_SPAN_${idx}__"
+            "⟪$idx⟫"
         }
         var translated = applyGlossaryRules(masked)
         placeholders.forEachIndexed { idx, original ->
-            translated = translated.replace("__NS_SPAN_${idx}__", original)
+            translated = translated.replace("⟪$idx⟫", original)
         }
         return translated
     }

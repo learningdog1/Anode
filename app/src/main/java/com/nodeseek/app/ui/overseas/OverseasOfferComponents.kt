@@ -16,15 +16,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,9 +37,6 @@ import androidx.compose.material.icons.automirrored.rounded.Article
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ConfirmationNumber
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -65,7 +59,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -89,7 +82,7 @@ import com.nodeseek.app.ui.theme.withTabularNumbers
 
 /**
  * Overseas VPS Promotions feed composable backed by the LowEndTalk promotion monitor API.
- * Uses precomputed [OverseasOfferCardUiModel] items with stable keys and zero scroll-time animation overhead.
+ * Renders clean, tag-free [OverseasOfferCardUiModel] items with zero translation clutter.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -102,7 +95,7 @@ fun OverseasOfferFeedContent(
     onOpenSourceLink: (String) -> Unit,
     onRepostToForum: (OverseasDealOffer) -> Unit,
     modifier: Modifier = Modifier,
-    onCopyPromoCode: ((String) -> Unit)? = null,
+    headerContent: (@Composable () -> Unit)? = null,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
 ) {
     PullToRefreshBox(
@@ -115,6 +108,12 @@ fun OverseasOfferFeedContent(
             contentPadding = contentPadding,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (headerContent != null) {
+                item(key = "overseas_header_controls", contentType = "header_controls") {
+                    headerContent()
+                }
+            }
+
             if (!uiState.syncStatus.errorMessage.isNullOrBlank()) {
                 item(key = "overseas_sync_error_banner", contentType = "error_banner") {
                     OverseasErrorNoticeBanner(
@@ -162,7 +161,6 @@ fun OverseasOfferFeedContent(
                             onOpenDetail = onOpenDetail,
                             onOpenSourceLink = onOpenSourceLink,
                             onRepostToForum = onRepostToForum,
-                            onCopyPromoCode = onCopyPromoCode,
                         )
                     }
 
@@ -248,7 +246,7 @@ private fun OverseasCompactSearchField(
         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
             if (query.isEmpty()) {
                 Text(
-                    text = "搜索商家、机房地区、配置或促销关键词…",
+                    text = "搜索商家、原帖标题或促销关键词…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
                     maxLines = 1,
@@ -327,6 +325,8 @@ private fun OverseasErrorNoticeBanner(
             text = "重试",
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
             color = MaterialTheme.colorScheme.onErrorContainer,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier
                 .clip(CircleShape)
                 .clickable(onClick = onRetry)
@@ -336,14 +336,12 @@ private fun OverseasErrorNoticeBanner(
 }
 
 /**
- * NodePulse editorial Overseas VPS promotion card with clear 4-tier visual hierarchy:
- * 1) Header meta group: Merchant monogram + name + source micro-badge + primary status tag + tabular time
- * 2) Title group: Headline (+ optional bilingual English subtitle)
- * 3) Highlight group: Prominent tabular price pill + location/region group + promo code chip
- * 4) Specs & perks group: Unified rounded chips for CPU/RAM/Storage/Traffic/Port & perks + optional AI summary
- * 5) Compact action footer: Source link / One-click OP repost / View detail CTA
+ * Clean, calm editorial Overseas VPS promotion card:
+ * 1) Merchant monogram + merchant name + relative publish time
+ * 2) Original clean headline title (no translation UI, no extracted price/spec/region tags)
+ * 3) Clean summary (when informative)
+ * 4) Action bar: Source link / Auto-translating One-click Repost / View Detail
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun OverseasOfferCard(
     cardModel: OverseasOfferCardUiModel,
@@ -352,22 +350,10 @@ fun OverseasOfferCard(
     onOpenSourceLink: (String) -> Unit,
     onRepostToForum: (OverseasDealOffer) -> Unit,
     modifier: Modifier = Modifier,
-    onCopyPromoCode: ((String) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
     val interactionSource = remember { MutableInteractionSource() }
-
-    val headerTag = remember(cardModel.promoTags) {
-        cardModel.promoTags.firstOrNull { it.tone == OfferTagTone.WARNING }
-            ?: cardModel.promoTags.firstOrNull { it.tone == OfferTagTone.PROMO }
-    }
-    val recurringTag = remember(cardModel.promoTags) {
-        cardModel.promoTags.firstOrNull { it.label == "续费同价" }
-    }
-    val secondaryChipsTags = remember(cardModel.promoTags, headerTag, recurringTag) {
-        cardModel.promoTags.filter { it !== headerTag && it !== recurringTag }
-    }
 
     Column(
         modifier = modifier
@@ -386,78 +372,50 @@ fun OverseasOfferCard(
             .padding(horizontal = 15.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // ── Tier 1: Merchant + Source + Event/Status Tag + Relative Time ──
+        // 1. Merchant & Publish Time Meta Row
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(22.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(
-                            MaterialTheme.colorScheme.primaryContainer.copy(
-                                alpha = if (isDark) 0.72f else 0.88f,
-                            ),
-                        )
-                        .border(
-                            width = 0.75.dp,
-                            color = MaterialTheme.colorScheme.primary.copy(
-                                alpha = if (isDark) 0.36f else 0.22f,
-                            ),
-                            shape = RoundedCornerShape(7.dp),
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer.copy(
+                            alpha = if (isDark) 0.72f else 0.88f,
                         ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = cardModel.merchantInitial,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                        ),
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        maxLines = 1,
                     )
-                }
-
-                Text(
-                    text = cardModel.merchantLabel,
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        fontWeight = FontWeight.Bold,
+                    .border(
+                        width = 0.75.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(
+                            alpha = if (isDark) 0.36f else 0.22f,
+                        ),
+                        shape = RoundedCornerShape(7.dp),
                     ),
-                    color = MaterialTheme.colorScheme.onSurface,
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = cardModel.merchantInitial,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                    ),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
                 )
-
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .padding(horizontal = 5.5.dp, vertical = 2.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = cardModel.sourceBadge,
-                        style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                            fontSize = 9.5.sp,
-                            lineHeight = 12.sp,
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-
-                if (headerTag != null) {
-                    OfferUnifiedTagChip(tag = headerTag)
-                }
             }
+
+            Text(
+                text = cardModel.merchantLabel,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                ),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
 
             if (cardModel.relativeTimeText.isNotBlank()) {
                 Text(
@@ -465,155 +423,38 @@ fun OverseasOfferCard(
                     style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
 
-        // ── Tier 2: Headline Title (+ Bilingual Original Subtitle) ──
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        // 2. Clean Core Title
+        Text(
+            text = cardModel.headlineTitle,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                lineHeight = 22.sp,
+            ),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+
+        // 3. Clean Summary (omits boilerplate fallback)
+        if (!cardModel.cleanSummary.isNullOrBlank()) {
             Text(
-                text = cardModel.headlineTitle,
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
-                    lineHeight = 22.sp,
-                ),
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
+                text = cardModel.cleanSummary,
+                style = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (!cardModel.secondaryTitle.isNullOrBlank()) {
-                Text(
-                    text = cardModel.secondaryTitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-
-        // ── Tier 3 & 4: Prominent Price Callout + Region Group + Specs & Perks ──
-        val hasPriceOrCodeBand = cardModel.priceBadge != null ||
-            recurringTag != null ||
-            cardModel.promoCode != null
-
-        if (hasPriceOrCodeBand) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                cardModel.priceBadge?.let { price ->
-                    OfferPriceHighlightPill(
-                        priceBadge = price,
-                        isRecurring = recurringTag != null,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-
-                if (cardModel.priceBadge == null && recurringTag != null) {
-                    OfferUnifiedTagChip(
-                        tag = recurringTag,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-
-                if (cardModel.regionTags.isNotEmpty()) {
-                    OfferRegionChip(
-                        regionTags = cardModel.regionTags,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-
-                cardModel.promoCode?.let { code ->
-                    OfferPromoCodeChip(
-                        code = code,
-                        onCopyPromoCode = onCopyPromoCode,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-            }
-        }
-
-        val inlineRegionInSpecs = !hasPriceOrCodeBand && cardModel.regionTags.isNotEmpty()
-        if (inlineRegionInSpecs || cardModel.specChips.isNotEmpty() || secondaryChipsTags.isNotEmpty()) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (inlineRegionInSpecs) {
-                    OfferRegionChip(
-                        regionTags = cardModel.regionTags,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-
-                cardModel.specChips.forEach { spec ->
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterVertically)
-                            .clip(PulseArchitecturalShapes.SmallChip)
-                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                            .border(
-                                width = 0.75.dp,
-                                color = ext.cardBorder,
-                                shape = PulseArchitecturalShapes.SmallChip,
-                            )
-                            .padding(horizontal = 8.dp, vertical = 4.5.dp),
-                    ) {
-                        Text(
-                            text = spec,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Medium,
-                            ).withTabularNumbers(),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                        )
-                    }
-                }
-
-                secondaryChipsTags.forEach { tag ->
-                    OfferUnifiedTagChip(
-                        tag = tag,
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    )
-                }
-            }
-        }
-
-        // ── Tier 5: Clean Editorial Summary (omits generic server fallback boilerplate) ──
-        if (!cardModel.cleanSummary.isNullOrBlank()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        MaterialTheme.colorScheme.surfaceContainerLow.copy(
-                            alpha = if (isDark) 0.64f else 0.74f,
-                        ),
-                    )
-                    .border(
-                        width = 0.6.dp,
-                        color = ext.cardBorder.copy(alpha = 0.55f),
-                        shape = RoundedCornerShape(12.dp),
-                    )
-                    .padding(horizontal = 11.dp, vertical = 9.dp),
-            ) {
-                Text(
-                    text = cardModel.cleanSummary,
-                    style = MaterialTheme.typography.bodySmall.copy(lineHeight = 18.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
         }
 
         PulseGradientDivider()
 
-        // ── Tier 6: Compact Action Footer ──
+        // 4. Compact Action Footer
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -629,7 +470,7 @@ fun OverseasOfferCard(
             )
 
             OfferActionChip(
-                label = if (isReposting) "搬运中…" else "一键搬运",
+                label = if (isReposting) "正在翻译排版…" else "一键搬贴",
                 icon = Icons.AutoMirrored.Rounded.Send,
                 isLoading = isReposting,
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -647,236 +488,6 @@ fun OverseasOfferCard(
                 onClick = { onOpenDetail(cardModel.offer) },
             )
         }
-    }
-}
-
-@Composable
-private fun OfferRegionChip(
-    regionTags: List<String>,
-    modifier: Modifier = Modifier,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    Row(
-        modifier = modifier
-            .heightIn(min = 26.dp)
-            .clip(PulseArchitecturalShapes.SmallChip)
-            .background(
-                MaterialTheme.colorScheme.secondaryContainer.copy(
-                    alpha = if (isDark) 0.56f else 0.72f,
-                ),
-            )
-            .border(
-                width = 0.75.dp,
-                color = MaterialTheme.colorScheme.secondary.copy(
-                    alpha = if (isDark) 0.30f else 0.18f,
-                ),
-                shape = PulseArchitecturalShapes.SmallChip,
-            )
-            .padding(horizontal = 8.dp, vertical = 4.5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.LocationOn,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.size(13.dp),
-        )
-        Text(
-            text = regionTags.joinToString(" · "),
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.SemiBold,
-            ),
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun OfferPromoCodeChip(
-    code: String,
-    onCopyPromoCode: ((String) -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    Row(
-        modifier = modifier
-            .heightIn(min = 26.dp)
-            .clip(PulseArchitecturalShapes.SmallChip)
-            .background(
-                ext.drumstickContainer.copy(
-                    alpha = if (isDark) 0.76f else 0.90f,
-                ),
-            )
-            .border(
-                width = 0.75.dp,
-                color = ext.onDrumstickContainer.copy(
-                    alpha = if (isDark) 0.36f else 0.22f,
-                ),
-                shape = PulseArchitecturalShapes.SmallChip,
-            )
-            .then(
-                if (onCopyPromoCode != null) {
-                    Modifier.clickable(
-                        role = Role.Button,
-                        onClickLabel = "复制优惠码",
-                        onClick = { onCopyPromoCode(code) },
-                    )
-                } else {
-                    Modifier
-                },
-            )
-            .padding(horizontal = 8.dp, vertical = 4.5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.ConfirmationNumber,
-            contentDescription = null,
-            tint = ext.onDrumstickContainer,
-            modifier = Modifier.size(13.dp),
-        )
-        Text(
-            text = "优惠码 $code",
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.Bold,
-            ),
-            color = ext.onDrumstickContainer,
-            maxLines = 1,
-        )
-        if (onCopyPromoCode != null) {
-            Icon(
-                imageVector = Icons.Rounded.ContentCopy,
-                contentDescription = "复制",
-                tint = ext.onDrumstickContainer,
-                modifier = Modifier.size(11.5.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun OfferPriceHighlightPill(
-    priceBadge: OverseasPriceBadge,
-    isRecurring: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val containerBrush = Brush.horizontalGradient(
-        colors = listOf(
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.78f else 0.92f),
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.44f else 0.56f),
-        ),
-    )
-
-    Row(
-        modifier = modifier
-            .heightIn(min = 28.dp)
-            .clip(PulseArchitecturalShapes.MediumBadge)
-            .background(containerBrush)
-            .border(
-                width = 0.85.dp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.42f else 0.28f),
-                shape = PulseArchitecturalShapes.MediumBadge,
-            )
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = priceBadge.amountText,
-                style = NodePulseThemeTokens.extraTypography.metricValue.copy(
-                    fontSize = 17.sp,
-                    lineHeight = 20.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                ),
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 1,
-            )
-            if (priceBadge.cycleLabel.isNotBlank()) {
-                Text(
-                    text = priceBadge.cycleLabel,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    ).withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f),
-                    maxLines = 1,
-                    modifier = Modifier.padding(bottom = 1.dp),
-                )
-            }
-        }
-        if (isRecurring) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(ext.drumstickContainer.copy(alpha = if (isDark) 0.82f else 0.95f))
-                    .padding(horizontal = 5.dp, vertical = 1.5.dp),
-            ) {
-                Text(
-                    text = "续费同价",
-                    style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                        fontSize = 9.5.sp,
-                        lineHeight = 12.sp,
-                    ),
-                    color = ext.onDrumstickContainer,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun OfferUnifiedTagChip(
-    tag: OverseasOfferTag,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-
-    val (bgColor, borderColor, fgColor) = when (tag.tone) {
-        OfferTagTone.PROMO -> Triple(
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.65f else 0.80f),
-            MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.34f else 0.22f),
-            MaterialTheme.colorScheme.onPrimaryContainer,
-        )
-        OfferTagTone.PERK -> Triple(
-            ext.drumstickContainer.copy(alpha = if (isDark) 0.70f else 0.88f),
-            ext.onDrumstickContainer.copy(alpha = if (isDark) 0.34f else 0.20f),
-            ext.onDrumstickContainer,
-        )
-        OfferTagTone.WARNING -> Triple(
-            MaterialTheme.colorScheme.errorContainer.copy(alpha = if (isDark) 0.72f else 0.86f),
-            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.36f else 0.22f),
-            MaterialTheme.colorScheme.onErrorContainer,
-        )
-    }
-
-    Box(
-        modifier = modifier
-            .clip(PulseArchitecturalShapes.SmallChip)
-            .background(bgColor)
-            .border(0.75.dp, borderColor, PulseArchitecturalShapes.SmallChip)
-            .padding(horizontal = 7.dp, vertical = 3.5.dp),
-    ) {
-        Text(
-            text = tag.label,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 10.5.sp,
-                fontWeight = FontWeight.SemiBold,
-            ),
-            color = fgColor,
-            maxLines = 1,
-        )
     }
 }
 
@@ -925,6 +536,8 @@ private fun OfferActionChip(
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
             color = contentColor,
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -945,7 +558,7 @@ private fun OverseasOfferShimmerCard() {
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 PulseShimmerBox(modifier = Modifier.size(22.dp), shape = RoundedCornerShape(7.dp))
                 PulseShimmerBox(modifier = Modifier.width(84.dp).height(14.dp))
@@ -953,15 +566,7 @@ private fun OverseasOfferShimmerCard() {
             PulseShimmerBox(modifier = Modifier.width(46.dp).height(12.dp))
         }
         PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.92f).height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PulseShimmerBox(modifier = Modifier.width(82.dp).height(28.dp), shape = PulseArchitecturalShapes.MediumBadge)
-            PulseShimmerBox(modifier = Modifier.width(96.dp).height(28.dp), shape = PulseArchitecturalShapes.SmallChip)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            PulseShimmerBox(modifier = Modifier.width(56.dp).height(22.dp), shape = PulseArchitecturalShapes.SmallChip)
-            PulseShimmerBox(modifier = Modifier.width(64.dp).height(22.dp), shape = PulseArchitecturalShapes.SmallChip)
-            PulseShimmerBox(modifier = Modifier.width(74.dp).height(22.dp), shape = PulseArchitecturalShapes.SmallChip)
-        }
+        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.84f).height(16.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1018,7 +623,12 @@ private fun OverseasEmptyStateCard(
                 modifier = Modifier.size(16.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text(if (hasSearchQuery) "清空搜索" else "立即刷新情报")
+            Text(
+                text = if (hasSearchQuery) "清空搜索" else "立即刷新情报",
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

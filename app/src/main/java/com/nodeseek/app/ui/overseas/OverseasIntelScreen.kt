@@ -1,34 +1,36 @@
 package com.nodeseek.app.ui.overseas
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Translate
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -61,7 +63,12 @@ import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
+import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
+import com.nodeseek.app.ui.theme.PulseElevation
+import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseThemeMode
+import com.nodeseek.app.ui.theme.pulseBouncyClickable
+import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,8 +76,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+const val OVERSEAS_MONITOR_TG_CHANNEL_URL = "https://t.me/colmidad_lowendtalk_offer"
+
 /**
  * Standalone Overseas VPS Promotions Screen (`海外情报`) powered by the LowEndTalk Promotion Monitor API.
+ *
+ * Browsing is intentionally clean and free of any translation controls or extracted spec/price tags,
+ * while one-click reposting (`一键搬贴`) automatically translates and formats OP posts for NodeSeek.
  */
 @Composable
 fun OverseasIntelScreen(
@@ -80,6 +92,8 @@ fun OverseasIntelScreen(
     onOpenOfferDetail: ((OverseasDealOffer) -> Unit)? = null,
     onOpenUrl: ((String) -> Unit)? = null,
     onShareDealToForum: ((suggestedTitle: String, markdownBody: String) -> Unit)? = null,
+    promoNotificationsEnabled: Boolean = false,
+    onTogglePromoNotifications: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val isInspection = LocalInspectionMode.current
@@ -97,8 +111,16 @@ fun OverseasIntelScreen(
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showTranslatorSheet by rememberSaveable { mutableStateOf(false) }
     var fallbackSelectedOfferId by rememberSaveable { mutableStateOf<String?>(null) }
+    var localFallbackPromoEnabled by rememberSaveable(promoNotificationsEnabled) {
+        mutableStateOf(promoNotificationsEnabled)
+    }
+
+    val effectivePromoEnabled = if (onTogglePromoNotifications != null) {
+        promoNotificationsEnabled
+    } else {
+        localFallbackPromoEnabled
+    }
 
     val openLinkHandler: (String) -> Unit = remember(onOpenUrl, context) {
         { url ->
@@ -107,14 +129,6 @@ fun OverseasIntelScreen(
             } else {
                 openOverseasExternalUrl(context, url)
             }
-        }
-    }
-
-    val copyPromoCodeHandler: (String) -> Unit = remember(context, viewModel) {
-        { code ->
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            clipboard?.setPrimaryClip(ClipData.newPlainText("promo_code", code))
-            viewModel.notifyMessage("已复制优惠码 $code")
         }
     }
 
@@ -142,6 +156,7 @@ fun OverseasIntelScreen(
             repository = resolvedRepository,
             onOpenUrl = openLinkHandler,
             onShareDealToForum = onShareDealToForum,
+            translator = resolvedTranslator,
         )
         return
     }
@@ -154,15 +169,8 @@ fun OverseasIntelScreen(
         topBar = {
             OverseasIntelTopBar(
                 totalCount = uiState.syncStatus.totalCount,
-                displayMode = uiState.translationConfig.displayMode,
-                isTranslatingList = uiState.isTranslatingList,
                 isRefreshing = uiState.syncStatus.isRefreshing,
                 onBack = onBack,
-                onCycleDisplayMode = viewModel::cycleDisplayMode,
-                onOpenSettings = {
-                    viewModel.clearTranslatorTestFeedback()
-                    showTranslatorSheet = true
-                },
                 onRefresh = viewModel::refresh,
             )
         },
@@ -181,23 +189,22 @@ fun OverseasIntelScreen(
             },
             onOpenSourceLink = openLinkHandler,
             onRepostToForum = viewModel::prepareRepostToForum,
-            onCopyPromoCode = copyPromoCodeHandler,
-            modifier = Modifier.padding(innerPadding),
-        )
-    }
-
-    if (showTranslatorSheet) {
-        OverseasTranslatorSettingsSheet(
-            currentConfig = uiState.translationConfig,
-            isTesting = uiState.isTestingTranslator,
-            testFeedback = uiState.translatorTestFeedback,
-            testSuccess = uiState.translatorTestSuccess,
-            onDismiss = { showTranslatorSheet = false },
-            onTestConnection = viewModel::testTranslationConfig,
-            onClearCache = viewModel::clearTranslationCache,
-            onSave = { config ->
-                viewModel.saveTranslationConfig(config)
+            headerContent = {
+                OverseasPromoControlCard(
+                    promoNotificationsEnabled = effectivePromoEnabled,
+                    onTogglePromoNotifications = { enabled ->
+                        if (onTogglePromoNotifications != null) {
+                            onTogglePromoNotifications(enabled)
+                        } else {
+                            localFallbackPromoEnabled = enabled
+                        }
+                    },
+                    onFollowMonitorChannel = {
+                        openLinkHandler(OVERSEAS_MONITOR_TG_CHANNEL_URL)
+                    },
+                )
             },
+            modifier = Modifier.padding(innerPadding),
         )
     }
 }
@@ -245,14 +252,6 @@ fun EmbeddedOverseasOfferFeed(
         }
     }
 
-    val copyPromoCodeHandler: (String) -> Unit = remember(context, viewModel) {
-        { code ->
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            clipboard?.setPrimaryClip(ClipData.newPlainText("promo_code", code))
-            viewModel.notifyMessage("已复制优惠码 $code")
-        }
-    }
-
     LaunchedEffect(viewModel, onFeedbackMessage) {
         if (onFeedbackMessage != null) {
             viewModel.snackbarMessages.collect { msg -> onFeedbackMessage(msg) }
@@ -277,6 +276,7 @@ fun EmbeddedOverseasOfferFeed(
             repository = resolvedRepository,
             onOpenUrl = openLinkHandler,
             onShareDealToForum = onShareDealToForum,
+            translator = resolvedTranslator,
         )
         return
     }
@@ -295,26 +295,150 @@ fun EmbeddedOverseasOfferFeed(
         },
         onOpenSourceLink = openLinkHandler,
         onRepostToForum = viewModel::prepareRepostToForum,
-        onCopyPromoCode = copyPromoCodeHandler,
         modifier = modifier,
         contentPadding = contentPadding,
     )
 }
 
 @Composable
-private fun OverseasIntelTopBar(
-    totalCount: Int,
-    displayMode: OverseasDisplayMode,
-    isTranslatingList: Boolean,
-    isRefreshing: Boolean,
-    onBack: () -> Unit,
-    onCycleDisplayMode: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onRefresh: () -> Unit,
+private fun OverseasPromoControlCard(
+    promoNotificationsEnabled: Boolean,
+    onTogglePromoNotifications: (Boolean) -> Unit,
+    onFollowMonitorChannel: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
 
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                elevation = PulseElevation.Card,
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (promoNotificationsEnabled) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (promoNotificationsEnabled) {
+                        Icons.Rounded.NotificationsActive
+                    } else {
+                        Icons.Rounded.NotificationsNone
+                    },
+                    contentDescription = null,
+                    tint = if (promoNotificationsEnabled) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "促销推送通知",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (promoNotificationsEnabled) {
+                        "已开启 · 发现新促销贴将第一时间主动通知"
+                    } else {
+                        "开启后无需打开页面，新促销贴出现即主动通知"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Switch(
+                checked = promoNotificationsEnabled,
+                onCheckedChange = onTogglePromoNotifications,
+            )
+        }
+
+        PulseGradientDivider()
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(CircleShape)
+                .background(
+                    MaterialTheme.colorScheme.primaryContainer.copy(
+                        alpha = if (isDark) 0.68f else 0.86f,
+                    ),
+                )
+                .border(
+                    width = 0.8.dp,
+                    color = MaterialTheme.colorScheme.primary.copy(
+                        alpha = if (isDark) 0.34f else 0.22f,
+                    ),
+                    shape = CircleShape,
+                )
+                .pulseBouncyClickable(onClick = onFollowMonitorChannel)
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.Send,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "关注监控 TG 频道",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun OverseasIntelTopBar(
+    totalCount: Int,
+    isRefreshing: Boolean,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -354,58 +478,6 @@ private fun OverseasIntelTopBar(
             )
         }
 
-        Row(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(
-                    if (displayMode == OverseasDisplayMode.ORIGINAL) {
-                        MaterialTheme.colorScheme.surfaceContainerHigh
-                    } else {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.78f else 0.92f)
-                    },
-                )
-                .border(0.8.dp, ext.cardBorder, CircleShape)
-                .clickable(onClick = onCycleDisplayMode)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            if (isTranslatingList) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(11.dp),
-                    strokeWidth = 1.6.dp,
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Rounded.Translate,
-                    contentDescription = null,
-                    tint = if (displayMode == OverseasDisplayMode.ORIGINAL) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    },
-                    modifier = Modifier.size(13.dp),
-                )
-            }
-            Text(
-                text = displayMode.shortLabel,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                color = if (displayMode == OverseasDisplayMode.ORIGINAL) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                },
-            )
-        }
-
-        IconButton(onClick = onOpenSettings) {
-            Icon(
-                imageVector = Icons.Rounded.Tune,
-                contentDescription = "列表翻译设置",
-                tint = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-
         IconButton(onClick = onRefresh, enabled = !isRefreshing) {
             if (isRefreshing) {
                 CircularProgressIndicator(
@@ -423,16 +495,14 @@ private fun OverseasIntelTopBar(
     }
 }
 
-private fun buildShowcasePreviewRepository(
-    displayMode: OverseasDisplayMode = OverseasDisplayMode.BILINGUAL,
-): OverseasIntelRepository {
+private fun buildShowcasePreviewRepository(): OverseasIntelRepository {
     val now = System.currentTimeMillis()
     val sampleOffers = listOf(
         OverseasDealOffer(
             id = "223566",
-            title = "RackNerd 北美多机房 KVM 入门与常规套餐促销",
-            originalTitle = "RackNerd - Los Angeles & San Jose KVM VPS - 2 vCPU 4GB RAM 45GB NVMe 4TB@1Gbps \$18.99/yr Recurring Promo Code: FLASH2026",
-            summary = "RackNerd 推出洛杉矶、圣何塞及芝加哥多机房 KVM 虚拟服务器常规特惠方案，含续费同价与大流量配置，适合轻量建站与开发测试。",
+            title = "RackNerd - Los Angeles & San Jose KVM VPS - 2 vCPU 4GB RAM 45GB NVMe $18.99/yr",
+            originalTitle = "RackNerd - Los Angeles & San Jose KVM VPS - 2 vCPU 4GB RAM 45GB NVMe $18.99/yr",
+            summary = "RackNerd 推出洛杉矶、圣何塞及芝加哥多机房 KVM 虚拟服务器常规特惠方案，适合轻量建站与开发测试。",
             merchant = "RackNerd",
             sourceLink = "https://lowendtalk.com/discussion/223566/racknerd-special-offers",
             publishedAtEpochMillis = now - 25L * 60_000L,
@@ -440,8 +510,8 @@ private fun buildShowcasePreviewRepository(
         ),
         OverseasDealOffer(
             id = "223590",
-            title = "[HostPapa] Black Friday Web Hosting – · cPanel | FREE Domain Y1 | CA/US/EU",
-            originalTitle = "[HostPapa] Black Friday Web Hosting – \$1.25/mo | 25 GB NVMe | cPanel | FREE Domain Y1 | CA/US/EU |",
+            title = "[HostPapa] Black Friday Web Hosting – $1.25/mo | 25 GB NVMe | cPanel | FREE Domain Y1",
+            originalTitle = "[HostPapa] Black Friday Web Hosting – $1.25/mo | 25 GB NVMe | cPanel | FREE Domain Y1",
             summary = "来自 HostPapa 的 LowEndTalk 海外服务器与 VPS 促销情报，点击查看完整方案详情。",
             merchant = "BLACK FRIDAY",
             sourceLink = "https://lowendtalk.com/discussion/223590/hostpapa-bf",
@@ -450,7 +520,7 @@ private fun buildShowcasePreviewRepository(
         ),
         OverseasDealOffer(
             id = "223512",
-            title = "CloudCone 东京与法兰克福 NVMe 云主机限时闪购",
+            title = "CloudCone Flash Sale - Tokyo & Frankfurt 2C/4G 40GB NVMe Unmetered €12/year",
             originalTitle = "CloudCone Flash Sale - Tokyo & Frankfurt 2C/4G 40GB NVMe Unmetered €12/year",
             summary = "开放日本东京与德国法兰克福节点 NVMe 固态云主机方案，支持按需弹性部署与快照备份。",
             merchant = "CloudCone",
@@ -464,7 +534,7 @@ private fun buildShowcasePreviewRepository(
         private val _snapshot = MutableStateFlow(
             OverseasIntelSnapshot(
                 offers = sampleOffers,
-                translationConfig = OverseasTranslationConfig(displayMode = displayMode),
+                translationConfig = OverseasTranslationConfig(),
                 syncStatus = OverseasSyncStatus(
                     lastSyncedEpochMillis = now - 120_000L,
                     currentPage = 1,
@@ -503,6 +573,8 @@ private fun OverseasIntelScreenLightPreview() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
+            promoNotificationsEnabled = true,
+            onTogglePromoNotifications = {},
             onShareDealToForum = { _, _ -> },
         )
     }
@@ -516,6 +588,8 @@ private fun OverseasIntelScreenDarkPreview() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
+            promoNotificationsEnabled = false,
+            onTogglePromoNotifications = {},
             onShareDealToForum = { _, _ -> },
         )
     }
@@ -529,6 +603,8 @@ private fun OverseasIntelScreenPitchAmoledPreview() {
         OverseasIntelScreen(
             onBack = {},
             repository = repo,
+            promoNotificationsEnabled = true,
+            onTogglePromoNotifications = {},
             onShareDealToForum = { _, _ -> },
         )
     }

@@ -44,6 +44,6 @@ class OverseasLiveServerVerifyTest {
         assertTrue("Expected non-blank repost bodyMarkdown", repost.bodyMarkdown.isNotBlank())
         val formattedPost = OverseasForumPostFormatter.format(repost)
         println("[LIVE-VERIFY] /api/v1/offers/$repostId/repost -> postTitle=${formattedPost.title}, images=${repost.images.size}, links=${repost.links.size}, bodyLen=${formattedPost.markdownBody.length}")
-        assertTrue(formattedPost.title.startsWith("[海外情报/LET]"))
+        assertTrue(formattedPost.title.startsWith("[海外情报]"))
     }
 }

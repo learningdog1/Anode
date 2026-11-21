@@ -1,6 +1,8 @@
 package com.nodeseek.app.overseas
 
 import com.nodeseek.app.data.overseas.OverseasTranslator
+import com.nodeseek.app.domain.overseas.OverseasLabeledLink
+import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.domain.overseas.TranslationEngineKind
 import com.nodeseek.app.domain.overseas.TranslationTier
@@ -70,6 +72,79 @@ class OverseasTranslatorTest {
     }
 
     @Test
+    fun segmentedMarkdownTranslationProtectsCodeFencesCouponsImagesAndLinkUrls() = runTest {
+        val server = MockWebServer()
+        // Block 1 (before code fence): heading + list item with inline link & bare coupon wrapped as code
+        val block1Gtx = """
+            [
+              [
+                ["独享 NVMe 套餐\n", "Dedicated NVMe Plans\n", null, null, 10],
+                ["** 2 vCPU ** / 4GB 内存 — 【立即订购洛杉矶】 kph 0 kph\n", "**2 vCPU** / 4GB RAM — [Order LA]KPH0KPH\n", null, null, 10],
+                ["使用优惠码：KPH1KPH 享受终身续费同价", "Use Promo Code: KPH1KPH for lifetime recurring", null, null, 10]
+              ],
+              null,
+              "en"
+            ]
+        """.trimIndent()
+        // Block 2 (after code fence & image): network looking glass line with bare URL
+        val block2Gtx = """
+            [
+              [
+                ["东京测试 IP 与 窥镜：KPH0KPH", "Tokyo Test IP & Looking Glass: KPH0KPH", null, null, 10]
+              ],
+              null,
+              "en"
+            ]
+        """.trimIndent()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(block1Gtx))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(block2Gtx))
+        server.start()
+
+        val cacheFile = File(tempFolder.root, "overseas_segmented_md.json")
+        try {
+            val translator = OverseasTranslator(
+                cacheFile = cacheFile,
+                gtxBaseUrl = server.url("/translate_a/single").toString(),
+            )
+            val rawMd = """
+                ### Dedicated NVMe Plans
+                - **2 vCPU** / 4GB RAM — [Order LA](https://my.racknerd.com/cart.php?a=add&pid=901)
+                - Use Promo Code: SPRING2026OFF for lifetime recurring
+
+                ```bash
+                wget -qO- bench.sh | bash
+                # Promo code SPRING2026OFF must stay untouched
+                ```
+
+                ![Promo Banner](https://img.example.com/banner-2026.png)
+
+                Tokyo Test IP &amp; Looking Glass: https://lg-tyo.example.com/100mb.bin
+            """.trimIndent()
+
+            val res = translator.translateMarkdown(
+                markdown = rawMd,
+                config = OverseasTranslationConfig(engineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY),
+            )
+
+            assertEquals(TranslationTier.GOOGLE_GTX, res.tier)
+            val out = res.translatedText
+            // Heading & list markers preserved cleanly; broken bold spacing repaired
+            assertTrue(out.contains("### 独享 NVMe 套餐"))
+            assertTrue(out.contains("- **2 vCPU** / 4GB 内存 — [立即订购洛杉矶](https://my.racknerd.com/cart.php?a=add&pid=901)"))
+            // Promo code SPRING2026OFF was protected as inline code and NOT translated into "春天2026"
+            assertTrue(out.contains("`SPRING2026OFF`"))
+            // Fenced code block and standalone image preserved 100% verbatim
+            assertTrue(out.contains("```bash\nwget -qO- bench.sh | bash\n# Promo code SPRING2026OFF must stay untouched\n```"))
+            assertTrue(out.contains("![Promo Banner](https://img.example.com/banner-2026.png)"))
+            // Bare URL preserved byte-for-byte & "窥镜" polished to "Looking Glass 测速面板"
+            assertTrue(out.contains("Looking Glass 测速面板"))
+            assertTrue(out.contains("https://lg-tyo.example.com/100mb.bin"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun markdownOfflineFallbackPreservesLinksAndCodeSpansWhenGtxFails() = runTest {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(503).setBody("Service Unavailable"))
@@ -98,9 +173,54 @@ class OverseasTranslatorTest {
             assertTrue(res.translatedText.contains("双倍流量"))
             assertTrue(res.translatedText.contains("不限流量"))
             assertTrue(res.translatedText.contains("续费同价"))
-            // Inline code and URL target must stay untouched!
             assertTrue(res.translatedText.contains("`LET2026_RECURRING`"))
-            assertTrue(res.translatedText.contains("](https://example.com/order?location=tokyo)"))
+            assertTrue(res.translatedText.contains("[立即下单](https://example.com/order?location=tokyo)"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun translateRepostContentTranslatesEnglishTitleBodyAndExtraLinks() = runTest {
+        val server = MockWebServer()
+        // 1st call: title translation
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """[[["CloudCone 东京限时闪购 NVMe 套餐", "CloudCone Tokyo Flash Sale NVMe Plans", null, null, 10]], null, "en"]""",
+            ),
+        )
+        // 2nd call: body translation
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """[[["东京机房即时开通，支持 [立即下单] KPH0KPH", "Instant setup in Tokyo, [Order Here]KPH0KPH", null, null, 10]], null, "en"]""",
+            ),
+        )
+        server.start()
+
+        val cacheFile = File(tempFolder.root, "repost_translate.json")
+        try {
+            val translator = OverseasTranslator(
+                cacheFile = cacheFile,
+                gtxBaseUrl = server.url("/translate_a/single").toString(),
+            )
+            val repost = OverseasRepostContent(
+                id = "3001",
+                title = "CloudCone Tokyo Flash Sale NVMe Plans",
+                titleCn = "",
+                merchant = "CloudCone",
+                author = "cloudcone",
+                sourceLink = "https://lowendtalk.com/discussion/3001/cloudcone",
+                bodyMarkdown = "- Instant setup in Tokyo, [Order Here](https://app.cloudcone.com/vps/99)",
+                links = listOf(
+                    OverseasLabeledLink("Looking Glass", "https://lg.cloudcone.com"),
+                ),
+            )
+
+            val translated = translator.translateRepostContent(repost)
+            assertEquals("CloudCone 东京限时闪购 NVMe 套餐", translated.titleCn)
+            assertTrue(translated.bodyMarkdown.contains("- 东京机房即时开通，支持 [立即下单](https://app.cloudcone.com/vps/99)"))
+            assertEquals("Looking Glass 测速面板", translated.links.first().text)
+            assertEquals("https://lg.cloudcone.com", translated.links.first().url)
         } finally {
             server.shutdown()
         }
@@ -158,15 +278,19 @@ class OverseasTranslatorTest {
     }
 
     @Test
-    fun offlineGlossaryDirectUnitRulesTranslateCommonVpsTermsCleanly() {
-        val out = VpsGlossaryTranslator.translateTitleOffline(
+    fun offlineGlossaryDirectUnitRulesAreIdempotentAndTranslateCommonVpsTermsCleanly() {
+        val once = VpsGlossaryTranslator.translateTitleOffline(
             "Special Offers: 50% off Storage VPS in Frankfurt & Amsterdam - Lifetime Recurring",
         )
-        assertTrue(out.contains("特惠套餐"))
-        assertTrue(out.contains("立减 50%"))
-        assertTrue(out.contains("大盘鸡"))
-        assertTrue(out.contains("法兰克福"))
-        assertTrue(out.contains("阿姆斯特丹"))
-        assertTrue(out.contains("续费同价"))
+        assertTrue(once.contains("特惠套餐"))
+        assertTrue(once.contains("立减 50%"))
+        assertTrue(once.contains("大盘鸡"))
+        assertTrue(once.contains("法兰克福"))
+        assertTrue(once.contains("阿姆斯特丹"))
+        assertTrue(once.contains("续费同价"))
+
+        // Idempotency check: running offline glossary a second time must not duplicate suffixes
+        val twice = VpsGlossaryTranslator.translateTitleOffline(once)
+        assertEquals(once, twice)
     }
 }
