@@ -1,20 +1,41 @@
 package com.nodeseek.app.fleet
 
+import com.nodeseek.app.data.fleet.ProbeCredentialBoundaryException
 import com.nodeseek.app.data.fleet.ProbePanelClient
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
 import kotlinx.coroutines.test.runTest
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.Dns
+import okhttp3.HttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
+import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.BeforeClass
 import org.junit.Test
+import java.io.File
+import java.net.InetAddress
+import java.net.Proxy
+import java.nio.file.Files
+import java.security.KeyStore
+import java.security.SecureRandom
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 
 class ProbePanelClientTest {
 
@@ -100,7 +121,10 @@ class ProbePanelClientTest {
             }
         }
 
-        val client = ProbePanelClient(nowMillisProvider = { fixedNowMillis })
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
         val config = ProbePanelConfig(
             id = "p-v0",
             name = "Nezha V0 Panel",
@@ -160,7 +184,10 @@ class ProbePanelClientTest {
             }
         }
 
-        val client = ProbePanelClient(nowMillisProvider = { fixedNowMillis })
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
         val fetched = client.fetchPanelServers(
             ProbePanelConfig(
                 id = "p-v0-list",
@@ -227,7 +254,10 @@ class ProbePanelClientTest {
             }
         }
 
-        val client = ProbePanelClient(nowMillisProvider = { fixedNowMillis })
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
         val fetched = client.fetchPanelServers(
             ProbePanelConfig(
                 id = "p-v1",
@@ -324,7 +354,10 @@ class ProbePanelClientTest {
             }
         }
 
-        val client = ProbePanelClient(nowMillisProvider = { fixedNowMillis })
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
         val fetched = client.fetchPanelServers(
             ProbePanelConfig(
                 id = "p-komari",
@@ -429,5 +462,418 @@ class ProbePanelClientTest {
             "http://127.0.0.1:8008",
             ProbePanelClient.normalizeBaseUrl("http://127.0.0.1:8008/api/nodes/"),
         )
+    }
+
+    @Test
+    fun `default ProbePanelClient rejects http baseUrl when apiToken is non-blank before making any network call`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"success","data":[]}"""))
+        val prodClient = ProbePanelClient(nowMillisProvider = { fixedNowMillis })
+
+        val rejectedConfigs = listOf(
+            ProbePanelConfig(
+                id = "http-ext-komari",
+                name = "Insecure Komari",
+                baseUrl = "http://probe.example.com:8008",
+                panelType = ProbePanelType.KOMARI,
+                apiToken = "komari-secret-key",
+            ),
+            ProbePanelConfig(
+                id = "http-loopback-v0",
+                name = "Loopback HTTP V0",
+                baseUrl = server.url("/").toString(),
+                panelType = ProbePanelType.NEZHA_V0,
+                apiToken = "nezha-v0-secret",
+            ),
+            ProbePanelConfig(
+                id = "http-loopback-v1-cookie",
+                name = "Loopback HTTP V1 Cookie",
+                baseUrl = server.url("/").toString(),
+                panelType = ProbePanelType.NEZHA_V1,
+                apiToken = "nz-jwt=cookie-secret",
+            ),
+            ProbePanelConfig(
+                id = "http-loopback-auto",
+                name = "Loopback HTTP Auto",
+                baseUrl = server.url("/").toString(),
+                panelType = ProbePanelType.AUTO,
+                apiToken = "auto-secret-token",
+            ),
+            ProbePanelConfig(
+                id = "crlf-token",
+                name = "Header Injection",
+                baseUrl = "https://probe.example.com",
+                panelType = ProbePanelType.KOMARI,
+                apiToken = "bad\r\nX-Injected: 1",
+            ),
+            ProbePanelConfig(
+                id = "userinfo-url",
+                name = "Embedded Userinfo",
+                baseUrl = "https://admin:pass@probe.example.com",
+                panelType = ProbePanelType.NEZHA_V1,
+                apiToken = "jwt-tok",
+            ),
+        )
+
+        for (cfg in rejectedConfigs) {
+            try {
+                prodClient.fetchPanelServers(cfg)
+                fail("Expected ProbeCredentialBoundaryException for ${cfg.id}")
+            } catch (e: ProbeCredentialBoundaryException) {
+                assertTrue("Expected Chinese security error for ${cfg.id}, got: ${e.message}", e.message!!.contains("安全校验失败"))
+            }
+
+            val connResult = prodClient.testConnection(cfg)
+            assertFalse("testConnection must fail for ${cfg.id}", connResult.success)
+            assertTrue(connResult.errorMessage.orEmpty().contains("安全校验失败"))
+        }
+
+        // Zero bytes may be transmitted over plaintext HTTP when credentials are configured
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `ProbePanelClient follows same-origin https redirects while preserving auth headers and stripping foreign cookies`() = runTest {
+        MockWebServer().use { httpsServer ->
+            httpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+            httpsServer.start()
+
+            val recordedRequests = mutableListOf<RecordedRequest>()
+            httpsServer.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    recordedRequests += request
+                    return when (request.path) {
+                        "/api/nodes" -> MockResponse()
+                            .setResponseCode(307)
+                            .addHeader("Location", "/edge/api/nodes")
+                            .addHeader("Set-Cookie", "panel_track=should_not_persist; Path=/")
+                        "/edge/api/nodes" -> MockResponse()
+                            .setResponseCode(302)
+                            .addHeader("Location", "https://probe.example.com:${httpsServer.port}/v2/api/nodes")
+                        "/v2/api/nodes" -> MockResponse()
+                            .setResponseCode(200)
+                            .setBody(
+                                """{"status":"success","data":[{"uuid":"n-1","name":"HTTPS-Redirect-Node","region":"🇯🇵","cpu_cores":2,"mem_total":2048,"online":true,"uptime":120}]}""",
+                            )
+                        "/api/recent", "/api/client" -> MockResponse().setResponseCode(404)
+                        "/api/v1/server" -> MockResponse()
+                            .setResponseCode(301)
+                            .addHeader("Location", "/v2/api/v1/server")
+                        "/v2/api/v1/server" -> MockResponse()
+                            .setResponseCode(200)
+                            .setBody(
+                                """{"success":true,"data":[{"id":11,"name":"V1-Cookie-Redirect","last_active":"2025-11-19T14:00:40Z","host":{"mem_total":1024},"state":{"cpu":8.0,"mem_used":256,"uptime":300}}]}""",
+                            )
+                        else -> MockResponse().setResponseCode(404)
+                    }
+                }
+            }
+
+            // Pollute base OkHttpClient with foreign cookies, foreign interceptor, and auto-redirects
+            val pollutedHttpsClient = buildTlsOkHttpClient()
+                .newBuilder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .cookieJar(
+                    object : CookieJar {
+                        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = Unit
+                        override fun loadForRequest(url: HttpUrl): List<Cookie> = listOf(
+                            Cookie.Builder()
+                                .name("nodeseek_session")
+                                .value("must_never_leak")
+                                .domain(url.host)
+                                .path("/")
+                                .build(),
+                        )
+                    },
+                )
+                .addInterceptor(
+                    Interceptor { chain ->
+                        chain.proceed(
+                            chain.request().newBuilder()
+                                .header("X-Foreign-Leak", "leaked")
+                                .header("Cookie", "injected=1")
+                                .build(),
+                        )
+                    },
+                )
+                .build()
+
+            val client = ProbePanelClient(
+                httpClient = pollutedHttpsClient,
+                nowMillisProvider = { fixedNowMillis },
+            )
+
+            // 1. Komari with Authorization + X-API-Key across 307 + 302 same-origin HTTPS hops
+            val komariConfig = ProbePanelConfig(
+                id = "https-komari",
+                name = "HTTPS Komari",
+                baseUrl = "https://probe.example.com:${httpsServer.port}",
+                panelType = ProbePanelType.KOMARI,
+                apiToken = "komari-sec-999",
+            )
+            val komariConn = client.testConnection(komariConfig)
+            assertTrue(komariConn.success)
+            assertEquals(1, komariConn.serverCount)
+
+            val nodeHops = recordedRequests.take(3)
+            assertEquals(listOf("/api/nodes", "/edge/api/nodes", "/v2/api/nodes"), nodeHops.map { it.path })
+            for (hopReq in nodeHops) {
+                assertEquals("Bearer komari-sec-999", hopReq.getHeader("Authorization"))
+                assertEquals("komari-sec-999", hopReq.getHeader("X-API-Key"))
+                assertNull("Foreign CookieJar/Set-Cookie must never attach", hopReq.getHeader("Cookie"))
+                assertNull("Foreign interceptor must be stripped", hopReq.getHeader("X-Foreign-Leak"))
+            }
+
+            // 2. Nezha v1 with explicit Cookie credential across 301 same-origin HTTPS hop
+            recordedRequests.clear()
+            val v1Fetched = client.fetchPanelServers(
+                ProbePanelConfig(
+                    id = "https-v1",
+                    name = "HTTPS Nezha V1",
+                    baseUrl = "https://probe.example.com:${httpsServer.port}",
+                    panelType = ProbePanelType.NEZHA_V1,
+                    apiToken = "nz-jwt=my-jwt-cookie",
+                ),
+            )
+            assertEquals(1, v1Fetched.snapshots.size)
+            assertEquals(listOf("/api/v1/server", "/v2/api/v1/server"), recordedRequests.map { it.path })
+            for (hopReq in recordedRequests) {
+                assertEquals("nz-jwt=my-jwt-cookie", hopReq.getHeader("Cookie"))
+                assertNull(hopReq.getHeader("X-Foreign-Leak"))
+            }
+        }
+    }
+
+    @Test
+    fun `ProbePanelClient aborts immediately without sending headers on cross-host cross-port or https-to-http redirects`() = runTest {
+        MockWebServer().use { probeHttpsServer ->
+            MockWebServer().use { evilHttpsServer ->
+                probeHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                evilHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                probeHttpsServer.start()
+                evilHttpsServer.start()
+
+                evilHttpsServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"success","data":[]}"""))
+                server.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"success","data":[]}"""))
+
+                var nextRedirectLocation = ""
+                var nextRedirectStatus = 302
+                probeHttpsServer.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        if (request.path == "/loop") {
+                            return MockResponse().setResponseCode(302).addHeader("Location", "/loop")
+                        }
+                        return MockResponse()
+                            .setResponseCode(nextRedirectStatus)
+                            .addHeader("Location", nextRedirectLocation)
+                    }
+                }
+
+                val client = ProbePanelClient(
+                    httpClient = buildTlsOkHttpClient(),
+                    nowMillisProvider = { fixedNowMillis },
+                )
+                val probeOrigin = "https://probe.example.com:${probeHttpsServer.port}"
+
+                // 1. Cross-host HTTPS redirect (302 -> https://evil.example) in AUTO mode must abort on hop 1
+                nextRedirectStatus = 302
+                nextRedirectLocation = "https://evil.example:${evilHttpsServer.port}/api/nodes"
+                val beforeProbeCount = probeHttpsServer.requestCount
+                try {
+                    client.fetchPanelServers(
+                        ProbePanelConfig(
+                            id = "cross-host",
+                            name = "Cross Host",
+                            baseUrl = probeOrigin,
+                            panelType = ProbePanelType.AUTO,
+                            apiToken = "secret-token-1",
+                        ),
+                    )
+                    fail("Expected ProbeCredentialBoundaryException on cross-host redirect")
+                } catch (e: ProbeCredentialBoundaryException) {
+                    assertTrue(e.message!!.contains("跨源"))
+                }
+                assertEquals("AUTO discovery must abort immediately on security boundary error", beforeProbeCount + 1, probeHttpsServer.requestCount)
+                assertEquals("Evil host must receive ZERO requests", 0, evilHttpsServer.requestCount)
+
+                // 2. Protocol-relative cross-host redirect (307 -> //evil.example:port/steal)
+                nextRedirectStatus = 307
+                nextRedirectLocation = "//evil.example:${evilHttpsServer.port}/steal"
+                val protoRelConn = client.testConnection(
+                    ProbePanelConfig(
+                        id = "proto-rel",
+                        name = "Proto Relative",
+                        baseUrl = probeOrigin,
+                        panelType = ProbePanelType.KOMARI,
+                        apiToken = "secret-token-2",
+                    ),
+                )
+                assertFalse(protoRelConn.success)
+                assertEquals(0, evilHttpsServer.requestCount)
+
+                // 3. Same-host cross-port HTTPS redirect (https://probe.example.com:port1 -> https://probe.example.com:port2)
+                nextRedirectStatus = 307
+                nextRedirectLocation = "https://probe.example.com:${evilHttpsServer.port}/api/v1/server"
+                try {
+                    client.fetchPanelServers(
+                        ProbePanelConfig(
+                            id = "cross-port",
+                            name = "Cross Port",
+                            baseUrl = probeOrigin,
+                            panelType = ProbePanelType.NEZHA_V1,
+                            apiToken = "nz-jwt=secret-cookie",
+                        ),
+                    )
+                    fail("Expected ProbeCredentialBoundaryException on cross-port redirect")
+                } catch (_: ProbeCredentialBoundaryException) {
+                    // Expected
+                }
+                assertEquals("Different port must receive ZERO requests", 0, evilHttpsServer.requestCount)
+
+                // 4. HTTPS -> HTTP scheme downgrade redirect (with credentials AND unauthenticated!)
+                nextRedirectStatus = 301
+                nextRedirectLocation = "http://probe.example.com:${server.port}/api/nodes"
+                try {
+                    client.fetchPanelServers(
+                        ProbePanelConfig(
+                            id = "downgrade-auth",
+                            name = "Downgrade Auth",
+                            baseUrl = probeOrigin,
+                            panelType = ProbePanelType.KOMARI,
+                            apiToken = "secret-token-3",
+                        ),
+                    )
+                    fail("Expected ProbeCredentialBoundaryException on HTTPS -> HTTP downgrade")
+                } catch (e: ProbeCredentialBoundaryException) {
+                    assertTrue(e.message!!.contains("降级"))
+                }
+                try {
+                    client.fetchPanelServers(
+                        ProbePanelConfig(
+                            id = "downgrade-public",
+                            name = "Downgrade Public",
+                            baseUrl = probeOrigin,
+                            panelType = ProbePanelType.KOMARI,
+                            apiToken = null,
+                        ),
+                    )
+                    fail("Expected ProbeCredentialBoundaryException on unauthenticated HTTPS -> HTTP downgrade")
+                } catch (e: ProbeCredentialBoundaryException) {
+                    assertTrue(e.message!!.contains("降级"))
+                }
+                assertEquals("Plaintext HTTP server must receive ZERO downgraded requests", 0, server.requestCount)
+
+                // 5. Bounded redirect loop protection
+                nextRedirectStatus = 302
+                nextRedirectLocation = "$probeOrigin/loop"
+                try {
+                    client.fetchPanelServers(
+                        ProbePanelConfig(
+                            id = "redirect-loop",
+                            name = "Loop",
+                            baseUrl = probeOrigin,
+                            panelType = ProbePanelType.KOMARI,
+                            apiToken = "secret-token-4",
+                        ),
+                    )
+                    fail("Expected ProbeCredentialBoundaryException on redirect loop")
+                } catch (e: ProbeCredentialBoundaryException) {
+                    assertTrue(e.message!!.contains("重定向次数过多"))
+                }
+            }
+        }
+    }
+
+    companion object {
+        private lateinit var tlsTempDir: File
+        private lateinit var tlsFixture: ProbeTestTlsFixture
+
+        private val LOOPBACK_TEST_HOSTS = setOf(
+            "probe.example.com",
+            "evil.example",
+            "localhost",
+            "127.0.0.1",
+        )
+
+        private data class ProbeTestTlsFixture(
+            val sslContext: SSLContext,
+            val trustManager: X509TrustManager,
+        )
+
+        @JvmStatic
+        @BeforeClass
+        fun setUpTls() {
+            tlsTempDir = Files.createTempDirectory("probe_panel_tls_test").toFile()
+            val keystoreFile = File(tlsTempDir, "probe_test.p12")
+            val passwordChars = "changeit".toCharArray()
+            val keytoolBin = File(System.getProperty("java.home"), "bin/keytool")
+                .takeIf { it.isFile && it.canExecute() }
+                ?.absolutePath
+                ?: "keytool"
+            val proc = ProcessBuilder(
+                keytoolBin,
+                "-genkeypair",
+                "-alias",
+                "probetest",
+                "-keyalg",
+                "EC",
+                "-groupname",
+                "secp256r1",
+                "-sigalg",
+                "SHA256withECDSA",
+                "-validity",
+                "7",
+                "-dname",
+                "CN=probe.example.com",
+                "-ext",
+                "SAN=DNS:probe.example.com,DNS:evil.example,DNS:localhost,IP:127.0.0.1",
+                "-storetype",
+                "PKCS12",
+                "-keystore",
+                keystoreFile.absolutePath,
+                "-storepass",
+                String(passwordChars),
+            ).redirectErrorStream(true).start()
+            val out = proc.inputStream.bufferedReader().readText()
+            check(proc.waitFor() == 0) { "keytool failed generating test cert: $out" }
+
+            val keyStore = KeyStore.getInstance("PKCS12").apply {
+                keystoreFile.inputStream().use { load(it, passwordChars) }
+            }
+            val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+                init(keyStore, passwordChars)
+            }
+            val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+                init(keyStore)
+            }
+            val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().single()
+            val sslContext = SSLContext.getInstance("TLS").apply {
+                init(kmf.keyManagers, arrayOf(trustManager), SecureRandom())
+            }
+            tlsFixture = ProbeTestTlsFixture(sslContext = sslContext, trustManager = trustManager)
+        }
+
+        @JvmStatic
+        @AfterClass
+        fun tearDownTls() {
+            if (::tlsTempDir.isInitialized) {
+                tlsTempDir.deleteRecursively()
+            }
+        }
+
+        private fun buildTlsOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .proxy(Proxy.NO_PROXY)
+            .sslSocketFactory(tlsFixture.sslContext.socketFactory, tlsFixture.trustManager)
+            .dns(
+                object : Dns {
+                    override fun lookup(hostname: String): List<InetAddress> =
+                        if (hostname.lowercase() in LOOPBACK_TEST_HOSTS) {
+                            listOf(InetAddress.getByName("127.0.0.1"))
+                        } else {
+                            Dns.SYSTEM.lookup(hostname)
+                        }
+                },
+            )
+            .build()
     }
 }

@@ -4,6 +4,8 @@ import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -339,6 +341,51 @@ class NodeImageHostRepositoryTest {
         assertArrayEquals(avifBytes, prepared.bytes)
         assertEquals("image/avif", prepared.mimeType)
         assertEquals("sample.avif", prepared.fileName)
+    }
+
+    @Test
+    fun `uploadImage fails cleanly on plaintext http NodeImage origin and cross-host redirect without leaking key`() = runBlocking {
+        val insecureApiClient = NodeSeekApiClient(
+            httpClient = OkHttpClient(),
+            nodeImageOrigin = "http://api.nodeimage.com".toHttpUrl(),
+        )
+        val insecureRepo = NodeImageHostRepositoryImpl(
+            apiClientProvider = { insecureApiClient },
+            settingsRepository = settingsRepository,
+            sessionRepository = sessionRepository,
+        )
+        val httpFailure = insecureRepo.uploadImage(
+            bytes = makePngBytes(),
+            mimeType = "image/png",
+            fileName = "secret.png",
+        )
+        assertTrue(httpFailure.isFailure)
+        assertTrue(httpFailure.exceptionOrNull()?.message.orEmpty().contains("HTTPS"))
+        assertEquals(0, server.requestCount)
+
+        MockWebServer().use { evilServer ->
+            evilServer.start()
+            evilServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true}"""))
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(307)
+                    .addHeader("Location", "http://evil.example:${evilServer.port}/steal"),
+            )
+
+            val repo = NodeImageHostRepositoryImpl(
+                apiClientProvider = { apiClient },
+                settingsRepository = settingsRepository,
+                sessionRepository = sessionRepository,
+            )
+            val redirectFailure = repo.uploadImage(
+                bytes = makePngBytes(),
+                mimeType = "image/png",
+                fileName = "secret.png",
+            )
+            assertTrue(redirectFailure.isFailure)
+            assertTrue(redirectFailure.exceptionOrNull()?.message.orEmpty().contains("跨源"))
+            assertEquals(0, evilServer.requestCount)
+        }
     }
 
     private fun makeJpegBytes(): ByteArray =

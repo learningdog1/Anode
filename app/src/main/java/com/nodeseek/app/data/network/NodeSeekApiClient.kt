@@ -21,6 +21,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.CookieJar
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -28,10 +30,12 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
 import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -50,13 +54,45 @@ class NodeSeekApiClient(
     private val onConfigObserved: ((ConfigPayloadDto) -> Unit)? = null,
 ) {
 
-    // Dedicated cookie-less client for third-party / NodeImage API calls (`httpShouldHandleCookies = false`).
-    private val cookielessClient: OkHttpClient by lazy {
+    // Forum transport with automatic redirects disabled so custom CSRF / captcha / dynamic-sign
+    // headers and session cookies are only ever forwarded after strict same-origin verification.
+    private val forumHttpClient: OkHttpClient by lazy {
         httpClient.newBuilder()
-            .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
+
+    // Cookie-less RSS fallback client with automatic redirects disabled.
+    private val rssHttpClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(20L, TimeUnit.SECONDS)
             .readTimeout(45L, TimeUnit.SECONDS)
             .writeTimeout(45L, TimeUnit.SECONDS)
+            .apply {
+                interceptors().removeAll { it !is NodeSeekRequestInterceptor }
+                networkInterceptors().clear()
+            }
+            .build()
+    }
+
+    // Isolated cookie-less, interceptor-free client for third-party `api.nodeimage.com` uploads
+    // (mirrors SeekMailApiClient's credential boundary isolation).
+    private val nodeImageHttpClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(20L, TimeUnit.SECONDS)
+            .readTimeout(45L, TimeUnit.SECONDS)
+            .writeTimeout(45L, TimeUnit.SECONDS)
+            .apply {
+                interceptors().clear()
+                networkInterceptors().clear()
+            }
             .build()
     }
 
@@ -184,23 +220,7 @@ class NodeSeekApiClient(
     }
 
     suspend fun fetchRssFeed(): ParsedFeedPageDto {
-        val request = Request.Builder()
-            .url(rssUrl)
-            .get()
-            .header("Accept", "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8")
-            .build()
-        val xmlBody = cookielessClient.newCall(request).awaitString { status, headers, body ->
-            if (status == 429) {
-                throw NodeSeekApiException(
-                    message = "请求过于频繁，请稍后再试",
-                    statusCode = 429,
-                    retryAfterSeconds = headers["Retry-After"]?.trim()?.toLongOrNull(),
-                )
-            }
-            if (status !in 200..299) {
-                throw NodeSeekApiException("RSS 请求失败 ($status)", statusCode = status, serverMessage = body.take(200))
-            }
-        }
+        val xmlBody = executeRssGetWithRedirects(rssUrl)
         return withContext(Dispatchers.Default) {
             RssFeedParser.parse(xmlBody)
         }
@@ -275,7 +295,7 @@ class NodeSeekApiClient(
             .build()
         try {
             try {
-                httpClient.newCall(request).awaitString { status, headers, body ->
+                executeForumCall(request) { status, headers, body ->
                     CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
                     validateSignOutResponse(status, body)
                 }
@@ -372,7 +392,7 @@ class NodeSeekApiClient(
             .post(multipart)
             .header("x-csrf-challenge", "simple-token")
             .build()
-        val raw = httpClient.newCall(request).awaitString { status, headers, body ->
+        val raw = executeForumCall(request) { status, headers, body ->
             CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
             ensureApiSuccess(status, body)
         }
@@ -848,27 +868,128 @@ class NodeSeekApiClient(
         if (!NODE_IMAGE_KEY_REGEX.matches(trimmedKey)) {
             throw NodeSeekApiException("NodeImage API Key 格式无效，请检查设置中的 32–128 位十六进制密钥。")
         }
-        val (normalizedMime, canonicalExt) = resolveUploadMimeAndExtension(mimeType = mimeType, fileName = fileName)
-        val resolvedFileName = buildSafeUploadFileName(rawFileName = fileName, extension = canonicalExt)
-
-        val multipartBuilder = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("image", resolvedFileName, imageBytes.toRequestBody(normalizedMime.toMediaType()))
-
-        if (deleteAfterDays != null && deleteAfterDays in 1..365) {
-            multipartBuilder.addFormDataPart("deleteDays", deleteAfterDays.toString())
+        if (hasUserInfo(nodeImageOrigin) || !isAllowedCredentialOrigin(nodeImageOrigin)) {
+            throw NodeSeekApiException(
+                "安全校验失败：NodeImage 图床上传必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送 API Key。",
+            )
         }
 
         val uploadUrl = nodeImageOrigin.resolve("/api/upload")
-            ?: throw IllegalStateException("Invalid NodeImage origin: $nodeImageOrigin")
-        val request = Request.Builder()
-            .url(uploadUrl)
-            .post(multipartBuilder.build())
-            .header("Accept", "application/json")
-            .header("X-API-Key", trimmedKey)
-            .build()
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
+        if (hasUserInfo(uploadUrl) || !isAllowedCredentialOrigin(uploadUrl) || !isSameOrigin(nodeImageOrigin, uploadUrl)) {
+            throw NodeSeekApiException(
+                "安全校验失败：禁止向非预期源站发送 NodeImage API Key。",
+            )
+        }
 
-        val rawBody = cookielessClient.newCall(request).awaitString { status, _, body ->
+        val (normalizedMime, canonicalExt) = resolveUploadMimeAndExtension(mimeType = mimeType, fileName = fileName)
+        val resolvedFileName = buildSafeUploadFileName(rawFileName = fileName, extension = canonicalExt)
+
+        fun buildMultipartBody(): MultipartBody {
+            val multipartBuilder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("image", resolvedFileName, imageBytes.toRequestBody(normalizedMime.toMediaType()))
+            if (deleteAfterDays != null && deleteAfterDays in 1..365) {
+                multipartBuilder.addFormDataPart("deleteDays", deleteAfterDays.toString())
+            }
+            return multipartBuilder.build()
+        }
+
+        val rawBody = executeNodeImagePostWithRedirects(
+            initialUrl = uploadUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+            bodyFactory = ::buildMultipartBody,
+        )
+
+        val parsed = json.decodeFromString(NodeImageUploadResponseDto.serializer(), rawBody)
+        val rawDirectUrl = parsed.resolvedDirectUrl
+            ?: throw NodeSeekApiException("图床未返回可用的直链地址。")
+        return normalizeUploadedImageUrl(rawDirectUrl)
+    }
+
+    private suspend fun executeNodeImagePostWithRedirects(
+        initialUrl: HttpUrl,
+        expectedOrigin: HttpUrl,
+        apiKey: String,
+        bodyFactory: () -> RequestBody,
+    ): String {
+        var currentUrl = initialUrl
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            if (hasUserInfo(currentUrl) ||
+                !isAllowedCredentialOrigin(currentUrl) ||
+                !isSameOrigin(expectedOrigin, currentUrl)
+            ) {
+                throw NodeSeekApiException(
+                    "安全校验失败：禁止向非同源或非加密地址发送 NodeImage API Key。",
+                )
+            }
+
+            val request = Request.Builder()
+                .url(currentUrl)
+                .post(bodyFactory())
+                .header("Accept", "application/json")
+                .header("X-API-Key", apiKey)
+                .build()
+
+            val raw = nodeImageHttpClient.newCall(request).awaitRawResponse()
+            val status = raw.code
+
+            if (status in REDIRECT_STATUS_CODES) {
+                if (hop >= MAX_REDIRECT_HOPS) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。",
+                        statusCode = status,
+                    )
+                }
+                val rawLocation = raw.headers["Location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向响应缺少 Location 头 ($status)。",
+                        statusCode = status,
+                    )
+                val nextUrl = currentUrl.resolve(rawLocation)
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向目标地址无效或协议不受支持 ($status)。",
+                        statusCode = status,
+                    )
+                if (hasUserInfo(nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝重定向至包含内嵌用户信息的图床地址 ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                    !nextUrl.scheme.equals("https", ignoreCase = true)
+                ) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝将图床上传请求从 HTTPS 降级重定向至明文 HTTP ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (!isAllowedCredentialOrigin(nextUrl) || !isSameOrigin(expectedOrigin, nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝跨源重定向图床上传请求，已阻止泄露 API Key ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (status != 307 && status != 308) {
+                    throw NodeSeekApiException(
+                        message = "图床上传遇到改变请求方法的重定向 ($status)，仅允许同源 307/308 重定向。",
+                        statusCode = status,
+                    )
+                }
+                currentUrl = nextUrl
+                continue
+            }
+
+            if (status in 300..399) {
+                throw NodeSeekApiException(
+                    message = "安全校验失败：图床返回不受支持的重定向状态 ($status)。",
+                    statusCode = status,
+                )
+            }
+
+            val body = raw.body
             val parsedError = runCatching {
                 json.decodeFromString(NodeImageUploadResponseDto.serializer(), body)
             }.getOrNull()
@@ -881,12 +1002,9 @@ class NodeSeekApiClient(
                     }
                 throw NodeSeekApiException(msg, statusCode = status, serverMessage = msg)
             }
+            return body
         }
-
-        val parsed = json.decodeFromString(NodeImageUploadResponseDto.serializer(), rawBody)
-        val rawDirectUrl = parsed.resolvedDirectUrl
-            ?: throw NodeSeekApiException("图床未返回可用的直链地址。")
-        return normalizeUploadedImageUrl(rawDirectUrl)
+        throw NodeSeekApiException("安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。")
     }
 
     private fun normalizeUploadedImageUrl(rawUrl: String): String {
@@ -1016,7 +1134,7 @@ class NodeSeekApiClient(
         val request = reqBuilder.build()
 
         return try {
-            httpClient.newCall(request).awaitString { status, headers, body ->
+            executeForumCall(request) { status, headers, body ->
                 validateHtmlResponse(
                     status = status,
                     headers = headers,
@@ -1066,7 +1184,7 @@ class NodeSeekApiClient(
         val request = builder.build()
 
         val raw = try {
-            httpClient.newCall(request).awaitString { status, headers, body ->
+            executeForumCall(request) { status, headers, body ->
                 CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
                 ensureApiSuccess(status, body, retryAfterSeconds = parseRetryAfterSeconds(headers))
             }
@@ -1128,7 +1246,7 @@ class NodeSeekApiClient(
 
         val builtRequest = builder.build()
         val raw = try {
-            httpClient.newCall(builtRequest).awaitString { status, headers, body ->
+            executeForumCall(builtRequest) { status, headers, body ->
                 CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
                 ensureApiSuccess(
                     statusCode = status,
@@ -1209,7 +1327,7 @@ class NodeSeekApiClient(
         }
 
         val raw = try {
-            httpClient.newCall(builder.build()).awaitString { status, headers, body ->
+            executeForumCall(builder.build()) { status, headers, body ->
                 CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
                 ensureApiSuccess(status, body, retryAfterSeconds = parseRetryAfterSeconds(headers))
             }
@@ -1351,7 +1469,167 @@ class NodeSeekApiClient(
         }
     }
 
+    private suspend fun executeForumCall(
+        initialRequest: Request,
+        validator: (statusCode: Int, headers: Headers, body: String) -> Unit,
+    ): String {
+        val expectedOrigin = initialRequest.url
+        if (hasUserInfo(expectedOrigin) || !isAllowedCredentialOrigin(expectedOrigin)) {
+            throw NodeSeekApiException(
+                "安全校验失败：社区请求必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送凭证。",
+            )
+        }
+
+        var currentRequest = initialRequest
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            val currentUrl = currentRequest.url
+            if (hasUserInfo(currentUrl) ||
+                !isAllowedCredentialOrigin(currentUrl) ||
+                !isSameOrigin(expectedOrigin, currentUrl)
+            ) {
+                throw NodeSeekApiException(
+                    "安全校验失败：禁止向非同源或非加密地址发送社区凭证。",
+                )
+            }
+
+            val raw = forumHttpClient.newCall(currentRequest).awaitRawResponse()
+            val status = raw.code
+
+            if (status in REDIRECT_STATUS_CODES) {
+                if (hop >= MAX_REDIRECT_HOPS) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：请求重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。",
+                        statusCode = status,
+                    )
+                }
+                val rawLocation = raw.headers["Location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：重定向响应缺少 Location 头 ($status)。",
+                        statusCode = status,
+                    )
+                val nextUrl = currentUrl.resolve(rawLocation)
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：重定向目标地址无效或协议不受支持 ($status)。",
+                        statusCode = status,
+                    )
+                if (hasUserInfo(nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝重定向至包含内嵌用户信息的地址 ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                    !nextUrl.scheme.equals("https", ignoreCase = true)
+                ) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝从 HTTPS 降级重定向至明文 HTTP ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (!isAllowedCredentialOrigin(nextUrl) || !isSameOrigin(expectedOrigin, nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝跨源重定向请求，已阻止泄露凭证 ($status)。",
+                        statusCode = status,
+                    )
+                }
+
+                currentRequest = if (
+                    currentRequest.method == "GET" ||
+                    currentRequest.method == "HEAD" ||
+                    status == 307 ||
+                    status == 308
+                ) {
+                    currentRequest.newBuilder().url(nextUrl).build()
+                } else {
+                    val nextBuilder = currentRequest.newBuilder()
+                        .url(nextUrl)
+                        .get()
+                    POST_REDIRECT_STRIP_HEADERS.forEach { nextBuilder.removeHeader(it) }
+                    nextBuilder.build()
+                }
+                continue
+            }
+
+            if (status in 300..399) {
+                throw NodeSeekApiException(
+                    message = "安全校验失败：返回不受支持的重定向状态 ($status)。",
+                    statusCode = status,
+                )
+            }
+
+            validator(status, raw.headers, raw.body)
+            return raw.body
+        }
+        throw NodeSeekApiException("安全校验失败：请求重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。")
+    }
+
+    private suspend fun executeRssGetWithRedirects(initialUrl: HttpUrl): String {
+        if (hasUserInfo(initialUrl)) {
+            throw NodeSeekApiException("安全校验失败：RSS 地址包含非法的内嵌用户信息。")
+        }
+        var currentUrl = initialUrl
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            val request = Request.Builder()
+                .url(currentUrl)
+                .get()
+                .header("Accept", "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8")
+                .build()
+            val raw = rssHttpClient.newCall(request).awaitRawResponse()
+            val status = raw.code
+
+            if (status in REDIRECT_STATUS_CODES) {
+                if (hop >= MAX_REDIRECT_HOPS) {
+                    throw NodeSeekApiException("RSS 重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）", statusCode = status)
+                }
+                val rawLocation = raw.headers["Location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: throw NodeSeekApiException("RSS 重定向缺少 Location 头 ($status)", statusCode = status)
+                val nextUrl = currentUrl.resolve(rawLocation)
+                    ?: throw NodeSeekApiException("RSS 重定向目标地址无效 ($status)", statusCode = status)
+                if (hasUserInfo(nextUrl)) {
+                    throw NodeSeekApiException("安全校验失败：拒绝重定向至包含内嵌用户信息的 RSS 地址 ($status)", statusCode = status)
+                }
+                if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                    !nextUrl.scheme.equals("https", ignoreCase = true)
+                ) {
+                    throw NodeSeekApiException("安全校验失败：拒绝 RSS 从 HTTPS 降级重定向至明文 HTTP ($status)", statusCode = status)
+                }
+                currentUrl = nextUrl
+                continue
+            }
+
+            if (status == 429) {
+                throw NodeSeekApiException(
+                    message = "请求过于频繁，请稍后再试",
+                    statusCode = 429,
+                    retryAfterSeconds = raw.headers["Retry-After"]?.trim()?.toLongOrNull(),
+                )
+            }
+            if (status !in 200..299) {
+                throw NodeSeekApiException("RSS 请求失败 ($status)", statusCode = status, serverMessage = raw.body.take(200))
+            }
+            return raw.body
+        }
+        throw NodeSeekApiException("RSS 重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）")
+    }
+
     companion object {
+        internal const val MAX_REDIRECT_HOPS = 5
+        private val REDIRECT_STATUS_CODES = setOf(301, 302, 303, 307, 308)
+        private val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1")
+        private val POST_REDIRECT_STRIP_HEADERS = listOf(
+            "Content-Type",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Origin",
+            "Authorization",
+            "X-API-Key",
+            "x-captcha-token",
+            "x-captcha-source",
+            "csrf-token",
+            "x-csrf-token",
+            "x-csrf-challenge",
+            "x-dynamic-sign",
+        )
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
         private val VALID_REACTIONS = setOf("upvote", "like", "dislike")
         private val NODE_IMAGE_KEY_REGEX = Regex("""^[a-fA-F0-9]{32,128}$""")
@@ -1366,6 +1644,24 @@ class NodeSeekApiClient(
             "/api/avatar/upload",
             "/api/invite/buyOne",
         )
+
+        private fun normalizeHost(host: String): String =
+            host.trim().lowercase(Locale.ROOT).removePrefix("[").removeSuffix("]")
+
+        internal fun isLoopbackHost(host: String): Boolean =
+            normalizeHost(host) in LOOPBACK_HOSTS
+
+        internal fun isAllowedCredentialOrigin(url: HttpUrl): Boolean =
+            url.scheme.equals("https", ignoreCase = true) ||
+                (url.scheme.equals("http", ignoreCase = true) && isLoopbackHost(url.host))
+
+        internal fun isSameOrigin(a: HttpUrl, b: HttpUrl): Boolean =
+            a.scheme.equals(b.scheme, ignoreCase = true) &&
+                normalizeHost(a.host) == normalizeHost(b.host) &&
+                a.port == b.port
+
+        private fun hasUserInfo(url: HttpUrl): Boolean =
+            url.encodedUsername.isNotEmpty() || url.encodedPassword.isNotEmpty()
 
         fun createDefaultHttpClient(
             cookieBridge: WebViewCookieBridge,
@@ -1387,16 +1683,20 @@ class NodeSeekApiClient(
                 .connectTimeout(connectTimeoutSeconds, TimeUnit.SECONDS)
                 .readTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
                 .writeTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .followSslRedirects(true)
+                .followRedirects(false)
+                .followSslRedirects(false)
                 .build()
         }
     }
 }
 
-private suspend fun Call.awaitString(
-    validator: (statusCode: Int, headers: okhttp3.Headers, body: String) -> Unit,
-): String = suspendCancellableCoroutine { cont ->
+private data class RawHttpPayload(
+    val code: Int,
+    val headers: Headers,
+    val body: String,
+)
+
+private suspend fun Call.awaitRawResponse(): RawHttpPayload = suspendCancellableCoroutine { cont ->
     cont.invokeOnCancellation {
         runCatching { cancel() }
     }
@@ -1411,10 +1711,19 @@ private suspend fun Call.awaitString(
             override fun onResponse(call: Call, response: Response) {
                 response.use { resp ->
                     try {
-                        val bodyString = resp.body?.string().orEmpty()
-                        validator(resp.code, resp.headers, bodyString)
+                        val bodyString = if (resp.code in 300..399) {
+                            ""
+                        } else {
+                            resp.body?.string().orEmpty()
+                        }
                         if (!cont.isCompleted) {
-                            cont.resume(bodyString)
+                            cont.resume(
+                                RawHttpPayload(
+                                    code = resp.code,
+                                    headers = resp.headers,
+                                    body = bodyString,
+                                ),
+                            )
                         }
                     } catch (t: Throwable) {
                         if (!cont.isCompleted) {

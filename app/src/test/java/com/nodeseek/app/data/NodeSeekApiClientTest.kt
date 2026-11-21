@@ -13,17 +13,37 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Cookie
+import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
+import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
+import org.junit.BeforeClass
 import org.junit.Test
+import java.io.File
+import java.net.InetAddress
+import java.net.Proxy
+import java.nio.file.Files
+import java.security.KeyStore
+import java.security.SecureRandom
 import java.util.Base64
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 
 class NodeSeekApiClientTest {
 
@@ -751,5 +771,377 @@ class NodeSeekApiClientTest {
         assertEquals(5, client.getUnreadNotificationCount())
         assertEquals(7, client.getUnreadNotificationCount())
         assertEquals(6, client.getUnreadNotificationCount())
+    }
+
+    @Test
+    fun `uploadImageToNodeImage rejects plaintext http origin and userinfo without making any network call`() = runTest {
+        val validApiKey = "0123456789abcdef0123456789abcdef"
+        var networkCallsAttempted = 0
+        val countingHttp = OkHttpClient.Builder()
+            .addInterceptor(
+                Interceptor { chain ->
+                    networkCallsAttempted += 1
+                    chain.proceed(chain.request())
+                },
+            )
+            .build()
+
+        val badOrigins = listOf(
+            "http://api.nodeimage.com".toHttpUrl(),
+            "http://203.0.113.10:8080".toHttpUrl(),
+            "https://user:pass@api.nodeimage.com".toHttpUrl(),
+        )
+        for (badOrigin in badOrigins) {
+            val insecureClient = NodeSeekApiClient(
+                httpClient = countingHttp,
+                nodeImageOrigin = badOrigin,
+            )
+            try {
+                insecureClient.uploadImageToNodeImage(
+                    imageBytes = byteArrayOf(1, 2, 3, 4),
+                    apiKey = validApiKey,
+                    mimeType = "image/png",
+                )
+                fail("Expected NodeSeekApiException for origin $badOrigin")
+            } catch (e: NodeSeekApiException) {
+                assertTrue("Expected security failure message for $badOrigin, got: ${e.message}", e.message!!.contains("安全校验失败"))
+            }
+        }
+        assertEquals(0, networkCallsAttempted)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `uploadImageToNodeImage follows same-origin https 307 and 308 redirects preserving multipart body and X-API-Key while stripping forum cookies`() = runTest {
+        val validApiKey = "abcdef0123456789abcdef0123456789"
+        MockWebServer().use { nodeImageHttpsServer ->
+            nodeImageHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+            nodeImageHttpsServer.start()
+
+            val recordedHops = mutableListOf<Pair<RecordedRequest, String>>()
+            nodeImageHttpsServer.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val bodyUtf8 = request.body.readUtf8()
+                    recordedHops += request to bodyUtf8
+                    return when (request.path) {
+                        "/api/upload" -> MockResponse()
+                            .setResponseCode(307)
+                            .addHeader("Location", "/edge/upload")
+                            .addHeader("Set-Cookie", "img_track=ignored; Path=/")
+                        "/edge/upload" -> MockResponse()
+                            .setResponseCode(308)
+                            .addHeader("Location", "https://api.nodeimage.com:${nodeImageHttpsServer.port}/v2/upload")
+                        "/v2/upload" -> MockResponse()
+                            .setResponseCode(200)
+                            .setBody("""{"success":true,"links":{"direct":"https://img.nodeimage.com/i/redirected_ok.png"}}""")
+                        else -> MockResponse().setResponseCode(404)
+                    }
+                }
+            }
+
+            // Seed forum session cookie, security token, and a foreign interceptor on base httpClient
+            val bridge = WebViewCookieBridge(forceInMemory = true)
+            bridge.saveFromResponse(
+                "https://api.nodeimage.com/".toHttpUrl(),
+                listOf(
+                    Cookie.Builder()
+                        .name("session")
+                        .value("forum_secret_cookie")
+                        .domain("api.nodeimage.com")
+                        .path("/")
+                        .build(),
+                ),
+            )
+            val secStore = CsrfTokenStore().apply { seedSecurityToken("sec.tok") }
+            val pollutedBaseHttp = buildTlsForumHttpClient(
+                cookieBridge = bridge,
+                csrfTokenStore = secStore,
+                additionalTargetHost = "api.nodeimage.com",
+            ).newBuilder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .addInterceptor(
+                    Interceptor { chain ->
+                        chain.proceed(
+                            chain.request().newBuilder()
+                                .header("X-Foreign-Leak", "1")
+                                .header("Cookie", "forced_cookie=1")
+                                .build(),
+                        )
+                    },
+                )
+                .build()
+
+            val tlsClient = NodeSeekApiClient(
+                httpClient = pollutedBaseHttp,
+                nodeImageOrigin = "https://api.nodeimage.com:${nodeImageHttpsServer.port}".toHttpUrl(),
+            )
+
+            val directUrl = tlsClient.uploadImageToNodeImage(
+                imageBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47),
+                apiKey = validApiKey,
+                mimeType = "image/png",
+                deleteAfterDays = 14,
+                fileName = "capture.png",
+            )
+            assertEquals("https://img.nodeimage.com/i/redirected_ok.png", directUrl)
+            assertEquals(3, recordedHops.size)
+            assertEquals(listOf("/api/upload", "/edge/upload", "/v2/upload"), recordedHops.map { it.first.path })
+
+            for ((hopReq, hopBody) in recordedHops) {
+                assertEquals("POST", hopReq.method)
+                assertEquals(validApiKey, hopReq.getHeader("X-API-Key"))
+                assertNull("Forum or foreign cookies must never leak to NodeImage", hopReq.getHeader("Cookie"))
+                assertNull("NodeSeekRequestInterceptor headers must be stripped", hopReq.getHeader("x-security-token"))
+                assertNull("Foreign interceptors must be stripped", hopReq.getHeader("X-Foreign-Leak"))
+                assertTrue("Multipart image body must be preserved across 307/308", hopBody.contains("""filename="capture.png""""))
+                assertTrue("Multipart deleteDays field must be preserved across 307/308", hopBody.contains("""name="deleteDays""""))
+            }
+        }
+    }
+
+    @Test
+    fun `uploadImageToNodeImage refuses to forward X-API-Key on cross-host cross-port http downgrade or 302 method-changing redirects`() = runTest {
+        val validApiKey = "fedcba9876543210fedcba9876543210"
+        MockWebServer().use { nodeImageHttpsServer ->
+            MockWebServer().use { evilHttpsServer ->
+                nodeImageHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                evilHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                nodeImageHttpsServer.start()
+                evilHttpsServer.start()
+
+                evilHttpsServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true,"links":{"direct":"https://evil.example/a.png"}}"""))
+                server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true,"links":{"direct":"https://evil.example/b.png"}}"""))
+
+                var redirectStatus = 307
+                var redirectLocation = ""
+                nodeImageHttpsServer.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse =
+                        MockResponse()
+                            .setResponseCode(redirectStatus)
+                            .addHeader("Location", redirectLocation)
+                }
+
+                val tlsHttp = buildTlsForumHttpClient(
+                    cookieBridge = cookieBridge,
+                    csrfTokenStore = csrfTokenStore,
+                )
+                val originUrl = "https://api.nodeimage.com:${nodeImageHttpsServer.port}".toHttpUrl()
+                val tlsClient = NodeSeekApiClient(
+                    httpClient = tlsHttp,
+                    nodeImageOrigin = originUrl,
+                )
+
+                // 1. Cross-host 307 redirect
+                redirectStatus = 307
+                redirectLocation = "https://evil.example:${evilHttpsServer.port}/api/upload"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on cross-host 307 redirect")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("跨源"))
+                }
+                assertEquals(0, evilHttpsServer.requestCount)
+
+                // 2. Cross-host 302 redirect
+                redirectStatus = 302
+                redirectLocation = "https://evil.example:${evilHttpsServer.port}/steal"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on cross-host 302 redirect")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("跨源"))
+                }
+                assertEquals(0, evilHttpsServer.requestCount)
+
+                // 3. Same-host cross-port 308 redirect
+                redirectStatus = 308
+                redirectLocation = "https://api.nodeimage.com:${evilHttpsServer.port}/api/upload"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on cross-port 308 redirect")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("跨源"))
+                }
+                assertEquals(0, evilHttpsServer.requestCount)
+
+                // 4. HTTPS -> HTTP downgrade (both external host and loopback localhost!)
+                redirectStatus = 307
+                redirectLocation = "http://api.nodeimage.com:${server.port}/api/upload"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on HTTPS -> HTTP downgrade")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("降级"))
+                }
+                redirectLocation = "http://localhost:${server.port}/api/upload"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on HTTPS -> loopback HTTP downgrade")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("降级"))
+                }
+                assertEquals(0, server.requestCount)
+
+                // 5. Same-origin 302 method-changing redirect on multipart POST upload must fail cleanly without extra request
+                val beforeCount = nodeImageHttpsServer.requestCount
+                redirectStatus = 302
+                redirectLocation = "https://api.nodeimage.com:${nodeImageHttpsServer.port}/v2/upload"
+                try {
+                    tlsClient.uploadImageToNodeImage(byteArrayOf(1, 2, 3), validApiKey)
+                    fail("Expected NodeSeekApiException on method-changing 302 for multipart upload")
+                } catch (e: NodeSeekApiException) {
+                    assertEquals(302, e.statusCode)
+                }
+                assertEquals(beforeCount + 1, nodeImageHttpsServer.requestCount)
+            }
+        }
+    }
+
+    @Test
+    fun `forum endpoints reject non-loopback http baseOrigin and block cross-host or downgrade redirects`() = runTest {
+        // 1. Plaintext non-loopback baseOrigin rejected before any network call
+        val insecureForumClient = NodeSeekApiClient(
+            httpClient = OkHttpClient(),
+            baseOrigin = "http://forum.example.com".toHttpUrl(),
+        )
+        try {
+            insecureForumClient.signIn("alice", "pw", "turnstile_tok")
+            fail("Expected NodeSeekApiException for plaintext forum baseOrigin")
+        } catch (e: NodeSeekApiException) {
+            assertTrue(e.message!!.contains("HTTPS"))
+        }
+
+        // 2. HTTPS forum client blocks cross-host redirect without leaking x-captcha-token or session cookies
+        MockWebServer().use { forumHttpsServer ->
+            MockWebServer().use { evilHttpsServer ->
+                forumHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                evilHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+                forumHttpsServer.start()
+                evilHttpsServer.start()
+                evilHttpsServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true}"""))
+
+                forumHttpsServer.enqueue(
+                    MockResponse()
+                        .setResponseCode(307)
+                        .addHeader("Location", "https://evil.example:${evilHttpsServer.port}/api/account/signIn"),
+                )
+
+                val httpsForumClient = NodeSeekApiClient(
+                    httpClient = buildTlsForumHttpClient(cookieBridge, csrfTokenStore),
+                    baseOrigin = "https://www.nodeseek.com:${forumHttpsServer.port}".toHttpUrl(),
+                )
+                try {
+                    httpsForumClient.signIn("alice", "pw123", "turnstile_secret_token")
+                    fail("Expected NodeSeekApiException on cross-host forum redirect")
+                } catch (e: NodeSeekApiException) {
+                    assertTrue(e.message!!.contains("跨源"))
+                }
+                assertEquals(0, evilHttpsServer.requestCount)
+            }
+        }
+    }
+
+    companion object {
+        private lateinit var tlsTempDir: File
+        private lateinit var tlsFixture: NodeSeekTestTlsFixture
+
+        private val LOOPBACK_TEST_HOSTS = setOf(
+            "api.nodeimage.com",
+            "www.nodeseek.com",
+            "evil.example",
+            "localhost",
+            "127.0.0.1",
+        )
+
+        private data class NodeSeekTestTlsFixture(
+            val sslContext: SSLContext,
+            val trustManager: X509TrustManager,
+        )
+
+        @JvmStatic
+        @BeforeClass
+        fun setUpTls() {
+            tlsTempDir = Files.createTempDirectory("nodeseek_api_tls_test").toFile()
+            val keystoreFile = File(tlsTempDir, "nodeseek_test.p12")
+            val passwordChars = "changeit".toCharArray()
+            val keytoolBin = File(System.getProperty("java.home"), "bin/keytool")
+                .takeIf { it.isFile && it.canExecute() }
+                ?.absolutePath
+                ?: "keytool"
+            val proc = ProcessBuilder(
+                keytoolBin,
+                "-genkeypair",
+                "-alias",
+                "nodeseektest",
+                "-keyalg",
+                "EC",
+                "-groupname",
+                "secp256r1",
+                "-sigalg",
+                "SHA256withECDSA",
+                "-validity",
+                "7",
+                "-dname",
+                "CN=api.nodeimage.com",
+                "-ext",
+                "SAN=DNS:api.nodeimage.com,DNS:www.nodeseek.com,DNS:evil.example,DNS:localhost,IP:127.0.0.1",
+                "-storetype",
+                "PKCS12",
+                "-keystore",
+                keystoreFile.absolutePath,
+                "-storepass",
+                String(passwordChars),
+            ).redirectErrorStream(true).start()
+            val out = proc.inputStream.bufferedReader().readText()
+            check(proc.waitFor() == 0) { "keytool failed generating test cert: $out" }
+
+            val keyStore = KeyStore.getInstance("PKCS12").apply {
+                keystoreFile.inputStream().use { load(it, passwordChars) }
+            }
+            val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+                init(keyStore, passwordChars)
+            }
+            val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+                init(keyStore)
+            }
+            val trustManager = tmf.trustManagers.filterIsInstance<X509TrustManager>().single()
+            val sslContext = SSLContext.getInstance("TLS").apply {
+                init(kmf.keyManagers, arrayOf(trustManager), SecureRandom())
+            }
+            tlsFixture = NodeSeekTestTlsFixture(sslContext = sslContext, trustManager = trustManager)
+        }
+
+        @JvmStatic
+        @AfterClass
+        fun tearDownTls() {
+            if (::tlsTempDir.isInitialized) {
+                tlsTempDir.deleteRecursively()
+            }
+        }
+
+        private fun buildTlsForumHttpClient(
+            cookieBridge: WebViewCookieBridge,
+            csrfTokenStore: CsrfTokenStore,
+            additionalTargetHost: String? = null,
+        ): OkHttpClient = NodeSeekApiClient.createDefaultHttpClient(
+            cookieBridge = cookieBridge,
+            userAgentProvider = UserAgentProvider("Mozilla/5.0 (Linux; Android 15) AnodeUnitTest/1.0"),
+            csrfTokenStore = csrfTokenStore,
+            additionalTargetHost = additionalTargetHost,
+        ).newBuilder()
+            .proxy(Proxy.NO_PROXY)
+            .sslSocketFactory(tlsFixture.sslContext.socketFactory, tlsFixture.trustManager)
+            .dns(
+                object : Dns {
+                    override fun lookup(hostname: String): List<InetAddress> =
+                        if (hostname.lowercase() in LOOPBACK_TEST_HOSTS) {
+                            listOf(InetAddress.getByName("127.0.0.1"))
+                        } else {
+                            Dns.SYSTEM.lookup(hostname)
+                        }
+                },
+            )
+            .build()
     }
 }

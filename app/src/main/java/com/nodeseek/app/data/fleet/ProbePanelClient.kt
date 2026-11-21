@@ -24,6 +24,9 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -48,18 +51,44 @@ data class ProbePanelFetchResult(
 )
 
 /**
+ * Raised when a probe panel request violates credential transmission boundaries
+ * (e.g., plaintext HTTP with credentials, HTTPS-to-HTTP downgrade, or cross-origin redirect).
+ */
+class ProbeCredentialBoundaryException(
+    message: String,
+) : IOException(message)
+
+/**
  * Multi-protocol HTTP probe connector supporting:
  * - **Nezha v0** (`GET /api/v1/server/details` & `/api/v1/server/list` with `Authorization: <token>`)
  * - **Nezha v1** (`GET /api/v1/server` with Bearer token, `nz-jwt` cookie, or public access)
  * - **Komari** (`GET /api/nodes` + `GET /api/recent` or `/api/client` with public / API key / cookie)
  * - **AUTO discovery** probing endpoints gracefully to identify the panel flavor
+ *
+ * Security & isolation guarantees:
+ * - Strips foreign interceptors and cookies ([CookieJar.NO_COOKIES]), disables automatic redirects,
+ *   and validates strict origin equality (`scheme`, normalized `host`, effective `port`) on every hop
+ *   before attaching `Authorization`, `X-API-Key`, or `Cookie` headers.
+ * - Rejects plaintext `http://` URLs before sending any network traffic whenever an `apiToken` is configured
+ *   (unless [allowLoopbackHttpWithCredentials] is explicitly enabled for local loopback tests).
  */
 class ProbePanelClient(
-    private val httpClient: OkHttpClient = defaultHttpClient(),
+    httpClient: OkHttpClient = defaultHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
     private val offlineThresholdMillis: Long = DEFAULT_OFFLINE_THRESHOLD_MILLIS,
+    private val allowLoopbackHttpWithCredentials: Boolean = false,
 ) {
+    private val transportClient: OkHttpClient = httpClient.newBuilder()
+        .cookieJar(CookieJar.NO_COOKIES)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .apply {
+            interceptors().clear()
+            networkInterceptors().clear()
+        }
+        .build()
+
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -71,6 +100,12 @@ class ProbePanelClient(
     ) {
         val isSuccessful: Boolean get() = code in 200..299
     }
+
+    private data class RawWireResponse(
+        val code: Int,
+        val location: String?,
+        val body: String,
+    )
 
     /**
      * Tests connectivity to [config], auto-detecting panel flavor when `panelType == AUTO`.
@@ -101,23 +136,37 @@ class ProbePanelClient(
      */
     suspend fun fetchPanelServers(config: ProbePanelConfig): ProbePanelFetchResult =
         withContext(ioDispatcher) {
-            val baseUrl = normalizeBaseUrl(config.baseUrl)
-            require(baseUrl.isNotBlank()) { "探针地址不能为空" }
+            val rawTrimmed = config.baseUrl.trim()
+            require(rawTrimmed.isNotEmpty()) { "探针地址不能为空" }
+
+            val baseUrl = normalizeBaseUrl(rawTrimmed)
+            val originUrl = baseUrl.toHttpUrlOrNull()
+                ?: throw ProbeCredentialBoundaryException("探针地址格式无效或协议不受支持：$rawTrimmed")
+            if (hasUserInfo(originUrl)) {
+                throw ProbeCredentialBoundaryException("安全校验失败：禁止在探针地址中内嵌账号或密码信息")
+            }
+
+            val cleanToken = sanitizeAndValidateApiToken(config.apiToken)
+            if (cleanToken != null && !isAllowedCredentialOrigin(originUrl, allowLoopbackHttpWithCredentials)) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：配置了 API Token 或 Cookie 的探针面板必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送凭证",
+                )
+            }
 
             when (config.effectivePanelType) {
                 ProbePanelType.NEZHA_V0 -> ProbePanelFetchResult(
                     detectedPanelType = ProbePanelType.NEZHA_V0,
-                    snapshots = fetchNezhaV0(config.id, baseUrl, config.apiToken),
+                    snapshots = fetchNezhaV0(config.id, originUrl, cleanToken),
                 )
                 ProbePanelType.NEZHA_V1 -> ProbePanelFetchResult(
                     detectedPanelType = ProbePanelType.NEZHA_V1,
-                    snapshots = fetchNezhaV1(config.id, baseUrl, config.apiToken),
+                    snapshots = fetchNezhaV1(config.id, originUrl, cleanToken),
                 )
                 ProbePanelType.KOMARI -> ProbePanelFetchResult(
                     detectedPanelType = ProbePanelType.KOMARI,
-                    snapshots = fetchKomari(config.id, baseUrl, config.apiToken),
+                    snapshots = fetchKomari(config.id, originUrl, cleanToken),
                 )
-                ProbePanelType.AUTO -> autoDiscoverAndFetch(config.id, baseUrl, config.apiToken)
+                ProbePanelType.AUTO -> autoDiscoverAndFetch(config.id, originUrl, cleanToken)
             }
         }
 
@@ -125,26 +174,26 @@ class ProbePanelClient(
 
     private suspend fun autoDiscoverAndFetch(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): ProbePanelFetchResult {
         var authFailureHint: String? = null
         var networkFailureHint: String? = null
 
         // 1. Try Komari (`GET /api/nodes`)
-        val komariAttempt = tryProbeKomari(panelId, baseUrl, apiToken)
+        val komariAttempt = tryProbeKomari(panelId, originUrl, apiToken)
         if (komariAttempt.result != null) return komariAttempt.result
         if (komariAttempt.isAuthError) authFailureHint = komariAttempt.errorMessage
         if (komariAttempt.isNetworkError) networkFailureHint = komariAttempt.errorMessage
 
         // 2. Try Nezha v1 (`GET /api/v1/server`)
-        val nezhaV1Attempt = tryProbeNezhaV1(panelId, baseUrl, apiToken)
+        val nezhaV1Attempt = tryProbeNezhaV1(panelId, originUrl, apiToken)
         if (nezhaV1Attempt.result != null) return nezhaV1Attempt.result
         if (nezhaV1Attempt.isAuthError && authFailureHint == null) authFailureHint = nezhaV1Attempt.errorMessage
         if (nezhaV1Attempt.isNetworkError && networkFailureHint == null) networkFailureHint = nezhaV1Attempt.errorMessage
 
         // 3. Try Nezha v0 (`GET /api/v1/server/details` then `/api/v1/server/list`)
-        val nezhaV0Attempt = tryProbeNezhaV0(panelId, baseUrl, apiToken)
+        val nezhaV0Attempt = tryProbeNezhaV0(panelId, originUrl, apiToken)
         if (nezhaV0Attempt.result != null) return nezhaV0Attempt.result
         if (nezhaV0Attempt.isAuthError && authFailureHint == null) authFailureHint = nezhaV0Attempt.errorMessage
         if (nezhaV0Attempt.isNetworkError && networkFailureHint == null) networkFailureHint = nezhaV0Attempt.errorMessage
@@ -164,13 +213,19 @@ class ProbePanelClient(
 
     private suspend fun tryProbeKomari(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): DiscoveryAttempt {
         val outcome = try {
-            executeGet("$baseUrl/api/nodes", buildKomariHeaders(apiToken))
+            executeGet(
+                initialUrl = buildEndpointUrl(originUrl, "api", "nodes"),
+                headers = buildKomariHeaders(apiToken),
+                expectedOrigin = originUrl,
+            )
         } catch (c: CancellationException) {
             throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
         } catch (e: IOException) {
             return DiscoveryAttempt(isNetworkError = true, errorMessage = "网络请求失败：${e.message}")
         }
@@ -187,7 +242,7 @@ class ProbePanelClient(
         if (!looksLikeKomariNodes(root)) return DiscoveryAttempt()
 
         val nodes = parseKomariNodesList(panelId, root)
-        val merged = enrichKomariWithLiveTelemetry(panelId, baseUrl, apiToken, nodes)
+        val merged = enrichKomariWithLiveTelemetry(panelId, originUrl, apiToken, nodes)
         return DiscoveryAttempt(
             result = ProbePanelFetchResult(
                 detectedPanelType = ProbePanelType.KOMARI,
@@ -198,13 +253,19 @@ class ProbePanelClient(
 
     private suspend fun tryProbeNezhaV1(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): DiscoveryAttempt {
         val outcome = try {
-            executeNezhaV1Get("$baseUrl/api/v1/server", apiToken)
+            executeNezhaV1Get(
+                url = buildEndpointUrl(originUrl, "api", "v1", "server"),
+                apiToken = apiToken,
+                expectedOrigin = originUrl,
+            )
         } catch (c: CancellationException) {
             throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
         } catch (e: IOException) {
             return DiscoveryAttempt(isNetworkError = true, errorMessage = "网络请求失败：${e.message}")
         }
@@ -231,14 +292,20 @@ class ProbePanelClient(
 
     private suspend fun tryProbeNezhaV0(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): DiscoveryAttempt {
         val headers = buildNezhaV0Headers(apiToken)
         val detailsOutcome = try {
-            executeGet("$baseUrl/api/v1/server/details", headers)
+            executeGet(
+                initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "details"),
+                headers = headers,
+                expectedOrigin = originUrl,
+            )
         } catch (c: CancellationException) {
             throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
         } catch (e: IOException) {
             return DiscoveryAttempt(isNetworkError = true, errorMessage = "网络请求失败：${e.message}")
         }
@@ -263,9 +330,15 @@ class ProbePanelClient(
         }
 
         val listOutcome = try {
-            executeGet("$baseUrl/api/v1/server/list", headers)
+            executeGet(
+                initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "list"),
+                headers = headers,
+                expectedOrigin = originUrl,
+            )
         } catch (c: CancellationException) {
             throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
         } catch (e: IOException) {
             return DiscoveryAttempt(isNetworkError = true, errorMessage = "网络请求失败：${e.message}")
         }
@@ -295,11 +368,15 @@ class ProbePanelClient(
 
     private suspend fun fetchNezhaV0(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): List<ProbeServerSnapshot> {
         val headers = buildNezhaV0Headers(apiToken)
-        val detailsResp = executeGet("$baseUrl/api/v1/server/details", headers)
+        val detailsResp = executeGet(
+            initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "details"),
+            headers = headers,
+            expectedOrigin = originUrl,
+        )
         if (detailsResp.isSuccessful) {
             val root = parseJsonOrNull(detailsResp.body)
             if (root != null) {
@@ -311,7 +388,11 @@ class ProbePanelClient(
             throw IOException("哪吒 v0 认证失败 (HTTP ${detailsResp.code})，请检查 API Token")
         }
 
-        val listResp = executeGet("$baseUrl/api/v1/server/list", headers)
+        val listResp = executeGet(
+            initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "list"),
+            headers = headers,
+            expectedOrigin = originUrl,
+        )
         if (!listResp.isSuccessful) {
             throw IOException("哪吒 v0 接口请求失败 (HTTP ${listResp.code})")
         }
@@ -427,10 +508,14 @@ class ProbePanelClient(
 
     private suspend fun fetchNezhaV1(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): List<ProbeServerSnapshot> {
-        val resp = executeNezhaV1Get("$baseUrl/api/v1/server", apiToken)
+        val resp = executeNezhaV1Get(
+            url = buildEndpointUrl(originUrl, "api", "v1", "server"),
+            apiToken = apiToken,
+            expectedOrigin = originUrl,
+        )
         if (resp.code == 401 || resp.code == 403) {
             throw IOException("哪吒 v1 认证失败 (HTTP ${resp.code})，请检查 JWT Token / Cookie")
         }
@@ -448,19 +533,20 @@ class ProbePanelClient(
     }
 
     private suspend fun executeNezhaV1Get(
-        url: String,
+        url: HttpUrl,
         apiToken: String?,
+        expectedOrigin: HttpUrl,
     ): HttpOutcome {
         val trimmedToken = apiToken?.trim().orEmpty()
         val primaryHeaders = buildNezhaV1Headers(trimmedToken, asCookie = false)
-        val first = executeGet(url, primaryHeaders)
+        val first = executeGet(initialUrl = url, headers = primaryHeaders, expectedOrigin = expectedOrigin)
         if ((first.code == 401 || first.code == 403) &&
             trimmedToken.isNotEmpty() &&
             !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
             !trimmedToken.contains('=')
         ) {
             val cookieHeaders = buildNezhaV1Headers(trimmedToken, asCookie = true)
-            val second = executeGet(url, cookieHeaders)
+            val second = executeGet(initialUrl = url, headers = cookieHeaders, expectedOrigin = expectedOrigin)
             if (second.isSuccessful) return second
         }
         return first
@@ -568,11 +654,15 @@ class ProbePanelClient(
 
     private suspend fun fetchKomari(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
     ): List<ProbeServerSnapshot> {
         val headers = buildKomariHeaders(apiToken)
-        val nodesResp = executeGet("$baseUrl/api/nodes", headers)
+        val nodesResp = executeGet(
+            initialUrl = buildEndpointUrl(originUrl, "api", "nodes"),
+            headers = headers,
+            expectedOrigin = originUrl,
+        )
         if (nodesResp.code == 401 || nodesResp.code == 403) {
             throw IOException("Komari 认证失败 (HTTP ${nodesResp.code})，请检查 API Token / Cookie")
         }
@@ -582,7 +672,7 @@ class ProbePanelClient(
         val nodesRoot = parseJsonOrNull(nodesResp.body)
             ?: throw IOException("Komari /api/nodes 返回数据非有效 JSON")
         val baseNodes = parseKomariNodesList(panelId, nodesRoot)
-        return enrichKomariWithLiveTelemetry(panelId, baseUrl, apiToken, baseNodes)
+        return enrichKomariWithLiveTelemetry(panelId, originUrl, apiToken, baseNodes)
     }
 
     private fun looksLikeKomariNodes(root: JsonElement): Boolean {
@@ -608,7 +698,7 @@ class ProbePanelClient(
 
     private suspend fun enrichKomariWithLiveTelemetry(
         panelId: String,
-        baseUrl: String,
+        originUrl: HttpUrl,
         apiToken: String?,
         baseNodes: List<ProbeServerSnapshot>,
     ): List<ProbeServerSnapshot> {
@@ -616,8 +706,8 @@ class ProbePanelClient(
         val headers = buildKomariHeaders(apiToken)
 
         // Try `/api/recent` first, then `/api/client`
-        val liveMap = fetchKomariTelemetryMap("$baseUrl/api/recent", headers)
-            ?: fetchKomariTelemetryMap("$baseUrl/api/client", headers)
+        val liveMap = fetchKomariTelemetryMap(buildEndpointUrl(originUrl, "api", "recent"), headers, originUrl)
+            ?: fetchKomariTelemetryMap(buildEndpointUrl(originUrl, "api", "client"), headers, originUrl)
             ?: return baseNodes
 
         val now = nowMillisProvider()
@@ -669,10 +759,19 @@ class ProbePanelClient(
     )
 
     private suspend fun fetchKomariTelemetryMap(
-        url: String,
+        url: HttpUrl,
         headers: Map<String, String>,
+        expectedOrigin: HttpUrl,
     ): Map<String, KomariLiveTelemetry>? {
-        val resp = runCatching { executeGet(url, headers) }.getOrNull() ?: return null
+        val resp = try {
+            executeGet(initialUrl = url, headers = headers, expectedOrigin = expectedOrigin)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (_: Throwable) {
+            return null
+        }
         if (!resp.isSuccessful) return null
         val root = parseJsonOrNull(resp.body) ?: return null
         val parsed = parseKomariTelemetryMap(root)
@@ -882,24 +981,121 @@ class ProbePanelClient(
             if (token.contains('=')) {
                 put("Cookie", token)
             } else {
-                val bearer = if (token.startsWith("Bearer ", ignoreCase = true)) token else "Bearer $token"
+                val hasBearerPrefix = token.startsWith("Bearer ", ignoreCase = true)
+                val bearer = if (hasBearerPrefix) token else "Bearer $token"
+                val rawKey = if (hasBearerPrefix) token.substring("Bearer ".length).trim() else token
                 put("Authorization", bearer)
-                put("X-API-Key", token.removePrefix("Bearer ").removePrefix("bearer ").trim())
+                if (rawKey.isNotEmpty()) {
+                    put("X-API-Key", rawKey)
+                }
             }
         }
     }
 
-    private suspend fun executeGet(
-        url: String,
-        headers: Map<String, String>,
-    ): HttpOutcome {
-        val builder = Request.Builder().url(url).get()
-        headers.forEach { (k, v) -> builder.header(k, v) }
-        val request = builder.build()
+    private fun buildEndpointUrl(originUrl: HttpUrl, vararg segments: String): HttpUrl {
+        val builder = originUrl.newBuilder()
+        val existing = originUrl.pathSegments
+        if (existing.isNotEmpty() && existing.last().isEmpty()) {
+            builder.removePathSegment(existing.size - 1)
+        }
+        for (segment in segments) {
+            if (segment.isNotEmpty()) {
+                builder.addPathSegment(segment)
+            }
+        }
+        return builder.build()
+    }
 
-        return suspendCancellableCoroutine { continuation ->
-            val call = httpClient.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
+    private suspend fun executeGet(
+        initialUrl: HttpUrl,
+        headers: Map<String, String>,
+        expectedOrigin: HttpUrl,
+    ): HttpOutcome {
+        val carriesCredentials = hasCredentialHeaders(headers)
+        val sanitizedHeaders = if (carriesCredentials) {
+            headers
+        } else {
+            headers.filterKeys { !isCredentialHeaderName(it) }
+        }
+
+        var currentUrl = initialUrl
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            if (hasUserInfo(currentUrl)) {
+                throw ProbeCredentialBoundaryException("安全校验失败：禁止在探针请求 URL 中内嵌账号或密码信息")
+            }
+            if (carriesCredentials) {
+                if (!isAllowedCredentialOrigin(currentUrl, allowLoopbackHttpWithCredentials)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：配置了 API Token 或 Cookie 的探针面板必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送凭证",
+                    )
+                }
+                if (!isSameOrigin(expectedOrigin, currentUrl)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝向非同源地址 (${formatOrigin(currentUrl)}) 发送探针凭证",
+                    )
+                }
+            }
+
+            val builder = Request.Builder().url(currentUrl).get()
+            sanitizedHeaders.forEach { (k, v) -> builder.header(k, v) }
+            val raw = executeSingleCall(builder.build())
+
+            if (raw.code !in REDIRECT_STATUS_CODES) {
+                if (carriesCredentials && raw.code in 300..399) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：探针面板返回不受支持的重定向状态 (HTTP ${raw.code})",
+                    )
+                }
+                return HttpOutcome(code = raw.code, body = raw.body)
+            }
+
+            if (hop >= MAX_REDIRECT_HOPS) {
+                throw ProbeCredentialBoundaryException(
+                    "探针面板重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）",
+                )
+            }
+
+            val rawLocation = raw.location?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw ProbeCredentialBoundaryException(
+                    "安全校验失败：探针面板重定向响应缺少 Location 头 (HTTP ${raw.code})",
+                )
+            val nextUrl = currentUrl.resolve(rawLocation)
+                ?: throw ProbeCredentialBoundaryException(
+                    "安全校验失败：探针面板重定向目标地址无效或协议不受支持 (HTTP ${raw.code})",
+                )
+            if (hasUserInfo(nextUrl)) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：拒绝重定向至包含内嵌用户信息的探针地址 (HTTP ${raw.code})",
+                )
+            }
+            if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                !nextUrl.scheme.equals("https", ignoreCase = true)
+            ) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：拒绝将探针请求从 HTTPS 降级重定向至明文 HTTP (HTTP ${raw.code})",
+                )
+            }
+            if (carriesCredentials) {
+                if (!isAllowedCredentialOrigin(nextUrl, allowLoopbackHttpWithCredentials)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝将探针凭证重定向至非 HTTPS 地址 (HTTP ${raw.code})",
+                    )
+                }
+                if (!isSameOrigin(expectedOrigin, nextUrl)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝跨源重定向探针请求 (${formatOrigin(expectedOrigin)} -> ${formatOrigin(nextUrl)})，已阻止泄露凭证",
+                    )
+                }
+            }
+            currentUrl = nextUrl
+        }
+        throw ProbeCredentialBoundaryException("探针面板重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）")
+    }
+
+    private suspend fun executeSingleCall(request: Request): RawWireResponse =
+        suspendCancellableCoroutine { continuation ->
+            val call = transportClient.newCall(request)
+            continuation.invokeOnCancellation { runCatching { call.cancel() } }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     if (continuation.isActive) {
@@ -909,15 +1105,25 @@ class ProbePanelClient(
 
                 override fun onResponse(call: Call, response: Response) {
                     response.use { resp ->
-                        val bodyStr = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                        val location = resp.header("Location")
+                        val bodyStr = if (resp.code in REDIRECT_STATUS_CODES) {
+                            ""
+                        } else {
+                            runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                        }
                         if (continuation.isActive) {
-                            continuation.resume(HttpOutcome(code = resp.code, body = bodyStr))
+                            continuation.resume(
+                                RawWireResponse(
+                                    code = resp.code,
+                                    location = location,
+                                    body = bodyStr,
+                                ),
+                            )
                         }
                     }
                 }
             })
         }
-    }
 
     private fun parseJsonOrNull(raw: String): JsonElement? {
         val trimmed = raw.trim()
@@ -1016,9 +1222,51 @@ class ProbePanelClient(
 
     companion object {
         const val DEFAULT_OFFLINE_THRESHOLD_MILLIS = 120_000L
+        internal const val MAX_REDIRECT_HOPS = 5
         private const val CLOCK_SKEW_TOLERANCE_MILLIS = 300_000L
+        private val REDIRECT_STATUS_CODES = setOf(301, 302, 303, 307, 308)
+        private val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1")
         private val SPACE_DATE_TIME_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+        private fun normalizeHost(host: String): String =
+            host.trim().lowercase(Locale.ROOT).removePrefix("[").removeSuffix("]")
+
+        internal fun isLoopbackHost(host: String): Boolean =
+            normalizeHost(host) in LOOPBACK_HOSTS
+
+        internal fun isAllowedCredentialOrigin(url: HttpUrl, allowLoopbackHttp: Boolean): Boolean =
+            url.scheme.equals("https", ignoreCase = true) ||
+                (allowLoopbackHttp && url.scheme.equals("http", ignoreCase = true) && isLoopbackHost(url.host))
+
+        internal fun isSameOrigin(a: HttpUrl, b: HttpUrl): Boolean =
+            a.scheme.equals(b.scheme, ignoreCase = true) &&
+                normalizeHost(a.host) == normalizeHost(b.host) &&
+                a.port == b.port
+
+        private fun hasUserInfo(url: HttpUrl): Boolean =
+            url.encodedUsername.isNotEmpty() || url.encodedPassword.isNotEmpty()
+
+        private fun formatOrigin(url: HttpUrl): String =
+            "${url.scheme.lowercase(Locale.ROOT)}://${url.host}:${url.port}"
+
+        private fun isCredentialHeaderName(name: String): Boolean =
+            name.equals("Authorization", ignoreCase = true) ||
+                name.equals("Proxy-Authorization", ignoreCase = true) ||
+                name.equals("X-API-Key", ignoreCase = true) ||
+                name.equals("Cookie", ignoreCase = true)
+
+        private fun hasCredentialHeaders(headers: Map<String, String>): Boolean =
+            headers.any { (k, v) -> isCredentialHeaderName(k) && v.isNotBlank() }
+
+        private fun sanitizeAndValidateApiToken(rawToken: String?): String? {
+            val trimmed = rawToken?.trim().orEmpty()
+            if (trimmed.isEmpty()) return null
+            if (trimmed.any { it == '\r' || it == '\n' || (it.isISOControl() && it != '\t') }) {
+                throw ProbeCredentialBoundaryException("安全校验失败：探针凭证格式无效，不能包含换行或控制字符")
+            }
+            return trimmed
+        }
 
         /**
          * Normalizes user-entered panel base URLs (adds `https://` when scheme omitted, trims
@@ -1028,7 +1276,8 @@ class ProbePanelClient(
             var cleaned = rawUrl.trim()
             if (cleaned.isEmpty()) return ""
             if (!cleaned.startsWith("http://", ignoreCase = true) &&
-                !cleaned.startsWith("https://", ignoreCase = true)
+                !cleaned.startsWith("https://", ignoreCase = true) &&
+                !cleaned.contains("://")
             ) {
                 cleaned = "https://$cleaned"
             }
@@ -1051,6 +1300,9 @@ class ProbePanelClient(
         }
 
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .callTimeout(18, TimeUnit.SECONDS)
