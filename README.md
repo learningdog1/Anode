@@ -295,7 +295,7 @@
 
 - **功能栏聚合中心与活动预留 (`FeatureHubScreen` · `ActivityScreen`)**：底部中间「功能栏」主标签按 **社区服务**（`邮箱` / `活动`）、**情报与监控**（`海外情报` / `补货监控`）、**主机与网络**（`我的服务器` / `手机端测机`）与 Hero **轻量 SSH** 分组汇聚全部效率入口，并实时展示 Seek 邮箱配置状态、补货监控启用数与未读提醒、探针主机数量与 SSH 保险库台数；「活动」页预留 `ForumWatch` 活动聚合接入点。
 - **VPS 补货 / 抢购监控 (`RestockMonitorScreen`)**：自动识别 WHMCS / SolusVM / HostBill / VirtFusion 面板购买页（支持顶栏粘贴链接或帖子内长按商品链接加入监控），后台 `缺货 → 有货` 波次去重巡检并发送高优先级通知，点击直跳下单页，亦支持一键导入资产账本。
-- **交易前“查一查”卖家信誉卡 (`SellerTrustCardSheet`)**：采用 **内存 LRU + 本地磁盘两级缓存**（正结果 18 小时 / 部分失败 15 分钟 / 负结果 3 分钟 / 7 天过期兜底）、单飞请求合并与 `429/503` 退避冷却保护；默认打开通过共享 `/categories/expose` 曝光版快照匹配（**零 `/search` 流量**，避免触发站内搜索限流），并提供按需单次深度 `/search` 查验（含独立冷却倒计时）与 Google `site:nodeseek.com/categories/expose` 站外兜底、本地 `AES-256-GCM` 私人标签备注及高危红框预警。
+- **交易前“查一查”卖家信誉卡 (`SellerTrustCardSheet`)**：采用 **内存 LRU + 本地磁盘两级缓存**（正结果 18 小时 / 部分失败 15 分钟 / 负结果 3 分钟 / 7 天过期兜底）、单飞请求合并与 `429/503` 退避冷却保护；默认打开通过共享 `/categories/expose` 曝光版快照匹配（**零 `/search` 流量**，避免触发站内搜索限流），并提供按需单次深度 `/search` 查验（含独立冷却倒计时）与 Google `site:www.nodeseek.com` 站外曝光关键词兜底、本机沙盒存储的私人标签备注及高危红框预警。
 - **我的服务器：探针接入 + 资产账本 (`MyServersScreen`)**：同时接入哪吒探针 v0/v1 与 Komari 面板 API 查看主机实时在线状态、CPU/内存/硬盘、双向流量与掉线推送提醒；内置多币种续费资产账本与到期提醒，点击「不想续了 · 一键出机」直接联动估值器生成交易帖并跳入发帖页。
 - **手机端测机 (`MobileNetBenchScreen`)**：
   - **ICMP Ping + TCPing 双重探测**：「测机项目开关」首行新增 **Ping 延迟与抖动**（调用系统 `/system/bin/ping` 解析每包 RTT、`min/avg/max/mdev` 抖动与丢包，内置 `(DUP!)`/异常包过滤、波形图与 VPN 直连受限提示），与 **TCPing** 协同绘制零分配 `Canvas` 波形，Markdown 报告自动将 Ping 排在 TCPing 之前并保持向后兼容的历史记录存储。
@@ -459,6 +459,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与卖家本地备注额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
+- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）与探针面板 API Token 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。

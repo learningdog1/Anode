@@ -442,8 +442,8 @@ Reorganized in `v2.x` from the initial Bento concept into an elevated **Hero Ran
 3. **Lite SSH (`LiteSshScreen` · `SshTerminalAutoFit` · `SshResultPublishSheet`)**:
    - **Virtualized Adaptive Terminal**: Uses `LazyColumn` (`SshTerminalConsoleBuffer`) for 60fps scrolling, **`AUTO_FIT`** dynamic font solver (`6.0sp–11.5sp`) to prevent wide NodeQuality/YABS ASCII tables from wrapping, **`FIXED`** mode with two-finger pinch zoom (`0.50x–1.80x`) & reset controls, and non-looping live PTY `window-change` dimension updates.
    - **Publishing Workflow (`SshResultPublishSheet`)**: Supports off-main-thread Markdown formatting, multi-run merge (`SshMergeLayout`), official 4-tab `NodeQuality` `:::: tabs` or plain-text copy, and contextual **`发测评`** button label when invoked from a topic reply bar.
-4. **Overseas Intel (`OverseasIntelScreen` & `OverseasIntelDetailScreen`)**: Clear typographic deal card hierarchy (`67e66da`) with list-level translation switching (`标题原文 / 中文译文 / 双语对照`); detail screen directly presents server-parsed Chinese titles, spec sections, promo codes, pros/cons, AI commentary, and 1-click NodeSeek repost (`47b042`).
-5. **Seller Trust (`SellerTrustCardSheet` & `SellerTrustState`)**: Surfaces cached `/categories/expose` snapshot status immediately with zero default `/search` calls, explicit **on-demand deep `/search` verification** with live cooldown countdown pill, Google site-search fallback, and local `AES-256-GCM` notes.
+4. **Overseas Intel (`OverseasIntelScreen` & `OverseasIntelDetailScreen`)**: Clear typographic deal card hierarchy with list-level translation switching (`标题原文 / 中文译文 / 双语对照`); detail screen directly presents server-parsed Chinese titles, spec sections, promo codes, pros/cons, AI commentary, and 1-click NodeSeek repost.
+5. **Seller Trust (`SellerTrustCardSheet` & `SellerTrustState`)**: Surfaces cached `/categories/expose` snapshot status immediately with zero default `/search` calls, explicit **on-demand deep `/search` verification** with live cooldown countdown pill, Google `site:www.nodeseek.com` site-search fallback, and local app-sandbox JSON notes (`filesDir/seller_trust_notes.json`).
 
 ---
 
