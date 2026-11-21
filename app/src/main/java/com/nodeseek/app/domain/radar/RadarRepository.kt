@@ -66,6 +66,19 @@ interface RadarRepository {
         trackedTopics: List<TrackedTopic>,
         replaceExisting: Boolean,
     ): RadarBackupRestoreResult = RadarBackupRestoreResult()
+
+    suspend fun restoreExactSnapshot(
+        pollingSettings: RadarPollingSettings,
+        keywordRules: List<KeywordWatchRule>,
+        trackedTopics: List<TrackedTopic>,
+    ) {
+        restoreFromBackup(
+            pollingSettings = pollingSettings,
+            keywordRules = keywordRules,
+            trackedTopics = trackedTopics,
+            replaceExisting = true,
+        )
+    }
 }
 
 data class RadarBackupRestoreResult(

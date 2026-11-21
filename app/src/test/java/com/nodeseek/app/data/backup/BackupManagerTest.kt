@@ -26,6 +26,7 @@ import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.UserRepositoryImpl
 import com.nodeseek.app.domain.backup.BackupFileNaming
+import com.nodeseek.app.domain.backup.BackupSyncTargetAccount
 import com.nodeseek.app.domain.backup.ContentFilterBackupBridge
 import com.nodeseek.app.domain.backup.ContentFilterBackupDto
 import com.nodeseek.app.domain.backup.ContentFilterRuleBackupDto
@@ -45,6 +46,9 @@ import com.nodeseek.app.domain.radar.KeywordMatchMode
 import com.nodeseek.app.domain.radar.KeywordWatchRule
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.TrackedTopic
+import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
+import com.nodeseek.app.domain.repository.DraftRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,6 +59,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.encodeToString
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -63,14 +68,17 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.time.ZoneOffset
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 class BackupManagerTest {
 
@@ -380,12 +388,25 @@ class BackupManagerTest {
         assertEquals(2, restoreSummary.radarKeywordRulesImported)
         assertEquals(1, restoreSummary.radarTrackedTopicsImported)
         assertEquals(2, restoreSummary.blockedUsersImported)
-        assertEquals(2, restoreSummary.blockedUsersSyncedToServer)
+        assertEquals(0, restoreSummary.blockedUsersSyncedToServer)
         assertEquals(0, restoreSummary.blockedUsersServerSyncSkippedOrFailed)
+        assertEquals(listOf("spam_bot", "aff_troll"), restoreSummary.pendingRemoteBlockUsers.map { it.username })
+        assertEquals(BackupSyncTargetAccount(uid = 101L, username = "Tester"), restoreSummary.targetSyncAccount)
         assertEquals(1, restoreSummary.contentFilterRulesImported)
         assertEquals(1, restoreSummary.bookmarksImported)
         assertEquals(2, restoreSummary.draftsImported)
+        // Local restore is strictly decoupled from remote server blocklist mutations!
+        assertEquals(0, blockedApiCallCount.size)
+
+        // Explicit remote sync verifies target account and syncs both blocked users cleanly
+        val remoteSync = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 101L,
+            expectedUsername = "Tester",
+        ).getOrThrow()
+        assertEquals(2, remoteSync.syncedCount)
+        assertEquals(0, remoteSync.failedCount)
         assertEquals(2, blockedApiCallCount.size)
+        assertNull(target.backupManager.pendingRemoteBlocklistSyncState.value)
 
         // Verify Settings restored
         val restoredSettings = withTimeout(3_000L) {
@@ -721,11 +742,21 @@ class BackupManagerTest {
         val restoreOutcome = restoreTarget.backupManager.restoreBackup(offlineExport, RestoreStrategy.MERGE).getOrThrow()
         assertEquals(2, restoreOutcome.blockedUsersImported)
         assertEquals(0, restoreOutcome.blockedUsersSyncedToServer)
-        assertEquals(2, restoreOutcome.blockedUsersServerSyncSkippedOrFailed)
+        assertEquals(2, restoreOutcome.pendingRemoteBlockUsers.size)
+        assertEquals(BackupSyncTargetAccount(uid = 101L, username = "Tester"), restoreOutcome.targetSyncAccount)
         assertEquals(
             setOf("cached_user", "offline_added_user"),
             restoreTarget.blockedUsersCache.getBlockedUsers().map { it.username }.toSet(),
         )
+
+        // Explicit remote sync while offline reports failures cleanly and retains failed users for retry
+        val offlineSyncResult = restoreTarget.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 101L,
+            expectedUsername = "Tester",
+        ).getOrThrow()
+        assertEquals(0, offlineSyncResult.syncedCount)
+        assertEquals(2, offlineSyncResult.failedCount)
+        assertEquals(2, restoreTarget.backupManager.pendingRemoteBlocklistSyncState.value?.users?.size)
     }
 
     @Test
@@ -1004,6 +1035,660 @@ class BackupManagerTest {
         assertTrue(gateway.cancelled.contains(RadarWorkScheduler.UNIQUE_WORK_NAME))
 
         scheduler.stopObserving()
+    }
+
+    @Test
+    fun `2 radar rules differing only in exclude keywords export 2, preview 2, and restore 2 across OVERWRITE and MERGE`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(503)
+        }
+
+        val source = TestNodeStack("excl_src", tempDir, ioScope, server)
+        source.radarRepository.addKeywordRule(
+            keyword = "DMIT",
+            excludeWords = "收",
+            categorySlug = "trade",
+            matchMode = KeywordMatchMode.CONTAINS,
+        ).getOrThrow()
+        source.radarRepository.addKeywordRule(
+            keyword = "DMIT",
+            excludeWords = "求购",
+            categorySlug = "trade",
+            matchMode = KeywordMatchMode.CONTAINS,
+        ).getOrThrow()
+
+        // 1. Export -> 2 rules
+        val payload = source.backupManager.exportBackupPayload().getOrThrow()
+        assertEquals(2, payload.bundle.radar.keywordRules.size)
+
+        // 2. Preview -> 2 rules
+        val preview = source.backupManager.inspectBackup(payload.rawJson).getOrThrow()
+        assertEquals(2, preview.radarKeywordRuleCount)
+
+        // 3. OVERWRITE restore -> 2 rules restored
+        val overwriteTarget = TestNodeStack("excl_overwrite_dst", tempDir, ioScope, server)
+        overwriteTarget.radarRepository.addKeywordRule(
+            keyword = "RackNerd",
+            excludeWords = "",
+            categorySlug = "trade",
+            matchMode = KeywordMatchMode.CONTAINS,
+        ).getOrThrow()
+
+        val overwriteSummary = overwriteTarget.backupManager
+            .restoreBackup(payload.rawJson, RestoreStrategy.OVERWRITE)
+            .getOrThrow()
+        assertEquals(2, overwriteSummary.radarKeywordRulesImported)
+        val overwrittenRules = overwriteTarget.radarRepository.getKeywordRulesForBackup()
+        assertEquals(2, overwrittenRules.size)
+        assertEquals(setOf("收", "求购"), overwrittenRules.map { it.excludeWords }.toSet())
+
+        // 4. MERGE restore onto a target with DMIT (empty excludeWords) + one matching rule -> imports only the distinct rule
+        val mergeTarget = TestNodeStack("excl_merge_dst", tempDir, ioScope, server)
+        mergeTarget.radarRepository.addKeywordRule(
+            keyword = "DMIT",
+            excludeWords = "",
+            categorySlug = "trade",
+            matchMode = KeywordMatchMode.CONTAINS,
+        ).getOrThrow()
+        mergeTarget.radarRepository.addKeywordRule(
+            keyword = "dmit",
+            excludeWords = "收",
+            categorySlug = "TRADE",
+            matchMode = KeywordMatchMode.CONTAINS,
+        ).getOrThrow()
+
+        val mergeSummary = mergeTarget.backupManager
+            .restoreBackup(payload.rawJson, RestoreStrategy.MERGE)
+            .getOrThrow()
+        assertEquals(1, mergeSummary.radarKeywordRulesImported)
+        val mergedRules = mergeTarget.radarRepository.getKeywordRulesForBackup()
+        assertEquals(3, mergedRules.size)
+        assertEquals(setOf("", "收", "求购"), mergedRules.map { it.excludeWords }.toSet())
+    }
+
+    @Test
+    fun `late-stage failure in restoreBookmarks, restoreDrafts, or cancellation rolls back all local stores and makes zero server calls`() = runBlocking {
+        val remoteBlockCalls = CopyOnWriteArrayList<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> {
+                        val b64 = encodeConfig(101L, "Tester")
+                        MockResponse().setResponseCode(200)
+                            .setBody("""<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$b64</script></body></html>""")
+                    }
+                    path.startsWith("/api/block-list/list") -> MockResponse().setResponseCode(200).setBody(
+                        """{"success":true,"data":[{"block_member_id":88,"block_member_name":"incoming_block_1"},{"block_member_id":89,"block_member_name":"incoming_block_2"}]}""",
+                    )
+                    path.startsWith("/api/block-list/add") -> {
+                        remoteBlockCalls.add(request.body.readUtf8())
+                        MockResponse().setResponseCode(200).setBody("""{"success":true}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        // Build incoming backup payload that overwrites all 5 categories
+        val incomingStack = TestNodeStack("rollback_src", tempDir, ioScope, server)
+        incomingStack.sessionRepository.refreshSession().getOrThrow()
+        incomingStack.settingsRepository.setThemeMode(ThemeMode.PAPER_LIGHT)
+        incomingStack.settingsRepository.setPurePitchAmoled(false)
+        incomingStack.settingsRepository.setFontScale(1.30f)
+        incomingStack.settingsRepository.setNodeImageApiKey("ni_incoming_overwrite")
+        incomingStack.settingsRepository.addRecentSearchQuery("incoming_query")
+        incomingStack.radarRepository.updatePollingSettings {
+            RadarPollingSettings(
+                isEnabled = false,
+                foregroundIntervalMinutes = 15,
+                backgroundIntervalMinutes = 90,
+                wifiOnlyInBackground = true,
+            )
+        }
+        incomingStack.radarRepository.addKeywordRule("IncomingKeyword", excludeWords = "AFF", categorySlug = "trade").getOrThrow()
+        incomingStack.radarRepository.trackTopic(66001L, "Incoming Tracked Topic", currentMaxFloor = 99, totalPages = 10)
+        incomingStack.contentFilterBridge.state = ContentFilterBackupDto(
+            isEnabled = false,
+            mutedCategorySlugs = setOf("carpool"),
+            rules = listOf(ContentFilterRuleBackupDto(id = "cf_incoming", pattern = "IncomingFilter")),
+        )
+        incomingStack.bookmarkDao.upsert(
+            BookmarkEntity.fromSummary(
+                accountUid = 101L,
+                summary = TopicSummary(id = 7701L, title = "Incoming Bookmark", categorySlug = "tech", categoryName = "技术", authorName = "inc"),
+                savedAtEpochMillis = 8_000L,
+            ),
+        )
+        incomingStack.draftRepository.saveDraft(
+            EditorDraft(
+                draftKey = EditorDraft.NEW_TOPIC_KEY,
+                accountUid = 101L,
+                title = "Incoming Draft",
+                markdownContent = "incoming body",
+                categorySlug = "tech",
+                updatedAtMillis = 9_000L,
+            ),
+        )
+        val incomingJson = incomingStack.backupManager.exportBackupJson(includeApiKeys = true).getOrThrow()
+
+        // Populate target stack with distinct pre-restore state
+        val target = TestNodeStack("rollback_dst", tempDir, ioScope, server)
+        target.sessionRepository.refreshSession().getOrThrow()
+        target.settingsRepository.setThemeMode(ThemeMode.OBSIDIAN_DARK)
+        target.settingsRepository.setPurePitchAmoled(true)
+        target.settingsRepository.setFontScale(0.95f)
+        target.settingsRepository.setNodeImageApiKey("ni_original_keep")
+        target.settingsRepository.setSeekMailApiKey("sm_original_keep")
+        target.settingsRepository.addRecentSearchQuery("original_query")
+
+        target.radarRepository.updatePollingSettings {
+            RadarPollingSettings(
+                isEnabled = true,
+                foregroundIntervalMinutes = 3,
+                backgroundIntervalMinutes = 30,
+                wifiOnlyInBackground = false,
+            )
+        }
+        val originalRule = target.radarRepository
+            .addKeywordRule("OriginalRule", excludeWords = "求购", categorySlug = "review")
+            .getOrThrow()
+        target.radarRepository.toggleKeywordRule(originalRule.id, enabled = false)
+        target.radarRepository.trackTopic(12345L, "Original Tracked", currentMaxFloor = 12, totalPages = 2)
+        target.blockedUsersCache.replaceAll(listOf(FloorAuthor(uid = 5L, username = "original_blocked_user")))
+
+        val targetFilterStore = PreferenceDataStoreFactory.create(
+            scope = ioScope,
+            produceFile = { File(tempDir, "rollback_dst_cf.preferences_pb") },
+        )
+        val targetFilterRepo = ContentFilterRepositoryImpl(targetFilterStore, ioScope)
+        targetFilterRepo.replaceConfig(
+            ContentFilterConfig(
+                isEnabled = true,
+                mutedCategorySlugs = setOf("meaningless"),
+                rules = listOf(
+                    ContentBlockRule(
+                        id = "cf_original",
+                        pattern = "水一贴",
+                        matchMode = KeywordMatchMode.CONTAINS,
+                        categorySlug = "daily",
+                        isEnabled = true,
+                        note = "原始规则",
+                        createdAtEpochMillis = 1_500L,
+                    ),
+                ),
+            ),
+        )
+
+        target.bookmarkDao.upsert(
+            BookmarkEntity.fromSummary(
+                accountUid = 101L,
+                summary = TopicSummary(id = 1111L, title = "Original Bookmark", categorySlug = "review", categoryName = "测评", authorName = "orig"),
+                savedAtEpochMillis = 2_000L,
+            ),
+        )
+        target.draftRepository.saveDraft(
+            EditorDraft(
+                draftKey = EditorDraft.replyKey(1111L),
+                accountUid = 101L,
+                title = "",
+                markdownContent = "Original reply draft",
+                categorySlug = "review",
+                updatedAtMillis = 3_000L,
+            ),
+        )
+
+        val expectedSettings = target.settingsRepository.exportSettingsForBackup(includeApiKeys = true)
+        val expectedPolling = target.radarRepository.getPollingSettings()
+        val expectedRules = target.radarRepository.getKeywordRulesForBackup()
+        val expectedTopics = target.radarRepository.getTrackedTopicsForBackup()
+        val expectedContentFilter = targetFilterRepo.getConfigSnapshot()
+        val expectedBlockedUsers = target.blockedUsersCache.getBlockedUsers()
+        val expectedBookmarks = target.bookmarkRepository.getAllBookmarksForBackup()
+        val expectedDrafts = target.draftRepository.getAllDrafts()
+
+        var failBookmarksWith: Throwable? = null
+        var failDraftsWith: Throwable? = null
+        val radarRestoredCallbacks = CopyOnWriteArrayList<RadarPollingSettings>()
+        val txCount = AtomicInteger(0)
+        val journalFile = File(tempDir, "rollback_journal.json")
+
+        val guardedBookmarkRepo = object : BookmarkAndHistoryRepository by target.bookmarkRepository {
+            override suspend fun restoreBookmarks(items: List<BookmarkedTopic>, replaceExisting: Boolean) {
+                failBookmarksWith?.let { throw it }
+                target.bookmarkRepository.restoreBookmarks(items, replaceExisting)
+            }
+        }
+        val guardedDraftRepo = object : DraftRepository by target.draftRepository {
+            override suspend fun restoreDrafts(items: List<EditorDraft>, replaceExisting: Boolean) {
+                failDraftsWith?.let { throw it }
+                target.draftRepository.restoreDrafts(items, replaceExisting)
+            }
+        }
+
+        val manager = BackupManagerImpl(
+            settingsRepository = target.settingsRepository,
+            radarRepository = target.radarRepository,
+            bookmarkAndHistoryRepository = guardedBookmarkRepo,
+            draftRepository = guardedDraftRepo,
+            userRepository = target.userRepository,
+            sessionRepository = target.sessionRepository,
+            blockedUsersCache = target.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(targetFilterRepo),
+            onRadarSettingsRestored = { restored -> radarRestoredCallbacks.add(restored) },
+            transactionRunner = object : LocalRestoreTransactionRunner {
+                override suspend fun <R> runInTransaction(block: suspend () -> R): R {
+                    txCount.incrementAndGet()
+                    return block()
+                }
+            },
+            restoreJournalStore = FileBackupRestoreJournalStore(journalFile),
+        )
+
+        suspend fun assertAllLocalStoresUnchanged() {
+            assertEquals(expectedSettings, target.settingsRepository.exportSettingsForBackup(includeApiKeys = true))
+            assertEquals(expectedPolling, target.radarRepository.getPollingSettings())
+            assertEquals(expectedRules, target.radarRepository.getKeywordRulesForBackup())
+            assertEquals(expectedTopics, target.radarRepository.getTrackedTopicsForBackup())
+            assertEquals(expectedContentFilter, targetFilterRepo.getConfigSnapshot())
+            assertEquals(expectedBlockedUsers, target.blockedUsersCache.getBlockedUsers())
+            assertEquals(expectedBookmarks, target.bookmarkRepository.getAllBookmarksForBackup())
+            assertEquals(expectedDrafts, target.draftRepository.getAllDrafts())
+            assertTrue(radarRestoredCallbacks.isEmpty())
+            assertTrue(remoteBlockCalls.isEmpty())
+            assertNull(manager.pendingRemoteBlocklistSyncState.value)
+            assertFalse(journalFile.exists())
+        }
+
+        // Case A: Failure injected during restoreBookmarks on OVERWRITE
+        remoteBlockCalls.clear()
+        failBookmarksWith = IOException("Simulated bookmark DB write error")
+        val bookmarkFailResult = manager.restoreBackup(incomingJson, RestoreStrategy.OVERWRITE)
+        assertTrue(bookmarkFailResult.isFailure)
+        assertTrue(txCount.get() >= 1)
+        failBookmarksWith = null
+        assertAllLocalStoresUnchanged()
+
+        // Case B: Failure injected during restoreDrafts (after restoreBookmarks already replaced bookmarks!)
+        var threwOnce = false
+        failDraftsWith = IllegalStateException("Simulated draft table constraint error")
+        val failingOnceDraftRepo = object : DraftRepository by target.draftRepository {
+            override suspend fun restoreDrafts(items: List<EditorDraft>, replaceExisting: Boolean) {
+                if (!threwOnce) {
+                    threwOnce = true
+                    throw failDraftsWith!!
+                }
+                target.draftRepository.restoreDrafts(items, replaceExisting)
+            }
+        }
+        val managerDraftFail = BackupManagerImpl(
+            settingsRepository = target.settingsRepository,
+            radarRepository = target.radarRepository,
+            bookmarkAndHistoryRepository = target.bookmarkRepository,
+            draftRepository = failingOnceDraftRepo,
+            userRepository = target.userRepository,
+            sessionRepository = target.sessionRepository,
+            blockedUsersCache = target.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(targetFilterRepo),
+            onRadarSettingsRestored = { restored -> radarRestoredCallbacks.add(restored) },
+            restoreJournalStore = FileBackupRestoreJournalStore(journalFile),
+        )
+        val draftFailResult = managerDraftFail.restoreBackup(incomingJson, RestoreStrategy.OVERWRITE)
+        assertTrue(draftFailResult.isFailure)
+        failDraftsWith = null
+        assertAllLocalStoresUnchanged()
+
+        // Case C: Coroutine cancellation mid-restore rethrows CancellationException AND rolls back cleanly
+        var cancelTriggered = false
+        val cancellingDraftRepo = object : DraftRepository by target.draftRepository {
+            override suspend fun restoreDrafts(items: List<EditorDraft>, replaceExisting: Boolean) {
+                if (!cancelTriggered) {
+                    cancelTriggered = true
+                    throw CancellationException("User cancelled restore")
+                }
+                target.draftRepository.restoreDrafts(items, replaceExisting)
+            }
+        }
+        val managerCancel = BackupManagerImpl(
+            settingsRepository = target.settingsRepository,
+            radarRepository = target.radarRepository,
+            bookmarkAndHistoryRepository = target.bookmarkRepository,
+            draftRepository = cancellingDraftRepo,
+            userRepository = target.userRepository,
+            sessionRepository = target.sessionRepository,
+            blockedUsersCache = target.blockedUsersCache,
+            contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(targetFilterRepo),
+            onRadarSettingsRestored = { restored -> radarRestoredCallbacks.add(restored) },
+            restoreJournalStore = FileBackupRestoreJournalStore(journalFile),
+        )
+        var caughtCancel: CancellationException? = null
+        try {
+            managerCancel.restoreBackup(incomingJson, RestoreStrategy.OVERWRITE)
+        } catch (ce: CancellationException) {
+            caughtCancel = ce
+        }
+        assertNotNull(caughtCancel)
+        assertAllLocalStoresUnchanged()
+    }
+
+    @Test
+    fun `uncommitted restore journal on disk is recovered cleanly on startup and unwritable journal aborts upfront`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(503)
+        }
+
+        val stack = TestNodeStack("journal_recovery", tempDir, ioScope, server)
+        val filterStore = PreferenceDataStoreFactory.create(
+            scope = ioScope,
+            produceFile = { File(tempDir, "journal_recovery_cf.preferences_pb") },
+        )
+        val filterRepo = ContentFilterRepositoryImpl(filterStore, ioScope)
+        val filterBridge = ContentFilterRepositoryBackupBridge(filterRepo)
+
+        // 1. Set clean pre-crash baseline state across all 6 stores
+        stack.settingsRepository.setThemeMode(ThemeMode.OBSIDIAN_DARK)
+        stack.settingsRepository.setNodeImageApiKey("ni_baseline_key")
+        stack.settingsRepository.addRecentSearchQuery("baseline_search")
+        stack.radarRepository.updatePollingSettings {
+            RadarPollingSettings(isEnabled = true, foregroundIntervalMinutes = 4, backgroundIntervalMinutes = 45)
+        }
+        val baselineRule = stack.radarRepository.addKeywordRule("BaselineRule", excludeWords = "收", categorySlug = "trade").getOrThrow()
+        stack.radarRepository.trackTopic(3001L, "Baseline Topic", currentMaxFloor = 22, totalPages = 3)
+        stack.blockedUsersCache.replaceAll(listOf(FloorAuthor(uid = 9L, username = "baseline_blocked")))
+        filterRepo.replaceConfig(
+            ContentFilterConfig(
+                isEnabled = true,
+                mutedCategorySlugs = setOf("promotion"),
+                rules = listOf(ContentBlockRule(id = "cf_base", pattern = "AFF", matchMode = KeywordMatchMode.CONTAINS)),
+            ),
+        )
+        stack.bookmarkDao.upsert(
+            BookmarkEntity.fromSummary(
+                accountUid = 0L,
+                summary = TopicSummary(id = 4001L, title = "Baseline Bookmark", categorySlug = "tech", categoryName = "技术", authorName = "u"),
+                savedAtEpochMillis = 4_000L,
+            ),
+        )
+        stack.draftRepository.saveDraft(
+            EditorDraft(
+                draftKey = EditorDraft.NEW_TOPIC_KEY,
+                accountUid = 0L,
+                title = "Baseline Draft",
+                markdownContent = "baseline body",
+                categorySlug = "tech",
+                updatedAtMillis = 5_000L,
+            ),
+        )
+
+        val baselineManager = BackupManagerImpl(
+            settingsRepository = stack.settingsRepository,
+            radarRepository = stack.radarRepository,
+            bookmarkAndHistoryRepository = stack.bookmarkRepository,
+            draftRepository = stack.draftRepository,
+            userRepository = stack.userRepository,
+            sessionRepository = stack.sessionRepository,
+            blockedUsersCache = stack.blockedUsersCache,
+            contentFilterBackupBridge = filterBridge,
+        )
+        val baselineSnapshot = baselineManager.exportBundle(includeApiKeys = true).getOrThrow()
+
+        // 2. Write uncommitted journal to disk, then simulate partial mid-restore crash corrupting local stores
+        val journalFile = File(tempDir, FileBackupRestoreJournalStore.DEFAULT_JOURNAL_FILE_NAME)
+        val journalStore = FileBackupRestoreJournalStore(journalFile)
+        journalStore.writePending(
+            BackupRestoreJournalEntry(
+                journalId = "crash-sim-001",
+                createdAtEpochMillis = 1_765_000_000_000L,
+                strategy = RestoreStrategy.OVERWRITE,
+                preRestoreSnapshot = baselineSnapshot,
+            ),
+        )
+        assertTrue(journalFile.isFile)
+
+        // Corrupt/partially overwrite local stores as if process died mid-restore
+        stack.settingsRepository.setThemeMode(ThemeMode.PAPER_LIGHT)
+        stack.settingsRepository.setNodeImageApiKey("")
+        stack.radarRepository.updatePollingSettings { RadarPollingSettings(isEnabled = false, backgroundIntervalMinutes = 120) }
+        stack.radarRepository.restoreFromBackup(
+            pollingSettings = RadarPollingSettings(isEnabled = false, backgroundIntervalMinutes = 120),
+            keywordRules = emptyList(),
+            trackedTopics = emptyList(),
+            replaceExisting = true,
+        )
+        stack.blockedUsersCache.replaceAll(listOf(FloorAuthor(uid = 99L, username = "partial_dirty_user")))
+        filterRepo.replaceConfig(ContentFilterConfig(isEnabled = false))
+        stack.bookmarkDao.clearAll()
+
+        // 3. Fresh BackupManager on restart recovers uncommitted journal cleanly
+        val syncedPollingOnRecovery = CopyOnWriteArrayList<RadarPollingSettings>()
+        val restartedManager = BackupManagerImpl(
+            settingsRepository = stack.settingsRepository,
+            radarRepository = stack.radarRepository,
+            bookmarkAndHistoryRepository = stack.bookmarkRepository,
+            draftRepository = stack.draftRepository,
+            userRepository = stack.userRepository,
+            sessionRepository = stack.sessionRepository,
+            blockedUsersCache = stack.blockedUsersCache,
+            contentFilterBackupBridge = filterBridge,
+            onRadarSettingsRestored = { restored -> syncedPollingOnRecovery.add(restored) },
+            restoreJournalStore = journalStore,
+        )
+
+        val recovered = restartedManager.recoverPendingRestoreIfNeeded().getOrThrow()
+        assertTrue(recovered)
+        assertFalse(journalFile.exists())
+        assertEquals(1, syncedPollingOnRecovery.size)
+        assertEquals(45, syncedPollingOnRecovery.single().backgroundIntervalMinutes)
+
+        // Verify all 6 stores were restored to pre-crash baseline
+        assertEquals(baselineSnapshot.settings, stack.settingsRepository.exportSettingsForBackup(includeApiKeys = true))
+        assertEquals(listOf(baselineRule), stack.radarRepository.getKeywordRulesForBackup())
+        assertEquals(3001L, stack.radarRepository.getTrackedTopicsForBackup().single().topicId)
+        assertEquals(listOf("baseline_blocked"), stack.blockedUsersCache.getBlockedUsers().map { it.username })
+        assertTrue(filterRepo.getConfigSnapshot().isEnabled)
+        assertEquals(listOf("cf_base"), filterRepo.getConfigSnapshot().rules.map { it.id })
+        assertEquals(4001L, stack.bookmarkRepository.getAllBookmarksForBackup().single().topicId)
+        assertEquals("Baseline Draft", stack.draftRepository.getAllDrafts().single().title)
+
+        // Second call is a clean no-op
+        assertFalse(restartedManager.recoverPendingRestoreIfNeeded().getOrThrow())
+
+        // 4. Unwritable journal path (directory occupying journal file path) fails upfront BEFORE mutating any store
+        val unwritableJournalPath = File(tempDir, "unwritable_journal_dir").apply { mkdirs() }
+        val unwritableManager = BackupManagerImpl(
+            settingsRepository = stack.settingsRepository,
+            radarRepository = stack.radarRepository,
+            bookmarkAndHistoryRepository = stack.bookmarkRepository,
+            draftRepository = stack.draftRepository,
+            userRepository = stack.userRepository,
+            sessionRepository = stack.sessionRepository,
+            blockedUsersCache = stack.blockedUsersCache,
+            contentFilterBackupBridge = filterBridge,
+            restoreJournalStore = FileBackupRestoreJournalStore(unwritableJournalPath),
+        )
+        val otherSource = TestNodeStack("unwritable_src", tempDir, ioScope, server)
+        otherSource.settingsRepository.setThemeMode(ThemeMode.PAPER_LIGHT)
+        val otherJson = otherSource.backupManager.exportBackupJson().getOrThrow()
+
+        val unwritableResult = unwritableManager.restoreBackup(otherJson, RestoreStrategy.OVERWRITE)
+        assertTrue(unwritableResult.isFailure)
+        assertEquals(ThemeMode.OBSIDIAN_DARK, stack.settingsRepository.exportSettingsForBackup().themeMode)
+    }
+
+    @Test
+    fun `upfront full validation rejects invalid radar regex, content filter regex, and unknown matchMode without mutating state`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(503)
+        }
+
+        val stack = TestNodeStack("upfront_validation", tempDir, ioScope, server)
+        stack.settingsRepository.setThemeMode(ThemeMode.OBSIDIAN_DARK)
+        stack.radarRepository.addKeywordRule("SafeKeyword", excludeWords = "收").getOrThrow()
+        val baselineRules = stack.radarRepository.getKeywordRulesForBackup()
+
+        val baseBundle = stack.backupManager.exportBundle().getOrThrow()
+
+        // 1. Invalid radar regex in bundle
+        val badRadarRegexJson = BackupManagerImpl.backupJson.encodeToString(
+            baseBundle.copy(
+                settings = baseBundle.settings.copy(themeMode = ThemeMode.PAPER_LIGHT),
+                radar = baseBundle.radar.copy(
+                    keywordRules = listOf(
+                        baseBundle.radar.keywordRules.first().copy(
+                            keyword = "[unclosed(",
+                            matchMode = KeywordMatchMode.REGEX.name,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(stack.backupManager.inspectBackup(badRadarRegexJson).isFailure)
+        assertTrue(stack.backupManager.restoreBackup(badRadarRegexJson, RestoreStrategy.OVERWRITE).isFailure)
+
+        // 2. Invalid content filter regex in bundle
+        val badFilterRegexJson = BackupManagerImpl.backupJson.encodeToString(
+            baseBundle.copy(
+                settings = baseBundle.settings.copy(themeMode = ThemeMode.PAPER_LIGHT),
+                blocklist = baseBundle.blocklist.copy(
+                    contentFilter = ContentFilterBackupDto(
+                        isEnabled = true,
+                        rules = listOf(
+                            ContentFilterRuleBackupDto(
+                                id = "bad_cf",
+                                pattern = "*invalid[regex",
+                                matchMode = KeywordMatchMode.REGEX.name,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(stack.backupManager.inspectBackup(badFilterRegexJson).isFailure)
+        assertTrue(stack.backupManager.restoreBackup(badFilterRegexJson, RestoreStrategy.OVERWRITE).isFailure)
+
+        // 3. Unknown matchMode string in bundle
+        val unknownModeJson = BackupManagerImpl.backupJson.encodeToString(
+            baseBundle.copy(
+                settings = baseBundle.settings.copy(themeMode = ThemeMode.PAPER_LIGHT),
+                radar = baseBundle.radar.copy(
+                    keywordRules = listOf(
+                        baseBundle.radar.keywordRules.first().copy(matchMode = "FUZZY_AI_V9"),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(stack.backupManager.restoreBackup(unknownModeJson, RestoreStrategy.OVERWRITE).isFailure)
+
+        // Verify local settings & radar rules were never touched by any rejected bundle
+        assertEquals(ThemeMode.OBSIDIAN_DARK, stack.settingsRepository.exportSettingsForBackup().themeMode)
+        assertEquals(baselineRules, stack.radarRepository.getKeywordRulesForBackup())
+    }
+
+    @Test
+    fun `explicit remote blocklist sync verifies target account and aborts on logout or mid-sync account switch`() = runBlocking {
+        var activeServerAccountUid = 101L
+        var activeServerUsername = "AccountA"
+        var switchAccountMidSync = false
+        val serverBlockedByAccount = CopyOnWriteArrayList<Pair<Long, String>>()
+        lateinit var target: TestNodeStack
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> {
+                        val b64 = encodeConfig(activeServerAccountUid, activeServerUsername)
+                        MockResponse().setResponseCode(200)
+                            .setBody("""<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$b64</script></body></html>""")
+                    }
+                    path.startsWith("/api/block-list/add") -> {
+                        val body = request.body.readUtf8()
+                        serverBlockedByAccount.add(activeServerAccountUid to body)
+                        if (switchAccountMidSync && serverBlockedByAccount.size == 1) {
+                            // Simulate concurrent account switch right after first remote call finishes
+                            activeServerAccountUid = 202L
+                            activeServerUsername = "AccountB"
+                            runBlocking { target.sessionRepository.refreshSession() }
+                        }
+                        MockResponse().setResponseCode(200).setBody("""{"success":true}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val source = TestNodeStack("sync_src", tempDir, ioScope, server)
+        source.blockedUsersCache.replaceAll(
+            listOf(
+                FloorAuthor(uid = 11L, username = "spam_one"),
+                FloorAuthor(uid = 12L, username = "spam_two"),
+            ),
+        )
+        val backupJson = source.backupManager.exportBackupJson().getOrThrow()
+
+        target = TestNodeStack("sync_dst", tempDir, ioScope, server)
+        target.sessionRepository.refreshSession().getOrThrow()
+
+        val summary = target.backupManager.restoreBackup(backupJson, RestoreStrategy.OVERWRITE).getOrThrow()
+        assertEquals(2, summary.blockedUsersImported)
+        assertEquals(0, summary.blockedUsersSyncedToServer)
+        assertEquals(BackupSyncTargetAccount(uid = 101L, username = "AccountA"), summary.targetSyncAccount)
+        assertTrue(serverBlockedByAccount.isEmpty())
+
+        // 1. Mismatched expected UID is rejected with 0 server calls
+        val wrongUidResult = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 999L,
+            expectedUsername = "AccountA",
+        )
+        assertTrue(wrongUidResult.isFailure)
+        assertTrue(serverBlockedByAccount.isEmpty())
+
+        // 2. Mismatched expected username is rejected with 0 server calls
+        val wrongNameResult = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 101L,
+            expectedUsername = "SomeoneElse",
+        )
+        assertTrue(wrongNameResult.isFailure)
+        assertTrue(serverBlockedByAccount.isEmpty())
+
+        // 3. Signed-out state is rejected with 0 server calls
+        target.sessionRepository.signOutLocalOnly().getOrThrow()
+        val signedOutResult = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 101L,
+            expectedUsername = "AccountA",
+        )
+        assertTrue(signedOutResult.isFailure)
+        assertTrue(serverBlockedByAccount.isEmpty())
+
+        // 4. Sign back in as AccountA, trigger mid-sync switch to AccountB after first user -> second user MUST NOT hit AccountB!
+        activeServerAccountUid = 101L
+        activeServerUsername = "AccountA"
+        target.sessionRepository.refreshSession().getOrThrow()
+        switchAccountMidSync = true
+
+        val midSwitchResult = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 101L,
+            expectedUsername = "AccountA",
+        )
+        assertTrue(midSwitchResult.isFailure)
+        assertEquals(1, serverBlockedByAccount.size)
+        assertEquals(101L, serverBlockedByAccount.single().first)
+
+        // 5. Explicit confirmation targeting the new AccountB (UID 202) now succeeds cleanly
+        switchAccountMidSync = false
+        serverBlockedByAccount.clear()
+        val confirmedAccountBSync = target.backupManager.syncBlockedUsersToServer(
+            expectedAccountUid = 202L,
+            expectedUsername = "AccountB",
+        ).getOrThrow()
+        assertEquals(BackupSyncTargetAccount(uid = 202L, username = "AccountB"), confirmedAccountBSync.targetAccount)
+        assertEquals(2, confirmedAccountBSync.syncedCount)
+        assertEquals(0, confirmedAccountBSync.failedCount)
+        assertEquals(2, serverBlockedByAccount.size)
+        assertTrue(serverBlockedByAccount.all { it.first == 202L })
     }
 }
 

@@ -249,6 +249,26 @@ enum class RestoreStrategy {
     OVERWRITE,
 }
 
+data class BackupSyncTargetAccount(
+    val uid: Long,
+    val username: String,
+)
+
+data class PendingRemoteBlocklistSync(
+    val users: List<FloorAuthor>,
+    val targetAccountAtRestore: BackupSyncTargetAccount?,
+    val strategy: RestoreStrategy,
+    val restoredAtEpochMillis: Long,
+)
+
+data class RemoteBlocklistSyncResult(
+    val targetAccount: BackupSyncTargetAccount,
+    val requestedCount: Int,
+    val syncedCount: Int,
+    val failedCount: Int,
+    val failedUsernames: List<String> = emptyList(),
+)
+
 data class BackupPreviewSummary(
     val schemaVersion: Int,
     val appVersion: String,
@@ -262,6 +282,7 @@ data class BackupPreviewSummary(
     val draftCount: Int,
     val recentSearchQueryCount: Int,
     val containsApiKeys: Boolean,
+    val targetSyncAccount: BackupSyncTargetAccount? = null,
 )
 
 data class BackupRestoreSummary(
@@ -269,14 +290,19 @@ data class BackupRestoreSummary(
     val radarKeywordRulesImported: Int,
     val radarTrackedTopicsImported: Int,
     val blockedUsersImported: Int,
-    val blockedUsersSyncedToServer: Int,
-    val blockedUsersServerSyncSkippedOrFailed: Int,
+    val blockedUsersSyncedToServer: Int = 0,
+    val blockedUsersServerSyncSkippedOrFailed: Int = 0,
+    val pendingRemoteBlockUsers: List<FloorAuthor> = emptyList(),
+    val targetSyncAccount: BackupSyncTargetAccount? = null,
     val contentFilterRulesImported: Int,
     val mutedCategoriesCount: Int,
     val bookmarksImported: Int,
     val draftsImported: Int,
     val recentSearchQueriesCount: Int,
-)
+) {
+    val hasPendingRemoteBlockSync: Boolean
+        get() = pendingRemoteBlockUsers.isNotEmpty()
+}
 
 data class BackupExportPayload(
     val bundle: NodePulseBackupBundle,

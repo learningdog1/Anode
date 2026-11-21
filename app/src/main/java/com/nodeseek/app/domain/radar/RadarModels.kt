@@ -8,6 +8,7 @@ import com.nodeseek.app.navigation.NodePulseDeepLink
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.regex.PatternSyntaxException
 
 enum class KeywordMatchMode {
     CONTAINS,
@@ -23,6 +24,153 @@ data class KeywordWatchRule(
     val isEnabled: Boolean = true,
     val createdAtEpochMillis: Long = System.currentTimeMillis(),
 )
+
+data class RadarRuleDedupeKey(
+    val normalizedKeywordLower: String,
+    val matchMode: KeywordMatchMode,
+    val normalizedCategorySlug: String,
+    val canonicalExcludeTerms: List<String>,
+)
+
+/**
+ * Single source of truth for normalizing, validating, and deduplicating [KeywordWatchRule] items
+ * across rule creation, backup inspection/preview, and merge/overwrite backup restore.
+ */
+object RadarRuleCanonicalizer {
+    const val MAX_KEYWORD_LENGTH = 64
+    const val MAX_REGEX_LENGTH = 160
+    private val EXCLUDE_SPLIT_REGEX = Regex("""[,，;；\n\r]+""")
+
+    fun normalizeCategorySlug(raw: String): String =
+        raw.trim().lowercase()
+
+    fun normalizeExcludeWords(raw: String): String =
+        raw.split(EXCLUDE_SPLIT_REGEX)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+            .joinToString(", ")
+
+    fun canonicalExcludeTerms(raw: String): List<String> =
+        raw.split(EXCLUDE_SPLIT_REGEX)
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .sorted()
+
+    fun parseMatchModeStrict(raw: String): Result<KeywordMatchMode> {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) {
+            return Result.success(KeywordMatchMode.CONTAINS)
+        }
+        val resolved = KeywordMatchMode.entries.firstOrNull { mode ->
+            mode.name.equals(trimmed, ignoreCase = true)
+        } ?: return Result.failure(
+            IllegalArgumentException("不支持的雷达关键词匹配模式：$trimmed"),
+        )
+        return Result.success(resolved)
+    }
+
+    fun validateAndNormalizeKeyword(
+        rawKeyword: String,
+        matchMode: KeywordMatchMode,
+    ): Result<String> {
+        val trimmed = rawKeyword.trim()
+        if (trimmed.isEmpty()) {
+            return Result.failure(IllegalArgumentException("请输入监控关键词"))
+        }
+        val maxLen = if (matchMode == KeywordMatchMode.REGEX) MAX_REGEX_LENGTH else MAX_KEYWORD_LENGTH
+        val normalizedKeyword = trimmed.take(maxLen)
+        if (matchMode == KeywordMatchMode.REGEX) {
+            try {
+                Regex(normalizedKeyword, RegexOption.IGNORE_CASE)
+            } catch (e: PatternSyntaxException) {
+                return Result.failure(
+                    IllegalArgumentException(
+                        "正则表达式格式无效：${e.description ?: e.message.orEmpty()}",
+                        e,
+                    ),
+                )
+            }
+        }
+        return Result.success(normalizedKeyword)
+    }
+
+    fun dedupeKey(
+        keyword: String,
+        excludeWords: String,
+        categorySlug: String,
+        matchMode: KeywordMatchMode,
+    ): RadarRuleDedupeKey {
+        val maxLen = if (matchMode == KeywordMatchMode.REGEX) MAX_REGEX_LENGTH else MAX_KEYWORD_LENGTH
+        return RadarRuleDedupeKey(
+            normalizedKeywordLower = keyword.trim().take(maxLen).lowercase(),
+            matchMode = matchMode,
+            normalizedCategorySlug = normalizeCategorySlug(categorySlug),
+            canonicalExcludeTerms = canonicalExcludeTerms(excludeWords),
+        )
+    }
+
+    fun dedupeKey(rule: KeywordWatchRule): RadarRuleDedupeKey =
+        dedupeKey(
+            keyword = rule.keyword,
+            excludeWords = rule.excludeWords,
+            categorySlug = rule.categorySlug,
+            matchMode = rule.matchMode,
+        )
+
+    fun normalizeRuleForRestore(
+        rule: KeywordWatchRule,
+        fallbackNowMillis: Long,
+    ): Result<KeywordWatchRule> {
+        val normalizedKeyword = validateAndNormalizeKeyword(rule.keyword, rule.matchMode)
+            .getOrElse { return Result.failure(it) }
+        return Result.success(
+            KeywordWatchRule(
+                id = 0L,
+                keyword = normalizedKeyword,
+                excludeWords = normalizeExcludeWords(rule.excludeWords),
+                categorySlug = normalizeCategorySlug(rule.categorySlug),
+                matchMode = rule.matchMode,
+                isEnabled = rule.isEnabled,
+                createdAtEpochMillis = if (rule.createdAtEpochMillis > 0L) {
+                    rule.createdAtEpochMillis
+                } else {
+                    fallbackNowMillis
+                },
+            ),
+        )
+    }
+
+    fun deduplicateForRestore(
+        rules: List<KeywordWatchRule>,
+        fallbackNowMillis: Long,
+        existingRules: List<KeywordWatchRule> = emptyList(),
+        strictValidation: Boolean = false,
+    ): Result<List<KeywordWatchRule>> {
+        val seenKeys = LinkedHashSet<RadarRuleDedupeKey>(existingRules.size + rules.size)
+        for (existing in existingRules) {
+            seenKeys.add(dedupeKey(existing))
+        }
+        val deduplicated = ArrayList<KeywordWatchRule>(rules.size)
+        for (rule in rules) {
+            val normalizedResult = normalizeRuleForRestore(rule, fallbackNowMillis)
+            if (normalizedResult.isFailure) {
+                if (strictValidation) {
+                    return Result.failure(
+                        normalizedResult.exceptionOrNull() ?: IllegalArgumentException("无效的雷达规则"),
+                    )
+                }
+                continue
+            }
+            val normalized = normalizedResult.getOrThrow()
+            if (seenKeys.add(dedupeKey(normalized))) {
+                deduplicated.add(normalized)
+            }
+        }
+        return Result.success(deduplicated)
+    }
+}
 
 data class TrackedTopic(
     val topicId: Long,

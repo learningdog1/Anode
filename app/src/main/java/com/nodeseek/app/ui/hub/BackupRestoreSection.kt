@@ -59,11 +59,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.domain.backup.BackupFileNaming
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.backup.BackupPreviewSummary
 import com.nodeseek.app.domain.backup.BackupRestoreSummary
+import com.nodeseek.app.domain.backup.BackupSyncTargetAccount
+import com.nodeseek.app.domain.backup.RemoteBlocklistSyncResult
 import com.nodeseek.app.domain.backup.RestoreStrategy
+import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogSecondaryButton
@@ -103,11 +107,18 @@ fun BackupRestoreSettingsSection(
     val scope = rememberCoroutineScope()
     val ext = NodePulseThemeTokens.extendedColors
 
+    val pendingRemoteSync by backupManager.pendingRemoteBlocklistSyncState.collectAsStateWithLifecycle()
+    val activeTargetAccount by backupManager.currentSyncTargetAccountFlow
+        .collectAsStateWithLifecycle(initialValue = null)
+
     var includeApiKeys by rememberSaveable { mutableStateOf(true) }
     var isExporting by remember { mutableStateOf(false) }
     var isInspecting by remember { mutableStateOf(false) }
     var isRestoring by remember { mutableStateOf(false) }
+    var isSyncingRemoteBlocks by remember { mutableStateOf(false) }
     var pendingRestore by remember { mutableStateOf<PendingBackupRestore?>(null) }
+    var showRemoteBlockSyncDialog by remember { mutableStateOf(false) }
+    var lastCompletedRestoreSummary by remember { mutableStateOf<BackupRestoreSummary?>(null) }
     var selectedStrategy by rememberSaveable { mutableStateOf(RestoreStrategy.MERGE) }
 
     val createDocumentLauncher = rememberLauncherForActivityResult(
@@ -175,7 +186,7 @@ fun BackupRestoreSettingsSection(
         }
     }
 
-    val isBusy = isExporting || isInspecting || isRestoring
+    val isBusy = isExporting || isInspecting || isRestoring || isSyncingRemoteBlocks
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -298,6 +309,45 @@ fun BackupRestoreSettingsSection(
                     openDocumentLauncher.launch(arrayOf("application/json", "*/*"))
                 },
             )
+
+            val pendingSyncSnapshot = pendingRemoteSync
+            if (pendingSyncSnapshot != null && pendingSyncSnapshot.users.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .height(0.6.dp)
+                        .background(ext.cardBorder.copy(alpha = 0.65f)),
+                )
+
+                val targetForRow = activeTargetAccount
+                BackupActionRow(
+                    icon = Icons.Rounded.FilterAlt,
+                    title = "同步远程屏蔽名单 (${pendingSyncSnapshot.users.size} 人)",
+                    subtitle = if (targetForRow != null) {
+                        "将本地已导入的屏蔽用户同步至在线账号 ${formatSyncTargetAccountLabel(targetForRow)}"
+                    } else {
+                        "屏蔽用户已保存在本地 · 请先登录目标在线账号后再确认同步"
+                    },
+                    actionLabel = when {
+                        isSyncingRemoteBlocks -> "同步中"
+                        targetForRow != null -> "确认同步"
+                        else -> "待登录"
+                    },
+                    loading = isSyncingRemoteBlocks,
+                    enabled = !isBusy,
+                    isPrimaryAccent = targetForRow != null,
+                    onClick = {
+                        if (targetForRow != null) {
+                            showRemoteBlockSyncDialog = true
+                        } else {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("当前未登录在线账号，请先登录目标账号后再确认同步屏蔽名单")
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
 
@@ -305,6 +355,7 @@ fun BackupRestoreSettingsSection(
     if (currentPending != null) {
         BackupRestoreConfirmDialog(
             summary = currentPending.summary,
+            targetSyncAccount = activeTargetAccount ?: currentPending.summary.targetSyncAccount,
             selectedStrategy = selectedStrategy,
             isRestoring = isRestoring,
             onSelectStrategy = { selectedStrategy = it },
@@ -321,7 +372,13 @@ fun BackupRestoreSettingsSection(
                         result
                             .onSuccess { outcome ->
                                 pendingRestore = null
-                                snackbarHostState.showSnackbar(formatRestoreOutcomeSnackbar(outcome))
+                                lastCompletedRestoreSummary = outcome
+                                val resolvedTarget = activeTargetAccount ?: outcome.targetSyncAccount
+                                if (outcome.hasPendingRemoteBlockSync && resolvedTarget != null) {
+                                    showRemoteBlockSyncDialog = true
+                                } else {
+                                    snackbarHostState.showSnackbar(formatRestoreOutcomeSnackbar(outcome))
+                                }
                             }
                             .onFailure { error ->
                                 pendingRestore = null
@@ -335,6 +392,69 @@ fun BackupRestoreSettingsSection(
             onDismiss = {
                 if (!isRestoring) {
                     pendingRestore = null
+                }
+            },
+        )
+    }
+
+    val dialogSyncUsers = pendingRemoteSync?.users
+        ?: lastCompletedRestoreSummary?.pendingRemoteBlockUsers
+            .orEmpty()
+    val dialogTargetAccount = activeTargetAccount ?: lastCompletedRestoreSummary?.targetSyncAccount
+    if (showRemoteBlockSyncDialog && dialogSyncUsers.isNotEmpty()) {
+        RemoteBlocklistSyncConfirmDialog(
+            users = dialogSyncUsers,
+            targetAccount = dialogTargetAccount,
+            restoreOutcome = lastCompletedRestoreSummary,
+            isSyncing = isSyncingRemoteBlocks,
+            onConfirmSync = { confirmedAccount ->
+                scope.launch {
+                    isSyncingRemoteBlocks = true
+                    try {
+                        val syncResult = withContext(Dispatchers.IO) {
+                            backupManager.syncBlockedUsersToServer(
+                                expectedAccountUid = confirmedAccount.uid,
+                                expectedUsername = confirmedAccount.username,
+                                users = dialogSyncUsers,
+                            )
+                        }
+                        syncResult
+                            .onSuccess { outcome ->
+                                showRemoteBlockSyncDialog = false
+                                val restorePrefix = lastCompletedRestoreSummary
+                                    ?.let { "${formatLocalRestoreSummaryShort(it)} · " }
+                                    .orEmpty()
+                                lastCompletedRestoreSummary = null
+                                snackbarHostState.showSnackbar(
+                                    restorePrefix + formatRemoteSyncOutcomeSnackbar(outcome),
+                                )
+                            }
+                            .onFailure { error ->
+                                showRemoteBlockSyncDialog = false
+                                snackbarHostState.showSnackbar(
+                                    "远程屏蔽同步未执行：${error.message ?: "未知错误"}",
+                                )
+                            }
+                    } finally {
+                        isSyncingRemoteBlocks = false
+                    }
+                }
+            },
+            onKeepLocalOnly = {
+                if (!isSyncingRemoteBlocks) {
+                    showRemoteBlockSyncDialog = false
+                    backupManager.dismissPendingRemoteBlocklistSync()
+                    val summaryToReport = lastCompletedRestoreSummary
+                    lastCompletedRestoreSummary = null
+                    scope.launch {
+                        if (summaryToReport != null) {
+                            snackbarHostState.showSnackbar(
+                                "${formatLocalRestoreSummaryShort(summaryToReport)}（屏蔽名单仅保留本地，未修改服务端）",
+                            )
+                        } else {
+                            snackbarHostState.showSnackbar("已保留本地屏蔽名单，未向服务端同步")
+                        }
+                    }
                 }
             },
         )
@@ -449,6 +569,7 @@ private fun BackupRowIconBadge(
 @Composable
 private fun BackupRestoreConfirmDialog(
     summary: BackupPreviewSummary,
+    targetSyncAccount: BackupSyncTargetAccount?,
     selectedStrategy: RestoreStrategy,
     isRestoring: Boolean,
     onSelectStrategy: (RestoreStrategy) -> Unit,
@@ -596,6 +717,38 @@ private fun BackupRestoreConfirmDialog(
                     detail = "发帖与回复编辑草稿",
                     countBadge = "${summary.draftCount}",
                 )
+            }
+
+            if (summary.blockedUserCount > 0) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .border(0.75.dp, ext.cardBorder, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = if (targetSyncAccount != null) {
+                            "当前登录账号：${formatSyncTargetAccountLabel(targetSyncAccount)}"
+                        } else {
+                            "当前状态：未登录在线账号"
+                        },
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (targetSyncAccount != null) {
+                            "导入过程仅原子恢复本地数据，不会静默改动服务端屏蔽名单；完成后可单独确认是否同步至该账号。"
+                        } else {
+                            "导入过程仅原子恢复本地数据；${summary.blockedUserCount} 位屏蔽用户将保存在本地，登录目标账号后可手动确认同步。"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
 
             // Restore strategy selector
@@ -752,6 +905,157 @@ private fun RestoreStrategyOptionCard(
     }
 }
 
+@Composable
+private fun RemoteBlocklistSyncConfirmDialog(
+    users: List<FloorAuthor>,
+    targetAccount: BackupSyncTargetAccount?,
+    restoreOutcome: BackupRestoreSummary?,
+    isSyncing: Boolean,
+    onConfirmSync: (BackupSyncTargetAccount) -> Unit,
+    onKeepLocalOnly: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val scrollState = rememberScrollState()
+    val previewNames = remember(users) {
+        formatBlockedUsersPreview(users)
+    }
+
+    PulseAlertDialog(
+        onDismissRequest = onKeepLocalOnly,
+        icon = Icons.Rounded.FilterAlt,
+        tone = PulseDialogTone.PRIMARY,
+        title = "确认同步远程屏蔽名单",
+        titleTrailing = {
+            PulseAccentPill(
+                text = "${users.size} 人",
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        },
+        buttons = {
+            Spacer(modifier = Modifier.weight(1f))
+            PulseDialogSecondaryButton(
+                text = "仅保留本地",
+                onClick = onKeepLocalOnly,
+                enabled = !isSyncing,
+            )
+            PulseDialogPrimaryButton(
+                text = if (targetAccount != null) {
+                    "同步至 @${targetAccount.username}"
+                } else {
+                    "未登录账号"
+                },
+                onClick = {
+                    if (targetAccount != null) {
+                        onConfirmSync(targetAccount)
+                    }
+                },
+                tone = PulseDialogTone.PRIMARY,
+                loading = isSyncing,
+                enabled = !isSyncing && targetAccount != null,
+            )
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 380.dp)
+                .verticalScroll(scrollState),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (restoreOutcome != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .border(0.75.dp, ext.cardBorder, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = "本地恢复已完成",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = formatLocalRestoreSummaryShort(restoreOutcome),
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (targetAccount != null) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f)
+                        } else {
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.28f)
+                        },
+                    )
+                    .border(
+                        0.75.dp,
+                        if (targetAccount != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = if (targetAccount != null) {
+                        "目标在线账号：${formatSyncTargetAccountLabel(targetAccount)}"
+                    } else {
+                        "当前未登录在线账号"
+                    },
+                    style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (targetAccount != null) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                )
+                Text(
+                    text = if (targetAccount != null) {
+                        "请核对上述目标账号无误后再确认同步；若切换账号或选择「仅保留本地」，将不会向当前账号写入屏蔽请求。"
+                    } else {
+                        "已先完成本地导入；请登录目标账号后再执行远程同步。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.75.dp, ext.cardBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "待同步屏蔽名单（共 ${users.size} 人）",
+                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = previewNames,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 private fun formatBackupTimestamp(epochMillis: Long): String {
     if (epochMillis <= 0L) return "未知时间"
     return runCatching {
@@ -760,9 +1064,26 @@ private fun formatBackupTimestamp(epochMillis: Long): String {
     }.getOrDefault("未知时间")
 }
 
-private fun formatRestoreOutcomeSnackbar(outcome: BackupRestoreSummary): String {
+internal fun formatSyncTargetAccountLabel(account: BackupSyncTargetAccount?): String {
+    if (account == null || account.uid <= 0L || account.username.isBlank()) {
+        return "未登录账号"
+    }
+    return "@${account.username.trim()} (UID: ${account.uid})"
+}
+
+internal fun formatBlockedUsersPreview(
+    users: List<FloorAuthor>,
+    maxNames: Int = 6,
+): String {
+    if (users.isEmpty()) return "无"
+    val shown = users.take(maxNames).joinToString("、") { "@${it.username}" }
+    val remaining = users.size - maxNames
+    return if (remaining > 0) "$shown 等 ${users.size} 人" else shown
+}
+
+internal fun formatLocalRestoreSummaryShort(outcome: BackupRestoreSummary): String {
     val modeLabel = if (outcome.strategy == RestoreStrategy.MERGE) "合并导入" else "覆盖恢复"
-    val base = buildString {
+    return buildString {
         append("$modeLabel 完成：")
         append("雷达规则 ${outcome.radarKeywordRulesImported} 条")
         append(" · 追踪 ${outcome.radarTrackedTopicsImported} 帖")
@@ -773,10 +1094,31 @@ private fun formatRestoreOutcomeSnackbar(outcome: BackupRestoreSummary): String 
         append(" · 收藏 ${outcome.bookmarksImported} 条")
         append(" · 草稿 ${outcome.draftsImported} 篇")
     }
-    return if (outcome.blockedUsersServerSyncSkippedOrFailed > 0) {
-        "$base（${outcome.blockedUsersServerSyncSkippedOrFailed} 位屏蔽用户仅保留本地，登录在线后可同步）"
-    } else {
-        base
+}
+
+internal fun formatRestoreOutcomeSnackbar(outcome: BackupRestoreSummary): String {
+    val base = formatLocalRestoreSummaryShort(outcome)
+    return when {
+        outcome.hasPendingRemoteBlockSync && outcome.targetSyncAccount != null -> {
+            "$base（待确认是否向 ${formatSyncTargetAccountLabel(outcome.targetSyncAccount)} 同步 ${outcome.pendingRemoteBlockUsers.size} 位屏蔽用户）"
+        }
+        outcome.hasPendingRemoteBlockSync -> {
+            "$base（${outcome.pendingRemoteBlockUsers.size} 位屏蔽用户仅导入本地，登录目标账号后可确认同步）"
+        }
+        outcome.blockedUsersServerSyncSkippedOrFailed > 0 -> {
+            "$base（${outcome.blockedUsersServerSyncSkippedOrFailed} 位屏蔽用户仅保留本地，登录在线后可同步）"
+        }
+        else -> base
+    }
+}
+
+internal fun formatRemoteSyncOutcomeSnackbar(result: RemoteBlocklistSyncResult): String {
+    val targetLabel = formatSyncTargetAccountLabel(result.targetAccount)
+    return when {
+        result.requestedCount == 0 -> "无需同步远程屏蔽名单（$targetLabel）"
+        result.failedCount == 0 -> "已向 $targetLabel 同步 ${result.syncedCount} 位屏蔽用户"
+        result.syncedCount == 0 -> "向 $targetLabel 同步屏蔽名单失败（${result.failedCount} 人未成功，可稍后重试）"
+        else -> "已向 $targetLabel 同步 ${result.syncedCount} 人（${result.failedCount} 人失败，可重试剩余项）"
     }
 }
 
@@ -835,7 +1177,9 @@ private fun PreviewBackupRestoreConfirmDialog() {
                 draftCount = 2,
                 recentSearchQueryCount = 7,
                 containsApiKeys = true,
+                targetSyncAccount = BackupSyncTargetAccount(uid = 101L, username = "Tester"),
             ),
+            targetSyncAccount = BackupSyncTargetAccount(uid = 101L, username = "Tester"),
             selectedStrategy = RestoreStrategy.MERGE,
             isRestoring = false,
             onSelectStrategy = {},

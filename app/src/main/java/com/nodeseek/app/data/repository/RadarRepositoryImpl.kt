@@ -12,10 +12,11 @@ import com.nodeseek.app.domain.radar.RadarBackupRestoreResult
 import com.nodeseek.app.domain.radar.RadarMonitorSyncSupport
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.radar.RadarRuleCanonicalizer
+import com.nodeseek.app.domain.radar.RadarRuleDedupeKey
 import com.nodeseek.app.domain.radar.TrackedTopic
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import java.util.regex.PatternSyntaxException
 
 class RadarRepositoryImpl(
     private val radarDao: RadarDao,
@@ -62,32 +63,22 @@ class RadarRepositoryImpl(
         categorySlug: String,
         matchMode: KeywordMatchMode,
     ): Result<KeywordWatchRule> {
-        val trimmedKeyword = keyword.trim()
-        if (trimmedKeyword.isEmpty()) {
-            return Result.failure(IllegalArgumentException("请输入监控关键词"))
-        }
-        val maxLen = if (matchMode == KeywordMatchMode.REGEX) MAX_REGEX_LENGTH else MAX_KEYWORD_LENGTH
-        val normalizedKeyword = trimmedKeyword.take(maxLen)
-
-        if (matchMode == KeywordMatchMode.REGEX) {
-            try {
-                Regex(normalizedKeyword, RegexOption.IGNORE_CASE)
-            } catch (e: PatternSyntaxException) {
-                return Result.failure(
-                    IllegalArgumentException("正则表达式格式无效：${e.description ?: e.message.orEmpty()}"),
-                )
-            }
-        }
+        val normalizedKeyword = RadarRuleCanonicalizer
+            .validateAndNormalizeKeyword(keyword, matchMode)
+            .getOrElse { return Result.failure(it) }
 
         val normalizedExclude = normalizeExcludeWords(excludeWords)
-        val normalizedSlug = categorySlug.trim().lowercase()
+        val normalizedSlug = RadarRuleCanonicalizer.normalizeCategorySlug(categorySlug)
+        val candidateKey = canonicalRuleKey(
+            keyword = normalizedKeyword,
+            excludeWords = normalizedExclude,
+            categorySlug = normalizedSlug,
+            matchMode = matchMode,
+        )
 
         val existing = radarDao.getKeywordRules()
         val duplicate = existing.any { row ->
-            row.keyword.equals(normalizedKeyword, ignoreCase = true) &&
-                row.excludeWords == normalizedExclude &&
-                row.categorySlug == normalizedSlug &&
-                row.matchMode == matchMode.name
+            canonicalRuleKey(row.toDomain()) == candidateKey
         }
         if (duplicate) {
             return Result.failure(IllegalArgumentException("相同的关键词监控规则已存在"))
@@ -247,26 +238,18 @@ class RadarRepositoryImpl(
         preferencesStore.updatePollingSettings { pollingSettings }
 
         val now = clockMillis()
-        val dedupeKeys = if (replaceExisting) {
-            LinkedHashSet()
+        val existingRules = if (replaceExisting) {
+            emptyList()
         } else {
-            radarDao.getKeywordRules()
-                .map { existing ->
-                    val domain = existing.toDomain()
-                    ruleDedupeKey(domain.keyword, domain.matchMode, domain.categorySlug)
-                }
-                .toCollection(LinkedHashSet())
+            radarDao.getKeywordRules().map { it.toDomain() }
         }
-
-        val ruleEntitiesToInsert = buildList {
-            for (rule in keywordRules) {
-                val entity = normalizeRuleForRestore(rule, fallbackNowMillis = now) ?: continue
-                val key = ruleDedupeKey(entity.keyword, rule.matchMode, entity.categorySlug)
-                if (dedupeKeys.add(key)) {
-                    add(entity)
-                }
-            }
-        }
+        val deduplicatedRules = RadarRuleCanonicalizer.deduplicateForRestore(
+            rules = keywordRules,
+            fallbackNowMillis = now,
+            existingRules = existingRules,
+            strictValidation = false,
+        ).getOrThrow()
+        val ruleEntitiesToInsert = deduplicatedRules.map { it.toEntity().copy(id = 0L) }
 
         if (replaceExisting) {
             radarDao.replaceAllKeywordRules(ruleEntitiesToInsert)
@@ -321,34 +304,14 @@ class RadarRepositoryImpl(
         )
     }
 
-    private fun ruleDedupeKey(
-        keyword: String,
-        matchMode: KeywordMatchMode,
-        categorySlug: String,
-    ): Triple<String, KeywordMatchMode, String> =
-        Triple(keyword.trim().lowercase(), matchMode, categorySlug.trim().lowercase())
-
-    private fun normalizeRuleForRestore(
-        rule: KeywordWatchRule,
-        fallbackNowMillis: Long,
-    ): KeywordWatchRuleEntity? {
-        val trimmed = rule.keyword.trim()
-        if (trimmed.isEmpty()) return null
-        val maxLen = if (rule.matchMode == KeywordMatchMode.REGEX) MAX_REGEX_LENGTH else MAX_KEYWORD_LENGTH
-        val normalizedKeyword = trimmed.take(maxLen)
-        if (rule.matchMode == KeywordMatchMode.REGEX) {
-            val validRegex = runCatching { Regex(normalizedKeyword, RegexOption.IGNORE_CASE) }.isSuccess
-            if (!validRegex) return null
-        }
-        return KeywordWatchRuleEntity(
-            id = 0L,
-            keyword = normalizedKeyword,
-            excludeWords = normalizeExcludeWords(rule.excludeWords),
-            categorySlug = rule.categorySlug.trim().lowercase(),
-            matchMode = rule.matchMode.name,
-            isEnabled = rule.isEnabled,
-            createdAtEpochMillis = if (rule.createdAtEpochMillis > 0L) rule.createdAtEpochMillis else fallbackNowMillis,
-        )
+    override suspend fun restoreExactSnapshot(
+        pollingSettings: RadarPollingSettings,
+        keywordRules: List<KeywordWatchRule>,
+        trackedTopics: List<TrackedTopic>,
+    ) {
+        preferencesStore.updatePollingSettings { pollingSettings }
+        radarDao.replaceAllKeywordRules(keywordRules.map { it.toEntity() })
+        radarDao.replaceAllTrackedTopics(trackedTopics.map { it.toEntity() })
     }
 
     private fun normalizeTopicForRestore(
@@ -416,16 +379,22 @@ class RadarRepositoryImpl(
     }
 
     companion object {
-        private const val MAX_KEYWORD_LENGTH = 64
-        private const val MAX_REGEX_LENGTH = 160
-        private val EXCLUDE_SPLIT_REGEX = Regex("""[,，;；\n\r]+""")
+        internal fun normalizeExcludeWords(raw: String): String =
+            RadarRuleCanonicalizer.normalizeExcludeWords(raw)
 
-        internal fun normalizeExcludeWords(raw: String): String {
-            return raw.split(EXCLUDE_SPLIT_REGEX)
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .distinctBy { it.lowercase() }
-                .joinToString(", ")
-        }
+        internal fun canonicalRuleKey(
+            keyword: String,
+            excludeWords: String,
+            categorySlug: String,
+            matchMode: KeywordMatchMode,
+        ): RadarRuleDedupeKey = RadarRuleCanonicalizer.dedupeKey(
+            keyword = keyword,
+            excludeWords = excludeWords,
+            categorySlug = categorySlug,
+            matchMode = matchMode,
+        )
+
+        internal fun canonicalRuleKey(rule: KeywordWatchRule): RadarRuleDedupeKey =
+            RadarRuleCanonicalizer.dedupeKey(rule)
     }
 }

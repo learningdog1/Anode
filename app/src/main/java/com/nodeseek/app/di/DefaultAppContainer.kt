@@ -349,6 +349,13 @@ class DefaultAppContainer(
         )
     }
 
+    private val backupRestoreJournalFile: File by lazy {
+        File(
+            appContext.filesDir,
+            com.nodeseek.app.data.backup.FileBackupRestoreJournalStore.DEFAULT_JOURNAL_FILE_NAME,
+        )
+    }
+
     override val backupManager: BackupManager by lazy {
         BackupManagerImpl(
             settingsRepository = settingsRepository,
@@ -360,6 +367,19 @@ class DefaultAppContainer(
             blockedUsersCache = blockedUsersCache,
             contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(contentFilterRepository),
             onRadarSettingsRestored = { restored -> radarWorkScheduler.sync(restored) },
+            transactionRunner = com.nodeseek.app.data.backup.RoomLocalRestoreTransactionRunner(database),
+            restoreJournalStore = com.nodeseek.app.data.backup.FileBackupRestoreJournalStore(backupRestoreJournalFile),
+        )
+    }
+
+    init {
+        BackupManagerImpl.scheduleStartupRecoveryIfPresent(
+            scope = applicationScope,
+            journalFile = File(
+                appContext.filesDir,
+                com.nodeseek.app.data.backup.FileBackupRestoreJournalStore.DEFAULT_JOURNAL_FILE_NAME,
+            ),
+            managerProvider = { backupManager },
         )
     }
 
