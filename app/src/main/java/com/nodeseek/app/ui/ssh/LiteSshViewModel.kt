@@ -57,6 +57,9 @@ data class PendingHostKeyMismatchPrompt(
     val expectedFingerprint: String,
     val actualHostKey: HostKeyInfo,
     val mismatchServerId: String = serverId,
+    /** Port of the isolated iperf3 service utility run that hit the mismatch (null for benchmark runs). */
+    val iperf3Port: Int? = null,
+    val iperf3AutoOpenFirewall: Boolean = false,
 )
 
 /**
@@ -125,6 +128,11 @@ data class LiteSshUiState(
     val iperf3ServerPortText: String = Iperf3RemoteServerCommands.DEFAULT_PORT.toString(),
     val iperf3AutoOpenFirewall: Boolean = false,
     val pendingIperf3InstallPrompt: PendingIperf3InstallPrompt? = null,
+    /**
+     * True while an isolated iperf3 server start/install/stop utility command is in flight. This is
+     * independent from [isRunning] so iperf3 can be toggled while a benchmark script runs.
+     */
+    val isIperf3ServiceBusy: Boolean = false,
 ) {
     val allPresets: List<SshScriptPreset>
         get() = builtInPresets + customPresets.map { it.toScriptPreset() }

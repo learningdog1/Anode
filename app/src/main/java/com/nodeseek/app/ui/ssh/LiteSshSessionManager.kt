@@ -92,6 +92,8 @@ class LiteSshSessionManager(
     val completionPopupEvents: SharedFlow<InAppMessagePopup> = _completionPopupEvents.asSharedFlow()
 
     private var executionJob: Job? = null
+    private var iperf3ServiceJob: Job? = null
+    private var iperf3ServiceGeneration: Long = 0L
     private var elapsedTickerJob: Job? = null
     private var lastForegroundNotifyMillis: Long = 0L
     private var lastForegroundStatusLine: String = ""
@@ -311,24 +313,42 @@ class LiteSshSessionManager(
                 } else {
                     server
                 }
-            executePresetOnServer(
-                server = refreshed,
-                preset = prompt.preset,
-                command = prompt.command,
-                allowHostKeyMismatchOverride = true,
-                mismatchOverrideServerId = prompt.mismatchServerId,
-            )
-            attachIperf3PostRunWatcherIfNeeded(
-                presetId = prompt.preset.id,
-                server = refreshed,
-                port = Iperf3RemoteServerCommands.validatePort(_uiState.value.iperf3ServerPortText)
-                    ?: Iperf3RemoteServerCommands.DEFAULT_PORT,
-                autoOpenFirewall = _uiState.value.iperf3AutoOpenFirewall,
-            )
+            if (prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
+                executeIperf3ServiceCommand(
+                    server = refreshed,
+                    preset = prompt.preset,
+                    command = prompt.command,
+                    port = prompt.iperf3Port
+                        ?: Iperf3RemoteServerCommands.validatePort(_uiState.value.iperf3ServerPortText)
+                        ?: Iperf3RemoteServerCommands.DEFAULT_PORT,
+                    autoOpenFirewall = prompt.iperf3AutoOpenFirewall,
+                    allowHostKeyMismatchOverride = true,
+                    mismatchOverrideServerId = prompt.mismatchServerId,
+                )
+            } else {
+                executePresetOnServer(
+                    server = refreshed,
+                    preset = prompt.preset,
+                    command = prompt.command,
+                    allowHostKeyMismatchOverride = true,
+                    mismatchOverrideServerId = prompt.mismatchServerId,
+                )
+            }
         }
     }
 
     fun dismissHostKeyMismatch() {
+        val prompt = _uiState.value.pendingHostKeyMismatch
+        if (prompt != null && prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
+            // iperf3 service utility runs are isolated from the benchmark console state.
+            _uiState.update {
+                it.copy(
+                    pendingHostKeyMismatch = null,
+                    statusMessage = "已因主机密钥变更取消 iperf3 服务端操作",
+                )
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 pendingHostKeyMismatch = null,
@@ -732,17 +752,13 @@ class LiteSshSessionManager(
                 pendingIperf3InstallPrompt = null,
             )
         }
-        executePresetOnServer(
+        executeIperf3ServiceCommand(
             server = server,
             preset = preset,
             command = command,
-            allowHostKeyMismatchOverride = false,
-        )
-        attachIperf3PostRunWatcherIfNeeded(
-            presetId = preset.id,
-            server = server,
             port = port,
             autoOpenFirewall = openFw,
+            allowHostKeyMismatchOverride = false,
         )
     }
 
@@ -769,17 +785,13 @@ class LiteSshSessionManager(
             estimatedDurationLabel = "~15-45 秒",
             commandTemplate = command,
         )
-        executePresetOnServer(
+        executeIperf3ServiceCommand(
             server = server,
             preset = preset,
             command = command,
-            allowHostKeyMismatchOverride = false,
-        )
-        attachIperf3PostRunWatcherIfNeeded(
-            presetId = preset.id,
-            server = server,
             port = prompt.port,
             autoOpenFirewall = prompt.autoOpenFirewall,
+            allowHostKeyMismatchOverride = false,
         )
     }
 
@@ -823,109 +835,188 @@ class LiteSshSessionManager(
                 showIperf3ServerDialog = false,
             )
         }
-        executePresetOnServer(
+        executeIperf3ServiceCommand(
             server = server,
             preset = preset,
             command = command,
-            allowHostKeyMismatchOverride = false,
-        )
-        attachIperf3PostRunWatcherIfNeeded(
-            presetId = preset.id,
-            server = server,
             port = port,
             autoOpenFirewall = state.iperf3AutoOpenFirewall,
+            allowHostKeyMismatchOverride = false,
         )
     }
 
-    private fun attachIperf3PostRunWatcherIfNeeded(
+    /**
+     * Runs an `iperf3` server utility command (start / install+start / stop) on its own SSH
+     * connection, fully isolated from the benchmark pipeline in [executePresetOnServer]:
+     * - never cancels or disturbs an in-progress benchmark script (e.g. NodeQuality / YABS);
+     * - never touches `isRunning`, the live console stream, or the global running bar;
+     * - never appends to `sessionRuns` nor persists a run record into the local history;
+     * - never posts foreground-service / completion notifications or in-app completion popups.
+     * Only a short [LiteSshUiState.statusMessage] summarises the result.
+     */
+    private fun executeIperf3ServiceCommand(
+        server: SshServerProfile,
+        preset: SshScriptPreset,
+        command: String,
+        port: Int,
+        autoOpenFirewall: Boolean,
+        allowHostKeyMismatchOverride: Boolean,
+        mismatchOverrideServerId: String? = null,
+    ) {
+        iperf3ServiceJob?.cancel()
+        val presetId = preset.id
+        val generation = ++iperf3ServiceGeneration
+        _uiState.update { it.copy(isIperf3ServiceBusy = true) }
+
+        val job = externalScope.launch {
+            try {
+                val request: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
+                    vaultRepository = vaultRepository,
+                    server = server,
+                    allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                    mismatchOverrideServerId = mismatchOverrideServerId,
+                )
+                var exitCode: Int? = null
+                var output = ""
+                executor.runCommand(
+                    request = request,
+                    command = command,
+                    autoRespondConfig = SshAutoRespondConfig(enabled = _uiState.value.autoRespondPrompts),
+                ).collect { event ->
+                    when (event) {
+                        is LiteSshExecutionEvent.HostKeyChecked -> {
+                            val checkedServerId = event.serverId ?: server.id
+                            when (val verification = event.verification) {
+                                is HostKeyVerificationResult.FirstUseTrust ->
+                                    vaultRepository.updateHostKeyFingerprint(
+                                        serverId = checkedServerId,
+                                        fingerprintSha256 = verification.hostKey.fingerprintSha256,
+                                        algorithm = verification.hostKey.algorithm,
+                                    )
+                                is HostKeyVerificationResult.KeyChangedWarning ->
+                                    vaultRepository.updateHostKeyFingerprint(
+                                        serverId = checkedServerId,
+                                        fingerprintSha256 = verification.hostKey.fingerprintSha256,
+                                        algorithm = verification.hostKey.algorithm,
+                                    )
+                                is HostKeyVerificationResult.Trusted -> Unit
+                            }
+                        }
+                        LiteSshExecutionEvent.Connected ->
+                            vaultRepository.markServerConnected(server.id, clock())
+                        is LiteSshExecutionEvent.Completed -> {
+                            exitCode = event.exitCode
+                            output = event.sanitizedAnsiOutput
+                        }
+                        else -> Unit
+                    }
+                }
+                handleIperf3ServiceResult(
+                    presetId = presetId,
+                    server = server,
+                    port = port,
+                    autoOpenFirewall = autoOpenFirewall,
+                    exitCode = exitCode ?: 0,
+                    output = output,
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (mismatch: SshHostKeyMismatchException) {
+                val resolvedMismatchServerId = mismatch.serverId ?: server.id
+                val resolvedMismatchAlias = mismatch.serverAlias
+                    ?: _uiState.value.servers.firstOrNull { it.id == resolvedMismatchServerId }?.displayName
+                    ?: server.displayName
+                _uiState.update {
+                    it.copy(
+                        statusMessage = "检测到主机密钥变更，已阻断 iperf3 服务端操作",
+                        pendingHostKeyMismatch = PendingHostKeyMismatchPrompt(
+                            serverId = server.id,
+                            serverAlias = resolvedMismatchAlias,
+                            preset = preset,
+                            command = command,
+                            expectedFingerprint = mismatch.expectedFingerprint,
+                            actualHostKey = mismatch.actualHostKey,
+                            mismatchServerId = resolvedMismatchServerId,
+                            iperf3Port = port,
+                            iperf3AutoOpenFirewall = autoOpenFirewall,
+                        ),
+                    )
+                }
+            } catch (t: Throwable) {
+                _uiState.update { it.copy(statusMessage = "iperf3 服务端操作失败：${formatFriendlySshError(t)}") }
+            } finally {
+                if (iperf3ServiceGeneration == generation) {
+                    iperf3ServiceJob = null
+                    _uiState.update { it.copy(isIperf3ServiceBusy = false) }
+                }
+            }
+        }
+        if (iperf3ServiceGeneration == generation && job.isActive) {
+            iperf3ServiceJob = job
+        }
+    }
+
+    private fun handleIperf3ServiceResult(
         presetId: String,
         server: SshServerProfile,
         port: Int,
         autoOpenFirewall: Boolean,
+        exitCode: Int,
+        output: String,
     ) {
-        val servicePresetIds = setOf(
-            Iperf3RemoteServerCommands.PRESET_ID_START,
-            Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
-            Iperf3RemoteServerCommands.PRESET_ID_STOP,
-        )
-        if (presetId !in servicePresetIds) return
-        val jobToWatch = executionJob ?: return
-
-        externalScope.launch {
-            jobToWatch.join()
-            val finished = _uiState.value
-            val latestServiceRun = finished.sessionRuns.lastOrNull { it.presetId == presetId }
-            val serviceRunId = latestServiceRun?.id
-
-            if (presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
-                finished.exitCode == Iperf3RemoteServerCommands.EXIT_CODE_NOT_INSTALLED
-            ) {
-                val output = latestServiceRun?.sanitizedAnsiOutput ?: finished.rawConsoleOutput
-                val parsed = Iperf3RemoteServerCommands.parseMissingProbeOutput(output)
-                if (parsed != null) {
-                    _uiState.update { s ->
-                        s.copy(
-                            sessionRuns = if (serviceRunId != null) {
-                                s.sessionRuns.filterNot { it.id == serviceRunId }
-                            } else {
-                                s.sessionRuns
-                            },
-                            selectedRunIdsForExport = if (serviceRunId != null) {
-                                s.selectedRunIdsForExport - serviceRunId
-                            } else {
-                                s.selectedRunIdsForExport
-                            },
-                            viewingRunId = if (s.viewingRunId == serviceRunId) {
-                                s.sessionRuns.lastOrNull { it.id != serviceRunId }?.id
-                            } else {
-                                s.viewingRunId
-                            },
-                            errorMessage = null,
-                            statusMessage = "未检测到 iperf3（${parsed.osRelease.displayTitle}），可一键自动安装",
-                            pendingIperf3InstallPrompt = PendingIperf3InstallPrompt(
-                                serverId = server.id,
-                                serverAlias = server.displayName,
-                                port = port,
-                                autoOpenFirewall = autoOpenFirewall,
-                                probe = parsed,
-                            ),
-                        )
-                    }
-                    if (serviceRunId != null) {
-                        vaultRepository.deleteRunRecord(serviceRunId)
-                    }
-                    return@launch
-                }
-            }
-
-            // Uncheck service utility runs from review export by default so benchmark exports stay clean
-            if (serviceRunId != null) {
+        if (presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
+            exitCode == Iperf3RemoteServerCommands.EXIT_CODE_NOT_INSTALLED
+        ) {
+            val parsed = Iperf3RemoteServerCommands.parseMissingProbeOutput(output)
+            if (parsed != null) {
                 _uiState.update { s ->
-                    val customStatus = when {
-                        presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
-                            finished.exitCode == Iperf3RemoteServerCommands.EXIT_CODE_PORT_CONFLICT ->
-                            "端口 $port 已被其他进程占用，请更换端口后重试"
-                        presetId in setOf(
-                            Iperf3RemoteServerCommands.PRESET_ID_START,
-                            Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
-                        ) && finished.exitCode == 0 ->
-                            "已在「${server.displayName}」开启 iperf3 服务端（端口 $port）"
-                        presetId == Iperf3RemoteServerCommands.PRESET_ID_STOP && finished.exitCode == 0 ->
-                            "已执行停止「${server.displayName}」的 iperf3 服务端（端口 $port）"
-                        else -> s.statusMessage
-                    }
                     s.copy(
-                        selectedRunIdsForExport = s.selectedRunIdsForExport - serviceRunId,
-                        statusMessage = customStatus,
+                        statusMessage = "未检测到 iperf3（${parsed.osRelease.displayTitle}），可一键自动安装",
+                        pendingIperf3InstallPrompt = PendingIperf3InstallPrompt(
+                            serverId = server.id,
+                            serverAlias = server.displayName,
+                            port = port,
+                            autoOpenFirewall = autoOpenFirewall,
+                            probe = parsed,
+                        ),
                     )
+                }
+                return
+            }
+        }
+        val isStart = presetId == Iperf3RemoteServerCommands.PRESET_ID_START ||
+            presetId == Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START
+        val message = when {
+            isStart && exitCode == 0 ->
+                "已在「${server.displayName}」开启 iperf3 服务端（端口 $port）"
+            presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
+                exitCode == Iperf3RemoteServerCommands.EXIT_CODE_PORT_CONFLICT ->
+                "端口 $port 已被其他进程占用，请更换端口后重试"
+            presetId == Iperf3RemoteServerCommands.PRESET_ID_STOP && exitCode == 0 ->
+                "已执行停止「${server.displayName}」的 iperf3 服务端（端口 $port）"
+            else -> {
+                val action = if (isStart) "开启" else "停止"
+                val lastLine = lastMeaningfulOutputLine(output)
+                buildString {
+                    append("「${server.displayName}」$action iperf3 服务端失败（退出码 $exitCode）")
+                    if (lastLine != null) append("：").append(lastLine)
                 }
             }
         }
+        _uiState.update { it.copy(statusMessage = message) }
     }
+
+    private fun lastMeaningfulOutputLine(output: String): String? =
+        output.replace(ANSI_ESCAPE_REGEX, "")
+            .lineSequence()
+            .map { it.trim() }
+            .lastOrNull { it.isNotEmpty() && !it.startsWith(Iperf3RemoteServerCommands.MISSING_MARKER_PREFIX) }
+            ?.take(120)
 
     internal fun disposeOwnedScopeForTests() {
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
+        iperf3ServiceJob?.cancel()
         externalScope.cancel()
     }
 
@@ -1441,5 +1532,11 @@ class LiteSshSessionManager(
     companion object {
         private const val ELAPSED_TICK_MS: Long = 500L
         private const val FOREGROUND_NOTIF_UPDATE_INTERVAL_MS: Long = 2_000L
+        private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
+        private val IPERF3_SERVICE_PRESET_IDS: Set<String> = setOf(
+            Iperf3RemoteServerCommands.PRESET_ID_START,
+            Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START,
+            Iperf3RemoteServerCommands.PRESET_ID_STOP,
+        )
     }
 }
