@@ -106,6 +106,11 @@ class MainActivity : ComponentActivity() {
             pendingShortcutDestination.trySend(MyServersRoute(initialTab = initialTab))
             return
         }
+        PulseNotificationDispatcher.parseOverseasPromoDestination(targetIntent)?.let { destination ->
+            PulseNotificationDispatcher.clearOverseasPromoExtras(targetIntent)
+            pendingShortcutDestination.trySend(destination)
+            return
+        }
         val target = PulseNotificationDispatcher.parseTapTarget(targetIntent) ?: return
         PulseNotificationDispatcher.clearTapTargetExtras(targetIntent)
         pendingNotificationTap.trySend(target)

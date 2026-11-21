@@ -85,6 +85,10 @@ import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
+import com.nodeseek.app.domain.overseas.OverseasPromoMonitorSettings
+import com.nodeseek.app.domain.overseas.OverseasPromoPollOutcome
+import com.nodeseek.app.domain.overseas.OverseasPromoRuntimeStatus
 import com.nodeseek.app.domain.restock.RestockBackgroundPollOutcome
 import com.nodeseek.app.domain.restock.RestockEventRecord
 import com.nodeseek.app.domain.restock.RestockMonitorController
@@ -737,6 +741,33 @@ internal class PreviewAppContainer(
     }
 
     override val overseasIntelRepository: OverseasIntelRepository = PreviewOverseasIntelRepository()
+
+    override val overseasPromoMonitorController: OverseasPromoMonitorController =
+        object : OverseasPromoMonitorController {
+            private val settingsState = MutableStateFlow(OverseasPromoMonitorSettings())
+            override val settingsFlow: StateFlow<OverseasPromoMonitorSettings> = settingsState.asStateFlow()
+            override val runtimeStatus: StateFlow<OverseasPromoRuntimeStatus> =
+                MutableStateFlow(OverseasPromoRuntimeStatus(isRunningInForeground = true)).asStateFlow()
+
+            override fun start() = Unit
+            override fun stop() = Unit
+            override fun onForegroundChanged(inForeground: Boolean) = Unit
+            override fun triggerImmediateCheck() = Unit
+            override suspend fun setNotificationsEnabled(enabled: Boolean) {
+                settingsState.update { it.copy(notificationsEnabled = enabled) }
+            }
+            override suspend fun updateSettings(
+                transform: (OverseasPromoMonitorSettings) -> OverseasPromoMonitorSettings,
+            ): OverseasPromoMonitorSettings {
+                val next = transform(settingsState.value).normalized()
+                settingsState.value = next
+                return next
+            }
+            override suspend fun checkNow(manualTrigger: Boolean): OverseasPromoPollOutcome =
+                OverseasPromoPollOutcome.Completed()
+            override suspend fun runBackgroundPollPass(): OverseasPromoPollOutcome =
+                OverseasPromoPollOutcome.Completed()
+        }
 }
 
 private val SHOWCASE_AVATAR_POOL = intArrayOf(

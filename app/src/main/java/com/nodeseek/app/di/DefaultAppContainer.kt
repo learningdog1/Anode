@@ -29,6 +29,10 @@ import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.data.network.WebViewSameOriginActionRunner
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
+import com.nodeseek.app.data.overseas.OverseasPromoMonitorControllerImpl
+import com.nodeseek.app.data.overseas.OverseasPromoPreferencesStore
+import com.nodeseek.app.data.overseas.OverseasPromoWorkScheduler
+import com.nodeseek.app.data.overseas.OverseasPromoWorker
 import com.nodeseek.app.data.radar.PulseRadarMonitor
 import com.nodeseek.app.data.radar.RadarWorkScheduler
 import com.nodeseek.app.data.repository.BookmarkAndHistoryRepositoryImpl
@@ -59,6 +63,7 @@ import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
@@ -400,6 +405,24 @@ class DefaultAppContainer(
         )
     }
 
+    val overseasPromoPreferencesStore: OverseasPromoPreferencesStore by lazy {
+        OverseasPromoPreferencesStore(context = appContext)
+    }
+
+    override val overseasPromoMonitorController: OverseasPromoMonitorController by lazy {
+        OverseasPromoMonitorControllerImpl(
+            appContext = appContext,
+            repository = overseasIntelRepository,
+            preferencesStore = overseasPromoPreferencesStore,
+            notificationDispatcher = notificationDispatcher,
+            scope = applicationScope,
+        )
+    }
+
+    val overseasPromoWorkScheduler: OverseasPromoWorkScheduler by lazy {
+        OverseasPromoWorkScheduler(appContext)
+    }
+
     override val activityRepository: ActivityRepository by lazy {
         // TODO(ForumWatch): 接入真实 ForumWatch ActivityRepository 实现
         EmptyActivityRepository()
@@ -466,11 +489,16 @@ class DefaultAppContainer(
         restockNotificationHelper.ensureChannel()
         fleetAlertNotifier.ensureChannels()
         RestockCheckWorker.registerControllerProvider { restockMonitorController }
+        OverseasPromoWorker.registerControllerProvider { overseasPromoMonitorController }
         FleetMonitorWorker.externalRepositoryFactory = { fleetRepository }
         restockWorkScheduler.observe(
             scope = applicationScope,
             settingsFlow = restockRepository.settingsFlow,
             watchItemsFlow = restockRepository.watchItemsFlow,
+        )
+        overseasPromoWorkScheduler.observe(
+            scope = applicationScope,
+            settingsFlow = overseasPromoMonitorController.settingsFlow,
         )
         fleetWorkScheduler.observeRepository(
             scope = applicationScope,

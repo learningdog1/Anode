@@ -15,10 +15,14 @@ import androidx.core.content.ContextCompat
 import com.nodeseek.app.MainActivity
 import com.nodeseek.app.R
 import com.nodeseek.app.domain.model.NotificationKind
+import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.radar.LocalAlertRecord
 import com.nodeseek.app.domain.radar.NotificationTapTarget
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshRunStatus
+import com.nodeseek.app.navigation.AppDestination
+import com.nodeseek.app.navigation.OverseasIntelDetailRoute
+import com.nodeseek.app.navigation.OverseasIntelRoute
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -77,6 +81,15 @@ open class PulseNotificationDispatcher(
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
                 description = "当后台 SSH 测评脚本运行结束时通知"
+            },
+            NotificationChannel(
+                CHANNEL_OVERSEAS_PROMOS,
+                CHANNEL_OVERSEAS_PROMOS_NAME,
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "当海外情报监测到新的海外 VPS 与服务器促销帖时主动推送通知"
+                enableVibration(true)
+                setShowBadge(true)
             },
         )
         manager.createNotificationChannels(channels)
@@ -386,6 +399,111 @@ open class PulseNotificationDispatcher(
         notifySafely(notificationId, notification)
     }
 
+    open fun postOverseasPromoNotifications(offers: List<OverseasDealOffer>) {
+        val validOffers = offers.filter { it.id.isNotBlank() }
+        if (validOffers.isEmpty() || !canPostNotification()) return
+        ensureChannels()
+
+        val individualTargets = validOffers
+            .take(MAX_INDIVIDUAL_OVERSEAS_NOTIFICATIONS)
+            .asReversed()
+        for (offer in individualTargets) {
+            postOverseasPromoNotification(offer)
+        }
+
+        if (validOffers.size > MAX_INDIVIDUAL_OVERSEAS_NOTIFICATIONS) {
+            postOverseasPromoSummaryNotification(validOffers)
+        }
+    }
+
+    open fun postOverseasPromoNotification(offer: OverseasDealOffer) {
+        val cleanId = offer.id.trim()
+        if (cleanId.isEmpty() || !canPostNotification()) return
+        ensureChannels()
+
+        val notificationId = notificationIdForKey("overseas:$cleanId", BASE_ID_OVERSEAS_PROMO)
+        val contentTitle = formatOverseasPromoNotificationTitle(offer)
+        val cleanSummary = formatOverseasPromoNotificationSummary(offer)
+        val cleanTitle = offer.title.trim().ifBlank { offer.originalTitle.trim() }
+        val bigText = if (cleanTitle.isNotEmpty() && !cleanSummary.equals(cleanTitle, ignoreCase = true)) {
+            "$cleanTitle\n$cleanSummary"
+        } else {
+            cleanSummary
+        }
+
+        val tapIntent = createOverseasPromoTapIntent(
+            context = appContext,
+            offerId = cleanId,
+            title = cleanTitle,
+            sourceUrl = offer.sourceLink.trim(),
+        )
+        val pendingIntent = PendingIntent.getActivity(
+            appContext,
+            notificationId,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_OVERSEAS_PROMOS)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(contentTitle)
+            .setContentText(cleanSummary)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(contentTitle)
+                    .bigText(bigText),
+            )
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setGroup(GROUP_OVERSEAS_PROMOS)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notifySafely(notificationId, notification)
+    }
+
+    protected open fun postOverseasPromoSummaryNotification(offers: List<OverseasDealOffer>) {
+        if (offers.isEmpty() || !canPostNotification()) return
+        val count = offers.size
+        val title = "海外情报新增 $count 条促销贴"
+        val previewLines = offers.take(5).map { item ->
+            val merchantPrefix = item.merchant.trim().takeIf { it.isNotEmpty() }?.let { "[$it] " }.orEmpty()
+            "$merchantPrefix${item.title.trim().ifBlank { item.originalTitle.trim() }}"
+        }
+        val summaryLine = previewLines.firstOrNull().orEmpty().ifBlank { "点击查看最新海外 VPS 促销情报" }
+        val bigText = buildString {
+            append(previewLines.joinToString("\n• ", prefix = "• "))
+            if (count > previewLines.size) {
+                append("\n…等共 $count 条最新促销情报")
+            }
+        }
+
+        val tapIntent = createOverseasPromoTapIntent(context = appContext, offerId = null)
+        val pendingIntent = PendingIntent.getActivity(
+            appContext,
+            ID_OVERSEAS_PROMO_SUMMARY,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_OVERSEAS_PROMOS)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(summaryLine)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setGroup(GROUP_OVERSEAS_PROMOS)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notifySafely(ID_OVERSEAS_PROMO_SUMMARY, notification)
+    }
+
     private fun canPostNotification(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -431,9 +549,19 @@ open class PulseNotificationDispatcher(
         const val CHANNEL_DIRECT_MESSAGES = "pulse_direct_messages"
         const val CHANNEL_SSH_BENCHMARK_ONGOING = "pulse_ssh_benchmark_ongoing"
         const val CHANNEL_SSH_BENCHMARK_RESULT = "pulse_ssh_benchmark_result"
+        const val CHANNEL_OVERSEAS_PROMOS = "pulse_overseas_promos"
+        const val CHANNEL_OVERSEAS_PROMOS_NAME = "海外情报促销推送"
 
         private const val PREFS_NAME = "nodepulse_notification_prefs"
         private const val KEY_POST_NOTIF_REQUESTED_ONCE = "post_notifications_requested_once"
+
+        const val ACTION_OPEN_OVERSEAS_PROMO = "com.nodeseek.app.action.OPEN_OVERSEAS_PROMO"
+        private const val EXTRA_OVERSEAS_PAYLOAD = "com.nodeseek.app.extra.OVERSEAS_PROMO_PAYLOAD"
+        private const val EXTRA_OVERSEAS_OFFER_ID = "com.nodeseek.app.extra.OVERSEAS_OFFER_ID"
+        private const val EXTRA_OVERSEAS_TITLE = "com.nodeseek.app.extra.OVERSEAS_TITLE"
+        private const val EXTRA_OVERSEAS_SOURCE_URL = "com.nodeseek.app.extra.OVERSEAS_SOURCE_URL"
+        private const val GROUP_OVERSEAS_PROMOS = "com.nodeseek.app.group.OVERSEAS_PROMOS"
+        const val MAX_INDIVIDUAL_OVERSEAS_NOTIFICATIONS = 3
 
         const val ACTION_OPEN_RADAR_TARGET = "com.nodeseek.app.action.OPEN_RADAR_TARGET"
         private const val EXTRA_TARGET_PAYLOAD = "com.nodeseek.app.extra.RADAR_TARGET_PAYLOAD"
@@ -459,6 +587,8 @@ open class PulseNotificationDispatcher(
         private const val BASE_ID_DM = 40_000
         private const val BASE_ID_SSH_RESULT = 50_000
         const val ID_SSH_ONGOING = 59_100
+        internal const val BASE_ID_OVERSEAS_PROMO = 70_000
+        const val ID_OVERSEAS_PROMO_SUMMARY = 79_100
 
         internal fun notificationIdForKey(key: String, baseOffset: Int): Int {
             val masked = key.hashCode() and 0x00FF_FFFF
@@ -662,5 +792,127 @@ open class PulseNotificationDispatcher(
             runCatching {
                 URLDecoder.decode(value, StandardCharsets.UTF_8.name())
             }.getOrDefault(value)
+
+        private val TELEGRAM_WORD_REGEX = Regex("""\btelegram\b""", RegexOption.IGNORE_CASE)
+
+        internal fun formatOverseasPromoNotificationTitle(offer: OverseasDealOffer): String {
+            val cleanTitle = offer.title.trim()
+                .ifBlank { offer.originalTitle.trim() }
+                .ifBlank { "海外 VPS 新促销情报" }
+            val cleanMerchant = offer.merchant.trim()
+            return if (cleanMerchant.isNotEmpty() && !cleanTitle.contains(cleanMerchant, ignoreCase = true)) {
+                "海外促销 · $cleanMerchant：$cleanTitle"
+            } else {
+                "海外促销 · $cleanTitle"
+            }
+        }
+
+        internal fun formatOverseasPromoNotificationSummary(offer: OverseasDealOffer): String {
+            val cleaned = offer.summary
+                .replace(TELEGRAM_WORD_REGEX, "")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+            return cleaned.ifBlank { "点击查看促销详情与活动链接" }
+        }
+
+        fun createOverseasPromoTapIntent(
+            context: Context,
+            offerId: String?,
+            title: String = "",
+            sourceUrl: String = "",
+        ): Intent {
+            val cleanId = offerId?.trim()?.takeIf { it.isNotEmpty() }
+            return Intent(context, MainActivity::class.java).apply {
+                action = ACTION_OPEN_OVERSEAS_PROMO
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(
+                    EXTRA_OVERSEAS_PAYLOAD,
+                    encodeOverseasPromoTarget(
+                        offerId = cleanId,
+                        title = title,
+                        sourceUrl = sourceUrl,
+                    ),
+                )
+                if (cleanId != null) {
+                    putExtra(EXTRA_OVERSEAS_OFFER_ID, cleanId)
+                    putExtra(EXTRA_OVERSEAS_TITLE, title)
+                    putExtra(EXTRA_OVERSEAS_SOURCE_URL, sourceUrl)
+                }
+            }
+        }
+
+        fun parseOverseasPromoDestination(intent: Intent?): AppDestination? {
+            if (intent == null) return null
+            decodeOverseasPromoTarget(intent.getStringExtra(EXTRA_OVERSEAS_PAYLOAD))?.let { return it }
+            if (intent.action != ACTION_OPEN_OVERSEAS_PROMO) return null
+
+            val offerId = intent.getStringExtra(EXTRA_OVERSEAS_OFFER_ID)?.trim().orEmpty()
+            return if (offerId.isNotEmpty()) {
+                OverseasIntelDetailRoute(
+                    offerId = offerId,
+                    initialTitle = intent.getStringExtra(EXTRA_OVERSEAS_TITLE).orEmpty(),
+                    initialSourceUrl = intent.getStringExtra(EXTRA_OVERSEAS_SOURCE_URL).orEmpty(),
+                )
+            } else {
+                OverseasIntelRoute
+            }
+        }
+
+        fun clearOverseasPromoExtras(intent: Intent?) {
+            if (intent == null) return
+            if (intent.action == ACTION_OPEN_OVERSEAS_PROMO) {
+                intent.action = null
+            }
+            intent.removeExtra(EXTRA_OVERSEAS_PAYLOAD)
+            intent.removeExtra(EXTRA_OVERSEAS_OFFER_ID)
+            intent.removeExtra(EXTRA_OVERSEAS_TITLE)
+            intent.removeExtra(EXTRA_OVERSEAS_SOURCE_URL)
+        }
+
+        internal fun encodeOverseasPromoTarget(
+            offerId: String?,
+            title: String = "",
+            sourceUrl: String = "",
+        ): String {
+            val cleanId = offerId?.trim().orEmpty()
+            if (cleanId.isEmpty()) {
+                return "nodepulse://overseas/list"
+            }
+            val params = buildList {
+                add("offerId=${urlEncode(cleanId)}")
+                if (title.isNotBlank()) {
+                    add("title=${urlEncode(title)}")
+                }
+                if (sourceUrl.isNotBlank()) {
+                    add("sourceUrl=${urlEncode(sourceUrl)}")
+                }
+            }
+            return "nodepulse://overseas/detail?${params.joinToString("&")}"
+        }
+
+        internal fun decodeOverseasPromoTarget(encoded: String?): AppDestination? {
+            if (encoded.isNullOrBlank()) return null
+            val trimmed = encoded.trim()
+            if (!trimmed.startsWith("nodepulse://overseas/")) return null
+
+            val pathAndQuery = trimmed.removePrefix("nodepulse://overseas/")
+            val qIdx = pathAndQuery.indexOf('?')
+            val path = if (qIdx >= 0) pathAndQuery.substring(0, qIdx) else pathAndQuery
+            val query = if (qIdx >= 0) pathAndQuery.substring(qIdx + 1) else ""
+            val params = parseQueryMap(query)
+
+            return when (path) {
+                "list" -> OverseasIntelRoute
+                "detail" -> {
+                    val offerId = params["offerId"]?.trim()?.takeIf { it.isNotEmpty() } ?: return OverseasIntelRoute
+                    OverseasIntelDetailRoute(
+                        offerId = offerId,
+                        initialTitle = params["title"].orEmpty(),
+                        initialSourceUrl = params["sourceUrl"].orEmpty(),
+                    )
+                }
+                else -> null
+            }
+        }
     }
 }

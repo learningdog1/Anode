@@ -11,7 +11,9 @@ import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
+import com.nodeseek.app.domain.overseas.NoOpOverseasPromoMonitorController
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
@@ -60,6 +62,8 @@ interface AppContainer {
     val sshVaultRepository: SshVaultRepository
     val sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager
     val overseasIntelRepository: OverseasIntelRepository
+    val overseasPromoMonitorController: OverseasPromoMonitorController
+        get() = NoOpOverseasPromoMonitorController
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

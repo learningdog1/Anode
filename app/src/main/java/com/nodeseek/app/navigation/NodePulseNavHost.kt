@@ -56,6 +56,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
@@ -142,6 +143,8 @@ import com.nodeseek.app.ui.mail.SeekMailScreen
 import com.nodeseek.app.ui.netbench.MobileNetBenchScreen
 import com.nodeseek.app.ui.overseas.OverseasIntelDetailScreen
 import com.nodeseek.app.ui.overseas.OverseasIntelScreen
+import com.nodeseek.app.ui.overseas.openOverseasAppNotificationSettings
+import com.nodeseek.app.ui.overseas.rememberOverseasPromoNotificationBinding
 import com.nodeseek.app.ui.radar.PulseRadarScreen
 import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
 import com.nodeseek.app.ui.restock.RestockMonitorScreen
@@ -787,6 +790,13 @@ fun NodePulseNavHost(
     LaunchedEffect(shortcutDestinationFlow, navController) {
         shortcutDestinationFlow?.collect { destination ->
             isDetailPaneMaximized = false
+            if (destination is OverseasIntelDetailRoute &&
+                navController.currentBackStackEntry?.destination?.hasRoute<OverseasIntelRoute>() != true
+            ) {
+                navController.navigate(OverseasIntelRoute) {
+                    launchSingleTop = true
+                }
+            }
             navController.navigate(destination) {
                 launchSingleTop = true
             }
@@ -1554,6 +1564,21 @@ fun NodePulseNavHost(
 
             // Feature 7: Overseas VPS Promotions (LowEndTalk Monitor API + Detail + Repost)
             composable<OverseasIntelRoute> {
+                val promoNotificationBinding = rememberOverseasPromoNotificationBinding(
+                    controller = container.overseasPromoMonitorController,
+                    notificationDispatcher = container.notificationDispatcher,
+                    onFeedbackMessage = { message, showOpenSettingsAction ->
+                        appScope.launch {
+                            val result = rootSnackbarHostState.showSnackbar(
+                                message = message,
+                                actionLabel = if (showOpenSettingsAction) "去设置" else null,
+                            )
+                            if (showOpenSettingsAction && result == SnackbarResult.ActionPerformed) {
+                                openOverseasAppNotificationSettings(context)
+                            }
+                        }
+                    },
+                )
                 OverseasIntelScreen(
                     onBack = safePopBackStack,
                     repository = container.overseasIntelRepository,
@@ -1571,6 +1596,8 @@ fun NodePulseNavHost(
                     onShareDealToForum = { suggestedTitle, markdownBody ->
                         openComposerWithPrefill("info", suggestedTitle, markdownBody)
                     },
+                    promoNotificationsEnabled = promoNotificationBinding.isNotificationsEnabled,
+                    onTogglePromoNotifications = promoNotificationBinding.onToggleNotifications,
                 )
             }
 
