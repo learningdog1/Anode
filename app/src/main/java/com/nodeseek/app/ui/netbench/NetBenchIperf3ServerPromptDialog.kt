@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Terminal
@@ -50,6 +51,7 @@ import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.ssh.HostKeyMismatchWarningDialog
 import com.nodeseek.app.ui.ssh.Iperf3InstallConfirmDialog
+import com.nodeseek.app.ui.ssh.Iperf3ServerAttachment
 import com.nodeseek.app.ui.ssh.Iperf3ServerControlDialog
 import com.nodeseek.app.ui.ssh.LiteSshViewModel
 import com.nodeseek.app.ui.ssh.SshServerEditorDialog
@@ -72,6 +74,8 @@ fun NetBenchIperf3ServerPromptDialog(
     onCopyManualCommand: ((String) -> Unit)? = null,
     onConfirmReady: () -> Unit,
     onDisableIperf3: () -> Unit,
+    currentAttachment: Iperf3ServerAttachment? = null,
+    onDisconnectExternalServer: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val validPort = Iperf3RemoteServerCommands.validatePort(iperfPortText)
@@ -179,6 +183,27 @@ fun NetBenchIperf3ServerPromptDialog(
                 )
             }
 
+            if (currentAttachment?.isExternalReused == true && onDisconnectExternalServer != null) {
+                OutlinedButton(
+                    onClick = onDisconnectExternalServer,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "断开与外部 iperf3 服务的本地连接（不终止远程进程）",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
             if (onJumpToLiteSsh != null) {
                 OutlinedButton(
                     onClick = onJumpToLiteSsh,
@@ -265,6 +290,16 @@ internal fun NetBenchIperf3DialogsHost(
         sshViewModel.consumeStatusMessage()
     }
 
+    val matchedHostServer = remember(sshState.servers, parsedHost, sshState.selectedServer) {
+        parsedHost.takeIf { it.isNotBlank() }?.let { host ->
+            sshState.servers.firstOrNull { srv -> srv.host.trim().equals(host, ignoreCase = true) }
+        } ?: sshState.selectedServer
+    }
+    val prepAttachment = sshState.iperf3AttachmentFor(
+        serverId = matchedHostServer?.id,
+        port = effectivePort,
+    )
+
     if (showPrepPrompt) {
         NetBenchIperf3ServerPromptDialog(
             targetInput = targetInput,
@@ -288,14 +323,27 @@ internal fun NetBenchIperf3DialogsHost(
             },
             onConfirmReady = onDismissPrepPrompt,
             onDisableIperf3 = onDisableIperf3,
+            currentAttachment = prepAttachment,
+            onDisconnectExternalServer = {
+                matchedHostServer?.let { srv -> sshViewModel.selectServer(srv.id) }
+                sshViewModel.disconnectExternalIperf3Server(portOverride = effectivePort)
+                onDisableIperf3()
+                onDismissPrepPrompt()
+            },
         )
     }
 
     if (showInlineSshDialog) {
+        val inlinePortText = iperfPortText.ifBlank { sshState.iperf3ServerPortText }
+        val inlinePort = Iperf3RemoteServerCommands.validatePort(inlinePortText)
+        val inlineAttachment = sshState.iperf3AttachmentFor(
+            serverId = sshState.selectedServer?.id,
+            port = inlinePort,
+        )
         Iperf3ServerControlDialog(
             servers = sshState.servers,
             selectedServer = sshState.selectedServer,
-            portText = iperfPortText.ifBlank { sshState.iperf3ServerPortText },
+            portText = inlinePortText,
             autoOpenFirewall = sshState.iperf3AutoOpenFirewall,
             // iperf3 service commands run on an isolated SSH connection, so only gate on
             // an in-flight iperf3 utility command, never on a running benchmark script.
@@ -311,14 +359,21 @@ internal fun NetBenchIperf3DialogsHost(
             },
             onToggleAutoOpenFirewall = sshViewModel::toggleIperf3AutoOpenFirewall,
             onStartServer = {
-                val port = Iperf3RemoteServerCommands.validatePort(iperfPortText) ?: return@Iperf3ServerControlDialog
+                val port = Iperf3RemoteServerCommands.validatePort(inlinePortText) ?: return@Iperf3ServerControlDialog
                 showInlineSshDialog = false
                 sshViewModel.startIperf3Server(portOverride = port)
             },
             onStopServer = {
-                val port = Iperf3RemoteServerCommands.validatePort(iperfPortText) ?: return@Iperf3ServerControlDialog
+                val port = Iperf3RemoteServerCommands.validatePort(inlinePortText) ?: return@Iperf3ServerControlDialog
                 showInlineSshDialog = false
                 sshViewModel.stopIperf3Server(portOverride = port)
+            },
+            currentAttachment = inlineAttachment,
+            onDisconnectExternalServer = {
+                val port = Iperf3RemoteServerCommands.validatePort(inlinePortText) ?: return@Iperf3ServerControlDialog
+                showInlineSshDialog = false
+                sshViewModel.disconnectExternalIperf3Server(portOverride = port)
+                onDisableIperf3()
             },
             onCopyCommand = { cmd ->
                 copyTextToClipboard(context, "防火墙放行命令", cmd)

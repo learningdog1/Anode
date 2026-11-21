@@ -11,7 +11,9 @@ import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyInfo
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.Iperf3MissingProbeResult
+import com.nodeseek.app.domain.ssh.Iperf3OwnedInstance
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
+import com.nodeseek.app.domain.ssh.Iperf3ServiceOwnership
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.NodeQualityReportFormatter
 import com.nodeseek.app.domain.ssh.SshMergeLayout
@@ -79,6 +81,34 @@ data class PendingIperf3InstallPrompt(
     val probe: Iperf3MissingProbeResult,
 )
 
+/**
+ * Unique `(serverId, port)` key identifying an attached `iperf3` service endpoint.
+ */
+@Immutable
+data class Iperf3EndpointKey(
+    val serverId: String,
+    val port: Int,
+)
+
+/**
+ * Tracks whether a `(serverId, port)` `iperf3` endpoint was started by this app (with verified
+ * [ownedInstance] `pid` + `startTime` + `port`) or is an existing external service reused locally.
+ */
+@Immutable
+data class Iperf3ServerAttachment(
+    val serverId: String,
+    val serverAlias: String,
+    val port: Int,
+    val ownership: Iperf3ServiceOwnership,
+    val ownedInstance: Iperf3OwnedInstance? = null,
+) {
+    val isAppStarted: Boolean
+        get() = ownership == Iperf3ServiceOwnership.APP_STARTED && ownedInstance != null
+
+    val isExternalReused: Boolean
+        get() = ownership == Iperf3ServiceOwnership.EXTERNAL_REUSED
+}
+
 @Immutable
 fun interface LiveBufferAccessor {
     fun currentSnapshot(): SanitizedBufferSnapshot
@@ -133,6 +163,7 @@ data class LiteSshUiState(
     val iperf3ServerPortText: String = Iperf3RemoteServerCommands.DEFAULT_PORT.toString(),
     val iperf3AutoOpenFirewall: Boolean = false,
     val pendingIperf3InstallPrompt: PendingIperf3InstallPrompt? = null,
+    val iperf3Attachments: Map<Iperf3EndpointKey, Iperf3ServerAttachment> = emptyMap(),
     /**
      * True while an isolated iperf3 server start/install/stop utility command is in flight. This is
      * independent from [isRunning] so iperf3 can be toggled while a benchmark script runs.
@@ -153,6 +184,14 @@ data class LiteSshUiState(
     val selectedServer: SshServerProfile?
         get() = selectedServerId?.let { id -> servers.firstOrNull { it.id == id } }
             ?: servers.firstOrNull()
+
+    fun iperf3AttachmentFor(
+        serverId: String? = selectedServer?.id,
+        port: Int? = Iperf3RemoteServerCommands.validatePort(iperf3ServerPortText),
+    ): Iperf3ServerAttachment? {
+        if (serverId.isNullOrBlank() || port == null) return null
+        return iperf3Attachments[Iperf3EndpointKey(serverId = serverId, port = port)]
+    }
 
     val serverGroupOptions: List<SshServerGroupOption>
         get() = SshVaultCatalogFilter.buildServerGroupOptions(servers)
@@ -503,6 +542,8 @@ class LiteSshViewModel(
     fun startIperf3Server(portOverride: Int? = null, autoOpenFirewallOverride: Boolean? = null) =
         sessionManager.startIperf3Server(portOverride = portOverride, autoOpenFirewallOverride = autoOpenFirewallOverride)
     fun stopIperf3Server(portOverride: Int? = null) = sessionManager.stopIperf3Server(portOverride = portOverride)
+    fun disconnectExternalIperf3Server(portOverride: Int? = null) =
+        sessionManager.disconnectExternalIperf3Server(portOverride = portOverride)
     fun confirmInstallAndStartIperf3Server() = sessionManager.confirmInstallAndStartIperf3Server()
     fun dismissIperf3InstallPrompt() = sessionManager.dismissIperf3InstallPrompt()
 

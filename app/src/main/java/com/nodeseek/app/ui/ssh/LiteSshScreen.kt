@@ -491,6 +491,8 @@ fun LiteSshScreen(
             onToggleAutoOpenFirewall = viewModel::toggleIperf3AutoOpenFirewall,
             onStartServer = { viewModel.startIperf3Server() },
             onStopServer = { viewModel.stopIperf3Server() },
+            currentAttachment = uiState.iperf3AttachmentFor(),
+            onDisconnectExternalServer = { viewModel.disconnectExternalIperf3Server() },
             onCopyCommand = { cmd -> copyToClipboard(cmd, "已复制防火墙放行命令") },
             onDismiss = viewModel::dismissIperf3ServerDialog,
         )

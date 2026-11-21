@@ -1267,6 +1267,8 @@ fun Iperf3ServerControlDialog(
     onToggleAutoOpenFirewall: (Boolean) -> Unit,
     onStartServer: () -> Unit,
     onStopServer: () -> Unit,
+    currentAttachment: Iperf3ServerAttachment? = null,
+    onDisconnectExternalServer: (() -> Unit)? = null,
     onCopyCommand: ((String) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
@@ -1274,6 +1276,9 @@ fun Iperf3ServerControlDialog(
     val validPort = Iperf3RemoteServerCommands.validatePort(portText)
     val portInvalid = portText.isNotBlank() && validPort == null
     val effectivePortForPreview = validPort ?: Iperf3RemoteServerCommands.DEFAULT_PORT
+    val activeAttachment = currentAttachment?.takeIf {
+        selectedServer != null && it.serverId == selectedServer.id && it.port == validPort
+    }
     val isSelectedRoot = selectedServer?.username?.trim()?.equals("root", ignoreCase = true) == true
     val firewallHints = remember(effectivePortForPreview, isSelectedRoot) {
         Iperf3RemoteServerCommands.buildFirewallHintCommands(
@@ -1287,7 +1292,7 @@ fun Iperf3ServerControlDialog(
     PulseAlertDialog(
         onDismissRequest = onDismiss,
         title = "VPS iperf3 服务端管理",
-        message = "执行前自动检测 iperf3 是否安装及端口占用，支持后台守护启动（-s -p PORT -D / nohup）与一键停止。",
+        message = "执行前自动检测 iperf3 是否安装及端口占用，仅管理本应用启动的实例（校验 PID / 启动时间 / 端口）；若复用已有外部服务，仅提供断开本地连接。",
         icon = Icons.Rounded.Speed,
         tone = PulseDialogTone.PRIMARY,
         confirmText = if (selectedServer == null) "先添加 VPS 主机" else "检测并开启服务端",
@@ -1553,23 +1558,86 @@ fun Iperf3ServerControlDialog(
                 }
             }
 
-            // Stop iperf3 button
+            // Ownership status & Stop / Disconnect action
             if (selectedServer != null) {
-                OutlinedButton(
-                    onClick = onStopServer,
-                    enabled = !isRunning && validPort != null,
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Stop,
-                        contentDescription = null,
-                        modifier = Modifier.size(17.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("停止「${selectedServer.displayName}」上的 iperf3 服务端")
+                if (activeAttachment?.isExternalReused == true) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f))
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Shield,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            text = "端口 ${activeAttachment.port} 当前复用的是 VPS 上已有的外部 iperf3 服务（非本应用启动）。为避免误杀其他任务，仅可断开本地连接，不会远程终止该进程。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { (onDisconnectExternalServer ?: onStopServer)() },
+                        enabled = !isRunning && validPort != null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("断开与「${selectedServer.displayName}」外部 iperf3 服务的本地连接")
+                    }
+                } else {
+                    activeAttachment?.ownedInstance?.let { owned ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f))
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.VerifiedUser,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                text = "已绑定本应用启动的实例（端口 ${owned.port} · PID ${owned.pid}），停止时将严格校验 PID、启动时间与端口。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = onStopServer,
+                        enabled = !isRunning && validPort != null,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Stop,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        val stopLabel = activeAttachment?.ownedInstance?.let { owned ->
+                            "停止本应用在「${selectedServer.displayName}」启动的 iperf3 (PID ${owned.pid})"
+                        } ?: "停止本应用在「${selectedServer.displayName}」启动的 iperf3 服务端"
+                        Text(stopLabel)
+                    }
                 }
             }
         }

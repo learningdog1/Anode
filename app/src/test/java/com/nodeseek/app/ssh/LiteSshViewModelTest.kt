@@ -297,11 +297,22 @@ class LiteSshViewModelTest {
                     }
                     command.contains("dnf install -y iperf3") -> {
                         installed = true
-                        emit(SshStreamEvent.OutputChunk("✓ iperf3 安装完成\n✓ iperf3 服务端已在后台守护运行（TCP/UDP 端口 15201）\n"))
+                        emit(
+                            SshStreamEvent.OutputChunk(
+                                "✓ iperf3 安装完成\n" +
+                                    "__ANODE_IPERF3_STATE__|mode=started|port=15201|pid=24680|start_time=991122\n" +
+                                    "✓ iperf3 服务端已在后台守护运行（TCP/UDP 端口 15201，PID 24680）\n",
+                            ),
+                        )
                         emit(SshStreamEvent.Completed(exitCode = 0))
                     }
-                    command.contains("已停止 VPS 上的 iperf3 服务端") -> {
-                        emit(SshStreamEvent.OutputChunk("✓ 已停止 VPS 上的 iperf3 服务端（端口 15201）\n"))
+                    command.contains(Iperf3RemoteServerCommands.STOP_MARKER_PREFIX) -> {
+                        emit(
+                            SshStreamEvent.OutputChunk(
+                                "__ANODE_IPERF3_STOP__|result=stopped|port=15201|pid=24680\n" +
+                                    "✓ 已停止 VPS 上的 iperf3 服务端（本应用实例，端口 15201，PID 24680）\n",
+                            ),
+                        )
                         emit(SshStreamEvent.Completed(exitCode = 0))
                     }
                     else -> {
@@ -340,13 +351,22 @@ class LiteSshViewModelTest {
         assertNull(viewModel.uiState.value.pendingIperf3InstallPrompt)
         assertTrue(installed)
         assertTrue(executedCommands.last().contains("PORT=15201"))
+        val attachment = viewModel.uiState.value.iperf3AttachmentFor(port = 15201)
+        assertNotNull(attachment)
+        assertTrue(attachment!!.isAppStarted)
+        assertEquals(24680L, attachment.ownedInstance?.pid)
+        assertEquals("991122", attachment.ownedInstance?.startTime)
         // Service utility run should not be auto-checked for NodeSeek benchmark export
         assertTrue(viewModel.uiState.value.selectedRunIdsForExport.isEmpty())
 
-        // 4. Stop iperf3 server
+        // 4. Stop iperf3 server -> scopes strictly to recorded PID + start_time + port, never pkill/killall
         viewModel.stopIperf3Server()
         assertTrue(executedCommands.last().contains("PORT=15201"))
-        assertTrue(executedCommands.last().contains("pkill"))
+        assertTrue(executedCommands.last().contains("""CLIENT_PID="24680""""))
+        assertTrue(executedCommands.last().contains("CLIENT_START='991122'"))
+        assertFalse(executedCommands.last().contains("pkill"))
+        assertFalse(executedCommands.last().contains("killall"))
+        assertNull(viewModel.uiState.value.iperf3AttachmentFor(port = 15201))
 
         // iperf3 service utility runs never create local benchmark session / history records
         assertTrue(viewModel.uiState.value.sessionRuns.isEmpty())

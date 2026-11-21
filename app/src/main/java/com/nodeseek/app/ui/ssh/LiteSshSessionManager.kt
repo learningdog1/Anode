@@ -6,6 +6,9 @@ import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
+import com.nodeseek.app.domain.ssh.Iperf3ServiceOwnership
+import com.nodeseek.app.domain.ssh.Iperf3StartProbeResult
+import com.nodeseek.app.domain.ssh.Iperf3StopOutcome
 import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
@@ -216,7 +219,12 @@ class LiteSshSessionManager(
     fun deleteServer(serverId: String) {
         externalScope.launch {
             vaultRepository.deleteServer(serverId)
-            _uiState.update { it.copy(statusMessage = "已从本地保险库删除主机") }
+            _uiState.update { state ->
+                state.copy(
+                    iperf3Attachments = state.iperf3Attachments.filterKeys { it.serverId != serverId },
+                    statusMessage = "已从本地保险库删除主机",
+                )
+            }
         }
     }
 
@@ -861,6 +869,37 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(pendingIperf3InstallPrompt = null) }
     }
 
+    fun disconnectExternalIperf3Server(portOverride: Int? = null) {
+        val state = _uiState.value
+        val server = state.selectedServer
+        if (server == null) {
+            _uiState.update {
+                it.copy(
+                    showIperf3ServerDialog = false,
+                    showServerEditor = true,
+                    statusMessage = "请先添加一台 VPS 主机",
+                )
+            }
+            return
+        }
+        val port = portOverride ?: Iperf3RemoteServerCommands.validatePort(state.iperf3ServerPortText)
+        if (port == null || !Iperf3RemoteServerCommands.isValidPort(port)) {
+            _uiState.update {
+                it.copy(statusMessage = "iperf3 端口必须在 1 ~ 65535 之间")
+            }
+            return
+        }
+        val endpointKey = Iperf3EndpointKey(serverId = server.id, port = port)
+        _uiState.update { cur ->
+            cur.copy(
+                iperf3ServerPortText = port.toString(),
+                showIperf3ServerDialog = false,
+                iperf3Attachments = cur.iperf3Attachments - endpointKey,
+                statusMessage = "已断开与「${server.displayName}」端口 $port 外部 iperf3 服务的本地连接（未终止远程进程）",
+            )
+        }
+    }
+
     fun stopIperf3Server(portOverride: Int? = null) {
         val state = _uiState.value
         val server = state.selectedServer
@@ -881,13 +920,24 @@ class LiteSshSessionManager(
             }
             return
         }
-        val command = Iperf3RemoteServerCommands.buildStopScript(port = port)
+        val endpointKey = Iperf3EndpointKey(serverId = server.id, port = port)
+        val attachment = state.iperf3Attachments[endpointKey]
+        if (attachment?.isExternalReused == true) {
+            disconnectExternalIperf3Server(portOverride = port)
+            return
+        }
+        val ownedInstance = attachment?.ownedInstance
+        val command = Iperf3RemoteServerCommands.buildStopScript(
+            port = port,
+            expectedPid = ownedInstance?.pid,
+            expectedStartTime = ownedInstance?.startTime,
+        )
         val preset = SshScriptPreset(
             id = Iperf3RemoteServerCommands.PRESET_ID_STOP,
             name = "停止 iperf3 服务端 ($port)",
             tabTitle = "停止 iperf3",
             category = SshPresetCategory.NETWORK,
-            description = "停止 VPS 上运行中的 iperf3 服务端进程",
+            description = "仅停止本应用在端口 $port 启动的 iperf3 服务端进程",
             estimatedDurationLabel = "~2 秒",
             commandTemplate = command,
         )
@@ -1046,16 +1096,89 @@ class LiteSshSessionManager(
                 return
             }
         }
+        val endpointKey = Iperf3EndpointKey(serverId = server.id, port = port)
         val isStart = presetId == Iperf3RemoteServerCommands.PRESET_ID_START ||
             presetId == Iperf3RemoteServerCommands.PRESET_ID_INSTALL_AND_START
+        if (isStart && exitCode == 0) {
+            val startProbe = Iperf3RemoteServerCommands.parseStartResultOutput(output, fallbackPort = port)
+            _uiState.update { cur ->
+                when (startProbe) {
+                    is Iperf3StartProbeResult.StartedByApp -> cur.copy(
+                        iperf3Attachments = cur.iperf3Attachments + (
+                            endpointKey to Iperf3ServerAttachment(
+                                serverId = server.id,
+                                serverAlias = server.displayName,
+                                port = port,
+                                ownership = Iperf3ServiceOwnership.APP_STARTED,
+                                ownedInstance = startProbe.instance,
+                            )
+                        ),
+                        statusMessage = "已在「${server.displayName}」开启 iperf3 服务端（端口 $port，PID ${startProbe.instance.pid}）",
+                    )
+                    is Iperf3StartProbeResult.AlreadyOwnedByApp -> cur.copy(
+                        iperf3Attachments = cur.iperf3Attachments + (
+                            endpointKey to Iperf3ServerAttachment(
+                                serverId = server.id,
+                                serverAlias = server.displayName,
+                                port = port,
+                                ownership = Iperf3ServiceOwnership.APP_STARTED,
+                                ownedInstance = startProbe.instance,
+                            )
+                        ),
+                        statusMessage = "「${server.displayName}」端口 $port 已有本应用启动的 iperf3 服务端运行中（PID ${startProbe.instance.pid}）",
+                    )
+                    is Iperf3StartProbeResult.ReusedExternalService -> cur.copy(
+                        iperf3Attachments = cur.iperf3Attachments + (
+                            endpointKey to Iperf3ServerAttachment(
+                                serverId = server.id,
+                                serverAlias = server.displayName,
+                                port = port,
+                                ownership = Iperf3ServiceOwnership.EXTERNAL_REUSED,
+                                ownedInstance = null,
+                            )
+                        ),
+                        statusMessage = "已连接复用「${server.displayName}」端口 $port 已有的外部 iperf3 服务（非本应用启动，仅支持断开本地连接）",
+                    )
+                    null -> cur.copy(
+                        statusMessage = "已在「${server.displayName}」开启 iperf3 服务端（端口 $port）",
+                    )
+                }
+            }
+            return
+        }
+        if (presetId == Iperf3RemoteServerCommands.PRESET_ID_STOP && exitCode == 0) {
+            val stopProbe = Iperf3RemoteServerCommands.parseStopResultOutput(output, fallbackPort = port)
+            val stopMessage = when (stopProbe?.outcome) {
+                Iperf3StopOutcome.STOPPED ->
+                    "已停止「${server.displayName}」由本应用启动的 iperf3 服务端（端口 $port${stopProbe.pid?.let { "，PID $it" }.orEmpty()}）"
+                Iperf3StopOutcome.ALREADY_STOPPED ->
+                    "「${server.displayName}」端口 $port 的本应用 iperf3 服务端已退出，已清理状态记录"
+                Iperf3StopOutcome.EXTERNAL_UNTOUCHED ->
+                    "「${server.displayName}」端口 $port 运行的是外部 iperf3 服务（非本应用启动），未执行远程终止"
+                Iperf3StopOutcome.STALE_PID_MISMATCH ->
+                    "检测到「${server.displayName}」端口 $port 记录的 PID 已复用（启动时间不匹配），已拒绝终止并清理旧记录"
+                Iperf3StopOutcome.TARGET_MISMATCH,
+                Iperf3StopOutcome.METADATA_MISMATCH,
+                ->
+                    "检测到「${server.displayName}」端口 $port 进程参数或状态元数据不匹配，已拒绝终止以保护其他任务"
+                Iperf3StopOutcome.NOT_FOUND ->
+                    "「${server.displayName}」端口 $port 未发现由本应用启动的 iperf3 服务端"
+                Iperf3StopOutcome.KILL_FAILED,
+                null,
+                ->
+                    "已执行停止「${server.displayName}」的 iperf3 服务端（端口 $port）"
+            }
+            _uiState.update { cur ->
+                cur.copy(
+                    iperf3Attachments = cur.iperf3Attachments - endpointKey,
+                    statusMessage = stopMessage,
+                )
+            }
+            return
+        }
         val message = when {
-            isStart && exitCode == 0 ->
-                "已在「${server.displayName}」开启 iperf3 服务端（端口 $port）"
-            presetId == Iperf3RemoteServerCommands.PRESET_ID_START &&
-                exitCode == Iperf3RemoteServerCommands.EXIT_CODE_PORT_CONFLICT ->
+            isStart && exitCode == Iperf3RemoteServerCommands.EXIT_CODE_PORT_CONFLICT ->
                 "端口 $port 已被其他进程占用，请更换端口后重试"
-            presetId == Iperf3RemoteServerCommands.PRESET_ID_STOP && exitCode == 0 ->
-                "已执行停止「${server.displayName}」的 iperf3 服务端（端口 $port）"
             else -> {
                 val action = if (isStart) "开启" else "停止"
                 val lastLine = lastMeaningfulOutputLine(output)
@@ -1072,7 +1195,7 @@ class LiteSshSessionManager(
         output.replace(ANSI_ESCAPE_REGEX, "")
             .lineSequence()
             .map { it.trim() }
-            .lastOrNull { it.isNotEmpty() && !it.startsWith(Iperf3RemoteServerCommands.MISSING_MARKER_PREFIX) }
+            .lastOrNull { it.isNotEmpty() && !Iperf3RemoteServerCommands.isInternalMarkerLine(it) }
             ?.take(120)
 
     internal fun disposeOwnedScopeForTests() {
