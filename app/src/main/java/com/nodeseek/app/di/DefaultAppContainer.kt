@@ -51,6 +51,7 @@ import com.nodeseek.app.data.restock.RestockRepositoryImpl
 import com.nodeseek.app.data.restock.RestockWorkScheduler
 import com.nodeseek.app.data.restock.StockPageAnalyzer
 import com.nodeseek.app.data.ssh.SshServerVault
+import com.nodeseek.app.data.trust.OfficialTradeRepositoryImpl
 import com.nodeseek.app.data.trust.SellerTrustRepositoryImpl
 import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
@@ -78,6 +79,7 @@ import com.nodeseek.app.domain.repository.UserRepository
 import com.nodeseek.app.domain.restock.RestockMonitorController
 import com.nodeseek.app.domain.restock.RestockRepository
 import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
@@ -460,6 +462,13 @@ class DefaultAppContainer(
             onConfigObserved = { config ->
                 sessionRepositoryImpl.onConfigPayloadObserved(config)
             },
+        )
+    }
+
+    override val officialTradeRepository: OfficialTradeRepository by lazy {
+        OfficialTradeRepositoryImpl.forContext(
+            context = appContext,
+            baseHttpClient = apiHttpClient,
         )
     }
 

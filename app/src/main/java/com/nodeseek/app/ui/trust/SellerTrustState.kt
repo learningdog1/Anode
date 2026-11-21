@@ -14,6 +14,9 @@ import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.data.trust.SellerTrustRepositoryImpl
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.trust.LocalSellerNote
+import com.nodeseek.app.domain.trust.NoOpOfficialTradeRepository
+import com.nodeseek.app.domain.trust.OfficialTradeLookup
+import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.trust.TrustFetchStatus
@@ -47,6 +50,34 @@ enum class SellerTrustLoadStatus {
     FROM_CACHE,
     RATE_LIMITED,
     FAILED_RETRYABLE,
+}
+
+/**
+ * UI status of the NodeSeek Official Trade Platform (`agent.nodeseek.org`) section inside
+ * [SellerTrustCardSheet].
+ */
+enum class OfficialTradeLoadStatus {
+    IDLE,
+    LOADING,
+    FOUND,
+    NOT_CONFIGURED,
+    NOT_FOUND,
+    UNAUTHORIZED,
+    RATE_LIMITED,
+    FAILED,
+}
+
+/**
+ * Lightweight in-process invalidation counter notifying inline [SellerTrustQuickBadge] instances
+ * when cached official trade stats or API key state change.
+ */
+internal object OfficialTradeUiSignalBus {
+    private val _epoch = MutableStateFlow(0L)
+    val epoch: StateFlow<Long> = _epoch.asStateFlow()
+
+    fun notifyMutated() {
+        _epoch.update { it + 1L }
+    }
 }
 
 private val TRUST_TIME_FORMATTER: DateTimeFormatter =
@@ -92,6 +123,7 @@ internal fun formatTrustUpdatedAt(
  * or process-scoped [SellerTrustRepositoryImpl.forContext].
  */
 val LocalSellerTrustRepository = staticCompositionLocalOf<SellerTrustRepository?> { null }
+val LocalOfficialTradeRepository = staticCompositionLocalOf<OfficialTradeRepository?> { null }
 
 /**
  * Resolves the active [SellerTrustRepository] from an explicit override, [LocalSellerTrustRepository],
@@ -107,6 +139,22 @@ fun rememberSellerTrustRepository(
     val container = LocalAppContainer.current
     return remember(context, container) {
         container.sellerTrustRepository
+    }
+}
+
+/**
+ * Resolves the active [OfficialTradeRepository] from an explicit override,
+ * [LocalOfficialTradeRepository], or [LocalAppContainer].
+ */
+@Composable
+fun rememberOfficialTradeRepository(
+    override: OfficialTradeRepository? = null,
+): OfficialTradeRepository {
+    if (override != null) return override
+    LocalOfficialTradeRepository.current?.let { return it }
+    val container = LocalAppContainer.current
+    return remember(container) {
+        container.officialTradeRepository
     }
 }
 
@@ -137,6 +185,12 @@ data class SellerTrustUiState(
     val isScanningMoreTopics: Boolean = false,
     val topicScanCooldownSeconds: Int = 0,
     val topicScanNotice: String? = null,
+    val isOfficialTradeLoading: Boolean = false,
+    val isOfficialTradeRefreshing: Boolean = false,
+    val officialTradeLookup: OfficialTradeLookup? = null,
+    val officialTradeQueriedUsername: String = "",
+    val officialTradeCooldownUntilMillis: Long = 0L,
+    val officialTradeCooldownSeconds: Int = 0,
 ) {
     val resolvedUid: Long
         get() = report?.uid?.takeIf { it > 0L } ?: uid
@@ -144,6 +198,41 @@ data class SellerTrustUiState(
     val resolvedUsername: String
         get() = report?.username?.takeIf { it.isNotBlank() }
             ?: usernameHint.trim().ifEmpty { if (uid > 0L) "用户 #$uid" else "未知卖家" }
+
+    val effectiveOfficialUsername: String
+        get() = report?.username?.trim()?.removePrefix("@")?.takeIf { it.isNotBlank() }
+            ?: usernameHint.trim().removePrefix("@")
+
+    val officialTradeFound: OfficialTradeLookup.Found?
+        get() = (officialTradeLookup as? OfficialTradeLookup.Found)?.takeIf { it.matches.isNotEmpty() }
+
+    val officialTradeStatus: OfficialTradeLoadStatus
+        get() {
+            if (isOfficialTradeLoading && officialTradeFound == null) {
+                return OfficialTradeLoadStatus.LOADING
+            }
+            return when (val lookup = officialTradeLookup) {
+                null -> {
+                    if (effectiveOfficialUsername.isNotBlank()) {
+                        OfficialTradeLoadStatus.LOADING
+                    } else {
+                        OfficialTradeLoadStatus.IDLE
+                    }
+                }
+                OfficialTradeLookup.NotConfigured -> OfficialTradeLoadStatus.NOT_CONFIGURED
+                OfficialTradeLookup.Unauthorized -> OfficialTradeLoadStatus.UNAUTHORIZED
+                is OfficialTradeLookup.RateLimited -> OfficialTradeLoadStatus.RATE_LIMITED
+                is OfficialTradeLookup.Failed -> OfficialTradeLoadStatus.FAILED
+                OfficialTradeLookup.NotFound -> OfficialTradeLoadStatus.NOT_FOUND
+                is OfficialTradeLookup.Found -> {
+                    if (lookup.matches.isEmpty()) {
+                        OfficialTradeLoadStatus.NOT_FOUND
+                    } else {
+                        OfficialTradeLoadStatus.FOUND
+                    }
+                }
+            }
+        }
 
     val resolvedAvatarUrl: String
         get() = report?.avatarUrl?.takeIf { it.isNotBlank() }
@@ -196,6 +285,7 @@ class SellerTrustStateHolder(
     avatarUrlHint: String = "",
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val uiRefreshMinIntervalMillis: Long = DEFAULT_UI_REFRESH_MIN_INTERVAL_MILLIS,
+    private val officialTradeRepository: OfficialTradeRepository = NoOpOfficialTradeRepository,
 ) {
     private val _uiState = MutableStateFlow(
         SellerTrustUiState(
@@ -207,12 +297,15 @@ class SellerTrustStateHolder(
     val uiState: StateFlow<SellerTrustUiState> = _uiState.asStateFlow()
 
     private var inspectJob: Job? = null
+    private var officialTradeJob: Job? = null
     private var deepSearchJob: Job? = null
     private var scanMoreTopicsJob: Job? = null
     private var observeNoteJob: Job? = null
+    private var observeOfficialConfigJob: Job? = null
     private var autoSaveJob: Job? = null
     private var feedbackJob: Job? = null
     private var cooldownTickerJob: Job? = null
+    private var officialTradeCooldownTickerJob: Job? = null
     private var deepSearchTickerJob: Job? = null
     private var topicScanTickerJob: Job? = null
     private var lastManualRefreshAcceptedAtMillis: Long = 0L
@@ -221,16 +314,27 @@ class SellerTrustStateHolder(
     private var saveSequence: Long = 0L
     private var userEditedNoteText: Boolean = false
     private var userEditedTag: Boolean = false
+    private var hasLoadedOnce: Boolean = false
 
     init {
         if (uid > 0L) {
             startObservingNote(uid)
         }
+        startObservingOfficialTradeConfig()
     }
 
     fun load(forceRefresh: Boolean = false) {
+        hasLoadedOnce = true
         val snapshot = _uiState.value
         val now = clockMillis()
+
+        val initialOfficialUsername = snapshot.effectiveOfficialUsername
+        if (initialOfficialUsername.isNotBlank()) {
+            loadOfficialTrade(
+                usernameOverride = initialOfficialUsername,
+                forceRefresh = forceRefresh,
+            )
+        }
 
         if (forceRefresh) {
             if (snapshot.isLoading || snapshot.isRefreshing) return
@@ -352,6 +456,16 @@ class SellerTrustStateHolder(
                 } else {
                     cooldownTickerJob?.cancel()
                 }
+
+                val resolvedReportUsername = report.username.trim().removePrefix("@")
+                if (resolvedReportUsername.isNotBlank() &&
+                    !resolvedReportUsername.equals(_uiState.value.officialTradeQueriedUsername, ignoreCase = true)
+                ) {
+                    loadOfficialTrade(
+                        usernameOverride = resolvedReportUsername,
+                        forceRefresh = forceRefresh,
+                    )
+                }
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -368,6 +482,95 @@ class SellerTrustStateHolder(
 
     fun refresh() {
         load(forceRefresh = true)
+    }
+
+    /**
+     * Explicitly refreshes the NodeSeek Official Trade Platform stats (`forceRefresh = true`).
+     */
+    fun refreshOfficialTrade() {
+        loadOfficialTrade(forceRefresh = true)
+    }
+
+    internal fun loadOfficialTrade(
+        usernameOverride: String? = null,
+        forceRefresh: Boolean = false,
+    ) {
+        val snapshot = _uiState.value
+        val cleanUsername = (usernameOverride ?: snapshot.effectiveOfficialUsername)
+            .trim()
+            .removePrefix("@")
+        if (cleanUsername.isEmpty()) return
+
+        val now = clockMillis()
+        if (forceRefresh && snapshot.officialTradeCooldownUntilMillis > now) {
+            val remSec = computeRemainingSeconds(snapshot.officialTradeCooldownUntilMillis, now)
+            _uiState.update { it.copy(officialTradeCooldownSeconds = remSec) }
+            startOfficialTradeCooldownTicker(snapshot.officialTradeCooldownUntilMillis)
+            return
+        }
+        if (forceRefresh && (snapshot.isOfficialTradeLoading || snapshot.isOfficialTradeRefreshing)) {
+            return
+        }
+
+        officialTradeJob?.cancel()
+        officialTradeJob = scope.launch {
+            _uiState.update { current ->
+                current.copy(
+                    isOfficialTradeLoading = current.officialTradeFound == null,
+                    isOfficialTradeRefreshing = forceRefresh || current.officialTradeFound != null,
+                    officialTradeQueriedUsername = cleanUsername,
+                )
+            }
+            try {
+                val result = officialTradeRepository.lookup(
+                    username = cleanUsername,
+                    forceRefresh = forceRefresh,
+                )
+                val finishedNow = clockMillis()
+                val rateLimitedUntil = if (result is OfficialTradeLookup.RateLimited) {
+                    val retrySec = (result.retryAfterSeconds ?: DEFAULT_OFFICIAL_RETRY_SECONDS)
+                        .coerceAtLeast(1L)
+                    finishedNow + retrySec * 1_000L
+                } else {
+                    0L
+                }
+                val remSec = computeRemainingSeconds(rateLimitedUntil, finishedNow)
+
+                _uiState.update { current ->
+                    current.copy(
+                        isOfficialTradeLoading = false,
+                        isOfficialTradeRefreshing = false,
+                        officialTradeLookup = result,
+                        officialTradeQueriedUsername = cleanUsername,
+                        officialTradeCooldownUntilMillis = rateLimitedUntil,
+                        officialTradeCooldownSeconds = remSec,
+                    )
+                }
+
+                if (result is OfficialTradeLookup.Found) {
+                    OfficialTradeUiSignalBus.notifyMutated()
+                }
+
+                if (rateLimitedUntil > finishedNow) {
+                    startOfficialTradeCooldownTicker(rateLimitedUntil)
+                } else {
+                    officialTradeCooldownTickerJob?.cancel()
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _uiState.update { current ->
+                    current.copy(
+                        isOfficialTradeLoading = false,
+                        isOfficialTradeRefreshing = false,
+                        officialTradeLookup = OfficialTradeLookup.Failed(
+                            message = t.message?.takeIf { it.isNotBlank() }
+                                ?: "官方交易平台查询失败，请手动重试",
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -718,16 +921,68 @@ class SellerTrustStateHolder(
         }
     }
 
+    private fun startObservingOfficialTradeConfig() {
+        observeOfficialConfigJob?.cancel()
+        observeOfficialConfigJob = scope.launch {
+            var previousConfigured: Boolean? = null
+            officialTradeRepository.isConfigured.collect { configured ->
+                val wasConfigured = previousConfigured
+                previousConfigured = configured
+                if (wasConfigured != null && wasConfigured != configured && hasLoadedOnce) {
+                    if (!configured) {
+                        officialTradeJob?.cancel()
+                        officialTradeCooldownTickerJob?.cancel()
+                        _uiState.update { current ->
+                            current.copy(
+                                isOfficialTradeLoading = false,
+                                isOfficialTradeRefreshing = false,
+                                officialTradeLookup = OfficialTradeLookup.NotConfigured,
+                                officialTradeCooldownUntilMillis = 0L,
+                                officialTradeCooldownSeconds = 0,
+                            )
+                        }
+                    } else {
+                        loadOfficialTrade(forceRefresh = false)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startOfficialTradeCooldownTicker(untilMillis: Long) {
+        officialTradeCooldownTickerJob?.cancel()
+        officialTradeCooldownTickerJob = scope.launch {
+            while (true) {
+                val now = clockMillis()
+                val remaining = computeRemainingSeconds(untilMillis, now)
+                if (remaining <= 0) {
+                    _uiState.update { current ->
+                        current.copy(
+                            officialTradeCooldownUntilMillis = 0L,
+                            officialTradeCooldownSeconds = 0,
+                        )
+                    }
+                    break
+                }
+                _uiState.update { current ->
+                    current.copy(officialTradeCooldownSeconds = remaining)
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
     companion object {
         const val MAX_NOTE_LENGTH: Int = 240
         const val DEFAULT_UI_REFRESH_MIN_INTERVAL_MILLIS: Long = 3_000L
+        private const val DEFAULT_OFFICIAL_RETRY_SECONDS: Long = 60L
         private const val AUTO_SAVE_DEBOUNCE_MILLIS: Long = 700L
         private const val SAVED_FEEDBACK_DURATION_MILLIS: Long = 2200L
     }
 }
 
 /**
- * Remembers a [SellerTrustStateHolder] scoped to `(uid, usernameHint, repository)` and
+ * Remembers a [SellerTrustStateHolder] scoped to `(uid, usernameHint, repository, officialTradeRepository)` and
  * triggers the initial inspection automatically.
  */
 @Composable
@@ -736,16 +991,19 @@ fun rememberSellerTrustState(
     usernameHint: String,
     avatarUrlHint: String = "",
     repository: SellerTrustRepository? = null,
+    officialTradeRepository: OfficialTradeRepository? = null,
 ): SellerTrustStateHolder {
     val resolvedRepo = rememberSellerTrustRepository(override = repository)
+    val resolvedOfficialRepo = rememberOfficialTradeRepository(override = officialTradeRepository)
     val scope = rememberCoroutineScope()
-    val holder = remember(resolvedRepo, uid, usernameHint, avatarUrlHint) {
+    val holder = remember(resolvedRepo, resolvedOfficialRepo, uid, usernameHint, avatarUrlHint) {
         SellerTrustStateHolder(
             repository = resolvedRepo,
             scope = scope,
             uid = uid,
             usernameHint = usernameHint,
             avatarUrlHint = avatarUrlHint,
+            officialTradeRepository = resolvedOfficialRepo,
         )
     }
     LaunchedEffect(holder) {
@@ -763,6 +1021,7 @@ class SellerTrustViewModel(
     uid: Long,
     usernameHint: String,
     avatarUrlHint: String = "",
+    officialTradeRepository: OfficialTradeRepository = NoOpOfficialTradeRepository,
 ) : ViewModel() {
 
     val stateHolder: SellerTrustStateHolder = SellerTrustStateHolder(
@@ -771,6 +1030,7 @@ class SellerTrustViewModel(
         uid = uid,
         usernameHint = usernameHint,
         avatarUrlHint = avatarUrlHint,
+        officialTradeRepository = officialTradeRepository,
     )
 
     val uiState: StateFlow<SellerTrustUiState> = stateHolder.uiState
@@ -780,6 +1040,7 @@ class SellerTrustViewModel(
     }
 
     fun refresh() = stateHolder.refresh()
+    fun refreshOfficialTrade() = stateHolder.refreshOfficialTrade()
     fun runDeepExposureSearch() = stateHolder.runDeepExposureSearch()
     fun scanMoreTradeTopics() = stateHolder.scanMoreTradeTopics()
     fun toggleTag(tag: TrustTag) = stateHolder.toggleTag(tag)
@@ -792,6 +1053,7 @@ class SellerTrustViewModel(
             uid: Long,
             usernameHint: String,
             avatarUrlHint: String = "",
+            officialTradeRepository: OfficialTradeRepository = NoOpOfficialTradeRepository,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -800,6 +1062,7 @@ class SellerTrustViewModel(
                     uid = uid,
                     usernameHint = usernameHint,
                     avatarUrlHint = avatarUrlHint,
+                    officialTradeRepository = officialTradeRepository,
                 ) as T
             }
         }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +40,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nodeseek.app.domain.trust.OfficialTradeLookup
+import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.trust.TrustRiskLevel
@@ -45,6 +49,7 @@ import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.pulsePressScale
+import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.flow.flowOf
 
 @Immutable
@@ -188,6 +193,7 @@ fun SellerTrustQuickBadge(
     compact: Boolean = false,
     enqueueIfUncached: Boolean = false,
     repository: SellerTrustRepository? = null,
+    officialTradeRepository: OfficialTradeRepository? = null,
 ) {
     val isInspection = LocalInspectionMode.current
     var cachedReport: SellerTrustReport? = null
@@ -216,6 +222,35 @@ fun SellerTrustQuickBadge(
     } else {
         TrustTag.NONE
     }
+
+    // Strictly zero-network official trade lookup: uses getCachedOnly / observeCachedOnly ONLY.
+    val officialUsername = cleanHint.removePrefix("@")
+        .ifBlank { cachedReport?.username?.trim()?.removePrefix("@").orEmpty() }
+    val cachedOfficialFound: OfficialTradeLookup.Found? = if (!isInspection && officialUsername.isNotEmpty()) {
+        val officialRepo = rememberOfficialTradeRepository(override = officialTradeRepository)
+        val isConfigured by officialRepo.isConfigured.collectAsStateWithLifecycle()
+        val signalEpoch by OfficialTradeUiSignalBus.epoch.collectAsStateWithLifecycle()
+        val observedFlow = remember(officialRepo, officialUsername) {
+            officialRepo.observeCachedOnly(officialUsername)
+        }
+        val observedCachedOfficial by observedFlow.collectAsStateWithLifecycle(initialValue = null)
+        val directCachedOfficial by produceState<OfficialTradeLookup.Found?>(
+            initialValue = null,
+            officialRepo,
+            officialUsername,
+            isConfigured,
+            signalEpoch,
+        ) {
+            value = if (isConfigured) officialRepo.getCachedOnly(officialUsername) else null
+        }
+        if (isConfigured) observedCachedOfficial ?: directCachedOfficial else null
+    } else {
+        null
+    }
+    val officialMarker = formatOfficialQuickBadgeMarker(
+        found = cachedOfficialFound,
+        compact = compact,
+    )
 
     val cachedRiskLevel = cachedReport
         ?.takeIf { !resolvedTag.isTagged && it.anyRemoteSucceeded }
@@ -287,5 +322,30 @@ fun SellerTrustQuickBadge(
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
+        if (officialMarker != null) {
+            val isDark = NodePulseThemeTokens.isDark
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(
+                        MaterialTheme.colorScheme.surface.copy(
+                            alpha = if (isDark) 0.48f else 0.72f,
+                        ),
+                    )
+                    .padding(
+                        horizontal = if (compact) 4.5.dp else 5.5.dp,
+                        vertical = if (compact) 0.5.dp else 1.dp,
+                    ),
+            ) {
+                Text(
+                    text = officialMarker,
+                    style = NodePulseThemeTokens.extraTypography.tabularBadge.withTabularNumbers(),
+                    fontWeight = FontWeight.Bold,
+                    color = tone.accent,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
     }
 }

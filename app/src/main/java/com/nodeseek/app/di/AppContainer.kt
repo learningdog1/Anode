@@ -28,6 +28,8 @@ import com.nodeseek.app.domain.repository.UserRepository
 import com.nodeseek.app.domain.restock.RestockMonitorController
 import com.nodeseek.app.domain.restock.RestockRepository
 import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.trust.NoOpOfficialTradeRepository
+import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.update.AppUpdateManager
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
@@ -56,6 +58,8 @@ interface AppContainer {
     val flareSolverrClient: FlareSolverrClient
     val activityRepository: ActivityRepository
     val sellerTrustRepository: SellerTrustRepository
+    val officialTradeRepository: OfficialTradeRepository
+        get() = NoOpOfficialTradeRepository
     val fleetRepository: FleetRepository
     val fleetWorkScheduler: FleetWorkScheduler
     val netBenchHistoryStore: NetBenchHistoryStore

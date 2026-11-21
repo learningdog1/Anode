@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.trust.ExposureHitTopic
+import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustReport
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.trust.TrustFetchStatus
@@ -145,11 +146,14 @@ fun SellerTrustCardSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     repository: SellerTrustRepository? = null,
+    officialTradeRepository: OfficialTradeRepository? = null,
+    onOpenSettings: (() -> Unit)? = null,
     stateHolder: SellerTrustStateHolder = rememberSellerTrustState(
         uid = uid,
         usernameHint = usernameHint,
         avatarUrlHint = avatarUrlHint,
         repository = repository,
+        officialTradeRepository = officialTradeRepository,
     ),
 ) {
     val uiState by stateHolder.uiState.collectAsStateWithLifecycle()
@@ -171,6 +175,7 @@ fun SellerTrustCardSheet(
         SellerTrustCardSheetContent(
             uiState = uiState,
             onRefresh = stateHolder::refresh,
+            onRefreshOfficialTrade = stateHolder::refreshOfficialTrade,
             onRunDeepSearch = stateHolder::runDeepExposureSearch,
             onScanMoreTopics = stateHolder::scanMoreTradeTopics,
             onToggleTag = stateHolder::toggleTag,
@@ -190,6 +195,13 @@ fun SellerTrustCardSheet(
                     startDm(targetUid, targetUsername)
                 }
             },
+            onOpenSettings = onOpenSettings?.let { openSettings ->
+                {
+                    onDismiss()
+                    openSettings()
+                }
+            },
+            officialTradeRepository = officialTradeRepository,
             onDismiss = onDismiss,
         )
     }
@@ -206,8 +218,11 @@ internal fun SellerTrustCardSheetContent(
     onOpenUserProfile: (Long, String) -> Unit,
     onStartDm: ((Long, String) -> Unit)?,
     onDismiss: () -> Unit,
+    onRefreshOfficialTrade: () -> Unit = {},
     onRunDeepSearch: () -> Unit = {},
     onScanMoreTopics: () -> Unit = {},
+    onOpenSettings: (() -> Unit)? = null,
+    officialTradeRepository: OfficialTradeRepository? = null,
 ) {
     val scrollState = rememberScrollState()
     val report = uiState.report
@@ -293,6 +308,12 @@ internal fun SellerTrustCardSheetContent(
             when (val status = uiState.loadStatus) {
                 SellerTrustLoadStatus.LOADING -> {
                     SellerTrustLoadingSkeleton()
+                    OfficialTradeSectionCard(
+                        uiState = uiState,
+                        onRefreshOfficialTrade = onRefreshOfficialTrade,
+                        onOpenSettings = onOpenSettings,
+                        officialTradeRepository = officialTradeRepository,
+                    )
                 }
 
                 SellerTrustLoadStatus.RATE_LIMITED,
@@ -326,6 +347,13 @@ internal fun SellerTrustCardSheetContent(
                             onRetry = onRefresh,
                         )
                     }
+
+                    OfficialTradeSectionCard(
+                        uiState = uiState,
+                        onRefreshOfficialTrade = onRefreshOfficialTrade,
+                        onOpenSettings = onOpenSettings,
+                        officialTradeRepository = officialTradeRepository,
+                    )
                 }
 
                 SellerTrustLoadStatus.FROM_CACHE,
@@ -351,6 +379,14 @@ internal fun SellerTrustCardSheetContent(
 
                         // 3. 4-Metric Bento Grid
                         SellerMetricsGrid(report = report)
+
+                        // 3a. NodeSeek Official Trade Platform Stats
+                        OfficialTradeSectionCard(
+                            uiState = uiState,
+                            onRefreshOfficialTrade = onRefreshOfficialTrade,
+                            onOpenSettings = onOpenSettings,
+                            officialTradeRepository = officialTradeRepository,
+                        )
 
                         // 3b. On-Demand Historical Deep Search & Google Site Search Card (Anti-Rate-Limit)
                         ExposureDeepSearchActionCard(
