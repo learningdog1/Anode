@@ -52,6 +52,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -97,6 +98,8 @@ internal fun ProbePanelManagerSheet(
     onToggleOfflineAlert: (ProbePanelConfig, Boolean) -> Unit,
     onUpdateMonitorSettings: (FleetMonitorSettings) -> Unit,
     onDismiss: () -> Unit,
+    saveError: String? = null,
+    onClearSaveError: () -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.90f).dp
@@ -104,6 +107,7 @@ internal fun ProbePanelManagerSheet(
 
     var editingPanelId by remember { mutableStateOf<String?>(null) }
     var showForm by remember(panels.isEmpty()) { mutableStateOf(panels.isEmpty()) }
+    var pendingSavedPanelId by remember { mutableStateOf<String?>(null) }
     var nameInput by remember { mutableStateOf("") }
     var urlInput by remember { mutableStateOf("") }
     var panelType by remember { mutableStateOf(ProbePanelType.AUTO) }
@@ -112,8 +116,21 @@ internal fun ProbePanelManagerSheet(
     var notifyOnOffline by remember { mutableStateOf(true) }
     var notifyOnRecovery by remember { mutableStateOf(false) }
 
+    LaunchedEffect(panels, saveError, pendingSavedPanelId) {
+        val targetId = pendingSavedPanelId ?: return@LaunchedEffect
+        if (saveError != null) {
+            pendingSavedPanelId = null
+            showForm = true
+        } else if (panels.any { it.id == targetId }) {
+            pendingSavedPanelId = null
+            showForm = false
+            onClearTestState()
+        }
+    }
+
     fun resetFormForNew() {
         editingPanelId = null
+        pendingSavedPanelId = null
         nameInput = ""
         urlInput = ""
         panelType = ProbePanelType.AUTO
@@ -122,11 +139,13 @@ internal fun ProbePanelManagerSheet(
         notifyOnOffline = true
         notifyOnRecovery = false
         onClearTestState()
+        onClearSaveError()
         showForm = true
     }
 
     fun loadPanelIntoForm(panel: ProbePanelConfig) {
         editingPanelId = panel.id
+        pendingSavedPanelId = null
         nameInput = panel.name
         urlInput = panel.baseUrl
         panelType = panel.panelType
@@ -135,6 +154,7 @@ internal fun ProbePanelManagerSheet(
         notifyOnOffline = panel.notifyOnOffline
         notifyOnRecovery = panel.notifyOnRecovery
         onClearTestState()
+        onClearSaveError()
         showForm = true
     }
 
@@ -459,6 +479,14 @@ internal fun ProbePanelManagerSheet(
                             }
                         }
 
+                        saveError?.let { err ->
+                            Text(
+                                text = err,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -481,9 +509,10 @@ internal fun ProbePanelManagerSheet(
                             }
                             Button(
                                 onClick = {
-                                    onSavePanel(buildCandidateConfig())
-                                    showForm = false
-                                    onClearTestState()
+                                    onClearSaveError()
+                                    val candidate = buildCandidateConfig()
+                                    pendingSavedPanelId = candidate.id
+                                    onSavePanel(candidate)
                                 },
                                 enabled = urlInput.isNotBlank(),
                                 shape = CircleShape,

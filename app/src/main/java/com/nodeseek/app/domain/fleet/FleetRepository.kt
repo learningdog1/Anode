@@ -1,7 +1,9 @@
 package com.nodeseek.app.domain.fleet
 
 import com.nodeseek.app.data.valuation.FxRatesState
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.time.LocalDate
 
 /**
@@ -9,6 +11,16 @@ import java.time.LocalDate
  * and deduplicated background alert evaluation.
  */
 interface FleetRepository {
+    /**
+     * Whether persisted state from disk has finished loading into the reactive flows.
+     *
+     * Disk-backed implementations start at `false` on cold start and flip to `true` only after
+     * persisted records have been loaded and published, preventing background schedulers from
+     * mistaking pre-load empty flows for "zero monitoring targets".
+     */
+    val isPersistedStateLoadedFlow: StateFlow<Boolean>
+        get() = DEFAULT_PERSISTED_STATE_LOADED_FLOW
+
     val panelsFlow: StateFlow<List<ProbePanelConfig>>
     val snapshotsFlow: StateFlow<List<ProbeServerSnapshot>>
     val assetsFlow: StateFlow<List<VpsAssetRecord>>
@@ -42,4 +54,9 @@ interface FleetRepository {
         checkedPanels: Int? = null,
         failedPanels: Int = 0,
     ): FleetMonitorCheckReport
+
+    companion object {
+        private val DEFAULT_PERSISTED_STATE_LOADED_FLOW: StateFlow<Boolean> =
+            MutableStateFlow(true).asStateFlow()
+    }
 }

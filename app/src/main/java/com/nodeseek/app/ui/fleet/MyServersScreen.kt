@@ -287,6 +287,8 @@ fun MyServersScreen(
             onToggleOfflineAlert = resolvedViewModel::togglePanelOfflineAlert,
             onUpdateMonitorSettings = resolvedViewModel::updateMonitorSettings,
             onDismiss = resolvedViewModel::closePanelManager,
+            saveError = uiState.panelSaveError,
+            onClearSaveError = resolvedViewModel::clearPanelSaveError,
         )
     }
 
@@ -296,6 +298,8 @@ fun MyServersScreen(
             availableProbes = uiState.snapshots,
             onSave = resolvedViewModel::saveAsset,
             onDismiss = resolvedViewModel::closeAssetEditor,
+            saveError = uiState.assetSaveError,
+            onClearSaveError = resolvedViewModel::clearAssetSaveError,
         )
     }
 

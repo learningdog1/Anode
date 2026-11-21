@@ -93,6 +93,8 @@ internal fun AssetEditorBottomSheet(
     availableProbes: List<ProbeServerSnapshot>,
     onSave: (VpsAssetRecord) -> Unit,
     onDismiss: () -> Unit,
+    saveError: String? = null,
+    onClearSaveError: () -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.92f).dp
@@ -442,7 +444,7 @@ internal fun AssetEditorBottomSheet(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                validationError?.let { err ->
+                (validationError ?: saveError)?.let { err ->
                     Text(
                         text = err,
                         style = MaterialTheme.typography.labelMedium,
@@ -490,6 +492,7 @@ internal fun AssetEditorBottomSheet(
                             }
                             else -> {
                                 validationError = null
+                                onClearSaveError()
                                 onSave(
                                     VpsAssetRecord(
                                         id = draft.editingId ?: UUID.randomUUID().toString(),

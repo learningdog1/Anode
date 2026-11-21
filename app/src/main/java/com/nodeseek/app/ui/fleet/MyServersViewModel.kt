@@ -26,6 +26,7 @@ import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -127,7 +128,9 @@ data class MyServersUiState(
     val panelErrors: Map<String, String> = emptyMap(),
     val showPanelManagerSheet: Boolean = false,
     val panelTestState: PanelTestUiState = PanelTestUiState.Idle,
+    val panelSaveError: String? = null,
     val assetEditorDraft: AssetEditorDraft? = null,
+    val assetSaveError: String? = null,
     val salePostAsset: VpsAssetRecord? = null,
     val bindingProbeAsset: VpsAssetRecord? = null,
 )
@@ -147,7 +150,9 @@ class MyServersViewModel(
     private val _selectedPanelIdFilter = MutableStateFlow<String?>(null)
     private val _showPanelManagerSheet = MutableStateFlow(false)
     private val _panelTestState = MutableStateFlow<PanelTestUiState>(PanelTestUiState.Idle)
+    private val _panelSaveError = MutableStateFlow<String?>(null)
     private val _assetEditorDraft = MutableStateFlow<AssetEditorDraft?>(null)
+    private val _assetSaveError = MutableStateFlow<String?>(null)
     private val _salePostAsset = MutableStateFlow<VpsAssetRecord?>(null)
     private val _bindingProbeAsset = MutableStateFlow<VpsAssetRecord?>(null)
 
@@ -164,6 +169,8 @@ class MyServersViewModel(
 
     private data class SheetModalState(
         val editorDraft: AssetEditorDraft?,
+        val assetSaveError: String?,
+        val panelSaveError: String?,
         val saleAsset: VpsAssetRecord?,
         val bindingAsset: VpsAssetRecord?,
     )
@@ -196,11 +203,15 @@ class MyServersViewModel(
 
     private val modalFlow = combine(
         _assetEditorDraft,
+        _assetSaveError,
+        _panelSaveError,
         _salePostAsset,
         _bindingProbeAsset,
-    ) { draft, saleAsset, bindingAsset ->
+    ) { draft, assetErr, panelErr, saleAsset, bindingAsset ->
         SheetModalState(
             editorDraft = draft,
+            assetSaveError = assetErr,
+            panelSaveError = panelErr,
             saleAsset = saleAsset,
             bindingAsset = bindingAsset,
         )
@@ -282,26 +293,40 @@ class MyServersViewModel(
             panelErrors = repo.panelErrors,
             showPanelManagerSheet = nav.showPanelManager,
             panelTestState = nav.panelTestState,
+            panelSaveError = modals.panelSaveError,
             assetEditorDraft = modals.editorDraft,
+            assetSaveError = modals.assetSaveError,
             salePostAsset = modals.saleAsset,
             bindingProbeAsset = modals.bindingAsset,
         )
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
+        started = SharingStarted.Eagerly,
         initialValue = MyServersUiState(selectedTab = initialTab),
     )
 
     init {
         viewModelScope.launch {
-            fleetRepository.loadPersistedState()
-            syncBackgroundSchedule()
-            if (fleetRepository.panelsFlow.value.any { it.enabled }) {
-                fleetRepository.refreshAllPanels()
+            try {
+                fleetRepository.loadPersistedState()
+                syncBackgroundSchedule()
+                if (fleetRepository.panelsFlow.value.any { it.enabled }) {
+                    fleetRepository.refreshAllPanels()
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("加载服务器账本失败：${formatPersistenceError(t)}")
             }
         }
         viewModelScope.launch {
-            exchangeRateRepository.ensureFreshRates(force = false)
+            try {
+                exchangeRateRepository.ensureFreshRates(force = false)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                // Offline fallback rates remain active.
+            }
         }
     }
 
@@ -319,97 +344,154 @@ class MyServersViewModel(
 
     fun openPanelManager() {
         _panelTestState.value = PanelTestUiState.Idle
+        _panelSaveError.value = null
         _showPanelManagerSheet.value = true
     }
 
     fun closePanelManager() {
         _showPanelManagerSheet.value = false
         _panelTestState.value = PanelTestUiState.Idle
+        _panelSaveError.value = null
     }
 
     fun clearPanelTestState() {
         _panelTestState.value = PanelTestUiState.Idle
     }
 
+    fun clearPanelSaveError() {
+        _panelSaveError.value = null
+    }
+
     fun testPanelConnection(config: ProbePanelConfig) {
         viewModelScope.launch {
             _panelTestState.value = PanelTestUiState.Testing
-            val result = fleetRepository.testPanelConnection(config)
+            val result = try {
+                fleetRepository.testPanelConnection(config)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                ProbeConnectivityResult(
+                    success = false,
+                    errorMessage = t.message?.takeIf { it.isNotBlank() } ?: "连接测试失败",
+                )
+            }
             _panelTestState.value = PanelTestUiState.Completed(result)
         }
     }
 
     fun savePanel(config: ProbePanelConfig) {
+        _panelSaveError.value = null
         viewModelScope.launch {
-            val saved = fleetRepository.upsertPanel(config)
-            syncBackgroundSchedule()
-            _snackbarChannel.trySend("已保存探针面板「${saved.name}」")
-            fleetRepository.refreshPanel(saved.id).onFailure { err ->
-                _snackbarChannel.trySend("同步失败：${err.message ?: "请检查网络或令牌"}")
+            try {
+                val saved = fleetRepository.upsertPanel(config)
+                _panelSaveError.value = null
+                syncBackgroundSchedule()
+                _snackbarChannel.trySend("已保存探针面板「${saved.name}」")
+                fleetRepository.refreshPanel(saved.id).onFailure { err ->
+                    _snackbarChannel.trySend("同步失败：${err.message ?: "请检查网络或令牌"}")
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                val message = "保存探针面板失败：${formatPersistenceError(t)}"
+                _panelSaveError.value = message
+                _snackbarChannel.trySend(message)
             }
         }
     }
 
     fun deletePanel(panelId: String) {
         viewModelScope.launch {
-            fleetRepository.deletePanel(panelId)
-            syncBackgroundSchedule()
-            _snackbarChannel.trySend("已移除探针面板")
+            try {
+                fleetRepository.deletePanel(panelId)
+                syncBackgroundSchedule()
+                _snackbarChannel.trySend("已移除探针面板")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("移除探针面板失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
     fun togglePanelOfflineAlert(panel: ProbePanelConfig, notifyOnOffline: Boolean) {
         viewModelScope.launch {
-            fleetRepository.upsertPanel(panel.copy(notifyOnOffline = notifyOnOffline))
-            syncBackgroundSchedule()
+            try {
+                fleetRepository.upsertPanel(panel.copy(notifyOnOffline = notifyOnOffline))
+                syncBackgroundSchedule()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("更新离线告警设置失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
     fun refreshAllProbes() {
         viewModelScope.launch {
-            val summary = fleetRepository.refreshAllPanels()
-            if (summary.refreshedPanelCount == 0) {
-                _snackbarChannel.trySend("尚未添加启用的探针面板")
-            } else if (summary.failedPanelErrors.isEmpty()) {
-                _snackbarChannel.trySend("已同步 ${summary.snapshots.size} 台探针节点")
-            } else {
-                _snackbarChannel.trySend(
-                    "已同步 ${summary.succeededPanelCount}/${summary.refreshedPanelCount} 个面板，部分面板异常",
-                )
+            try {
+                val summary = fleetRepository.refreshAllPanels()
+                if (summary.refreshedPanelCount == 0) {
+                    _snackbarChannel.trySend("尚未添加启用的探针面板")
+                } else if (summary.failedPanelErrors.isEmpty()) {
+                    _snackbarChannel.trySend("已同步 ${summary.snapshots.size} 台探针节点")
+                } else {
+                    _snackbarChannel.trySend(
+                        "已同步 ${summary.succeededPanelCount}/${summary.refreshedPanelCount} 个面板，部分面板异常",
+                    )
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("同步探针数据失败：${formatPersistenceError(t)}")
             }
         }
     }
 
     fun refreshFxRates() {
         viewModelScope.launch {
-            exchangeRateRepository.refreshOnline()
-            _snackbarChannel.trySend("已刷新实时汇率")
+            try {
+                exchangeRateRepository.refreshOnline()
+                _snackbarChannel.trySend("已刷新实时汇率")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("刷新汇率失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
     fun updateMonitorSettings(settings: FleetMonitorSettings) {
         viewModelScope.launch {
-            fleetRepository.updateMonitorSettings(settings)
-            syncBackgroundSchedule()
-            _snackbarChannel.trySend(
-                if (settings.backgroundMonitorEnabled) {
-                    "后台巡检已开启（每 ${settings.pollIntervalMinutes} 分钟）"
-                } else {
-                    "后台巡检已关闭"
-                },
-            )
+            try {
+                fleetRepository.updateMonitorSettings(settings)
+                syncBackgroundSchedule()
+                _snackbarChannel.trySend(
+                    if (settings.backgroundMonitorEnabled) {
+                        "后台巡检已开启（每 ${settings.pollIntervalMinutes} 分钟）"
+                    } else {
+                        "后台巡检已关闭"
+                    },
+                )
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("保存后台巡检设置失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
     // ── Asset Ledger Actions ──────────────────────────────────────────────────
 
     fun openAddAssetSheet() {
+        _assetSaveError.value = null
         _assetEditorDraft.value = AssetEditorDraft(
             expiryDateIso = AssetEditorDraft.defaultExpiryDateIso(todayProvider()),
         )
     }
 
     fun openEditAssetSheet(asset: VpsAssetRecord) {
+        _assetSaveError.value = null
         _assetEditorDraft.value = AssetEditorDraft.fromRecord(asset)
     }
 
@@ -423,6 +505,7 @@ class MyServersViewModel(
             (bytes / (1024.0 * 1024.0 * 1024.0)).toInt().toString()
         }.orEmpty()
 
+        _assetSaveError.value = null
         _selectedTab.value = MyServersTab.ASSETS
         _assetEditorDraft.value = AssetEditorDraft(
             nickname = snapshot.name,
@@ -460,6 +543,7 @@ class MyServersViewModel(
             BillingCyclePreset.TRIENNIAL -> today.plusYears(3)
             else -> today.plusYears(1)
         }
+        _assetSaveError.value = null
         _selectedTab.value = MyServersTab.ASSETS
         _assetEditorDraft.value = AssetEditorDraft(
             nickname = parsed.nickname,
@@ -475,24 +559,62 @@ class MyServersViewModel(
         )
     }
 
+    fun clearAssetSaveError() {
+        _assetSaveError.value = null
+    }
+
     fun closeAssetEditor() {
+        _assetSaveError.value = null
         _assetEditorDraft.value = null
     }
 
     fun saveAsset(asset: VpsAssetRecord) {
+        val previousDraft = _assetEditorDraft.value
+        val preservedEditingId = when {
+            previousDraft != null -> previousDraft.editingId
+            fleetRepository.assetsFlow.value.any { it.id == asset.id } -> asset.id
+            else -> null
+        }
+        val draftFromSubmission = AssetEditorDraft.fromRecord(asset).copy(
+            editingId = preservedEditingId,
+            customCycleDays = (
+                asset.customCycleDays
+                    ?: previousDraft?.customCycleDays?.toIntOrNull()
+                    ?: 365
+                ).toString(),
+        )
+        _assetEditorDraft.value = draftFromSubmission
+        _assetSaveError.value = null
+
         viewModelScope.launch {
-            val saved = fleetRepository.upsertAsset(asset)
-            _assetEditorDraft.value = null
-            syncBackgroundSchedule()
-            _snackbarChannel.trySend("已保存资产「${saved.nickname}」")
+            try {
+                val saved = fleetRepository.upsertAsset(asset)
+                _assetSaveError.value = null
+                _assetEditorDraft.value = null
+                syncBackgroundSchedule()
+                _snackbarChannel.trySend("已保存资产「${saved.nickname}」")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                val errorMessage = "保存资产失败：${formatPersistenceError(t)}"
+                _assetSaveError.value = errorMessage
+                _assetEditorDraft.value = draftFromSubmission
+                _snackbarChannel.trySend(errorMessage)
+            }
         }
     }
 
     fun deleteAsset(assetId: String) {
         viewModelScope.launch {
-            fleetRepository.deleteAsset(assetId)
-            syncBackgroundSchedule()
-            _snackbarChannel.trySend("已删除服务器资产")
+            try {
+                fleetRepository.deleteAsset(assetId)
+                syncBackgroundSchedule()
+                _snackbarChannel.trySend("已删除服务器资产")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("删除服务器资产失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
@@ -506,9 +628,15 @@ class MyServersViewModel(
 
     fun bindAssetToProbe(assetId: String, probeKey: String?) {
         viewModelScope.launch {
-            fleetRepository.linkAssetToProbe(assetId, probeKey)
-            _bindingProbeAsset.value = null
-            _snackbarChannel.trySend(if (probeKey != null) "已绑定探针节点" else "已解除探针绑定")
+            try {
+                fleetRepository.linkAssetToProbe(assetId, probeKey)
+                _bindingProbeAsset.value = null
+                _snackbarChannel.trySend(if (probeKey != null) "已绑定探针节点" else "已解除探针绑定")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("更新探针绑定失败：${formatPersistenceError(t)}")
+            }
         }
     }
 
@@ -527,10 +655,26 @@ class MyServersViewModel(
 
     private fun syncBackgroundSchedule() {
         val scheduler = workScheduler ?: return
+        if (!fleetRepository.isPersistedStateLoadedFlow.value) return
         val settings = fleetRepository.monitorSettingsFlow.value
-        val hasTargets = fleetRepository.panelsFlow.value.any { it.enabled && it.notifyOnOffline } ||
-            fleetRepository.assetsFlow.value.any { it.remindDaysBeforeExpiry > 0 }
-        scheduler.sync(settings, hasTargets)
+        val hasTargets = FleetWorkScheduler.hasActiveTargets(
+            panels = fleetRepository.panelsFlow.value,
+            assets = fleetRepository.assetsFlow.value,
+        )
+        scheduler.sync(
+            settings = settings,
+            hasActiveTargets = hasTargets,
+            isPersistedStateLoaded = true,
+        )
+    }
+
+    private fun formatPersistenceError(t: Throwable): String {
+        val raw = t.message?.trim().orEmpty()
+        return if (raw.isNotEmpty() && raw.any { it.code in 0x4E00..0x9FFF }) {
+            raw
+        } else {
+            "本地账本写入失败，请检查存储空间或目录权限"
+        }
     }
 
     private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)

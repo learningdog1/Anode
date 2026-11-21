@@ -13,11 +13,16 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.fleet.ProbePanelConfig
+import com.nodeseek.app.domain.fleet.VpsAssetRecord
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
@@ -95,41 +100,83 @@ class FleetWorkScheduler internal constructor(
     )
 
     /**
-     * Convenience entrypoint for [com.nodeseek.app.NodePulseApp] startup: observes repository settings, panels,
-     * and assets, keeping WorkManager periodic work automatically synchronized.
+     * Convenience entrypoint for [com.nodeseek.app.NodePulseApp] startup: triggers loading of
+     * persisted repository state and observes settings, panels, and assets, keeping WorkManager
+     * periodic work automatically synchronized without cancelling already-configured work while
+     * persisted state is still unloaded on cold start.
      */
     fun observeRepository(
         scope: CoroutineScope,
         repository: FleetRepository,
     ) {
-        val hasActiveTargetsFlow = combine(
-            repository.panelsFlow,
-            repository.assetsFlow,
-        ) { panels, assets ->
-            panels.any { it.enabled && it.notifyOnOffline } ||
-                assets.any { it.remindDaysBeforeExpiry > 0 }
+        synchronized(observerLock) {
+            observerJob?.cancel()
+            observerJob = scope.launch {
+                launch {
+                    try {
+                        repository.loadPersistedState()
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (_: Throwable) {
+                        // Keep isPersistedStateLoadedFlow == false on transient read failure so
+                        // existing WorkManager periodic monitoring is never wrongly cancelled.
+                    }
+                }
+
+                combine(
+                    repository.isPersistedStateLoadedFlow,
+                    repository.monitorSettingsFlow,
+                    repository.panelsFlow,
+                    repository.assetsFlow,
+                ) { isLoaded, settings, panels, assets ->
+                    if (!isLoaded) {
+                        null
+                    } else {
+                        val hasTargets = hasActiveTargets(panels, assets)
+                        Triple(settings, hasTargets, toSignature(settings, hasTargets))
+                    }
+                }
+                    .filterNotNull()
+                    .distinctUntilChanged { old, new -> old.third == new.third }
+                    .collect { (settings, hasTargets, _) ->
+                        sync(
+                            settings = settings,
+                            hasActiveTargets = hasTargets,
+                            isPersistedStateLoaded = true,
+                        )
+                    }
+            }
         }
-        observeMonitorSettings(
-            scope = scope,
-            settingsFlow = repository.monitorSettingsFlow,
-            hasActiveTargetsFlow = hasActiveTargetsFlow,
-        )
     }
 
     fun observeMonitorSettings(
         scope: CoroutineScope,
         settingsFlow: Flow<FleetMonitorSettings>,
         hasActiveTargetsFlow: Flow<Boolean>,
+        isPersistedStateLoadedFlow: Flow<Boolean> = flowOf(true),
     ) {
         synchronized(observerLock) {
             observerJob?.cancel()
             observerJob = scope.launch {
-                combine(settingsFlow, hasActiveTargetsFlow) { settings, hasTargets ->
-                    Triple(settings, hasTargets, toSignature(settings, hasTargets))
+                combine(
+                    isPersistedStateLoadedFlow,
+                    settingsFlow,
+                    hasActiveTargetsFlow,
+                ) { isLoaded, settings, hasTargets ->
+                    if (!isLoaded) {
+                        null
+                    } else {
+                        Triple(settings, hasTargets, toSignature(settings, hasTargets))
+                    }
                 }
+                    .filterNotNull()
                     .distinctUntilChanged { old, new -> old.third == new.third }
                     .collect { (settings, hasTargets, _) ->
-                        sync(settings, hasTargets)
+                        sync(
+                            settings = settings,
+                            hasActiveTargets = hasTargets,
+                            isPersistedStateLoaded = true,
+                        )
                     }
             }
         }
@@ -145,7 +192,11 @@ class FleetWorkScheduler internal constructor(
     fun sync(
         settings: FleetMonitorSettings,
         hasActiveTargets: Boolean = true,
+        isPersistedStateLoaded: Boolean = true,
     ) {
+        if (!isPersistedStateLoaded) {
+            return
+        }
         if (shouldSchedule(settings, hasActiveTargets)) {
             val request = buildPeriodicWorkRequest(settings)
             workManagerGateway.enqueueUniquePeriodicWork(
@@ -194,6 +245,13 @@ class FleetWorkScheduler internal constructor(
         const val MIN_INTERVAL_MINUTES = 15L
         const val MAX_INTERVAL_MINUTES = 360L
         private const val RETRY_BACKOFF_SECONDS = 30L
+
+        fun hasActiveTargets(
+            panels: List<ProbePanelConfig>,
+            assets: List<VpsAssetRecord>,
+        ): Boolean =
+            panels.any { it.enabled && it.notifyOnOffline } ||
+                assets.any { it.remindDaysBeforeExpiry > 0 }
 
         fun shouldSchedule(
             settings: FleetMonitorSettings,

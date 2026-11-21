@@ -31,6 +31,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.LocalDate
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -138,7 +143,7 @@ class FleetRepositoryImpl(
     private val storeFile: File,
     private val probeClient: ProbePanelClient = ProbePanelClient(),
     private val tokenCipher: FleetTokenCipher = FleetTokenCipherFactory.createDefault(
-        fallbackKeyFile = File(storeFile.parentFile, FALLBACK_KEY_FILE_NAME),
+        fallbackKeyFile = File(storeFile.absoluteFile.parentFile, FALLBACK_KEY_FILE_NAME),
     ),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
@@ -152,6 +157,9 @@ class FleetRepositoryImpl(
     private val mutex = Mutex()
     private var diskLoaded = false
     private var cachedPayload = FleetStorePayload()
+
+    private val _isPersistedStateLoadedFlow = MutableStateFlow(false)
+    override val isPersistedStateLoadedFlow: StateFlow<Boolean> = _isPersistedStateLoadedFlow.asStateFlow()
 
     private val _panelsFlow = MutableStateFlow<List<ProbePanelConfig>>(emptyList())
     override val panelsFlow: StateFlow<List<ProbePanelConfig>> = _panelsFlow.asStateFlow()
@@ -178,7 +186,6 @@ class FleetRepositoryImpl(
         withContext(ioDispatcher) {
             mutex.withLock {
                 ensureDiskLoadedLocked()
-                publishStateLocked()
             }
         }
     }
@@ -205,8 +212,9 @@ class FleetRepositoryImpl(
                     .plus(stored)
                     .sortedBy { it.createdAtEpochMillis }
 
-                cachedPayload = cachedPayload.copy(panels = updatedPanels)
-                writeStoreToDiskLocked(cachedPayload)
+                val nextPayload = cachedPayload.copy(panels = updatedPanels)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 publishStateLocked()
                 normalized
             }
@@ -234,13 +242,14 @@ class FleetRepositoryImpl(
                         .toSet(),
                 )
 
-                cachedPayload = cachedPayload.copy(
+                val nextPayload = cachedPayload.copy(
                     panels = updatedPanels,
                     snapshots = updatedSnapshots,
                     assets = updatedAssets,
                     alertTracker = updatedTracker,
                 )
-                writeStoreToDiskLocked(cachedPayload)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 _panelErrorsFlow.value = _panelErrorsFlow.value - panelId
                 publishStateLocked()
             }
@@ -284,7 +293,7 @@ class FleetRepositoryImpl(
                             seededOnlineMap.putIfAbsent(snap.probeKey, true)
                         }
                     }
-                    cachedPayload = cachedPayload.copy(
+                    val nextPayload = cachedPayload.copy(
                         panels = updatedPanels,
                         snapshots = updatedSnapshots,
                         alertTracker = cachedPayload.alertTracker.copy(
@@ -292,7 +301,8 @@ class FleetRepositoryImpl(
                         ),
                         lastSyncEpochMillis = now,
                     )
-                    writeStoreToDiskLocked(cachedPayload)
+                    writeStoreToDiskLocked(nextPayload)
+                    cachedPayload = nextPayload
                     _panelErrorsFlow.value = _panelErrorsFlow.value - panelId
                     publishStateLocked()
                 }
@@ -302,14 +312,17 @@ class FleetRepositoryImpl(
             } catch (t: Throwable) {
                 val errorMsg = t.message?.takeIf { it.isNotBlank() } ?: "同步失败"
                 mutex.withLock {
-                    ensureDiskLoadedLocked()
-                    val updatedPanels = cachedPayload.panels.map { stored ->
-                        if (stored.id == panelId) stored.copy(lastError = errorMsg) else stored
+                    runCatching {
+                        ensureDiskLoadedLocked()
+                        val updatedPanels = cachedPayload.panels.map { stored ->
+                            if (stored.id == panelId) stored.copy(lastError = errorMsg) else stored
+                        }
+                        val errorPayload = cachedPayload.copy(panels = updatedPanels)
+                        writeStoreToDiskLocked(errorPayload)
+                        cachedPayload = errorPayload
+                        publishStateLocked()
                     }
-                    cachedPayload = cachedPayload.copy(panels = updatedPanels)
-                    writeStoreToDiskLocked(cachedPayload)
                     _panelErrorsFlow.value = _panelErrorsFlow.value + (panelId to errorMsg)
-                    publishStateLocked()
                 }
                 Result.failure(t)
             }
@@ -383,7 +396,7 @@ class FleetRepositoryImpl(
                         seededOnlineMap.putIfAbsent(snap.probeKey, true)
                     }
                 }
-                cachedPayload = cachedPayload.copy(
+                val nextPayload = cachedPayload.copy(
                     panels = updatedPanels,
                     snapshots = retainedSnapshots + newSnapshots,
                     alertTracker = cachedPayload.alertTracker.copy(
@@ -391,7 +404,8 @@ class FleetRepositoryImpl(
                     ),
                     lastSyncEpochMillis = if (freshByPanelId.isNotEmpty()) now else cachedPayload.lastSyncEpochMillis,
                 )
-                writeStoreToDiskLocked(cachedPayload)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 _panelErrorsFlow.value = errors.toMap()
                 publishStateLocked()
                 _snapshotsFlow.value
@@ -442,8 +456,9 @@ class FleetRepositoryImpl(
                     .plus(normalized.toStored())
                     .sortedBy { it.createdAtEpochMillis }
 
-                cachedPayload = cachedPayload.copy(assets = updatedAssets)
-                writeStoreToDiskLocked(cachedPayload)
+                val nextPayload = cachedPayload.copy(assets = updatedAssets)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 publishStateLocked()
                 normalized
             }
@@ -460,11 +475,12 @@ class FleetRepositoryImpl(
                         .filterNot { it.startsWith(prefix) }
                         .toSet(),
                 )
-                cachedPayload = cachedPayload.copy(
+                val nextPayload = cachedPayload.copy(
                     assets = updatedAssets,
                     alertTracker = updatedTracker,
                 )
-                writeStoreToDiskLocked(cachedPayload)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 publishStateLocked()
             }
         }
@@ -483,8 +499,9 @@ class FleetRepositoryImpl(
                         stored
                     }
                 }
-                cachedPayload = cachedPayload.copy(assets = updatedAssets)
-                writeStoreToDiskLocked(cachedPayload)
+                val nextPayload = cachedPayload.copy(assets = updatedAssets)
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 publishStateLocked()
             }
         }
@@ -497,8 +514,9 @@ class FleetRepositoryImpl(
                 val clamped = settings.copy(
                     pollIntervalMinutes = settings.pollIntervalMinutes.coerceIn(15, 360),
                 )
-                cachedPayload = cachedPayload.copy(monitorSettings = clamped.toStored())
-                writeStoreToDiskLocked(cachedPayload)
+                val nextPayload = cachedPayload.copy(monitorSettings = clamped.toStored())
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
                 publishStateLocked()
             }
         }
@@ -532,10 +550,11 @@ class FleetRepositoryImpl(
                 failedPanels = failedPanels,
             )
 
-            cachedPayload = cachedPayload.copy(
+            val nextPayload = cachedPayload.copy(
                 alertTracker = evaluation.updatedTracker.toStored(),
             )
-            writeStoreToDiskLocked(cachedPayload)
+            writeStoreToDiskLocked(nextPayload)
+            cachedPayload = nextPayload
             publishStateLocked()
             evaluation.report
         }
@@ -543,28 +562,111 @@ class FleetRepositoryImpl(
 
     // ── Disk I/O & Mapping ────────────────────────────────────────────────────
 
+    @Throws(IOException::class)
     private fun ensureDiskLoadedLocked() {
         if (diskLoaded) return
-        diskLoaded = true
-        if (!storeFile.exists()) return
-        val loaded = runCatching {
+        if (storeFile.exists() && storeFile.isFile) {
             val content = storeFile.readText(Charsets.UTF_8)
-            if (content.isBlank()) null else json.decodeFromString<FleetStorePayload>(content)
-        }.getOrNull()
-        if (loaded != null) {
-            cachedPayload = loaded
+            if (content.isNotBlank()) {
+                val loaded = runCatching {
+                    json.decodeFromString<FleetStorePayload>(content)
+                }.getOrNull()
+                if (loaded != null) {
+                    cachedPayload = loaded
+                }
+            }
+        }
+        diskLoaded = true
+        publishStateLocked()
+        _isPersistedStateLoadedFlow.value = true
+    }
+
+    @Throws(IOException::class)
+    private fun writeStoreToDiskLocked(payload: FleetStorePayload) {
+        val targetFile = storeFile.absoluteFile
+        val parentDir = targetFile.parentFile
+            ?: throw IOException("无法解析本地账本存储目录: ${targetFile.path}")
+
+        if (parentDir.exists() && !parentDir.isDirectory) {
+            throw IOException("本地账本父路径不是有效目录: ${parentDir.path}")
+        }
+        if (!parentDir.exists() && !parentDir.mkdirs() && !parentDir.isDirectory) {
+            throw IOException("无法创建本地账本存储目录: ${parentDir.path}")
+        }
+        if (targetFile.exists() && (!targetFile.isFile || !targetFile.canWrite())) {
+            throw IOException("本地账本文件不可写: ${targetFile.path}")
+        }
+
+        val encodedBytes = try {
+            json.encodeToString(payload).toByteArray(Charsets.UTF_8)
+        } catch (t: Throwable) {
+            throw IOException("序列化服务器账本数据失败", t)
+        }
+
+        val tmpFile = File(parentDir, "${targetFile.name}.tmp")
+        if (tmpFile.exists() && tmpFile.isDirectory) {
+            throw IOException("本地账本临时路径异常: ${tmpFile.path}")
+        }
+
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(encodedBytes)
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
+            replaceStoreFileAtomically(tmpFile, targetFile, encodedBytes)
+        } catch (t: Throwable) {
+            runCatching {
+                if (tmpFile.exists() && tmpFile.isFile) {
+                    tmpFile.delete()
+                }
+            }
+            if (t is IOException) throw t
+            throw IOException("写入服务器账本文件失败: ${targetFile.path}", t)
         }
     }
 
-    private fun writeStoreToDiskLocked(payload: FleetStorePayload) {
-        runCatching {
-            storeFile.parentFile?.mkdirs()
-            val encoded = json.encodeToString(payload)
-            val tmpFile = File(storeFile.parentFile, "${storeFile.name}.tmp")
-            tmpFile.writeText(encoded, Charsets.UTF_8)
-            if (!tmpFile.renameTo(storeFile)) {
-                storeFile.writeText(encoded, Charsets.UTF_8)
-                tmpFile.delete()
+    @Throws(IOException::class)
+    private fun replaceStoreFileAtomically(
+        tmpFile: File,
+        targetFile: File,
+        encodedBytes: ByteArray,
+    ) {
+        val tmpPath = tmpFile.toPath()
+        val targetPath = targetFile.toPath()
+        try {
+            Files.move(
+                tmpPath,
+                targetPath,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+            return
+        } catch (_: AtomicMoveNotSupportedException) {
+            // Filesystem does not support ATOMIC_MOVE; try standard REPLACE_EXISTING move next.
+        }
+
+        try {
+            Files.move(
+                tmpPath,
+                targetPath,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+            return
+        } catch (moveErr: IOException) {
+            if (tmpFile.renameTo(targetFile)) {
+                return
+            }
+            try {
+                FileOutputStream(targetFile).use { fos ->
+                    fos.write(encodedBytes)
+                    fos.flush()
+                    runCatching { fos.fd.sync() }
+                }
+                runCatching { tmpFile.delete() }
+            } catch (fallbackErr: IOException) {
+                fallbackErr.addSuppressed(moveErr)
+                throw fallbackErr
             }
         }
     }
