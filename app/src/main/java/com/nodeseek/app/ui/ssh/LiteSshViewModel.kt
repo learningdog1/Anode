@@ -21,11 +21,16 @@ import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
+import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPresetFilter
+import com.nodeseek.app.domain.ssh.SshPresetFilterOption
 import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
+import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -133,6 +138,14 @@ data class LiteSshUiState(
      * independent from [isRunning] so iperf3 can be toggled while a benchmark script runs.
      */
     val isIperf3ServiceBusy: Boolean = false,
+    val serverSearchQuery: String = "",
+    val selectedServerGroupKey: String = SshServerGroupOption.KEY_ALL,
+    val isServerVaultExpanded: Boolean = false,
+    val showServerQuickPickerSheet: Boolean = false,
+    val presetSearchQuery: String = "",
+    val selectedPresetFilter: SshPresetFilter = SshPresetFilter.ALL,
+    val isPresetCatalogExpanded: Boolean = false,
+    val showPresetQuickPickerSheet: Boolean = false,
 ) {
     val allPresets: List<SshScriptPreset>
         get() = builtInPresets + customPresets.map { it.toScriptPreset() }
@@ -141,9 +154,53 @@ data class LiteSshUiState(
         get() = selectedServerId?.let { id -> servers.firstOrNull { it.id == id } }
             ?: servers.firstOrNull()
 
+    val serverGroupOptions: List<SshServerGroupOption>
+        get() = SshVaultCatalogFilter.buildServerGroupOptions(servers)
+
+    val effectiveServerGroupKey: String
+        get() = SshVaultCatalogFilter.resolveEffectiveServerGroupKey(
+            selectedGroupKey = selectedServerGroupKey,
+            options = serverGroupOptions,
+        )
+
+    val filteredServers: List<SshServerProfile>
+        get() = SshVaultCatalogFilter.filterAndSortServers(
+            servers = servers,
+            selectedServerId = selectedServer?.id,
+            searchQuery = serverSearchQuery,
+            selectedGroupKey = effectiveServerGroupKey,
+            pinSelectedFirst = true,
+        )
+
+    val inlineVisibleServers: List<SshServerProfile>
+        get() = SshVaultCatalogFilter.visibleServersForInlineSection(
+            filteredServers = filteredServers,
+            expanded = isServerVaultExpanded,
+            searchQuery = serverSearchQuery,
+        )
+
     val selectedPreset: SshScriptPreset
         get() = allPresets.firstOrNull { it.id == selectedPresetId }
             ?: builtInPresets.first()
+
+    val presetFilterOptions: List<SshPresetFilterOption>
+        get() = SshVaultCatalogFilter.buildPresetFilterOptions(allPresets)
+
+    val filteredPresets: List<SshScriptPreset>
+        get() = SshVaultCatalogFilter.filterAndSortPresets(
+            presets = allPresets,
+            selectedPresetId = selectedPreset.id,
+            searchQuery = presetSearchQuery,
+            filter = selectedPresetFilter,
+            pinSelectedFirst = true,
+        )
+
+    val inlineVisiblePresets: List<SshScriptPreset>
+        get() = SshVaultCatalogFilter.visiblePresetsForInlineSection(
+            filteredPresets = filteredPresets,
+            expanded = isPresetCatalogExpanded,
+            searchQuery = presetSearchQuery,
+        )
 
     val selectedPresetFlagIds: Set<String>
         get() = enabledFlagIdsByPreset[selectedPreset.id] ?: selectedPreset.defaultEnabledFlagIds
@@ -363,6 +420,14 @@ class LiteSshViewModel(
         get() = sessionManager.consoleStreamHandle
 
     fun selectServer(serverId: String) = sessionManager.selectServer(serverId)
+    fun updateServerSearchQuery(query: String) = sessionManager.updateServerSearchQuery(query)
+    fun clearServerSearchQuery() = sessionManager.clearServerSearchQuery()
+    fun selectServerGroup(groupKey: String) = sessionManager.selectServerGroup(groupKey)
+    fun setServerVaultExpanded(expanded: Boolean) = sessionManager.setServerVaultExpanded(expanded)
+    fun toggleServerVaultExpanded() = sessionManager.toggleServerVaultExpanded()
+    fun openServerQuickPickerSheet() = sessionManager.openServerQuickPickerSheet()
+    fun dismissServerQuickPickerSheet() = sessionManager.dismissServerQuickPickerSheet()
+
     fun openAddServerDialog() = sessionManager.openAddServerDialog()
     fun openEditServerDialog(profile: SshServerProfile) = sessionManager.openEditServerDialog(profile)
     fun dismissServerEditor() = sessionManager.dismissServerEditor()
@@ -370,6 +435,14 @@ class LiteSshViewModel(
     fun deleteServer(serverId: String) = sessionManager.deleteServer(serverId)
 
     fun selectPreset(presetId: String) = sessionManager.selectPreset(presetId)
+    fun updatePresetSearchQuery(query: String) = sessionManager.updatePresetSearchQuery(query)
+    fun clearPresetSearchQuery() = sessionManager.clearPresetSearchQuery()
+    fun selectPresetFilter(filter: SshPresetFilter) = sessionManager.selectPresetFilter(filter)
+    fun setPresetCatalogExpanded(expanded: Boolean) = sessionManager.setPresetCatalogExpanded(expanded)
+    fun togglePresetCatalogExpanded() = sessionManager.togglePresetCatalogExpanded()
+    fun openPresetQuickPickerSheet() = sessionManager.openPresetQuickPickerSheet()
+    fun dismissPresetQuickPickerSheet() = sessionManager.dismissPresetQuickPickerSheet()
+
     fun togglePresetFlag(presetId: String, flagId: String) = sessionManager.togglePresetFlag(presetId, flagId)
     fun toggleAutoRespondPrompts(enabled: Boolean) = sessionManager.toggleAutoRespondPrompts(enabled)
 
@@ -382,7 +455,8 @@ class LiteSshViewModel(
         tabTitle: String,
         description: String,
         command: String,
-    ) = sessionManager.saveCustomPreset(id, name, tabTitle, description, command)
+        category: SshPresetCategory = SshPresetCategory.CUSTOM,
+    ) = sessionManager.saveCustomPreset(id, name, tabTitle, description, command, category)
     fun deleteCustomPreset(presetId: String) = sessionManager.deleteCustomPreset(presetId)
 
     fun runSelectedPreset() = sessionManager.runSelectedPreset()

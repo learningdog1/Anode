@@ -21,14 +21,17 @@ import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPresetFilter
 import com.nodeseek.app.domain.ssh.SshPtyResizeCallbackContext
 import com.nodeseek.app.domain.ssh.SshPtyResizer
 import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
+import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshStageDetector
+import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -148,6 +151,34 @@ class LiteSshSessionManager(
         _uiState.update { it.copy(selectedServerId = serverId) }
     }
 
+    fun updateServerSearchQuery(query: String) {
+        _uiState.update { it.copy(serverSearchQuery = query) }
+    }
+
+    fun clearServerSearchQuery() {
+        _uiState.update { it.copy(serverSearchQuery = "") }
+    }
+
+    fun selectServerGroup(groupKey: String) {
+        _uiState.update { it.copy(selectedServerGroupKey = groupKey) }
+    }
+
+    fun setServerVaultExpanded(expanded: Boolean) {
+        _uiState.update { it.copy(isServerVaultExpanded = expanded) }
+    }
+
+    fun toggleServerVaultExpanded() {
+        _uiState.update { it.copy(isServerVaultExpanded = !it.isServerVaultExpanded) }
+    }
+
+    fun openServerQuickPickerSheet() {
+        _uiState.update { it.copy(showServerQuickPickerSheet = true) }
+    }
+
+    fun dismissServerQuickPickerSheet() {
+        _uiState.update { it.copy(showServerQuickPickerSheet = false) }
+    }
+
     fun openAddServerDialog() {
         _uiState.update { it.copy(showServerEditor = true, editingServer = null) }
     }
@@ -163,7 +194,8 @@ class LiteSshSessionManager(
     fun saveServer(draft: SshServerDraft) {
         externalScope.launch {
             runCatching {
-                vaultRepository.saveServer(draft)
+                val normalizedDraft = SshVaultCatalogFilter.normalizeDraftForPersistence(draft)
+                vaultRepository.saveServer(normalizedDraft)
             }.onSuccess { saved ->
                 _uiState.update {
                     it.copy(
@@ -192,6 +224,34 @@ class LiteSshSessionManager(
         _uiState.update { state ->
             state.copy(selectedPresetId = presetId)
         }
+    }
+
+    fun updatePresetSearchQuery(query: String) {
+        _uiState.update { it.copy(presetSearchQuery = query) }
+    }
+
+    fun clearPresetSearchQuery() {
+        _uiState.update { it.copy(presetSearchQuery = "") }
+    }
+
+    fun selectPresetFilter(filter: SshPresetFilter) {
+        _uiState.update { it.copy(selectedPresetFilter = filter) }
+    }
+
+    fun setPresetCatalogExpanded(expanded: Boolean) {
+        _uiState.update { it.copy(isPresetCatalogExpanded = expanded) }
+    }
+
+    fun togglePresetCatalogExpanded() {
+        _uiState.update { it.copy(isPresetCatalogExpanded = !it.isPresetCatalogExpanded) }
+    }
+
+    fun openPresetQuickPickerSheet() {
+        _uiState.update { it.copy(showPresetQuickPickerSheet = true) }
+    }
+
+    fun dismissPresetQuickPickerSheet() {
+        _uiState.update { it.copy(showPresetQuickPickerSheet = false) }
     }
 
     fun togglePresetFlag(presetId: String, flagId: String) {
@@ -241,6 +301,7 @@ class LiteSshSessionManager(
         tabTitle: String,
         description: String,
         command: String,
+        category: SshPresetCategory = SshPresetCategory.CUSTOM,
     ) {
         externalScope.launch {
             runCatching {
@@ -251,6 +312,7 @@ class LiteSshSessionManager(
                         tabTitle = tabTitle,
                         description = description,
                         command = command,
+                        category = category,
                     ),
                 )
             }.onSuccess { saved ->

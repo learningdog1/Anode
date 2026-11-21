@@ -59,9 +59,16 @@ data class SshServerProfile(
     val lastConnectedEpochMillis: Long? = null,
     val createdAtEpochMillis: Long = 0L,
     val jumpHostId: String? = null,
+    val groupTag: String = "",
 ) {
+    val resolvedGroup: String?
+        get() = SshVaultCatalogFilter.parseAliasGroup(alias = alias, explicitGroupTag = groupTag).group
+
+    val cleanAlias: String
+        get() = SshVaultCatalogFilter.parseAliasGroup(alias = alias, explicitGroupTag = groupTag).cleanAlias
+
     val displayName: String
-        get() = alias.trim().ifBlank { host.trim() }
+        get() = cleanAlias.ifBlank { host.trim() }
 
     val displayAddress: String
         get() {
@@ -102,6 +109,8 @@ data class SshServerDraft(
     val keepExistingSecret: Boolean = false,
     val keepExistingPassphrase: Boolean = false,
     val jumpHostId: String? = null,
+    val groupTag: String = "",
+    val groupEdited: Boolean = false,
 )
 
 /**
@@ -191,12 +200,13 @@ data class CustomSshPreset(
     val description: String = "",
     val command: String,
     val createdAtEpochMillis: Long = 0L,
+    val category: SshPresetCategory = SshPresetCategory.CUSTOM,
 ) {
     fun toScriptPreset(): SshScriptPreset = SshScriptPreset(
         id = id,
         name = name.trim().ifBlank { "自定义脚本" },
         tabTitle = tabTitle.trim().ifBlank { name.trim().ifBlank { "自定义脚本" } },
-        category = SshPresetCategory.CUSTOM,
+        category = category,
         description = description.trim().ifBlank { "用户自定义远程脚本" },
         estimatedDurationLabel = "自定义",
         commandTemplate = command.trim(),

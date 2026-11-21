@@ -111,6 +111,25 @@ fun SshQuickInsertSheet(
     }
     var maskServerIp by rememberSaveable { mutableStateOf(true) }
     var expandedPreviewRunId by rememberSaveable { mutableStateOf<String?>(null) }
+    var historySearchQuery by rememberSaveable { mutableStateOf("") }
+
+    val filteredHistory = remember(exportableHistory, historySearchQuery) {
+        val q = historySearchQuery.trim().lowercase()
+        if (q.isEmpty()) {
+            exportableHistory
+        } else {
+            val tokens = q.split(Regex("\\s+")).filter { it.isNotEmpty() }
+            exportableHistory.filter { run ->
+                tokens.all { token ->
+                    run.serverAlias.lowercase().contains(token) ||
+                        run.serverHost.lowercase().contains(token) ||
+                        run.presetName.lowercase().contains(token) ||
+                        run.tabTitle.lowercase().contains(token) ||
+                        run.command.lowercase().contains(token)
+                }
+            }
+        }
+    }
 
     val selectedRuns = remember(exportableHistory, selectedIds) {
         val idSet = selectedIds.toSet()
@@ -293,13 +312,27 @@ fun SshQuickInsertSheet(
                     }
                 }
             } else {
+                if (exportableHistory.size > 3 || historySearchQuery.isNotEmpty()) {
+                    SshCompactSearchBar(
+                        value = historySearchQuery,
+                        onValueChange = { historySearchQuery = it },
+                        onClear = { historySearchQuery = "" },
+                        placeholder = "搜索主机备注 / IP / 脚本名称…",
+                        matchCountSummary = if (historySearchQuery.isNotBlank()) {
+                            "${filteredHistory.size}/${exportableHistory.size}"
+                        } else {
+                            null
+                        },
+                    )
+                }
+
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 340.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(exportableHistory, key = { it.id }) { run ->
+                    items(filteredHistory, key = { it.id }) { run ->
                         val isSelected = run.id in selectedIds
                         val isExpanded = expandedPreviewRunId == run.id
                         QuickInsertRunRow(

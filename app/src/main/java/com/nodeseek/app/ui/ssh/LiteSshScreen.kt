@@ -50,6 +50,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
 import androidx.compose.material.icons.rounded.Close
@@ -64,13 +65,14 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Preview
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material.icons.rounded.Terminal
@@ -124,10 +126,15 @@ import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
+import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPresetFilter
+import com.nodeseek.app.domain.ssh.SshPresetFilterOption
 import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshScriptPreset
+import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.ui.components.AnsiAndCodeFormatter
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
@@ -259,8 +266,19 @@ fun LiteSshScreen(
             item(key = "server_vault_section") {
                 ServerVaultSection(
                     servers = uiState.servers,
-                    selectedServerId = uiState.selectedServer?.id,
+                    filteredServers = uiState.filteredServers,
+                    inlineVisibleServers = uiState.inlineVisibleServers,
+                    selectedServer = uiState.selectedServer,
+                    searchQuery = uiState.serverSearchQuery,
+                    groupOptions = uiState.serverGroupOptions,
+                    selectedGroupKey = uiState.effectiveServerGroupKey,
+                    isExpanded = uiState.isServerVaultExpanded,
                     isRunning = uiState.isRunning,
+                    onSearchQueryChange = viewModel::updateServerSearchQuery,
+                    onClearSearch = viewModel::clearServerSearchQuery,
+                    onSelectGroup = viewModel::selectServerGroup,
+                    onToggleExpanded = viewModel::toggleServerVaultExpanded,
+                    onOpenQuickPicker = viewModel::openServerQuickPickerSheet,
                     onSelectServer = viewModel::selectServer,
                     onAddServer = viewModel::openAddServerDialog,
                     onEditServer = viewModel::openEditServerDialog,
@@ -272,15 +290,24 @@ fun LiteSshScreen(
             item(key = "presets_section") {
                 PresetCatalogSection(
                     allPresets = uiState.allPresets,
+                    filteredPresets = uiState.filteredPresets,
+                    inlineVisiblePresets = uiState.inlineVisiblePresets,
                     customPresets = uiState.customPresets,
                     selectedPreset = uiState.selectedPreset,
+                    searchQuery = uiState.presetSearchQuery,
+                    filterOptions = uiState.presetFilterOptions,
+                    selectedFilter = uiState.selectedPresetFilter,
+                    isExpanded = uiState.isPresetCatalogExpanded,
                     enabledFlagIds = uiState.selectedPresetFlagIds,
                     resolvedCommand = uiState.resolvedSelectedCommand,
                     selectedServer = uiState.selectedServer,
                     isRunning = uiState.isRunning,
                     elapsedMillis = uiState.elapsedMillis,
-                    iperf3PortLabel = uiState.iperf3ServerPortText.ifBlank { "5201" },
-                    isIperf3ServiceBusy = uiState.isIperf3ServiceBusy,
+                    onSearchQueryChange = viewModel::updatePresetSearchQuery,
+                    onClearSearch = viewModel::clearPresetSearchQuery,
+                    onSelectFilter = viewModel::selectPresetFilter,
+                    onToggleExpanded = viewModel::togglePresetCatalogExpanded,
+                    onOpenQuickPicker = viewModel::openPresetQuickPickerSheet,
                     onSelectPreset = viewModel::selectPreset,
                     onToggleFlag = { flagId ->
                         viewModel.togglePresetFlag(uiState.selectedPreset.id, flagId)
@@ -290,8 +317,6 @@ fun LiteSshScreen(
                     onDeleteCustomPreset = { pendingDeleteCustomPreset = it },
                     onRunPreset = viewModel::runSelectedPreset,
                     onStopExecution = viewModel::cancelExecution,
-                    onOpenIperf3ServerManager = { viewModel.openIperf3ServerDialog() },
-                    onQuickStopIperf3Server = { viewModel.stopIperf3Server() },
                 )
             }
 
@@ -384,6 +409,45 @@ fun LiteSshScreen(
     }
 
     // Dialogs & Bottom Sheets
+    if (uiState.showServerQuickPickerSheet) {
+        SshServerQuickPickerSheet(
+            servers = uiState.servers,
+            filteredServers = uiState.filteredServers,
+            selectedServerId = uiState.selectedServer?.id,
+            searchQuery = uiState.serverSearchQuery,
+            groupOptions = uiState.serverGroupOptions,
+            selectedGroupKey = uiState.effectiveServerGroupKey,
+            isRunning = uiState.isRunning,
+            onSearchQueryChange = viewModel::updateServerSearchQuery,
+            onClearSearch = viewModel::clearServerSearchQuery,
+            onSelectGroup = viewModel::selectServerGroup,
+            onSelectServer = viewModel::selectServer,
+            onAddServer = viewModel::openAddServerDialog,
+            onEditServer = viewModel::openEditServerDialog,
+            onDismiss = viewModel::dismissServerQuickPickerSheet,
+        )
+    }
+
+    if (uiState.showPresetQuickPickerSheet) {
+        SshPresetQuickPickerSheet(
+            allPresets = uiState.allPresets,
+            filteredPresets = uiState.filteredPresets,
+            customPresets = uiState.customPresets,
+            selectedPresetId = uiState.selectedPreset.id,
+            searchQuery = uiState.presetSearchQuery,
+            filterOptions = uiState.presetFilterOptions,
+            selectedFilter = uiState.selectedPresetFilter,
+            isRunning = uiState.isRunning,
+            onSearchQueryChange = viewModel::updatePresetSearchQuery,
+            onClearSearch = viewModel::clearPresetSearchQuery,
+            onSelectFilter = viewModel::selectPresetFilter,
+            onSelectPreset = viewModel::selectPreset,
+            onAddCustomPreset = viewModel::openAddCustomPresetDialog,
+            onEditCustomPreset = viewModel::openEditCustomPresetDialog,
+            onDismiss = viewModel::dismissPresetQuickPickerSheet,
+        )
+    }
+
     if (uiState.showServerEditor) {
         SshServerEditorDialog(
             existing = uiState.editingServer,
@@ -409,6 +473,8 @@ fun LiteSshScreen(
         )
     }
 
+    // Retained solely for cross-screen invocation from MobileNetBench (NodePulseNavHost.onOpenLiteSshIperf3Setup);
+    // LiteSshScreen itself intentionally exposes no iperf3 trigger UI.
     if (uiState.showIperf3ServerDialog) {
         Iperf3ServerControlDialog(
             servers = uiState.servers,
@@ -572,26 +638,64 @@ private fun LiteSshTopBar(
 @Composable
 private fun ServerVaultSection(
     servers: List<SshServerProfile>,
-    selectedServerId: String?,
+    filteredServers: List<SshServerProfile>,
+    inlineVisibleServers: List<SshServerProfile>,
+    selectedServer: SshServerProfile?,
+    searchQuery: String,
+    groupOptions: List<SshServerGroupOption>,
+    selectedGroupKey: String,
+    isExpanded: Boolean,
     isRunning: Boolean,
+    onSearchQueryChange: (String) -> Unit,
+    onClearSearch: () -> Unit,
+    onSelectGroup: (String) -> Unit,
+    onToggleExpanded: () -> Unit,
+    onOpenQuickPicker: () -> Unit,
     onSelectServer: (String) -> Unit,
     onAddServer: () -> Unit,
     onEditServer: (SshServerProfile) -> Unit,
     onDeleteServer: (SshServerProfile) -> Unit,
 ) {
+    val serversById = remember(servers) { servers.associateBy { it.id } }
+    val isFiltering = searchQuery.isNotBlank() || selectedGroupKey != SshServerGroupOption.KEY_ALL
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PulseSectionHeader(
             title = "主机保险库",
-            subtitle = if (servers.isEmpty()) "零云端同步 · AES-256-GCM 硬件密钥保护" else "已保存 ${servers.size} 台 VPS",
+            subtitle = when {
+                servers.isEmpty() -> "零云端同步 · AES-256-GCM 硬件密钥保护"
+                isFiltering -> "命中 ${filteredServers.size} / ${servers.size} 台 VPS · 当前目标置顶"
+                else -> "已保存 ${servers.size} 台 VPS · 当前目标置顶"
+            },
             icon = Icons.Rounded.Dns,
             trailing = {
-                TextButton(
-                    onClick = onAddServer,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(3.dp))
-                    Text("添加主机")
+                    if (servers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT) {
+                        TextButton(
+                            onClick = onOpenQuickPicker,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "快选 (${servers.size})",
+                                style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = onAddServer,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("添加主机", maxLines = 1, softWrap = false)
+                    }
                 }
             },
         )
@@ -645,24 +749,201 @@ private fun ServerVaultSection(
                 }
             }
         } else {
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(vertical = 2.dp),
-            ) {
-                items(servers, key = { it.id }) { server ->
-                    val selected = server.id == selectedServerId
-                    val jumpHostName = server.jumpHostId?.let { jumpId ->
-                        servers.firstOrNull { it.id == jumpId }?.displayName
+            // Instant search box (alias / IP / domain / username / group tag + 1-tap clear)
+            SshCompactSearchBar(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                onClear = onClearSearch,
+                placeholder = "搜索主机别名 / IP / 用户名 / 分组标签…",
+                matchCountSummary = if (isFiltering) "${filteredServers.size}/${servers.size}" else null,
+            )
+
+            // Group filter chips (All + each group with count) when groups exist
+            if (groupOptions.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(groupOptions, key = { "vault_grp_${it.key}" }) { option ->
+                        val active = option.key.equals(selectedGroupKey, ignoreCase = true)
+                        FilterChip(
+                            selected = active,
+                            onClick = {
+                                onSelectGroup(
+                                    if (active && option.key != SshServerGroupOption.KEY_ALL) {
+                                        SshServerGroupOption.KEY_ALL
+                                    } else {
+                                        option.key
+                                    },
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "${option.label} (${option.count})",
+                                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                    maxLines = 1,
+                                )
+                            },
+                        )
                     }
-                    ServerVaultCard(
-                        server = server,
-                        selected = selected,
-                        enabled = !isRunning,
-                        jumpHostName = jumpHostName,
-                        onSelect = { onSelectServer(server.id) },
-                        onEdit = { onEditServer(server) },
-                        onDelete = { onDeleteServer(server) },
+                }
+            }
+
+            // Always surface the active target host even when hidden by an active search/group filter
+            if (selectedServer != null && filteredServers.none { it.id == selectedServer.id }) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f))
+                        .border(
+                            width = 0.9.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(12.dp),
+                        )
+                        .padding(horizontal = 11.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        PulseAccentPill(text = "当前目标")
+                        Text(
+                            text = "${selectedServer.displayName} (${selectedServer.displayAddress})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        text = "重置筛选",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                onClearSearch()
+                                onSelectGroup(SshServerGroupOption.KEY_ALL)
+                            }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                     )
+                }
+            }
+
+            val hasMoreThanCollapsed = filteredServers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT
+            val showScrollableExpanded = hasMoreThanCollapsed && (isExpanded || searchQuery.isNotBlank())
+
+            if (filteredServers.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pulseCard(shape = RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "未找到匹配的 VPS 主机",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = {
+                            onClearSearch()
+                            onSelectGroup(SshServerGroupOption.KEY_ALL)
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            } else if (showScrollableExpanded) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 288.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(filteredServers, key = { it.id }) { server ->
+                        val jumpHostName = server.jumpHostId?.let { serversById[it]?.displayName }
+                        ServerVaultCompactRow(
+                            server = server,
+                            selected = server.id == selectedServer?.id,
+                            enabled = !isRunning,
+                            jumpHostName = jumpHostName,
+                            onSelect = { onSelectServer(server.id) },
+                            onEdit = { onEditServer(server) },
+                            onDelete = { onDeleteServer(server) },
+                        )
+                    }
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    inlineVisibleServers.forEach { server ->
+                        val jumpHostName = server.jumpHostId?.let { serversById[it]?.displayName }
+                        ServerVaultCompactRow(
+                            server = server,
+                            selected = server.id == selectedServer?.id,
+                            enabled = !isRunning,
+                            jumpHostName = jumpHostName,
+                            onSelect = { onSelectServer(server.id) },
+                            onEdit = { onEditServer(server) },
+                            onDelete = { onDeleteServer(server) },
+                        )
+                    }
+                }
+            }
+
+            if (hasMoreThanCollapsed || servers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    if (hasMoreThanCollapsed && searchQuery.isBlank()) {
+                        TextButton(
+                            onClick = onToggleExpanded,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (isExpanded) {
+                                    "收起主机列表"
+                                } else {
+                                    "展开全部（共 ${filteredServers.size} 台）"
+                                },
+                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                            )
+                        }
+                    } else {
+                        Spacer(Modifier.width(1.dp))
+                    }
+
+                    FilledTonalButton(
+                        onClick = onOpenQuickPicker,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "快速检索抽屉 (${servers.size})",
+                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
                 }
             }
         }
@@ -670,7 +951,7 @@ private fun ServerVaultSection(
 }
 
 @Composable
-private fun ServerVaultCard(
+private fun ServerVaultCompactRow(
     server: SshServerProfile,
     selected: Boolean,
     enabled: Boolean,
@@ -681,111 +962,144 @@ private fun ServerVaultCard(
 ) {
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else null
 
-    Column(
+    Row(
         modifier = Modifier
-            .widthIn(min = 216.dp, max = 256.dp)
+            .fillMaxWidth()
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
                 borderColor = borderColor,
-                borderWidth = if (selected) 1.2.dp else 0.8.dp,
+                borderWidth = if (selected) 1.3.dp else 0.8.dp,
             )
             .pulseBouncyClickable(enabled = enabled, role = Role.Button, onClick = onSelect)
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(
+                    if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHighest
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.outlineVariant),
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
-                modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
-                        ),
-                )
                 Text(
                     text = server.displayName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                IconButton(
-                    onClick = onEdit,
-                    enabled = enabled,
-                    modifier = Modifier.size(28.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Edit,
-                        contentDescription = "编辑主机",
-                        modifier = Modifier.size(15.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (selected) {
+                    PulseAccentPill(text = "当前目标")
+                }
+                server.resolvedGroup?.let { groupLabel ->
+                    PulseAccentPill(
+                        text = groupLabel,
+                        icon = Icons.Rounded.LocalOffer,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     )
                 }
-                IconButton(
-                    onClick = onDelete,
-                    enabled = enabled,
-                    modifier = Modifier.size(28.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.DeleteOutline,
-                        contentDescription = "删除主机",
-                        modifier = Modifier.size(15.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = server.displayAddress,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                PulseAccentPill(
+                    text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
+                    icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (server.hasTrustedHostKey) {
+                    PulseAccentPill(
+                        text = "TOFU 已校验",
+                        icon = Icons.Rounded.VerifiedUser,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                } else {
+                    PulseAccentPill(
+                        text = "首次校验",
+                        icon = Icons.Rounded.Lock,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (server.usesJumpHost) {
+                    PulseAccentPill(
+                        text = if (!jumpHostName.isNullOrBlank()) "跳板 · $jumpHostName" else "跳板",
+                        icon = Icons.AutoMirrored.Rounded.AltRoute,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     )
                 }
             }
         }
 
-        Text(
-            text = server.displayAddress,
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            PulseAccentPill(
-                text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
-                icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (server.hasTrustedHostKey) {
-                PulseAccentPill(
-                    text = "TOFU 已校验",
-                    icon = Icons.Rounded.VerifiedUser,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            } else {
-                PulseAccentPill(
-                    text = "首次校验",
-                    icon = Icons.Rounded.Lock,
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            IconButton(
+                onClick = onEdit,
+                enabled = enabled,
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Edit,
+                    contentDescription = "编辑主机",
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (server.usesJumpHost) {
-                PulseAccentPill(
-                    text = if (!jumpHostName.isNullOrBlank()) "跳板 · $jumpHostName" else "跳板",
-                    icon = Icons.AutoMirrored.Rounded.AltRoute,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            IconButton(
+                onClick = onDelete,
+                enabled = enabled,
+                modifier = Modifier.size(28.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.DeleteOutline,
+                    contentDescription = "删除主机",
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -795,15 +1109,24 @@ private fun ServerVaultCard(
 @Composable
 private fun PresetCatalogSection(
     allPresets: List<SshScriptPreset>,
+    filteredPresets: List<SshScriptPreset>,
+    inlineVisiblePresets: List<SshScriptPreset>,
     customPresets: List<CustomSshPreset>,
     selectedPreset: SshScriptPreset,
+    searchQuery: String,
+    filterOptions: List<SshPresetFilterOption>,
+    selectedFilter: SshPresetFilter,
+    isExpanded: Boolean,
     enabledFlagIds: Set<String>,
     resolvedCommand: String,
     selectedServer: SshServerProfile?,
     isRunning: Boolean,
     elapsedMillis: Long,
-    iperf3PortLabel: String = "5201",
-    isIperf3ServiceBusy: Boolean = false,
+    onSearchQueryChange: (String) -> Unit,
+    onClearSearch: () -> Unit,
+    onSelectFilter: (SshPresetFilter) -> Unit,
+    onToggleExpanded: () -> Unit,
+    onOpenQuickPicker: () -> Unit,
     onSelectPreset: (String) -> Unit,
     onToggleFlag: (String) -> Unit,
     onAddCustomPreset: () -> Unit,
@@ -811,132 +1134,209 @@ private fun PresetCatalogSection(
     onDeleteCustomPreset: (CustomSshPreset) -> Unit,
     onRunPreset: () -> Unit,
     onStopExecution: () -> Unit,
-    onOpenIperf3ServerManager: () -> Unit = {},
-    onQuickStopIperf3Server: () -> Unit = {},
 ) {
     var showCommandPreview by rememberSaveable { mutableStateOf(false) }
+    val builtInCount = remember(allPresets) { allPresets.count { !it.isCustom } }
+    val customCount = customPresets.size
+    val isFiltering = searchQuery.isNotBlank() || selectedFilter != SshPresetFilter.ALL
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PulseSectionHeader(
             title = "一键测评脚本",
-            subtitle = "内置 ${allPresets.count { !it.isCustom }} 套免交互 VPS 测机脚本 · 支持离开页面后台运行",
+            subtitle = if (customCount > 0) {
+                "内置 $builtInCount 套 + 自定义 $customCount 个 · 支持离开页面后台运行"
+            } else {
+                "内置 $builtInCount 套免交互 VPS 测机脚本 · 支持离开页面后台运行"
+            },
             icon = Icons.Rounded.Bolt,
             trailing = {
-                TextButton(
-                    onClick = onAddCustomPreset,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(3.dp))
-                    Text("自定义")
+                    TextButton(
+                        onClick = onOpenQuickPicker,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            text = "快选 (${allPresets.size})",
+                            style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                    TextButton(
+                        onClick = onAddCustomPreset,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("自定义", maxLines = 1, softWrap = false)
+                    }
                 }
             },
         )
 
-        // 1-Click VPS iperf3 Server Utility Bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .pulseCard(shape = PulseArchitecturalShapes.EditorialCard)
-                .clickable(enabled = !isIperf3ServiceBusy, onClick = onOpenIperf3ServerManager)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        // Instant search box (script name / description / command keyword)
+        SshCompactSearchBar(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            onClear = onClearSearch,
+            placeholder = "搜索脚本名称 / 功能描述 / 命令关键字…",
+            matchCountSummary = if (isFiltering) "${filteredPresets.size}/${allPresets.size}" else null,
+        )
+
+        // Category / source filter chips (All / Custom / Benchmark / Network / Unlock / Diagnostic)
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(vertical = 2.dp),
         ) {
-            Box(
+            items(filterOptions, key = { "preset_flt_${it.filter.name}" }) { option ->
+                val active = option.filter == selectedFilter
+                FilterChip(
+                    selected = active,
+                    onClick = {
+                        onSelectFilter(
+                            if (active && option.filter != SshPresetFilter.ALL) {
+                                SshPresetFilter.ALL
+                            } else {
+                                option.filter
+                            },
+                        )
+                    },
+                    label = {
+                        Text(
+                            text = "${option.label} (${option.count})",
+                            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                            maxLines = 1,
+                        )
+                    },
+                )
+            }
+        }
+
+        val hasMoreThanCollapsed = filteredPresets.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_PRESET_COUNT
+        val showScrollableExpanded = hasMoreThanCollapsed && (isExpanded || searchQuery.isNotBlank())
+
+        if (filteredPresets.isEmpty()) {
+            Row(
                 modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Speed,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                    .fillMaxWidth()
+                    .pulseCard(shape = RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = "一键开启 VPS iperf3 服务端",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = "端口 $iperf3PortLabel · 自动检测/安装 · 守护启动",
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    text = if (selectedFilter == SshPresetFilter.CUSTOM && customPresets.isEmpty()) {
+                        "暂未添加自定义测机脚本"
+                    } else {
+                        "未找到匹配的测评脚本"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                if (selectedFilter == SshPresetFilter.CUSTOM && customPresets.isEmpty()) {
+                    TextButton(
+                        onClick = onAddCustomPreset,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("新建自定义", style = MaterialTheme.typography.labelMedium)
+                    }
+                } else {
+                    TextButton(
+                        onClick = {
+                            onClearSearch()
+                            onSelectFilter(SshPresetFilter.ALL)
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("清空筛选", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
             }
-            if (selectedServer != null) {
-                OutlinedButton(
-                    onClick = onQuickStopIperf3Server,
-                    enabled = !isIperf3ServiceBusy,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+        } else if (showScrollableExpanded) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 256.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 2.dp),
+            ) {
+                items(filteredPresets, key = { it.id }) { preset ->
+                    PresetCompactSelectorRow(
+                        preset = preset,
+                        selected = preset.id == selectedPreset.id,
+                        enabled = !isRunning,
+                        onClick = { onSelectPreset(preset.id) },
+                    )
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                inlineVisiblePresets.forEach { preset ->
+                    PresetCompactSelectorRow(
+                        preset = preset,
+                        selected = preset.id == selectedPreset.id,
+                        enabled = !isRunning,
+                        onClick = { onSelectPreset(preset.id) },
+                    )
+                }
+            }
+        }
+
+        if (hasMoreThanCollapsed || allPresets.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_PRESET_COUNT) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                if (hasMoreThanCollapsed && searchQuery.isBlank()) {
+                    TextButton(
+                        onClick = onToggleExpanded,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = if (isExpanded) {
+                                "收起脚本列表"
+                            } else {
+                                "展开全部（共 ${filteredPresets.size} 个）"
+                            },
+                            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.width(1.dp))
+                }
+
+                FilledTonalButton(
+                    onClick = onOpenQuickPicker,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) {
+                    Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
                     Text(
-                        text = "停止",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = "快速选择面板 (${allPresets.size})",
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         maxLines = 1,
                         softWrap = false,
                     )
                 }
             }
-            FilledTonalButton(
-                onClick = onOpenIperf3ServerManager,
-                enabled = !isIperf3ServiceBusy,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                Text(
-                    text = "配置/开启",
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    softWrap = false,
-                )
-            }
         }
 
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(vertical = 2.dp),
-        ) {
-            items(allPresets, key = { it.id }) { preset ->
-                val isSelected = preset.id == selectedPreset.id
-                FilterChip(
-                    selected = isSelected,
-                    enabled = !isRunning,
-                    onClick = { onSelectPreset(preset.id) },
-                    label = {
-                        Text(
-                            text = preset.name,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    leadingIcon = if (preset.isCustom) {
-                        {
-                            Icon(
-                                imageVector = Icons.Rounded.Code,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                            )
-                        }
-                    } else {
-                        null
-                    },
-                )
-            }
-        }
-
-        // Selected Preset Card
+        // Selected Preset Execution Card
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -960,6 +1360,7 @@ private fun PresetCatalogSection(
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     PulseAccentPill(
                         text = selectedPreset.estimatedDurationLabel,
@@ -1104,6 +1505,111 @@ private fun PresetCatalogSection(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PresetCompactSelectorRow(
+    preset: SshScriptPreset,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(12.dp)
+    val borderColor = if (selected) MaterialTheme.colorScheme.primary else null
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = shape,
+                borderColor = borderColor,
+                borderWidth = if (selected) 1.3.dp else 0.8.dp,
+            )
+            .pulseBouncyClickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(
+                    if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHighest
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = when {
+                    selected -> Icons.Rounded.Check
+                    preset.isCustom -> Icons.Rounded.Code
+                    else -> Icons.Rounded.Terminal
+                },
+                contentDescription = null,
+                tint = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(13.dp),
+            )
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = preset.name,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                PulseAccentPill(
+                    text = if (preset.isCustom && preset.category == SshPresetCategory.CUSTOM) {
+                        "自定义"
+                    } else if (preset.isCustom) {
+                        "自定义 · ${preset.category.label}"
+                    } else {
+                        preset.category.label
+                    },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = preset.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        PulseAccentPill(
+            text = preset.estimatedDurationLabel,
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.secondaryContainer
+            },
+            contentColor = if (selected) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSecondaryContainer
+            },
+        )
     }
 }
 

@@ -22,34 +22,43 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PostAdd
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -78,8 +87,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -92,9 +103,15 @@ import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
+import com.nodeseek.app.domain.ssh.SshPresetCategory
+import com.nodeseek.app.domain.ssh.SshPresetFilter
+import com.nodeseek.app.domain.ssh.SshPresetFilterOption
 import com.nodeseek.app.domain.ssh.SshRunStatus
+import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
+import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
@@ -121,7 +138,8 @@ internal fun SshServerEditorDialog(
     servers: List<SshServerProfile> = emptyList(),
 ) {
     val isEditing = existing != null
-    var alias by rememberSaveable(existing?.id) { mutableStateOf(existing?.alias.orEmpty()) }
+    var alias by rememberSaveable(existing?.id) { mutableStateOf(existing?.cleanAlias.orEmpty()) }
+    var groupTag by rememberSaveable(existing?.id) { mutableStateOf(existing?.resolvedGroup.orEmpty()) }
     var host by rememberSaveable(existing?.id) { mutableStateOf(existing?.host.orEmpty()) }
     var portText by rememberSaveable(existing?.id) {
         mutableStateOf((existing?.port ?: SshServerProfile.DEFAULT_PORT).toString())
@@ -199,6 +217,8 @@ internal fun SshServerEditorDialog(
                             keepExistingSecret = isEditing && secret.isEmpty() && authMethod == existing?.authMethod,
                             keepExistingPassphrase = isEditing && passphrase.isEmpty() && hasSavedPassphrase && authMethod == existing?.authMethod,
                             jumpHostId = selectedJumpHostId,
+                            groupTag = groupTag.trim(),
+                            groupEdited = true,
                         ),
                     )
                 }
@@ -242,6 +262,55 @@ internal fun SshServerEditorDialog(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            val suggestedGroups = remember(servers) {
+                val existingGroups = servers.mapNotNull { it.resolvedGroup?.trim()?.takeIf(String::isNotEmpty) }
+                (existingGroups + SshVaultCatalogFilter.SUGGESTED_SERVER_GROUPS)
+                    .distinctBy { it.lowercase() }
+                    .take(8)
+            }
+            OutlinedTextField(
+                value = groupTag,
+                onValueChange = { groupTag = it.take(20); validationError = null },
+                label = { Text("分组标签（可选，如 香港 / 美西 / 主力）") },
+                singleLine = true,
+                trailingIcon = if (groupTag.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { groupTag = "" }) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "清空分组",
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                } else {
+                    null
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (suggestedGroups.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    suggestedGroups.forEach { candidateGroup ->
+                        val isGroupSelected = groupTag.trim().equals(candidateGroup, ignoreCase = true)
+                        FilterChip(
+                            selected = isGroupSelected,
+                            onClick = {
+                                groupTag = if (isGroupSelected) "" else candidateGroup
+                            },
+                            label = {
+                                Text(
+                                    text = candidateGroup,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -549,12 +618,22 @@ private fun AuthMethodChoicePill(
 internal fun CustomSshPresetEditorDialog(
     existing: CustomSshPreset?,
     onDismiss: () -> Unit,
-    onSave: (id: String?, name: String, tabTitle: String, description: String, command: String) -> Unit,
+    onSave: (
+        id: String?,
+        name: String,
+        tabTitle: String,
+        description: String,
+        command: String,
+        category: SshPresetCategory,
+    ) -> Unit,
 ) {
     var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name.orEmpty()) }
     var tabTitle by rememberSaveable(existing?.id) { mutableStateOf(existing?.tabTitle.orEmpty()) }
     var description by rememberSaveable(existing?.id) { mutableStateOf(existing?.description.orEmpty()) }
     var command by rememberSaveable(existing?.id) { mutableStateOf(existing?.command.orEmpty()) }
+    var category by rememberSaveable(existing?.id) {
+        mutableStateOf(existing?.category ?: SshPresetCategory.CUSTOM)
+    }
 
     val canSave = name.trim().isNotEmpty() && command.trim().isNotEmpty()
 
@@ -572,6 +651,7 @@ internal fun CustomSshPresetEditorDialog(
                 tabTitle.trim(),
                 description.trim(),
                 command.trim(),
+                category,
             )
         },
         dismissText = "取消",
@@ -590,6 +670,36 @@ internal fun CustomSshPresetEditorDialog(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "脚本分类（便于多脚本快速筛选）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    listOf(
+                        SshPresetCategory.CUSTOM to "自定义脚本",
+                        SshPresetCategory.BENCHMARK to "综合测评",
+                        SshPresetCategory.NETWORK to "网络 / 回程",
+                        SshPresetCategory.UNLOCK to "流媒体 / 解锁",
+                        SshPresetCategory.DIAGNOSTIC to "系统 / 硬件",
+                    ).forEach { (cat, catLabel) ->
+                        FilterChip(
+                            selected = category == cat,
+                            onClick = { category = cat },
+                            label = {
+                                Text(
+                                    text = catLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
             OutlinedTextField(
                 value = tabTitle,
                 onValueChange = { tabTitle = it },
@@ -1559,6 +1669,708 @@ fun Iperf3InstallConfirmDialog(
                     style = NodePulseThemeTokens.extraTypography.codeLabel.copy(fontSize = 11.sp),
                     color = ext.onCodeSurface,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Compact architectural search input shared by the inline SSH Server Vault, Preset Catalog,
+ * Quick Picker sheets, and Quick Insert sheet.
+ */
+@Composable
+internal fun SshCompactSearchBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    matchCountSummary: String? = null,
+    onClear: () -> Unit = { onValueChange("") },
+) {
+    val hasQuery = value.isNotEmpty()
+    val shape = RoundedCornerShape(12.dp)
+    val borderColor = if (hasQuery) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.50f)
+    } else {
+        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .border(width = 0.9.dp, color = borderColor, shape = shape)
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Search,
+            contentDescription = null,
+            tint = if (hasQuery) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(17.dp),
+        )
+
+        Box(
+            modifier = Modifier.weight(1f),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            if (value.isEmpty()) {
+                Text(
+                    text = placeholder,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodySmall.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        if (!matchCountSummary.isNullOrBlank()) {
+            Text(
+                text = matchCountSummary,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+            )
+        }
+
+        if (hasQuery) {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .clickable(onClick = onClear),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "清空搜索",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Full-capacity modal bottom sheet for searching, group-filtering, and switching among 50+ VPS
+ * entries in 1 tap without scrolling past the benchmark console.
+ */
+@Composable
+internal fun SshServerQuickPickerSheet(
+    servers: List<SshServerProfile>,
+    filteredServers: List<SshServerProfile>,
+    selectedServerId: String?,
+    searchQuery: String,
+    groupOptions: List<SshServerGroupOption>,
+    selectedGroupKey: String,
+    isRunning: Boolean,
+    onSearchQueryChange: (String) -> Unit,
+    onClearSearch: () -> Unit,
+    onSelectGroup: (String) -> Unit,
+    onSelectServer: (String) -> Unit,
+    onAddServer: () -> Unit,
+    onEditServer: (SshServerProfile) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val ext = NodePulseThemeTokens.extendedColors
+    val serversById = remember(servers) { servers.associateBy { it.id } }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        shape = PulseArchitecturalShapes.BottomSheetTop,
+        containerColor = ext.cardSurfaceElevated,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Dns,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Column {
+                        Text(
+                            text = "快速检索主机（共 ${servers.size} 台）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "支持别名 / IP / 端口 / 用户名 / 分组标签即时匹配",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                FilledTonalButton(
+                    onClick = {
+                        onDismiss()
+                        onAddServer()
+                    },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("添加主机", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
+                }
+            }
+
+            SshCompactSearchBar(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                onClear = onClearSearch,
+                placeholder = "搜索主机别名 / IP / 用户名 / 分组…",
+                matchCountSummary = if (searchQuery.isNotBlank() || selectedGroupKey != SshServerGroupOption.KEY_ALL) {
+                    "${filteredServers.size}/${servers.size}"
+                } else {
+                    null
+                },
+            )
+
+            if (groupOptions.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(groupOptions, key = { "sheet_grp_${it.key}" }) { option ->
+                        val active = option.key.equals(selectedGroupKey, ignoreCase = true)
+                        FilterChip(
+                            selected = active,
+                            onClick = {
+                                onSelectGroup(
+                                    if (active && option.key != SshServerGroupOption.KEY_ALL) {
+                                        SshServerGroupOption.KEY_ALL
+                                    } else {
+                                        option.key
+                                    },
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "${option.label} (${option.count})",
+                                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+
+            if (filteredServers.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pulseCard(shape = RoundedCornerShape(14.dp))
+                        .padding(horizontal = 16.dp, vertical = 22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "没有找到匹配的 VPS 主机",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "请尝试缩短关键词或重置分组筛选",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            onClearSearch()
+                            onSelectGroup(SshServerGroupOption.KEY_ALL)
+                        },
+                    ) {
+                        Text("重置搜索与分组")
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(filteredServers, key = { "picker_srv_${it.id}" }) { server ->
+                        val isSelected = server.id == selectedServerId
+                        val jumpName = server.jumpHostId?.let { serversById[it]?.displayName }
+                        val shape = RoundedCornerShape(14.dp)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pulseCard(
+                                    shape = shape,
+                                    borderColor = if (isSelected) MaterialTheme.colorScheme.primary else null,
+                                    borderWidth = if (isSelected) 1.3.dp else 0.9.dp,
+                                )
+                                .clickable(enabled = !isRunning) {
+                                    onSelectServer(server.id)
+                                    onDismiss()
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceContainerHighest
+                                        },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = if (isSelected) Icons.Rounded.Check else Icons.Rounded.Dns,
+                                    contentDescription = null,
+                                    tint = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = server.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (isSelected) {
+                                        PulseAccentPill(text = "当前目标")
+                                    }
+                                    server.resolvedGroup?.let { grp ->
+                                        PulseAccentPill(
+                                            text = grp,
+                                            icon = Icons.Rounded.LocalOffer,
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = server.displayAddress,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    PulseAccentPill(
+                                        text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
+                                        icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
+                                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    if (server.hasTrustedHostKey) {
+                                        PulseAccentPill(
+                                            text = "TOFU 已校验",
+                                            icon = Icons.Rounded.VerifiedUser,
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        )
+                                    }
+                                    if (server.usesJumpHost) {
+                                        PulseAccentPill(
+                                            text = if (!jumpName.isNullOrBlank()) "跳板 · $jumpName" else "跳板",
+                                            icon = Icons.AutoMirrored.Rounded.AltRoute,
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        )
+                                    }
+                                }
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    onDismiss()
+                                    onEditServer(server)
+                                },
+                                enabled = !isRunning,
+                                modifier = Modifier.size(30.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "编辑主机",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Full-capacity modal bottom sheet for searching, category-filtering, and picking among built-in
+ * and large collections of user-defined custom benchmark scripts.
+ */
+@Composable
+internal fun SshPresetQuickPickerSheet(
+    allPresets: List<SshScriptPreset>,
+    filteredPresets: List<SshScriptPreset>,
+    customPresets: List<CustomSshPreset>,
+    selectedPresetId: String,
+    searchQuery: String,
+    filterOptions: List<SshPresetFilterOption>,
+    selectedFilter: SshPresetFilter,
+    isRunning: Boolean,
+    onSearchQueryChange: (String) -> Unit,
+    onClearSearch: () -> Unit,
+    onSelectFilter: (SshPresetFilter) -> Unit,
+    onSelectPreset: (String) -> Unit,
+    onAddCustomPreset: () -> Unit,
+    onEditCustomPreset: (CustomSshPreset) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val ext = NodePulseThemeTokens.extendedColors
+    val customById = remember(customPresets) { customPresets.associateBy { it.id } }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        shape = PulseArchitecturalShapes.BottomSheetTop,
+        containerColor = ext.cardSurfaceElevated,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Column {
+                        Text(
+                            text = "快速选择测评脚本（共 ${allPresets.size} 个）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "按名称 / 功能描述 / 命令关键字即时检索",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                FilledTonalButton(
+                    onClick = {
+                        onDismiss()
+                        onAddCustomPreset()
+                    },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("自定义", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
+                }
+            }
+
+            SshCompactSearchBar(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                onClear = onClearSearch,
+                placeholder = "搜索脚本名称 / 描述 / 命令关键字（如 fio、goecs、nexttrace）…",
+                matchCountSummary = if (searchQuery.isNotBlank() || selectedFilter != SshPresetFilter.ALL) {
+                    "${filteredPresets.size}/${allPresets.size}"
+                } else {
+                    null
+                },
+            )
+
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 2.dp),
+            ) {
+                items(filterOptions, key = { "sheet_preset_flt_${it.filter.name}" }) { option ->
+                    val active = option.filter == selectedFilter
+                    FilterChip(
+                        selected = active,
+                        onClick = {
+                            onSelectFilter(
+                                if (active && option.filter != SshPresetFilter.ALL) {
+                                    SshPresetFilter.ALL
+                                } else {
+                                    option.filter
+                                },
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = "${option.label} (${option.count})",
+                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                            )
+                        },
+                    )
+                }
+            }
+
+            if (filteredPresets.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pulseCard(shape = RoundedCornerShape(14.dp))
+                        .padding(horizontal = 16.dp, vertical = 22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = if (selectedFilter == SshPresetFilter.CUSTOM && customPresets.isEmpty()) {
+                            "暂未添加自定义脚本"
+                        } else {
+                            "没有找到匹配的测评脚本"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = if (selectedFilter == SshPresetFilter.CUSTOM && customPresets.isEmpty()) {
+                            "点击下方按钮即可保存你常用的私有测机命令，一键无人值守执行"
+                        } else {
+                            "请尝试更换关键词或切换回「全部」分类"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (selectedFilter == SshPresetFilter.CUSTOM && customPresets.isEmpty()) {
+                        Button(
+                            onClick = {
+                                onDismiss()
+                                onAddCustomPreset()
+                            },
+                        ) {
+                            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("新建自定义脚本")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = {
+                                onClearSearch()
+                                onSelectFilter(SshPresetFilter.ALL)
+                            },
+                        ) {
+                            Text("重置搜索与分类")
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(filteredPresets, key = { "picker_preset_${it.id}" }) { preset ->
+                        val isSelected = preset.id == selectedPresetId
+                        val customObj = if (preset.isCustom) customById[preset.id] else null
+                        val shape = RoundedCornerShape(14.dp)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pulseCard(
+                                    shape = shape,
+                                    borderColor = if (isSelected) MaterialTheme.colorScheme.primary else null,
+                                    borderWidth = if (isSelected) 1.3.dp else 0.9.dp,
+                                )
+                                .clickable(enabled = !isRunning) {
+                                    onSelectPreset(preset.id)
+                                    onDismiss()
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceContainerHighest
+                                        },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = when {
+                                        isSelected -> Icons.Rounded.Check
+                                        preset.isCustom -> Icons.Rounded.Code
+                                        else -> Icons.Rounded.Terminal
+                                    },
+                                    contentDescription = null,
+                                    tint = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = preset.name,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (isSelected) {
+                                        PulseAccentPill(text = "当前选中")
+                                    }
+                                    PulseAccentPill(
+                                        text = if (preset.isCustom && preset.category == SshPresetCategory.CUSTOM) {
+                                            "自定义"
+                                        } else if (preset.isCustom) {
+                                            "自定义 · ${preset.category.label}"
+                                        } else {
+                                            preset.category.label
+                                        },
+                                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    PulseAccentPill(
+                                        text = preset.estimatedDurationLabel,
+                                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    )
+                                }
+                                Text(
+                                    text = preset.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = preset.commandTemplate.lineSequence().firstOrNull().orEmpty(),
+                                    style = NodePulseThemeTokens.extraTypography.microLabel.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+
+                            if (customObj != null) {
+                                IconButton(
+                                    onClick = {
+                                        onDismiss()
+                                        onEditCustomPreset(customObj)
+                                    },
+                                    enabled = !isRunning,
+                                    modifier = Modifier.size(30.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Edit,
+                                        contentDescription = "编辑脚本",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
