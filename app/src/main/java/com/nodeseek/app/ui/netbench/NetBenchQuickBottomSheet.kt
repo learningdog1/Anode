@@ -445,12 +445,6 @@ fun NetBenchQuickBottomSheet(
                     )
                 }
 
-                if (uiState.enableIcmpPing && uiState.clientEgress?.isVpnActive == true && !uiState.testViaProxy) {
-                    NetBenchWarningCallout(
-                        message = "提示：无法对 /system/bin/ping 子进程绑定底层网络，VPN 下 ICMP Ping 可能走默认路由，请结合 TCPing 参考。",
-                    )
-                }
-
                 // Compact iperf3 direction & port bar when enabled
                 AnimatedVisibility(visible = uiState.enableIperf3) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

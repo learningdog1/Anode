@@ -68,7 +68,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -594,7 +593,6 @@ private fun TestModulesConfigCard(
     onIperfModeChange: (Iperf3TestMode) -> Unit,
     onOpenIperf3SshManager: () -> Unit = {},
 ) {
-    val vpnDirectPingNote = uiState.clientEgress?.isVpnActive == true && !uiState.testViaProxy
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -610,25 +608,12 @@ private fun TestModulesConfigCard(
 
         ModuleToggleRow(
             title = "Ping 延迟与抖动",
-            subtitle = if (vpnDirectPingNote) {
-                "ICMP Ping · 无法对 ping 进程强制绑定底层网络，VPN 下可能走默认路由"
-            } else {
-                "ICMP Ping 实时统计平均/最小/最大延迟、mdev 抖动与丢包"
-            },
+            subtitle = "ICMP Ping 实时统计平均/最小/最大延迟、mdev 抖动与丢包",
             icon = Icons.Rounded.GraphicEq,
             checked = uiState.enableIcmpPing,
             enabled = !uiState.isRunning,
             onCheckedChange = onToggleIcmpPing,
         )
-        AnimatedVisibility(
-            visible = uiState.enableIcmpPing && vpnDirectPingNote,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
-            NetBenchWarningCallout(
-                message = "系统 /system/bin/ping 为外部进程，无法像 TCPing/iperf3 一样通过 Network.bindSocket 绕过 VPN；开启 VPN 时 ICMP 结果可能反映代理/默认路由，请以 TCPing 作为直连延迟参考。",
-            )
-        }
         ModuleToggleRow(
             title = "TCPing 延迟与抖动",
             subtitle = "实时统计平均/最小/最大延迟、mdev 抖动与丢包",

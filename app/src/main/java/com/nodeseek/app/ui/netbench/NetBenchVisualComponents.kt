@@ -91,7 +91,6 @@ import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IcmpPingProgress
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
-import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
 import com.nodeseek.app.domain.netbench.IpUsageType
@@ -601,8 +600,6 @@ internal fun NetBenchRecentTargetsStrip(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             entries.forEach { entry ->
-                val effectiveLatencyMs = entry.lastPingAvgMs ?: entry.lastAvgMs
-                val latencyColor = NetBenchTelemetryColors.forLatencyMs(effectiveLatencyMs)
                 Row(
                     modifier = Modifier
                         .clip(PulseArchitecturalShapes.MediumBadge)
@@ -629,22 +626,14 @@ internal fun NetBenchRecentTargetsStrip(
                             maxLines = 1,
                         )
                         val meta = buildList {
-                            when {
-                                entry.lastPingAvgMs != null && entry.lastAvgMs != null ->
-                                    add("Ping ${NetBenchMarkdownFormatter.formatMs(entry.lastPingAvgMs)} · TCP ${NetBenchMarkdownFormatter.formatMs(entry.lastAvgMs)}")
-                                entry.lastPingAvgMs != null ->
-                                    add("Ping ${NetBenchMarkdownFormatter.formatMs(entry.lastPingAvgMs)}")
-                                entry.lastAvgMs != null ->
-                                    add(NetBenchMarkdownFormatter.formatMs(entry.lastAvgMs))
-                            }
                             entry.lastOriginType?.takeIf { it != IpOriginType.UNKNOWN }?.let { add(it.badgeLabel) }
-                            entry.lastRegionSummary?.let { add(it) }
+                            entry.lastRegionSummary?.takeIf { it.isNotBlank() }?.let { add(it) }
                         }.joinToString(" · ")
                         if (meta.isNotEmpty()) {
                             Text(
                                 text = meta,
                                 style = NodePulseThemeTokens.extraTypography.microLabel,
-                                color = if (effectiveLatencyMs != null) latencyColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                             )
                         }
