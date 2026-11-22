@@ -357,7 +357,7 @@ class BackupManagerTest {
         // Export JSON
         val exportedJson = source.backupManager.exportBackupJson(includeApiKeys = true).getOrThrow()
         assertTrue(exportedJson.contains("\"schemaVersion\": 1"))
-        assertTrue(exportedJson.contains("\"requireBatteryNotLowInBackground\": true"))
+        assertTrue(exportedJson.contains("\"requireBatteryNotLowInBackground\": false"))
         assertTrue(exportedJson.contains("ni_live_secret_123"))
 
         // Inspect summary before restoring
@@ -791,12 +791,12 @@ class BackupManagerTest {
         }
         assertEquals(ThemeMode.OBSIDIAN_DARK, unchanged.themeMode)
 
-        // Verify unknown keys + requireBatteryNotLowInBackground = false are accepted cleanly
+        // Verify unknown keys + requireBatteryNotLowInBackground = true override are accepted cleanly
         val forwardCompatJson = validJson
-            .replace("\"requireBatteryNotLowInBackground\": true", "\"requireBatteryNotLowInBackground\": false")
+            .replace("\"requireBatteryNotLowInBackground\": false", "\"requireBatteryNotLowInBackground\": true")
             .replace("\"schemaVersion\": 1,", "\"schemaVersion\": 1, \"futureTopLevelField\": 123,")
         val decoded = BackupManagerImpl.backupJson.decodeFromString<NodePulseBackupBundle>(forwardCompatJson)
-        assertFalse(decoded.radar.pollingSettings.requireBatteryNotLowInBackground)
+        assertTrue(decoded.radar.pollingSettings.requireBatteryNotLowInBackground)
         assertTrue(stack.backupManager.inspectBackup(forwardCompatJson).isSuccess)
     }
 

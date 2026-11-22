@@ -118,6 +118,31 @@ class WebViewCookieBridge(
                 )
         }
 
+    fun hasAnyAuthCookie(
+        urls: List<HttpUrl> = listOf(
+            NodeSeekUrlNormalizer.ORIGIN.toHttpUrl(),
+            "https://${NodeSeekUrlNormalizer.BARE_HOST}/".toHttpUrl(),
+        ),
+    ): Boolean {
+        for (target in urls) {
+            for (cookie in loadForRequest(target)) {
+                val lower = cookie.name.trim().lowercase()
+                if (cookie.value.isBlank() ||
+                    isUnreplayableCookie(lower) ||
+                    isCloudflarePreservedCookie(lower) ||
+                    lower == "colorscheme" ||
+                    lower.startsWith("__cf") ||
+                    lower.startsWith("_cf") ||
+                    lower.startsWith("cf_")
+                ) {
+                    continue
+                }
+                return true
+            }
+        }
+        return false
+    }
+
     fun hasSessionOrClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
         hasClearanceCookie(url) || hasSessionCookie(url)
 

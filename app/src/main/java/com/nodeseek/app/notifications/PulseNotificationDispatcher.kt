@@ -38,27 +38,36 @@ open class PulseNotificationDispatcher(
 
     open fun ensureChannels() {
         val manager = appContext.getSystemService(NotificationManager::class.java) ?: return
+        for (legacyChannelId in LEGACY_LOW_IMPORTANCE_CHANNEL_IDS) {
+            runCatching { manager.deleteNotificationChannel(legacyChannelId) }
+        }
         val channels = listOf(
             NotificationChannel(
                 CHANNEL_KEYWORD_ALERTS,
                 "关键词雷达提醒",
-                NotificationManager.IMPORTANCE_DEFAULT,
+                NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "当新发布主题命中本地关键词监控规则时通知"
+                enableVibration(true)
+                setShowBadge(true)
             },
             NotificationChannel(
                 CHANNEL_TRACKED_REPLIES,
                 "关注帖新回复",
-                NotificationManager.IMPORTANCE_DEFAULT,
+                NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "当已开启追更的帖子收到新楼层回复时通知"
+                enableVibration(true)
+                setShowBadge(true)
             },
             NotificationChannel(
                 CHANNEL_FORUM_INTERACTIONS,
                 "社区回复与提及",
-                NotificationManager.IMPORTANCE_DEFAULT,
+                NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "收到新的帖子回复或 @提及时通知"
+                enableVibration(true)
+                setShowBadge(true)
             },
             NotificationChannel(
                 CHANNEL_DIRECT_MESSAGES,
@@ -66,6 +75,8 @@ open class PulseNotificationDispatcher(
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "收到新的社区私信时通知"
+                enableVibration(true)
+                setShowBadge(true)
             },
             NotificationChannel(
                 CHANNEL_SSH_BENCHMARK_ONGOING,
@@ -178,8 +189,9 @@ open class PulseNotificationDispatcher(
             .setContentTitle(contentTitle)
             .setContentText(record.topicTitle)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(createTapPendingIntent(target, notificationId))
@@ -223,8 +235,9 @@ open class PulseNotificationDispatcher(
             .setContentTitle(contentTitle)
             .setContentText(previewLine)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .setContentIntent(createTapPendingIntent(target, notificationId))
             .build()
@@ -277,8 +290,10 @@ open class PulseNotificationDispatcher(
             .setContentTitle(contentTitle)
             .setContentText(topicTitle.ifBlank { cleanExcerpt })
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
             .setContentIntent(createTapPendingIntent(target, notificationId))
             .build()
@@ -543,14 +558,20 @@ open class PulseNotificationDispatcher(
     }
 
     companion object {
-        const val CHANNEL_KEYWORD_ALERTS = "pulse_keyword_alerts"
-        const val CHANNEL_TRACKED_REPLIES = "pulse_tracked_replies"
-        const val CHANNEL_FORUM_INTERACTIONS = "pulse_forum_interactions"
+        const val CHANNEL_KEYWORD_ALERTS = "pulse_keyword_alerts_v2"
+        const val CHANNEL_TRACKED_REPLIES = "pulse_tracked_replies_v2"
+        const val CHANNEL_FORUM_INTERACTIONS = "pulse_forum_interactions_v2"
         const val CHANNEL_DIRECT_MESSAGES = "pulse_direct_messages"
         const val CHANNEL_SSH_BENCHMARK_ONGOING = "pulse_ssh_benchmark_ongoing"
         const val CHANNEL_SSH_BENCHMARK_RESULT = "pulse_ssh_benchmark_result"
         const val CHANNEL_OVERSEAS_PROMOS = "pulse_overseas_promos"
         const val CHANNEL_OVERSEAS_PROMOS_NAME = "海外情报促销推送"
+
+        private val LEGACY_LOW_IMPORTANCE_CHANNEL_IDS = listOf(
+            "pulse_keyword_alerts",
+            "pulse_tracked_replies",
+            "pulse_forum_interactions",
+        )
 
         private const val PREFS_NAME = "nodepulse_notification_prefs"
         private const val KEY_POST_NOTIF_REQUESTED_ONCE = "post_notifications_requested_once"

@@ -56,6 +56,7 @@ class NodePulseApp :
                     isActivityChangingConfigurations = false
                     startedActivityCount += 1
                     if (startedActivityCount > 0 && !transitioningFromConfigChange) {
+                        container.onAppEnteredForeground()
                         container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
                         container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
                         container.overseasPromoMonitorController.onForegroundChanged(startedActivityCount > 0)
@@ -71,6 +72,7 @@ class NodePulseApp :
                     startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
                     if (startedActivityCount == 0 && !isActivityChangingConfigurations) {
                         container.radarMonitorController.onForegroundChanged(false)
+                        container.onAppEnteredBackground()
                         container.restockMonitorController.onForegroundChanged(false)
                         container.overseasPromoMonitorController.onForegroundChanged(false)
                         container.overseasPromoWorkScheduler.onAppEnteredBackground(

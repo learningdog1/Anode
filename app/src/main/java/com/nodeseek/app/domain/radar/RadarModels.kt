@@ -215,7 +215,7 @@ data class RadarPollingSettings(
     val foregroundIntervalMinutes: Int = 2,
     val backgroundIntervalMinutes: Int = MIN_BACKGROUND_INTERVAL_MINUTES,
     val wifiOnlyInBackground: Boolean = false,
-    val requireBatteryNotLowInBackground: Boolean = true,
+    val requireBatteryNotLowInBackground: Boolean = false,
     val quietHoursEnabled: Boolean = false,
     val quietStartMinuteOfDay: Int = 23 * 60,
     val quietEndMinuteOfDay: Int = 7 * 60,

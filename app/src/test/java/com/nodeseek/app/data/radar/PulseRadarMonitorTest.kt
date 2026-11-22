@@ -14,6 +14,8 @@ import com.nodeseek.app.data.repository.FakeSettingsRepository
 import com.nodeseek.app.data.repository.InboxRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
+import com.nodeseek.app.data.repository.SessionSnapshotStore
+import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.radar.KeywordMatchMode
 import com.nodeseek.app.domain.radar.LocalAlertKind
@@ -1152,6 +1154,659 @@ class PulseRadarMonitorTest {
         } finally {
             ioScope.cancel()
         }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `background inbox loop delivers reply mention and DM system notifications when app leaves foreground with zero keyword rules`() = runTest {
+        var phase = 1
+        var serverUnreadCount = 0
+        val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson = selfUserJson))
+
+                    path == "/api/notification/unread-count" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":$serverUnreadCount}}""")
+
+                    path == "/api/notification/reply-to-me/list" && phase >= 3 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"id":301,"viewed":0,"post_id":900,"title":"后台收到新回复","floor_id":6,"commenter_id":202,"commenter_name":"Alice","created_at":"2026-11-22T10:02:00Z"}]}""")
+
+                    path == "/api/notification/message/list" && phase == 2 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":0,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"后台无ID私信测试","is_markdown":0,"created_at":"2026-11-22T10:01:00Z","viewed":0}]}""")
+
+                    path == "/api/notification/message/list" && phase >= 3 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"msgArray":[{"id":0,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"后台无ID私信测试","is_markdown":0,"created_at":"2026-11-22T10:01:00Z","viewed":0}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        assertEquals(101L, sessionRepository.sessionState.value?.uid)
+
+        // Default settings with 0 keyword rules and 0 tracked topics
+        radarRepository.getPollingSettings()
+
+        val loopScheduler = TestCoroutineScheduler()
+        val loopScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(loopScheduler))
+        val sharedInbox = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            watermarkStore = preferencesStore,
+        )
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = loopScope,
+            apiClient = apiClient,
+            inboxRepository = sharedInbox,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis + loopScheduler.currentTime },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        suspend fun advanceUntil(maxVirtualMs: Long, predicate: suspend () -> Boolean) {
+            var advanced = 0L
+            while (advanced <= maxVirtualMs) {
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                withContext(Dispatchers.Default) { delay(10L) }
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                val step = minOf(500L, (maxVirtualMs - advanced).coerceAtLeast(0L))
+                if (step == 0L) break
+                loopScheduler.advanceTimeBy(step)
+                advanced += step
+            }
+            repeat(100) {
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                withContext(Dispatchers.Default) { delay(10L) }
+            }
+            assertTrue("Timed out waiting for condition after advancing ${maxVirtualMs}ms", predicate())
+        }
+
+        val popups = mutableListOf<InAppMessagePopup>()
+        val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            sharedInbox.inAppPopupEvents.collect { popups.add(it) }
+        }
+        try {
+            // User enters background immediately after signing in -> baseline seeds promptly in background
+            monitor.onForegroundChanged(false)
+            monitor.start()
+            loopScheduler.runCurrent()
+            assertFalse(monitor.isForegroundLoopActive())
+            assertTrue(monitor.isBackgroundInboxLoopActive())
+
+            advanceUntil(5_000L) { preferencesStore.getWatermarks().dmInitialized }
+            assertTrue(dispatcher.directMessages.isEmpty())
+            assertTrue(dispatcher.interactions.isEmpty())
+
+            // Phase 2: New DM arrives (even with unread-count == 0 and id == 0!) while app is in background
+            phase = 2
+            advanceUntil(20_000L) { dispatcher.directMessages.size == 1 }
+            assertEquals(1, dispatcher.directMessages.size)
+            assertEquals(888L, dispatcher.directMessages.single().peerUid)
+            assertEquals("后台无ID私信测试", dispatcher.directMessages.single().previewText)
+            assertTrue(popups.isEmpty())
+
+            // Phase 3: New reply arrives while app stays in background -> system notification fires, DM not duplicated
+            phase = 3
+            serverUnreadCount = 1
+            advanceUntil(50_000L) { dispatcher.interactions.size == 1 }
+            assertEquals(1, dispatcher.interactions.size)
+            assertEquals(900L, dispatcher.interactions.single().topicId)
+            assertEquals(6, dispatcher.interactions.single().floorNumber)
+            assertEquals(1, dispatcher.directMessages.size)
+            assertTrue(popups.isEmpty())
+
+            monitor.stop()
+        } finally {
+            popupJob.cancel()
+            loopScope.cancel()
+        }
+    }
+
+    @Test
+    fun `cold process restart restores persisted session snapshot and delivers inbox notifications even when HTML hits Cloudflare`() = runTest {
+        val snapshotHolder = object : SessionSnapshotStore {
+            var saved: AccountSession? = null
+            override fun load(): AccountSession? = saved
+            override fun save(session: AccountSession) {
+                saved = session
+            }
+            override fun clear() {
+                saved = null
+            }
+        }
+
+        val baseUrl = server.url("/")
+        val sharedCookieBridge = WebViewCookieBridge(forceInMemory = true)
+        val okHttp = NodeSeekApiClient.createDefaultHttpClient(
+            cookieBridge = sharedCookieBridge,
+            userAgentProvider = UserAgentProvider("AnodeColdRestartTest/1.0"),
+            additionalTargetHost = baseUrl.host,
+        )
+
+        lateinit var client1: NodeSeekApiClient
+        val session1 = SessionRepositoryImpl(
+            apiClientProvider = { client1 },
+            cookieBridge = sharedCookieBridge,
+            sessionSnapshotStore = snapshotHolder,
+        )
+        client1 = NodeSeekApiClient(
+            httpClient = okHttp,
+            baseOrigin = baseUrl,
+            rssUrl = server.url("/rss.xml"),
+            nodeImageOrigin = baseUrl,
+            onConfigObserved = session1::onConfigPayloadObserved,
+        )
+
+        var coldRestarted = false
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    !coldRestarted && path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .addHeader("Set-Cookie", "session=valid_auth_token; Path=/")
+                        .setBody(
+                            buildFeedHtml(
+                                emptyList(),
+                                userJson = """{"member_id":101,"member_name":"PersistentUser","coin":500}""",
+                            ),
+                        )
+
+                    // After cold restart, all HTML & RSS routes hit Cloudflare 403 challenge,
+                    // while JSON `/api/notification/*` remains reachable with session cookie!
+                    coldRestarted && (
+                        path == "/" ||
+                            path.contains("sortBy=") ||
+                            path.startsWith("/post-") ||
+                            path.startsWith("/rss.xml")
+                        ) ->
+                        MockResponse()
+                            .setResponseCode(403)
+                            .addHeader("cf-mitigated", "challenge")
+                            .setBody("<html><title>Just a moment...</title></html>")
+
+                    !coldRestarted && path.startsWith("/api/notification/") ->
+                        MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+
+                    coldRestarted && path == "/api/notification/reply-to-me/list" ->
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setBody("""{"success":true,"data":[{"id":77,"viewed":0,"post_id":888,"title":"冷重启后台回复","floor_id":9,"commenter_id":303,"commenter_name":"Carol","created_at":"2026-11-22T11:00:00Z"}]}""")
+
+                    coldRestarted && path == "/api/notification/message/list" ->
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setBody("""{"success":true,"msgArray":[{"id":99,"sender_id":404,"sender_name":"Dave","receiver_id":101,"receiver_name":"PersistentUser","content":"进程被杀后收到的私信","is_markdown":0,"created_at":"2026-11-22T11:01:00Z","viewed":0}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        // Process 1: Sign in and seed baseline watermarks in foreground
+        session1.refreshSession().getOrThrow()
+        assertEquals(101L, snapshotHolder.load()?.uid)
+        val inbox1 = InboxRepositoryImpl(
+            apiClientProvider = { client1 },
+            sessionRepository = session1,
+            watermarkStore = preferencesStore,
+        )
+        inbox1.syncForegroundInbox().getOrThrow()
+        assertEquals(101L, preferencesStore.getWatermarks().inboxAccountUid)
+        assertTrue(preferencesStore.getWatermarks().dmInitialized)
+
+        // Process 2 (cold background WorkManager start): new SessionRepositoryImpl + InboxRepositoryImpl + PulseRadarMonitor
+        coldRestarted = true
+        radarRepository.addKeywordRule(keyword = "DMIT").getOrThrow()
+        radarRepository.trackTopic(topicId = 555L, title = "Tracked", currentMaxFloor = 3, totalPages = 1)
+
+        lateinit var client2: NodeSeekApiClient
+        val coldSession = SessionRepositoryImpl(
+            apiClientProvider = { client2 },
+            cookieBridge = sharedCookieBridge,
+            sessionSnapshotStore = snapshotHolder,
+        )
+        assertEquals(101L, coldSession.sessionState.value?.uid)
+        client2 = NodeSeekApiClient(
+            httpClient = okHttp,
+            baseOrigin = baseUrl,
+            rssUrl = server.url("/rss.xml"),
+            nodeImageOrigin = baseUrl,
+            onConfigObserved = coldSession::onConfigPayloadObserved,
+        )
+        val coldInbox = InboxRepositoryImpl(
+            apiClientProvider = { client2 },
+            sessionRepository = coldSession,
+            watermarkStore = preferencesStore,
+        )
+        val coldMonitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = this,
+            apiClient = client2,
+            inboxRepository = coldInbox,
+            sessionRepository = coldSession,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { true },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        val outcome = coldMonitor.runBackgroundPollPass()
+        assertTrue(outcome is RadarBackgroundPollOutcome.Completed)
+        val completed = outcome as RadarBackgroundPollOutcome.Completed
+        assertEquals(2, completed.inboxNotificationsTriggered)
+        assertEquals(1, dispatcher.interactions.size)
+        assertEquals(888L, dispatcher.interactions.single().topicId)
+        assertEquals(9, dispatcher.interactions.single().floorNumber)
+        assertEquals(1, dispatcher.directMessages.size)
+        assertEquals(99L, dispatcher.directMessages.single().messageId)
+        assertEquals("进程被杀后收到的私信", dispatcher.directMessages.single().previewText)
+
+        // Sign out clears persisted snapshot
+        coldRestarted = false
+        coldSession.signOutLocalOnly().getOrThrow()
+        assertEquals(null, snapshotHolder.load())
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `foreground popup advances shared watermark without duplicate OS notification then background pass notifies new arrivals`() = runTest {
+        var stage = 0
+        val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson = selfUserJson))
+
+                    path == "/api/notification/unread-count" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":$stage}}""")
+
+                    path == "/api/notification/reply-to-me/list" && stage == 1 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"id":501,"viewed":0,"post_id":700,"title":"前台弹窗帖","floor_id":3,"commenter_id":202,"commenter_name":"Alice","created_at":"2026-11-22T12:00:00Z"}]}""")
+
+                    path == "/api/notification/reply-to-me/list" && stage == 2 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"id":502,"viewed":0,"post_id":701,"title":"后台系统通知帖","floor_id":4,"commenter_id":203,"commenter_name":"Bob","created_at":"2026-11-22T12:01:00Z"},{"id":501,"viewed":0,"post_id":700,"title":"前台弹窗帖","floor_id":3,"commenter_id":202,"commenter_name":"Alice","created_at":"2026-11-22T12:00:00Z"}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        val sharedInbox = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            watermarkStore = preferencesStore,
+        )
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = this,
+            apiClient = apiClient,
+            inboxRepository = sharedInbox,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        val popups = mutableListOf<InAppMessagePopup>()
+        val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            sharedInbox.inAppPopupEvents.collect { popups.add(it) }
+        }
+        try {
+            // Stage 0: Seed foreground baseline
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            assertEquals(0L, preferencesStore.getWatermarks().lastNotifiedReplyId)
+            assertTrue(popups.isEmpty())
+
+            // Stage 1: Foreground reply arrives while RESUMED collector is active -> emits popup, no OS duplicate
+            stage = 1
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            assertEquals(1, popups.size)
+            assertEquals(501L, popups.single().itemId)
+            assertEquals(501L, preferencesStore.getWatermarks().lastNotifiedReplyId)
+
+            val afterForegroundOutcome = monitor.runBackgroundPollPass()
+            assertTrue(afterForegroundOutcome is RadarBackgroundPollOutcome.Completed)
+            assertEquals(0, dispatcher.interactions.size)
+
+            // Stage 2: User pauses/backgrounds app (unsubscribes RESUMED collector) -> new reply triggers OS notification
+            popupJob.cancel()
+            stage = 2
+            val backgroundOutcome = monitor.runBackgroundPollPass()
+            assertTrue(backgroundOutcome is RadarBackgroundPollOutcome.Completed)
+            assertEquals(1, popups.size)
+            assertEquals(1, dispatcher.interactions.size)
+            assertEquals(502L, dispatcher.interactions.single().itemId)
+            assertEquals(701L, dispatcher.interactions.single().topicId)
+            assertEquals(4, dispatcher.interactions.single().floorNumber)
+        } finally {
+            popupJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `synthetic negative DM watermark for id zero never poisons real positive message IDs or foreground popups`() = runTest {
+        var dmStage = 0
+        val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson = selfUserJson))
+
+                    path == "/api/notification/unread-count" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":0}}""")
+
+                    path == "/api/notification/message/list" -> {
+                        val body = when (dmStage) {
+                            1 -> """{"success":true,"msgArray":[{"id":0,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"后台无ID私信A","is_markdown":0,"created_at":"2026-11-22T12:00:00Z","viewed":0}]}"""
+                            2 -> """{"success":true,"msgArray":[{"id":0,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"前台无ID私信B","is_markdown":0,"created_at":"2026-11-22T12:01:00Z","viewed":0}]}"""
+                            3 -> """{"success":true,"msgArray":[{"id":105,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"真实正整数ID私信105","is_markdown":0,"created_at":"2026-11-22T12:02:00Z","viewed":0}]}"""
+                            4 -> """{"success":true,"msgArray":[{"id":106,"sender_id":888,"sender_name":"Bob","receiver_id":101,"receiver_name":"Me","content":"冷重启前台私信106","is_markdown":0,"created_at":"2026-11-22T12:03:00Z","viewed":0}]}"""
+                            else -> """{"success":true,"msgArray":[]}"""
+                        }
+                        MockResponse().setResponseCode(200).setBody(body)
+                    }
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        val sharedInbox = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            watermarkStore = preferencesStore,
+        )
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = this,
+            apiClient = apiClient,
+            inboxRepository = sharedInbox,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        // Stage 0: Seed baseline in background
+        assertTrue(monitor.runBackgroundPollPass() is RadarBackgroundPollOutcome.Completed)
+
+        // Stage 1: id=0 DM arrives in background -> negative watermark stored, 1 OS DM notification
+        dmStage = 1
+        assertTrue(monitor.runBackgroundPollPass() is RadarBackgroundPollOutcome.Completed)
+        assertEquals(1, dispatcher.directMessages.size)
+        val syntheticMarkerA = preferencesStore.getWatermarks().lastNotifiedDmMap[888L] ?: 0L
+        assertTrue("Expected negative synthetic marker, got $syntheticMarkerA", syntheticMarkerA < 0L)
+
+        // User enters foreground (RESUMED) -> no duplicate popup for already-notified id=0 DM A
+        val popups = mutableListOf<InAppMessagePopup>()
+        var popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            sharedInbox.inAppPopupEvents.collect { popups.add(it) }
+        }
+        try {
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            assertTrue("Expected zero duplicate popups on foreground return, got $popups", popups.isEmpty())
+
+            // Stage 2: Second id=0 DM arrives in foreground -> pops in-app, updates negative marker, no OS duplicate
+            dmStage = 2
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            assertEquals(1, popups.size)
+            assertEquals("前台无ID私信B", popups.single().previewText)
+            val syntheticMarkerB = preferencesStore.getWatermarks().lastNotifiedDmMap[888L] ?: 0L
+            assertTrue(syntheticMarkerB < 0L && syntheticMarkerB != syntheticMarkerA)
+
+            popupJob.cancel()
+            assertTrue(monitor.runBackgroundPollPass() is RadarBackgroundPollOutcome.Completed)
+            assertEquals(1, dispatcher.directMessages.size)
+
+            // Stage 3: Real positive id=105 DM arrives in background -> NOT poisoned by synthetic marker!
+            dmStage = 3
+            assertTrue(monitor.runBackgroundPollPass() is RadarBackgroundPollOutcome.Completed)
+            assertEquals(2, dispatcher.directMessages.size)
+            assertEquals(105L, dispatcher.directMessages.last().messageId)
+            assertEquals("真实正整数ID私信105", dispatcher.directMessages.last().previewText)
+            assertEquals(105L, preferencesStore.getWatermarks().lastNotifiedDmMap[888L])
+
+            // Stage 4: Cold-restarted InboxRepositoryImpl seeds from persisted watermarks and still pops id=106!
+            val coldInbox = InboxRepositoryImpl(
+                apiClientProvider = { apiClient },
+                sessionRepository = sessionRepository,
+                watermarkStore = preferencesStore,
+            )
+            val coldPopups = mutableListOf<InAppMessagePopup>()
+            popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+                coldInbox.inAppPopupEvents.collect { coldPopups.add(it) }
+            }
+            dmStage = 4
+            coldInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            assertEquals(1, coldPopups.size)
+            assertEquals(106L, coldPopups.single().itemId)
+        } finally {
+            popupJob.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `foreground return suppresses duplicate popups for background-notified replies and resets background unread baseline`() = runTest {
+        var stage = 0
+        var serverUnreadCount = 0
+        val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson = selfUserJson))
+
+                    path == "/api/notification/unread-count" -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"unreadCount":{"all":$serverUnreadCount}}""")
+
+                    path == "/api/notification/reply-to-me/list" -> {
+                        val body = when (stage) {
+                            1 -> """{"success":true,"data":[
+                                {"id":603,"viewed":0,"post_id":801,"title":"回复3","floor_id":4,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:03:00Z"},
+                                {"id":602,"viewed":0,"post_id":801,"title":"回复2","floor_id":3,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:02:00Z"},
+                                {"id":601,"viewed":0,"post_id":801,"title":"回复1","floor_id":2,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:01:00Z"}
+                            ]}"""
+                            2 -> """{"success":true,"data":[
+                                {"id":603,"viewed":1,"post_id":801,"title":"回复3","floor_id":4,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:03:00Z"},
+                                {"id":602,"viewed":1,"post_id":801,"title":"回复2","floor_id":3,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:02:00Z"},
+                                {"id":601,"viewed":1,"post_id":801,"title":"回复1","floor_id":2,"commenter_id":202,"commenter_name":"A","created_at":"2026-11-22T12:01:00Z"}
+                            ]}"""
+                            3 -> """{"success":true,"data":[
+                                {"id":604,"viewed":0,"post_id":802,"title":"二进后台新回复","floor_id":5,"commenter_id":205,"commenter_name":"Eve","created_at":"2026-11-22T12:05:00Z"}
+                            ]}"""
+                            else -> """{"success":true,"data":[]}"""
+                        }
+                        MockResponse().setResponseCode(200).setBody(body)
+                    }
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        val loopScheduler = TestCoroutineScheduler()
+        val loopScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(loopScheduler))
+        val sharedInbox = InboxRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            watermarkStore = preferencesStore,
+        )
+        val monitor = PulseRadarMonitor(
+            appContext = ContextWrapper(null),
+            scope = loopScope,
+            apiClient = apiClient,
+            inboxRepository = sharedInbox,
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            notificationDispatcher = dispatcher,
+            watermarkStore = preferencesStore,
+            clockMillis = { fakeClockMillis + loopScheduler.currentTime },
+            isUnmeteredNetwork = { fakeUnmeteredNetwork },
+            currentMinuteOfDay = { fakeMinuteOfDay },
+        )
+
+        suspend fun advanceUntil(maxVirtualMs: Long, predicate: suspend () -> Boolean) {
+            var advanced = 0L
+            while (advanced <= maxVirtualMs) {
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                withContext(Dispatchers.Default) { delay(10L) }
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                val step = minOf(500L, (maxVirtualMs - advanced).coerceAtLeast(0L))
+                if (step == 0L) break
+                loopScheduler.advanceTimeBy(step)
+                advanced += step
+            }
+            repeat(100) {
+                loopScheduler.runCurrent()
+                if (predicate()) return
+                withContext(Dispatchers.Default) { delay(10L) }
+            }
+            assertTrue("Timed out waiting for condition", predicate())
+        }
+
+        try {
+            // Seed in foreground first
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+
+            // Background #1: unread-count jumps to 3 -> 3 OS notifications emitted
+            monitor.onForegroundChanged(false)
+            monitor.start()
+            stage = 1
+            serverUnreadCount = 3
+            advanceUntil(20_000L) { dispatcher.interactions.size == 3 }
+            assertEquals(3, dispatcher.interactions.size)
+
+            // Return to foreground (RESUMED) -> must NOT re-emit popups for 601..603, and user reads all (unread=0)
+            monitor.onForegroundChanged(true)
+            val popups = mutableListOf<InAppMessagePopup>()
+            val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+                sharedInbox.inAppPopupEvents.collect { popups.add(it) }
+            }
+            sharedInbox.syncForegroundInbox().getOrThrow()
+            assertTrue("Expected no duplicate foreground popups after background notify, got $popups", popups.isEmpty())
+
+            stage = 2
+            serverUnreadCount = 0
+            sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
+            popupJob.cancel()
+
+            // Background #2: unread-count becomes 1 (less than Background #1's 3!) -> immediately notifies 604!
+            stage = 3
+            serverUnreadCount = 1
+            monitor.onForegroundChanged(false)
+            advanceUntil(20_000L) { dispatcher.interactions.size == 4 }
+            assertEquals(4, dispatcher.interactions.size)
+            assertEquals(604L, dispatcher.interactions.last().itemId)
+            monitor.stop()
+        } finally {
+            loopScope.cancel()
+        }
+    }
+
+    @Test
+    fun `HTML Cloudflare backoff isolates web scraping without blocking subsequent background inbox poll passes`() = runTest {
+        var htmlRequests = 0
+        var inboxStep = 1
+        val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path == "/" && inboxStep == 0 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody(buildFeedHtml(emptyList(), userJson = selfUserJson))
+
+                    path == "/" || path.contains("sortBy=") || path.startsWith("/rss.xml") -> {
+                        htmlRequests++
+                        MockResponse()
+                            .setResponseCode(403)
+                            .addHeader("cf-mitigated", "challenge")
+                            .setBody("<html><title>Just a moment...</title></html>")
+                    }
+
+                    path == "/api/notification/reply-to-me/list" && inboxStep == 2 -> MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"id":801,"viewed":0,"post_id":950,"title":"CF退避期间收到的回复","floor_id":7,"commenter_id":301,"commenter_name":"Frank","created_at":"2026-11-22T12:10:00Z"}]}""")
+
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        inboxStep = 0
+        sessionRepository.refreshSession().getOrThrow()
+        radarRepository.addKeywordRule(keyword = "DMIT").getOrThrow()
+        val monitor = createMonitor(this)
+
+        // Pass 1: HTML + RSS hit Cloudflare 403 (sets 60s htmlCfBackoff), while JSON inbox seeds baseline
+        inboxStep = 1
+        val pass1 = monitor.runBackgroundPollPass()
+        assertTrue(pass1 is RadarBackgroundPollOutcome.Completed)
+        val htmlCallsAfterPass1 = htmlRequests
+        assertTrue(htmlCallsAfterPass1 > 0)
+
+        // Pass 2 (10s later, still inside 60s HTML CF backoff): HTML is skipped, JSON inbox STILL delivers 801!
+        fakeClockMillis += 10_000L
+        inboxStep = 2
+        val pass2 = monitor.runBackgroundPollPass()
+        assertTrue("Expected Completed instead of Skipped(BACKOFF_ACTIVE), got $pass2", pass2 is RadarBackgroundPollOutcome.Completed)
+        assertEquals(htmlCallsAfterPass1, htmlRequests)
+        assertEquals(1, (pass2 as RadarBackgroundPollOutcome.Completed).inboxNotificationsTriggered)
+        assertEquals(1, dispatcher.interactions.size)
+        assertEquals(801L, dispatcher.interactions.single().itemId)
     }
 }
 

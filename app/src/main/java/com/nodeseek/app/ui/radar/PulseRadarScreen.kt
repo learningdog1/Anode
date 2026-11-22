@@ -279,6 +279,7 @@ fun PulseRadarScreen(
                 onSetMasterEnabled = viewModel::setMasterEnabled,
                 onSetKeywordAlertsEnabled = viewModel::setKeywordAlertsEnabled,
                 onSetReplyTrackingEnabled = viewModel::setReplyTrackingEnabled,
+                onSetInboxPushEnabled = viewModel::setInboxPushEnabled,
                 onSetForegroundInterval = viewModel::setForegroundIntervalMinutes,
                 onSetBackgroundInterval = viewModel::setBackgroundIntervalMinutes,
                 onSetWifiOnly = viewModel::setWifiOnlyInBackground,
@@ -582,6 +583,7 @@ private fun RadarEnvironmentBanner(
     onSetMasterEnabled: (Boolean) -> Unit,
     onSetKeywordAlertsEnabled: (Boolean) -> Unit,
     onSetReplyTrackingEnabled: (Boolean) -> Unit,
+    onSetInboxPushEnabled: (Boolean) -> Unit,
     onSetForegroundInterval: (Int) -> Unit,
     onSetBackgroundInterval: (Int) -> Unit,
     onSetWifiOnly: (Boolean) -> Unit,
@@ -753,6 +755,12 @@ private fun RadarEnvironmentBanner(
                         selected = pollingSettings.replyTrackingEnabled,
                         onClick = { onSetReplyTrackingEnabled(!pollingSettings.replyTrackingEnabled) },
                         label = { Text("关注帖新回复") },
+                        enabled = pollingSettings.isEnabled,
+                    )
+                    FilterChip(
+                        selected = pollingSettings.inboxPushEnabled,
+                        onClick = { onSetInboxPushEnabled(!pollingSettings.inboxPushEnabled) },
+                        label = { Text("私信与回复推送") },
                         enabled = pollingSettings.isEnabled,
                     )
                     FilterChip(

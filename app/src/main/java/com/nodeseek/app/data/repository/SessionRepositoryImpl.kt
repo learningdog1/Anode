@@ -1,5 +1,6 @@
 package com.nodeseek.app.data.repository
 
+import android.content.Context
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.data.network.WebViewCookieBridge
@@ -13,17 +14,72 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.serialization.json.Json
+
+interface SessionSnapshotStore {
+    fun load(): AccountSession?
+    fun save(session: AccountSession)
+    fun clear()
+}
+
+class SharedPreferencesSessionSnapshotStore(
+    context: Context,
+) : SessionSnapshotStore {
+    private val appContext: Context = context.applicationContext ?: context
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
+
+    override fun load(): AccountSession? = runCatching {
+        val raw = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_ACTIVE_SESSION_JSON, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        json.decodeFromString(AccountSession.serializer(), raw)
+            .takeIf { it.uid > 0L && it.username.isNotBlank() }
+    }.getOrNull()
+
+    override fun save(session: AccountSession) {
+        if (session.uid <= 0L) return
+        runCatching {
+            val raw = json.encodeToString(AccountSession.serializer(), session)
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_ACTIVE_SESSION_JSON, raw)
+                .apply()
+        }
+    }
+
+    override fun clear() {
+        runCatching {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_ACTIVE_SESSION_JSON)
+                .apply()
+        }
+    }
+
+    companion object {
+        private const val PREFS_NAME = "nodepulse_session_snapshot"
+        private const val KEY_ACTIVE_SESSION_JSON = "active_account_session_json"
+    }
+}
 
 /**
  * Concrete [SessionRepository] synchronizing authentication state from embedded HTML `__config__.user`,
- * native Turnstile/2FA sign-in, and interactive WebView cookie sessions.
+ * native Turnstile/2FA sign-in, and interactive WebView cookie sessions, with optional disk snapshot
+ * persistence so cold-started WorkManager background polls retain authenticated `uid` context.
  */
 class SessionRepositoryImpl(
     private val apiClientProvider: () -> NodeSeekApiClient,
     private val cookieBridge: WebViewCookieBridge,
+    private val sessionSnapshotStore: SessionSnapshotStore? = null,
 ) : SessionRepository {
 
-    private val _sessionState = MutableStateFlow<AccountSession?>(null)
+    private val _sessionState = MutableStateFlow<AccountSession?>(
+        sessionSnapshotStore?.load()?.takeIf { it.uid > 0L },
+    )
     override val sessionState: StateFlow<AccountSession?> = _sessionState.asStateFlow()
 
     private val _challengeRequired = MutableStateFlow(false)
@@ -37,7 +93,8 @@ class SessionRepositoryImpl(
     var onVerifiedCallback: (() -> Unit)? = null
     var onChallengeClearedOrAuthenticated: (() -> Unit)? = null
 
-    internal fun hasStoredSessionCookie(): Boolean = cookieBridge.hasSessionCookie()
+    internal fun hasStoredSessionCookie(): Boolean =
+        cookieBridge.hasSessionCookie() || cookieBridge.hasAnyAuthCookie()
 
     private fun bumpAuthVerifiedEpoch() {
         _authVerifiedEpoch.update { prev -> maxOf(prev + 1L, System.currentTimeMillis()) }
@@ -48,6 +105,11 @@ class SessionRepositoryImpl(
         _challengeRequired.value = false
         val session = config.user?.toDomainSession(config.enableCustomedStyle)
         _sessionState.value = session
+        if (session != null && session.uid > 0L) {
+            sessionSnapshotStore?.save(session)
+        } else {
+            sessionSnapshotStore?.clear()
+        }
         if (wasChallengeActive || session != null) {
             onChallengeClearedOrAuthenticated?.invoke()
         }
@@ -68,7 +130,9 @@ class SessionRepositoryImpl(
 
     fun updateCoinBalance(updatedCoins: Int) {
         _sessionState.update { current ->
-            current?.copy(drumsticks = updatedCoins)
+            current?.copy(drumsticks = updatedCoins)?.also { updated ->
+                sessionSnapshotStore?.save(updated)
+            }
         }
     }
 
@@ -201,6 +265,7 @@ class SessionRepositoryImpl(
     private fun clearLocalSessionState() {
         _challengeRequired.value = false
         _sessionState.value = null
+        sessionSnapshotStore?.clear()
         unreadCountListener?.invoke(0)
     }
 }

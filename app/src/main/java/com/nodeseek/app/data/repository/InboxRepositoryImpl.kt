@@ -148,10 +148,13 @@ class InboxRepositoryImpl(
     private var dmPopupBaselineInitialized: Boolean = false
     private val dmPopupWatermarkByPeer = mutableMapOf<Long, Long>()
     private val dmPopupSignatureByPeer = mutableMapOf<Long, String>()
+    private val dmPopupPersistedSyntheticByPeer = mutableMapOf<Long, Long>()
     private val emittedInteractionFloorKeys = LinkedHashMap<Pair<Long, Int>, Long>()
     private val emittedPopupKeys = LinkedHashSet<String>()
     private var persistedBaselineCheckedForUid: Long = 0L
     private var persistedBaselineCheckedForEpoch: Long = -1L
+    private var nonEmittingFetchGeneration: Long = 0L
+    private var syncedNonEmittingGeneration: Long = 0L
     private var lastForegroundCheckMs: Long = 0L
     private var lastFullListSyncMs: Long = 0L
     private var lastDmListSyncMs: Long = 0L
@@ -306,6 +309,7 @@ class InboxRepositoryImpl(
                 ensurePersistedBaselineSeeded(requestToken)
 
                 val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
+                syncPersistedWatermarksIfNeeded(requestToken, suppressPopups)
                 var pendingLoadedPopups: List<InAppMessagePopup> = emptyList()
                 var pendingReplyPersist: Long? = null
                 var pendingMentionPersist: Long? = null
@@ -392,7 +396,7 @@ class InboxRepositoryImpl(
                                 null
                             },
                             dmInitialized = dmPopupBaselineInitialized,
-                            dmWatermarks = dmPopupWatermarkByPeer.toMap(),
+                            dmWatermarks = buildPersistableDmWatermarksLocked(),
                         )
                     }
                     persistWatermarksToStore(
@@ -548,6 +552,7 @@ class InboxRepositoryImpl(
                 )
             }
             val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
+            syncPersistedWatermarksIfNeeded(requestToken, suppressPopups)
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
             var updatedWatermarkForPersist: Long? = null
             val effective = synchronized(stateLock) {
@@ -558,6 +563,9 @@ class InboxRepositoryImpl(
                 val now = clockMillis()
                 val viewerUid = requestToken.uid
                 val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
+                if (!allowEmit) {
+                    nonEmittingFetchGeneration += 1L
+                }
                 val ledger = ledgerFor(kind)
                 ledger.prune(now)
                 raw.forEach { item ->
@@ -759,6 +767,7 @@ class InboxRepositoryImpl(
             }
 
             val suppressPopups = currentCoroutineContext()[SuppressInAppPopupsContext] != null
+            syncPersistedWatermarksIfNeeded(requestToken, suppressPopups)
             var popupsToEmit: List<InAppMessagePopup> = emptyList()
             var dmWatermarksForPersist: Map<Long, Long> = emptyMap()
             val effective = synchronized(stateLock) {
@@ -795,6 +804,9 @@ class InboxRepositoryImpl(
                 _messageThreads.value = resolvedEffective
                 raiseTotalToKnownFloorLocked(now)
                 val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
+                if (!allowEmit) {
+                    nonEmittingFetchGeneration += 1L
+                }
                 popupsToEmit = detectDmPopupsLocked(
                     effectiveThreads = resolvedEffective,
                     viewerUid = viewerUid,
@@ -802,7 +814,7 @@ class InboxRepositoryImpl(
                     allowEmit = allowEmit,
                 )
                 if (popupsToEmit.isNotEmpty()) {
-                    dmWatermarksForPersist = dmPopupWatermarkByPeer.toMap()
+                    dmWatermarksForPersist = buildPersistableDmWatermarksLocked()
                 }
                 resolvedEffective
             }
@@ -1465,10 +1477,13 @@ class InboxRepositoryImpl(
         dmPopupBaselineInitialized = false
         dmPopupWatermarkByPeer.clear()
         dmPopupSignatureByPeer.clear()
+        dmPopupPersistedSyntheticByPeer.clear()
         emittedInteractionFloorKeys.clear()
         emittedPopupKeys.clear()
         persistedBaselineCheckedForUid = 0L
         persistedBaselineCheckedForEpoch = -1L
+        nonEmittingFetchGeneration = 0L
+        syncedNonEmittingGeneration = 0L
         lastForegroundCheckMs = 0L
         lastFullListSyncMs = 0L
         lastDmListSyncMs = 0L
@@ -1938,8 +1953,13 @@ class InboxRepositoryImpl(
             } else {
                 buildDmThreadSignature(thread.updatedAtIso, thread.previewText)
             }
+            val syntheticMarker = RadarWatermarks.encodeSignatureHashWatermark(currentSignature)
+            val persistedSynthetic = dmPopupPersistedSyntheticByPeer[thread.peerUid] ?: 0L
             if (currentSignature.isNotEmpty()) {
                 dmPopupSignatureByPeer[thread.peerUid] = currentSignature
+                if (syntheticMarker < 0L) {
+                    dmPopupPersistedSyntheticByPeer[thread.peerUid] = syntheticMarker
+                }
             }
 
             val shouldTriggerById = !thread.isRead && triggerMsgId > prevWatermark
@@ -1947,7 +1967,8 @@ class InboxRepositoryImpl(
                 hasTriggerCandidate &&
                 triggerMsgId <= 0L &&
                 currentSignature.isNotEmpty() &&
-                currentSignature != prevSignature
+                currentSignature != prevSignature &&
+                syntheticMarker != persistedSynthetic
 
             if (shouldTriggerById || shouldTriggerBySignature) {
                 val dedupKey = if (shouldTriggerById) {
@@ -1983,10 +2004,30 @@ class InboxRepositoryImpl(
             .takeLast(MAX_POPUPS_PER_BATCH)
     }
 
-    private fun buildDmThreadSignature(updatedAtIso: String, preview: String): String {
-        val cleanTime = updatedAtIso.trim()
-        val cleanBody = preview.trim()
-        return if (cleanTime.isEmpty() && cleanBody.isEmpty()) "" else "$cleanTime|$cleanBody"
+    private fun buildDmThreadSignature(updatedAtIso: String, preview: String): String =
+        RadarWatermarks.buildDmSignature(updatedAtIso, preview)
+
+    private fun buildPersistableDmWatermarksLocked(): Map<Long, Long> {
+        val result = LinkedHashMap<Long, Long>()
+        for ((peerUid, msgId) in dmPopupWatermarkByPeer) {
+            if (peerUid > 0L && msgId > 0L) {
+                result[peerUid] = msgId
+            }
+        }
+        for ((peerUid, sig) in dmPopupSignatureByPeer) {
+            if (peerUid > 0L && !result.containsKey(peerUid) && sig.isNotEmpty()) {
+                val synthetic = RadarWatermarks.encodeSignatureHashWatermark(sig)
+                if (synthetic < 0L) {
+                    result[peerUid] = synthetic
+                }
+            }
+        }
+        for ((peerUid, synthetic) in dmPopupPersistedSyntheticByPeer) {
+            if (peerUid > 0L && !result.containsKey(peerUid) && synthetic < 0L) {
+                result[peerUid] = synthetic
+            }
+        }
+        return result
     }
 
     private fun flushPendingPopupsFromLoadedStateLocked(
@@ -2035,7 +2076,7 @@ class InboxRepositoryImpl(
             )
             if (emitted.isNotEmpty()) {
                 collected += emitted
-                dmPersist = dmPopupWatermarkByPeer.toMap()
+                dmPersist = buildPersistableDmWatermarksLocked()
             }
         }
         return FlushPopupsResult(
@@ -2044,6 +2085,79 @@ class InboxRepositoryImpl(
             mentionWatermark = mentionPersist,
             dmWatermarks = dmPersist,
         )
+    }
+
+    private fun applyPersistedWatermarksMonotonicallyLocked(
+        persisted: RadarWatermarks,
+        onlyIfBaselineUninitialized: Boolean,
+    ) {
+        if ((!onlyIfBaselineUninitialized || !repliesLedger.popupBaselineInitialized) &&
+            persisted.lastNotifiedReplyId >= 0L
+        ) {
+            repliesLedger.popupBaselineInitialized = true
+            repliesLedger.popupWatermarkId = maxOf(
+                repliesLedger.popupWatermarkId,
+                persisted.lastNotifiedReplyId,
+            )
+        }
+        if ((!onlyIfBaselineUninitialized || !mentionsLedger.popupBaselineInitialized) &&
+            persisted.lastNotifiedMentionId >= 0L
+        ) {
+            mentionsLedger.popupBaselineInitialized = true
+            mentionsLedger.popupWatermarkId = maxOf(
+                mentionsLedger.popupWatermarkId,
+                persisted.lastNotifiedMentionId,
+            )
+        }
+        if ((!onlyIfBaselineUninitialized || !dmPopupBaselineInitialized) &&
+            persisted.dmInitialized
+        ) {
+            dmPopupBaselineInitialized = true
+            for ((peerUid, marker) in persisted.lastNotifiedDmMap) {
+                if (peerUid <= 0L) continue
+                if (marker > 0L) {
+                    dmPopupWatermarkByPeer[peerUid] = maxOf(
+                        dmPopupWatermarkByPeer[peerUid] ?: 0L,
+                        marker,
+                    )
+                } else if (marker < 0L) {
+                    dmPopupPersistedSyntheticByPeer[peerUid] = marker
+                }
+            }
+        }
+    }
+
+    private suspend fun syncPersistedWatermarksIfNeeded(
+        requestToken: RequestSessionToken,
+        suppressPopups: Boolean,
+    ) {
+        val store = watermarkStore ?: return
+        if (!requestToken.isAuthenticated) return
+        val observedGen = synchronized(stateLock) {
+            syncAccountLocked()
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                return
+            }
+            val allowEmit = !suppressPopups && _inAppPopupEvents.subscriptionCount.value > 0
+            if (!allowEmit || syncedNonEmittingGeneration >= nonEmittingFetchGeneration) {
+                return
+            }
+            nonEmittingFetchGeneration
+        }
+        val persisted = runCatching { store.getWatermarks() }.getOrNull()
+        synchronized(stateLock) {
+            syncAccountLocked()
+            if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
+                return@synchronized
+            }
+            syncedNonEmittingGeneration = maxOf(syncedNonEmittingGeneration, observedGen)
+            if (persisted != null && persisted.inboxAccountUid == requestToken.uid) {
+                applyPersistedWatermarksMonotonicallyLocked(
+                    persisted = persisted,
+                    onlyIfBaselineUninitialized = false,
+                )
+            }
+        }
     }
 
     private suspend fun ensurePersistedBaselineSeeded(requestToken: RequestSessionToken) {
@@ -2078,31 +2192,10 @@ class InboxRepositoryImpl(
             persistedBaselineCheckedForUid = viewerUid
             persistedBaselineCheckedForEpoch = requestToken.sessionEpoch
             if (persisted != null && persisted.inboxAccountUid == viewerUid) {
-                if (!repliesLedger.popupBaselineInitialized && persisted.lastNotifiedReplyId >= 0L) {
-                    repliesLedger.popupBaselineInitialized = true
-                    repliesLedger.popupWatermarkId = maxOf(
-                        repliesLedger.popupWatermarkId,
-                        persisted.lastNotifiedReplyId,
-                    )
-                }
-                if (!mentionsLedger.popupBaselineInitialized && persisted.lastNotifiedMentionId >= 0L) {
-                    mentionsLedger.popupBaselineInitialized = true
-                    mentionsLedger.popupWatermarkId = maxOf(
-                        mentionsLedger.popupWatermarkId,
-                        persisted.lastNotifiedMentionId,
-                    )
-                }
-                if (!dmPopupBaselineInitialized && persisted.dmInitialized) {
-                    dmPopupBaselineInitialized = true
-                    for ((peerUid, msgId) in persisted.lastNotifiedDmMap) {
-                        if (peerUid > 0L && msgId > 0L) {
-                            dmPopupWatermarkByPeer[peerUid] = maxOf(
-                                dmPopupWatermarkByPeer[peerUid] ?: 0L,
-                                msgId,
-                            )
-                        }
-                    }
-                }
+                applyPersistedWatermarksMonotonicallyLocked(
+                    persisted = persisted,
+                    onlyIfBaselineUninitialized = true,
+                )
             }
         }
     }
@@ -2153,9 +2246,15 @@ class InboxRepositoryImpl(
                     base.lastNotifiedDmMap
                 } else {
                     base.lastNotifiedDmMap.toMutableMap().apply {
-                        for ((peerUid, msgId) in dmWatermarks) {
-                            if (peerUid > 0L && msgId > (this[peerUid] ?: 0L)) {
-                                this[peerUid] = msgId
+                        for ((peerUid, marker) in dmWatermarks) {
+                            if (peerUid <= 0L || marker == 0L) continue
+                            val existing = this[peerUid] ?: 0L
+                            if (marker > 0L) {
+                                if (marker > existing) {
+                                    this[peerUid] = marker
+                                }
+                            } else if (existing <= 0L && marker != existing) {
+                                this[peerUid] = marker
                             }
                         }
                     }

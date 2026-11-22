@@ -299,4 +299,12 @@ class RadarMatcherAndTapTargetTest {
             PulseNotificationDispatcher.decodeTapTarget(PulseNotificationDispatcher.encodeTapTarget(dmTarget!!)),
         )
     }
+
+    @Test
+    fun `notification channel constants use upgraded v2 high-importance IDs for forum and radar alerts`() {
+        assertEquals("pulse_forum_interactions_v2", PulseNotificationDispatcher.CHANNEL_FORUM_INTERACTIONS)
+        assertEquals("pulse_tracked_replies_v2", PulseNotificationDispatcher.CHANNEL_TRACKED_REPLIES)
+        assertEquals("pulse_keyword_alerts_v2", PulseNotificationDispatcher.CHANNEL_KEYWORD_ALERTS)
+        assertEquals("pulse_direct_messages", PulseNotificationDispatcher.CHANNEL_DIRECT_MESSAGES)
+    }
 }

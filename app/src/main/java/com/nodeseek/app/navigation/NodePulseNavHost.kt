@@ -1,8 +1,12 @@
 package com.nodeseek.app.navigation
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import android.os.Build
+import androidx.core.app.ActivityCompat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -108,6 +112,7 @@ import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InboxTargetResolver
 import com.nodeseek.app.domain.radar.NotificationTapTarget
+import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.ui.adaptive.AdaptivePostureTransition
 import com.nodeseek.app.ui.adaptive.DualPaneDestinationKind
@@ -285,6 +290,9 @@ fun NodePulseNavHost(
     val challengeRequired by container.sessionRepository.challengeRequired.collectAsStateWithLifecycle()
     val unreadCount by container.inboxRepository.unreadTotalCount.collectAsStateWithLifecycle()
     val radarUnreadCount by container.radarRepository.unreadAlertCountFlow.collectAsStateWithLifecycle(initialValue = 0)
+    val radarPollingSettings by container.radarRepository.pollingSettingsFlow.collectAsStateWithLifecycle(
+        initialValue = RadarPollingSettings(),
+    )
     val sharedCheckInStatus by container.checkInRepository.checkInStatus.collectAsStateWithLifecycle()
     val updateState by container.appUpdateManager.state.collectAsStateWithLifecycle()
 
@@ -338,9 +346,24 @@ fun NodePulseNavHost(
         }
     }
 
+    var hasPromptedNotificationThisSession by rememberSaveable { mutableStateOf(false) }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-    ) { }
+    ) { granted ->
+        container.notificationDispatcher.markPostNotificationsRequestedOnce()
+        if (!granted) {
+            appScope.launch {
+                val result = rootSnackbarHostState.showSnackbar(
+                    message = "未开启系统通知权限，退至后台时手机无法收到回复与私信通知",
+                    actionLabel = "去开启",
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    openOverseasAppNotificationSettings(context)
+                }
+            }
+        }
+    }
 
     val synchronizedUserAgent = remember(container, context) {
         (container as? DefaultAppContainer)?.userAgentProvider?.getUserAgent(context)
@@ -386,18 +409,58 @@ fun NodePulseNavHost(
         if (currentSession == null) {
             container.checkInRepository.clearCachedStatus()
         } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                currentSession.uid > 0L &&
-                !container.notificationDispatcher.hasPostNotificationsPermission() &&
-                !container.notificationDispatcher.hasRequestedPostNotificationsOnce()
-            ) {
-                container.notificationDispatcher.markPostNotificationsRequestedOnce()
+            delay(600L)
+            container.checkInRepository.getCheckInBoard(page = 1, forceRefresh = false)
+        }
+    }
+
+    // Prompt Android 13+ POST_NOTIFICATIONS once WebView auth sheet is closed and Activity is resumed,
+    // or surface a one-tap Settings action if system notifications were previously disabled.
+    LaunchedEffect(
+        session?.uid,
+        activeWebViewRequest == null,
+        radarPollingSettings.isEnabled,
+        radarPollingSettings.inboxPushEnabled,
+    ) {
+        val currentUid = session?.uid ?: 0L
+        if (currentUid <= 0L ||
+            activeWebViewRequest != null ||
+            hasPromptedNotificationThisSession ||
+            !radarPollingSettings.isEnabled ||
+            !radarPollingSettings.inboxPushEnabled
+        ) {
+            return@LaunchedEffect
+        }
+        delay(350L)
+        if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            return@LaunchedEffect
+        }
+        if (container.notificationDispatcher.hasPostNotificationsPermission()) {
+            return@LaunchedEffect
+        }
+
+        hasPromptedNotificationThisSession = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val shouldShowRationale = context.findHostActivity()?.let { hostActivity ->
+                ActivityCompat.shouldShowRequestPermissionRationale(
+                    hostActivity,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                )
+            } == true
+            if (!container.notificationDispatcher.hasRequestedPostNotificationsOnce() || shouldShowRationale) {
                 runCatching {
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
+                return@LaunchedEffect
             }
-            delay(600L)
-            container.checkInRepository.getCheckInBoard(page = 1, forceRefresh = false)
+        }
+
+        val result = rootSnackbarHostState.showSnackbar(
+            message = "系统通知权限未开启，后台无法收到新回复与私信通知",
+            actionLabel = "去开启",
+        )
+        if (result == SnackbarResult.ActionPerformed) {
+            openOverseasAppNotificationSettings(context)
         }
     }
 
@@ -411,12 +474,14 @@ fun NodePulseNavHost(
         }
     }
 
-    // Foreground lightweight unread polling, piggyback wake, and in-app popup collection
+    // Foreground lightweight unread polling, piggyback wake, and in-app popup collection.
+    // Scoped to RESUMED so pressing Home / locking screen immediately unsubscribes popups and
+    // never consumes unread watermarks during onPause -> onStop background transitions.
     LaunchedEffect(lifecycleOwner, container, session?.uid) {
         val currentUid = session?.uid ?: 0L
         if (currentUid <= 0L) return@LaunchedEffect
 
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             launch {
                 container.inboxRepository.inAppPopupEvents.collect { popup ->
                     val currentActiveDmPeer = latestActiveDmPeerUid
@@ -2093,4 +2158,10 @@ private fun resolveDestinationKind(
             DualPaneDestinationKind.TOPIC_DETAIL
         else -> DualPaneDestinationKind.OTHER
     }
+}
+
+private tailrec fun Context.findHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }

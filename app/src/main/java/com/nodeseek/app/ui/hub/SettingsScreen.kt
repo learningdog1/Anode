@@ -2,9 +2,13 @@
 
 package com.nodeseek.app.ui.hub
 
+import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.expandVertically
@@ -62,6 +66,7 @@ import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.NewReleases
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Schedule
@@ -91,6 +96,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -106,6 +112,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -115,8 +122,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -135,6 +146,7 @@ import com.nodeseek.app.domain.trust.OfficialTradeLookup
 import com.nodeseek.app.domain.update.AppUpdateState
 import com.nodeseek.app.domain.update.UpdateCheckResult
 import com.nodeseek.app.domain.update.UpdateDownloadPhase
+import com.nodeseek.app.ui.overseas.openOverseasAppNotificationSettings
 import com.nodeseek.app.ui.trust.OFFICIAL_TRADE_PORTAL_URL
 import com.nodeseek.app.ui.trust.OfficialTradeUiSignalBus
 import kotlinx.coroutines.CancellationException
@@ -608,8 +620,67 @@ fun SettingsScreen(
     val uiState = previewUiState ?: observedUiState
     val settings = uiState.settings
     val context = LocalContext.current
+    val isInspection = LocalInspectionMode.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val uriHandler = LocalUriHandler.current
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val isPreviewMode = isInspection || previewUiState != null || previewRadarPollingSettings != null
+    var hasNotificationPermission by remember(appContainer.notificationDispatcher, isPreviewMode) {
+        mutableStateOf(
+            if (isPreviewMode) true else appContainer.notificationDispatcher.hasPostNotificationsPermission(),
+        )
+    }
+
+    DisposableEffect(lifecycleOwner, appContainer.notificationDispatcher, isPreviewMode) {
+        if (isPreviewMode) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    hasNotificationPermission = appContainer.notificationDispatcher.hasPostNotificationsPermission()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        appContainer.notificationDispatcher.markPostNotificationsRequestedOnce()
+        val nowPermitted = appContainer.notificationDispatcher.hasPostNotificationsPermission()
+        hasNotificationPermission = nowPermitted
+        if (granted && nowPermitted) {
+            settingsScope.launch {
+                snackbarHostState.showSnackbar("系统通知权限已开启")
+            }
+        } else {
+            openOverseasAppNotificationSettings(context)
+        }
+    }
+
+    val requestOrOpenNotificationPermission: () -> Unit = {
+        if (!isPreviewMode) {
+            val runtimeMissing = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            if (runtimeMissing && !appContainer.notificationDispatcher.hasRequestedPostNotificationsOnce()) {
+                runCatching {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }.onFailure {
+                    openOverseasAppNotificationSettings(context)
+                }
+            } else {
+                openOverseasAppNotificationSettings(context)
+            }
+        }
+    }
 
     var showNodeImageKeyDialog by rememberSaveable { mutableStateOf(false) }
     var showClearHistoryConfirm by rememberSaveable { mutableStateOf(false) }
@@ -1010,16 +1081,33 @@ fun SettingsScreen(
                 item(key = "settings_radar_notifications") {
                     PulseStaggeredEntrance(index = 3) {
                         SettingsGroupedSection(title = "通知与提醒") {
+                            if (!hasNotificationPermission &&
+                                (radarPollingSettings.isEnabled || radarPollingSettings.inboxPushEnabled)
+                            ) {
+                                SettingsNavRow(
+                                    icon = Icons.Rounded.NotificationsOff,
+                                    title = "系统通知权限未开启",
+                                    subtitle = "当前仅前台显示应用内弹窗，退至后台无法收到手机消息通知",
+                                    trailingText = "去开启",
+                                    trailingTextColor = MaterialTheme.colorScheme.error,
+                                    onClick = requestOrOpenNotificationPermission,
+                                )
+                                SettingsGroupDivider()
+                            }
+
                             SettingsSwitchRow(
                                 icon = Icons.Rounded.Radar,
                                 title = "启用脉搏雷达监测",
-                                subtitle = "定时检查关键词新帖命中与追踪楼层回复",
+                                subtitle = "总开关：控制后台私信/回复系统通知、关键词与追更楼层监测",
                                 checked = radarPollingSettings.isEnabled,
                                 onCheckedChange = { enabled ->
                                     settingsScope.launch {
                                         appContainer.radarRepository.updatePollingSettings {
                                             it.copy(isEnabled = enabled)
                                         }
+                                    }
+                                    if (enabled && !hasNotificationPermission) {
+                                        requestOrOpenNotificationPermission()
                                     }
                                 },
                             )
@@ -1034,8 +1122,14 @@ fun SettingsScreen(
                                 onCheckedChange = { enabled ->
                                     settingsScope.launch {
                                         appContainer.radarRepository.updatePollingSettings {
-                                            it.copy(inboxPushEnabled = enabled)
+                                            it.copy(
+                                                isEnabled = if (enabled) true else it.isEnabled,
+                                                inboxPushEnabled = enabled,
+                                            )
                                         }
+                                    }
+                                    if (enabled && !hasNotificationPermission) {
+                                        requestOrOpenNotificationPermission()
                                     }
                                 },
                             )

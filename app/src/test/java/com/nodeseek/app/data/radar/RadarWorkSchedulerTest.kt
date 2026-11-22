@@ -6,10 +6,13 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.work.BackoffPolicy
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
 import androidx.work.PeriodicWorkRequest
 import com.nodeseek.app.data.local.RadarPreferencesStore
 import com.nodeseek.app.domain.radar.RadarPollingSettings
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -42,7 +45,14 @@ class RadarWorkSchedulerTest {
             val request: PeriodicWorkRequest,
         )
 
+        data class OneTimeEnqueueCall(
+            val uniqueWorkName: String,
+            val policy: ExistingWorkPolicy,
+            val request: OneTimeWorkRequest,
+        )
+
         val enqueueCalls = mutableListOf<EnqueueCall>()
+        val oneTimeEnqueueCalls = mutableListOf<OneTimeEnqueueCall>()
         val cancelCalls = mutableListOf<String>()
 
         override fun enqueueUniquePeriodicWork(
@@ -54,6 +64,20 @@ class RadarWorkSchedulerTest {
                 EnqueueCall(
                     uniqueWorkName = uniqueWorkName,
                     policy = existingPeriodicWorkPolicy,
+                    request = request,
+                ),
+            )
+        }
+
+        override fun enqueueUniqueWork(
+            uniqueWorkName: String,
+            existingWorkPolicy: ExistingWorkPolicy,
+            request: OneTimeWorkRequest,
+        ) {
+            oneTimeEnqueueCalls.add(
+                OneTimeEnqueueCall(
+                    uniqueWorkName = uniqueWorkName,
+                    policy = existingWorkPolicy,
                     request = request,
                 ),
             )
@@ -80,19 +104,19 @@ class RadarWorkSchedulerTest {
     fun `buildConstraints maps wifiOnlyInBackground and requireBatteryNotLowInBackground accurately`() {
         val defaults = RadarPollingSettings()
         assertEquals(15, defaults.backgroundIntervalMinutes)
-        assertTrue(defaults.requireBatteryNotLowInBackground)
+        assertFalse(defaults.requireBatteryNotLowInBackground)
 
         val defaultConstraints = RadarWorkScheduler.buildConstraints(defaults)
         assertEquals(NetworkType.CONNECTED, defaultConstraints.requiredNetworkType)
-        assertTrue(defaultConstraints.requiresBatteryNotLow())
+        assertFalse(defaultConstraints.requiresBatteryNotLow())
 
-        val wifiAndIgnoreBattery = defaults.copy(
+        val wifiAndRequireBattery = defaults.copy(
             wifiOnlyInBackground = true,
-            requireBatteryNotLowInBackground = false,
+            requireBatteryNotLowInBackground = true,
         )
-        val unmeteredConstraints = RadarWorkScheduler.buildConstraints(wifiAndIgnoreBattery)
+        val unmeteredConstraints = RadarWorkScheduler.buildConstraints(wifiAndRequireBattery)
         assertEquals(NetworkType.UNMETERED, unmeteredConstraints.requiredNetworkType)
-        assertFalse(unmeteredConstraints.requiresBatteryNotLow())
+        assertTrue(unmeteredConstraints.requiresBatteryNotLow())
     }
 
     @SuppressLint("RestrictedApi")
@@ -237,22 +261,92 @@ class RadarWorkSchedulerTest {
         val store = RadarPreferencesStore(dataStore)
         val migrated = store.getPollingSettings()
         assertEquals(15, migrated.backgroundIntervalMinutes)
-        assertTrue(migrated.requireBatteryNotLowInBackground)
+        assertFalse(migrated.requireBatteryNotLowInBackground)
 
         store.updatePollingSettings {
             it.copy(
                 backgroundIntervalMinutes = 45,
-                requireBatteryNotLowInBackground = false,
+                requireBatteryNotLowInBackground = true,
                 wifiOnlyInBackground = true,
             )
         }
         val reloaded = store.pollingSettingsFlow.first()
         assertEquals(45, reloaded.backgroundIntervalMinutes)
-        assertFalse(reloaded.requireBatteryNotLowInBackground)
+        assertTrue(reloaded.requireBatteryNotLowInBackground)
         assertTrue(reloaded.wifiOnlyInBackground)
 
         // Attempt to store < 15m gets coerced to 15m
         store.updatePollingSettings { it.copy(backgroundIntervalMinutes = 3) }
         assertEquals(15, store.getPollingSettings().backgroundIntervalMinutes)
+    }
+
+    @SuppressLint("RestrictedApi")
+    @Test
+    fun `onAppEnteredBackground keeps periodic schedule, enqueues prompt background check, and cancels on foreground return`() {
+        val gateway = RecordingWorkManagerGateway()
+        val scheduler = RadarWorkScheduler(gateway)
+
+        // User has 0 keyword rules & 0 tracked topics, only inbox push enabled -> schedules KEEP + one-shot entry check
+        scheduler.onAppEnteredBackground(
+            RadarPollingSettings(
+                isEnabled = true,
+                keywordAlertsEnabled = false,
+                replyTrackingEnabled = false,
+                inboxPushEnabled = true,
+            ),
+        )
+        assertEquals(1, gateway.enqueueCalls.size)
+        assertEquals(ExistingPeriodicWorkPolicy.KEEP, gateway.enqueueCalls.single().policy)
+        assertEquals(1, gateway.oneTimeEnqueueCalls.size)
+        val entryCall = gateway.oneTimeEnqueueCalls.single()
+        assertEquals(RadarWorkScheduler.UNIQUE_BACKGROUND_ENTRY_WORK_NAME, entryCall.uniqueWorkName)
+        assertEquals(ExistingWorkPolicy.REPLACE, entryCall.policy)
+        assertEquals(
+            RadarWorkScheduler.BACKGROUND_ENTRY_DELAY_SECONDS * 1_000L,
+            entryCall.request.workSpec.initialDelay,
+        )
+
+        // Returning to foreground cancels pending one-shot background entry check while preserving periodic work
+        scheduler.onAppEnteredForeground()
+        assertEquals(listOf(RadarWorkScheduler.UNIQUE_BACKGROUND_ENTRY_WORK_NAME), gateway.cancelCalls)
+
+        // Re-entering background then disabling cancels both periodic and background-entry work
+        scheduler.onAppEnteredBackground(RadarPollingSettings(isEnabled = true))
+        gateway.cancelCalls.clear()
+        scheduler.sync(RadarPollingSettings(isEnabled = false))
+        assertEquals(
+            listOf(
+                RadarWorkScheduler.UNIQUE_WORK_NAME,
+                RadarWorkScheduler.UNIQUE_BACKGROUND_ENTRY_WORK_NAME,
+            ),
+            gateway.cancelCalls,
+        )
+    }
+
+    @Test
+    fun `onAppEnteredBackgroundAsync drops stale background entry enqueue when app returns to foreground before settings load`() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val gateway = RecordingWorkManagerGateway()
+        val scheduler = RadarWorkScheduler(gateway)
+        val delayedSettings = CompletableDeferred<RadarPollingSettings>()
+
+        // 1. Rapid background -> foreground bounce while settings read is still suspended
+        scheduler.onAppEnteredBackgroundAsync(CoroutineScope(testDispatcher)) {
+            delayedSettings.await()
+        }
+        scheduler.onAppEnteredForeground()
+        delayedSettings.complete(RadarPollingSettings(isEnabled = true, inboxPushEnabled = true))
+        advanceUntilIdle()
+
+        assertTrue(gateway.oneTimeEnqueueCalls.isEmpty())
+        assertTrue(gateway.enqueueCalls.isEmpty())
+
+        // 2. Genuine stay-in-background enqueues both KEEP periodic work and one-shot entry check
+        scheduler.onAppEnteredBackgroundAsync(CoroutineScope(testDispatcher)) {
+            RadarPollingSettings(isEnabled = true, inboxPushEnabled = true)
+        }
+        advanceUntilIdle()
+        assertEquals(1, gateway.enqueueCalls.size)
+        assertEquals(1, gateway.oneTimeEnqueueCalls.size)
     }
 }

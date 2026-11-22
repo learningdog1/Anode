@@ -30,18 +30,36 @@ class UserAgentProvider(
                 return existing
             }
         }
+        val appContext = context.applicationContext ?: context
         val systemUa = runCatching {
-            WebSettings.getDefaultUserAgent(context.applicationContext ?: context)
+            WebSettings.getDefaultUserAgent(appContext)
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
         return if (systemUa != null) {
             isSystemWebViewDefault = true
             cachedUserAgent = systemUa
+            runCatching {
+                appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_CACHED_SYSTEM_UA, systemUa)
+                    .apply()
+            }
             systemUa
         } else {
-            val fallback = cachedUserAgent ?: DEFAULT_ANDROID_USER_AGENT
-            cachedUserAgent = fallback
-            fallback
+            val persistedSystemUa = runCatching {
+                appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(KEY_CACHED_SYSTEM_UA, null)
+                    ?.takeIf { it.isNotBlank() }
+            }.getOrNull()
+            if (persistedSystemUa != null) {
+                isSystemWebViewDefault = true
+                cachedUserAgent = persistedSystemUa
+                persistedSystemUa
+            } else {
+                val fallback = cachedUserAgent ?: DEFAULT_ANDROID_USER_AGENT
+                cachedUserAgent = fallback
+                fallback
+            }
         }
     }
 
@@ -79,6 +97,9 @@ class UserAgentProvider(
     }
 
     companion object {
+        private const val PREFS_NAME = "nodepulse_network_prefs"
+        private const val KEY_CACHED_SYSTEM_UA = "cached_system_webview_ua"
+
         const val DEFAULT_ANDROID_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

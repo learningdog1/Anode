@@ -30,7 +30,24 @@ data class RadarWatermarks(
     val lastNotifiedMentionId: Long = -1L,
     val dmInitialized: Boolean = false,
     val lastNotifiedDmMap: Map<Long, Long> = emptyMap(),
-)
+) {
+    companion object {
+        fun buildDmSignature(updatedAtIso: String, previewText: String): String {
+            val cleanTime = updatedAtIso.trim()
+            val cleanBody = previewText.trim()
+            return if (cleanTime.isEmpty() && cleanBody.isEmpty()) "" else "$cleanTime|$cleanBody"
+        }
+
+        fun encodeSignatureHashWatermark(signature: String): Long {
+            if (signature.isEmpty()) return 0L
+            val hash = signature.hashCode().toLong() and 0x7FFF_FFFFL
+            return -(1L + hash)
+        }
+
+        fun encodeSyntheticDmWatermark(updatedAtIso: String, previewText: String): Long =
+            encodeSignatureHashWatermark(buildDmSignature(updatedAtIso, previewText))
+    }
+}
 
 interface RadarWatermarkStore {
     suspend fun getWatermarks(): RadarWatermarks
@@ -93,7 +110,10 @@ class RadarPreferencesStore(
             val next = transform(current)
             val trimmedDmMap = if (next.lastNotifiedDmMap.size > MAX_TRACKED_DM_PEERS) {
                 next.lastNotifiedDmMap.entries
-                    .sortedByDescending { it.value }
+                    .sortedWith(
+                        compareByDescending<Map.Entry<Long, Long>> { it.value > 0L }
+                            .thenByDescending { if (it.value > 0L) it.value else 0L },
+                    )
                     .take(MAX_TRACKED_DM_PEERS)
                     .associate { it.key to it.value }
             } else {
@@ -127,7 +147,7 @@ class RadarPreferencesStore(
             RadarPollingSettings.MAX_BACKGROUND_INTERVAL_MINUTES,
         ),
         wifiOnlyInBackground = this[Keys.WIFI_ONLY_IN_BACKGROUND] ?: false,
-        requireBatteryNotLowInBackground = this[Keys.REQUIRE_BATTERY_NOT_LOW_IN_BACKGROUND] ?: true,
+        requireBatteryNotLowInBackground = this[Keys.REQUIRE_BATTERY_NOT_LOW_IN_BACKGROUND] ?: false,
         quietHoursEnabled = this[Keys.QUIET_HOURS_ENABLED] ?: false,
         quietStartMinuteOfDay = (this[Keys.QUIET_START_MINUTE] ?: (23 * 60)).coerceIn(0, 1439),
         quietEndMinuteOfDay = (this[Keys.QUIET_END_MINUTE] ?: (7 * 60)).coerceIn(0, 1439),

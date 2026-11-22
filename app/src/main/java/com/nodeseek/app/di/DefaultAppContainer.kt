@@ -42,6 +42,7 @@ import com.nodeseek.app.data.repository.InboxRepositoryImpl
 import com.nodeseek.app.data.repository.NodeImageHostRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
+import com.nodeseek.app.data.repository.SharedPreferencesSessionSnapshotStore
 import com.nodeseek.app.data.repository.UserRepositoryImpl
 import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.RestockCheckWorker
@@ -66,6 +67,7 @@ import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorController
+import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.CheckInRepository
@@ -86,6 +88,7 @@ import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /**
@@ -171,6 +174,7 @@ class DefaultAppContainer(
         SessionRepositoryImpl(
             apiClientProvider = { apiClient },
             cookieBridge = cookieBridge,
+            sessionSnapshotStore = SharedPreferencesSessionSnapshotStore(appContext),
         ).also { sessionRepo ->
             sessionRepo.unreadCountListener = { unreadCount ->
                 inboxRepositoryImpl.onPiggybackedUnreadCount(unreadCount)
@@ -329,6 +333,17 @@ class DefaultAppContainer(
             scope = applicationScope,
             pollingSettingsFlow = radarRepository.pollingSettingsFlow,
         )
+    }
+
+    fun onAppEnteredForeground() {
+        radarWorkScheduler.onAppEnteredForeground()
+    }
+
+    fun onAppEnteredBackground() {
+        radarWorkScheduler.onAppEnteredBackgroundAsync(applicationScope) {
+            runCatching { radarRepository.getPollingSettings() }
+                .getOrDefault(RadarPollingSettings())
+        }
     }
 
     val gitHubReleaseClient: GitHubReleaseClient by lazy {
