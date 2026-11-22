@@ -75,7 +75,7 @@ class NetBenchHistoryStore(
                 host = cleanHost,
                 port = entry.port.coerceIn(1, 65535),
                 iperfPort = entry.iperfPort.coerceIn(1, 65535),
-            )
+            ).sanitizedMetrics()
             val current = _entries.value.filterNot { existing ->
                 existing.host.equals(normalized.host, ignoreCase = true) && existing.port == normalized.port
             }
@@ -125,6 +125,7 @@ class NetBenchHistoryStore(
             val payload = json.decodeFromString<NetBenchHistoryPayload>(raw)
             val cleanEntries = payload.entries
                 .filter { it.host.isNotBlank() }
+                .map { it.sanitizedMetrics() }
                 .sortedByDescending { it.testedAtEpochMillis }
                 .take(maxEntries.coerceAtLeast(1))
             payload.copy(entries = cleanEntries)

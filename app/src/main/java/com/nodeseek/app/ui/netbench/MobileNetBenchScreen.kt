@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,6 +60,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -81,9 +84,9 @@ import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPortPreset
+import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
-import com.nodeseek.app.ui.topic.NodeImageApiKeySetupDialog
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -94,8 +97,9 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
-import kotlinx.coroutines.launch
+import com.nodeseek.app.ui.topic.NodeImageApiKeySetupDialog
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /**
  * Full-screen Mobile Network Tester (`手机端测机`):
@@ -251,6 +255,7 @@ fun MobileNetBenchScreen(
                         onToggleTestViaProxy = viewModel::toggleTestViaProxy,
                         onIperfPortChange = viewModel::updateIperfPortText,
                         onIperfDurationChange = viewModel::updateIperfDurationSec,
+                        onIperfOmitChange = viewModel::updateIperfOmitSec,
                         onIperfParallelStreamsChange = viewModel::updateIperfParallelStreams,
                         onIperfModeChange = viewModel::updateIperfTestMode,
                         onOpenIperf3SshManager = { directSshControlTrigger++ },
@@ -584,6 +589,7 @@ private fun TestModulesConfigCard(
     onToggleTestViaProxy: (Boolean) -> Unit,
     onIperfPortChange: (String) -> Unit,
     onIperfDurationChange: (Int) -> Unit,
+    onIperfOmitChange: (Int) -> Unit,
     onIperfParallelStreamsChange: (Int) -> Unit,
     onIperfModeChange: (Iperf3TestMode) -> Unit,
     onOpenIperf3SshManager: () -> Unit = {},
@@ -700,21 +706,72 @@ private fun TestModulesConfigCard(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            text = "单向测速时长",
+                            text = "预热剔除 (-O)",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf(3, 5, 10).forEach { sec ->
+                            Iperf3Config.OMIT_PRESETS.forEach { sec ->
                                 NetBenchSelectableChip(
                                     label = "${sec}s",
-                                    selected = uiState.iperfDurationSec == sec,
+                                    selected = uiState.iperfOmitSec == sec,
                                     enabled = !uiState.isRunning,
-                                    onClick = { onIperfDurationChange(sec) },
+                                    onClick = { onIperfOmitChange(sec) },
                                 )
                             }
                         }
                     }
+                }
+
+                var showCustomDurationDialog by rememberSaveable { mutableStateOf(false) }
+                val isCustomDuration = uiState.iperfDurationSec !in Iperf3Config.DURATION_PRESETS
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "单向时长 (-t)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Iperf3Config.DURATION_PRESETS.forEach { sec ->
+                            NetBenchSelectableChip(
+                                label = "${sec}s",
+                                selected = uiState.iperfDurationSec == sec,
+                                enabled = !uiState.isRunning,
+                                onClick = { onIperfDurationChange(sec) },
+                            )
+                        }
+                        NetBenchSelectableChip(
+                            label = if (isCustomDuration) "${uiState.iperfDurationSec}s" else "自定义",
+                            selected = isCustomDuration,
+                            icon = Icons.Rounded.Edit,
+                            enabled = !uiState.isRunning,
+                            onClick = { showCustomDurationDialog = true },
+                        )
+                    }
+                }
+                Text(
+                    text = "单向实际耗时约 ${uiState.iperfOmitSec + uiState.iperfDurationSec}s：" +
+                        if (uiState.iperfOmitSec > 0) {
+                            "前 ${uiState.iperfOmitSec}s 为 TCP 慢启动预热，不计入均速（同 iperf3 -O）"
+                        } else {
+                            "未剔除慢启动，均速会包含起速阶段"
+                        },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                )
+                if (showCustomDurationDialog) {
+                    IperfCustomDurationDialog(
+                        initialSec = uiState.iperfDurationSec,
+                        onConfirm = { sec ->
+                            onIperfDurationChange(sec)
+                            showCustomDurationDialog = false
+                        },
+                        onDismiss = { showCustomDurationDialog = false },
+                    )
                 }
 
                 Row(
@@ -945,5 +1002,45 @@ private fun StandaloneHttpLatencyCard(
         } else {
             NetBenchErrorCallout(message = result.localDiagnosticMessage ?: "HTTP 探测失败")
         }
+    }
+}
+
+@Composable
+internal fun IperfCustomDurationDialog(
+    initialSec: Int,
+    onConfirm: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var input by rememberSaveable { mutableStateOf(initialSec.toString()) }
+    val parsed = input.toIntOrNull()
+    val valid = parsed != null && parsed in Iperf3Config.MIN_DURATION_SEC..Iperf3Config.MAX_DURATION_SEC
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        title = "自定义单向测速时长",
+        message = "输入 ${Iperf3Config.MIN_DURATION_SEC}–${Iperf3Config.MAX_DURATION_SEC} 秒（官方 iperf3 默认 10 秒）。" +
+            "时长越长，越能平滑链路波动，但会消耗更多流量。",
+        icon = Icons.Rounded.Timer,
+        confirmText = "确定",
+        onConfirm = { parsed?.let(onConfirm) },
+        confirmEnabled = valid,
+        dismissText = "取消",
+        onDismiss = onDismiss,
+    ) {
+        OutlinedTextField(
+            value = input,
+            onValueChange = { raw -> input = raw.filter { it.isDigit() }.take(2) },
+            singleLine = true,
+            isError = input.isNotEmpty() && !valid,
+            label = { Text("时长（秒）") },
+            suffix = { Text("s") },
+            supportingText = if (input.isNotEmpty() && !valid) {
+                { Text("请输入 ${Iperf3Config.MIN_DURATION_SEC}–${Iperf3Config.MAX_DURATION_SEC} 之间的整数") }
+            } else {
+                null
+            },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            shape = PulseArchitecturalShapes.SmallChip,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }

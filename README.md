@@ -300,7 +300,7 @@
 - **手机端测机 (`MobileNetBenchScreen`)**：
   - **内核级物理绑定 ICMP Ping + TCPing 双重探测**：采用原生非阻塞 `AF_INET/AF_INET6` `SOCK_DGRAM` `IPPROTO_ICMP` 套接字配合 `Network.bindSocket` 真正绕过 VPN/代理直连物理蜂窝/Wi-Fi 网卡（外部 `/system/bin/ping` 仅作权限降级兜底），搭配防 Fake-IP 物理链路 DoH 解析与 `Proxy.NO_PROXY` TCPing，协同绘制零分配 `Canvas` 波形。
   - **双出口 IP 解析与物理网络绑定 (`NetBenchNetworkSelection` / `NetBenchNetworkBinding`)**：支持通过 `ConnectivityManager` 将 ICMP Ping、TCPing、iperf3 与 IP 查询绑定至真实蜂窝/Wi-Fi 物理网卡，清晰对照**真实本机出口 IP** 与**代理/VPN 出口 IP**。
-  - **原生 `iperf3` `-P` 并发流、逐秒区间采集与图文混排论坛报告**：内置 `-P`（`1 / 2 / 4 / 8` 快捷档位与协议 `1..16` 流）并发测速与逐秒吞吐分段（per-second intervals）波动统计，联动 GeoIP / RIR RDAP 鉴定原生/广播 IP；支持离屏渲染适配论坛列宽的横版可视化卡片（IP 原生鉴定卡、Ping/TCPing 波形卡、iperf3 仪表盘与逐秒明细卡），通过官方 **NodeImage 图床**（`api.nodeimage.com`）自动上传并按章节嵌入完整 Markdown 报告（支持按单卡指纹缓存复用与脱敏同步）。
+  - **原生 `iperf3` `-P` 并发流、`-O` 慢启动预热剔除、自定义时长与图文混排论坛报告**：默认 `10s` 单向时长对齐官方 `iperf3` 并支持 `1–60s` 自定义时长，内置 `-O`（`0s / 1s / 2s`，默认 `1s`）TCP 慢启动预热剔除、上传方向服务端接收侧（`receiver`）权威速率对齐、`-P`（`1 / 2 / 4 / 8` 快捷档位与协议 `1..16` 流）并发测速及逐秒吞吐分段（per-second intervals）波动统计，联动 GeoIP / RIR RDAP 鉴定原生/广播 IP；支持离屏渲染适配论坛列宽的横版可视化卡片（IP 原生鉴定卡、Ping/TCPing 波形卡、iperf3 仪表盘与逐秒明细卡），通过官方 **NodeImage 图床**（`api.nodeimage.com`）自动上传并按章节嵌入完整 Markdown 报告（支持按单卡指纹缓存复用与脱敏同步）。
 - **轻量 SSH：一键跑测评脚本与自适应终端 (`LiteSshScreen`)**：
   - **安全凭据、搜索分组与多跳跳板 (`ProxyJump`)**：内置 Android Keystore `AES-256-GCM` 主机保险库（支持主机/预设搜索、分组筛选与快捷选择器）、`TOFU` SHA-256 指纹校验、**`SshJumpHostResolver` 多跳跳板机链路**（含成环检测）与后台前台服务 (`LiteSshForegroundService`) 保活。
   - **非交互自动应答与独立通道联动测速**：支持预设脚本自动应答引擎（`SshPromptAutoResponder` 回显去重、防抖与静默进度检测）、分组执行历史，以及通过独立 SSH 通道并发装/启/停远端 VPS `iperf3 -s`。
@@ -459,6 +459,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）与探针面板 API Token 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
+- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与 `NodeSeek` 官方交易平台 API Key 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。

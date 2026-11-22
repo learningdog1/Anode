@@ -590,18 +590,19 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
                 String.format(Locale.US, "%.1f", mbps) to "Mbps"
             }
             val displayedIntervals = selectDisplayIntervals(res, maxRows = maxRows)
-            val totalIntervals = res.intervals.size.coerceAtLeast(displayedIntervals.size)
+            val totalIntervals = res.measuredIntervals.size.coerceAtLeast(displayedIntervals.size)
             val ivHeaderTitle = if (isDual) {
                 "逐秒明细 (${totalIntervals}段)"
             } else {
                 "${res.direction.flagLabel} · 逐秒测速明细 (${totalIntervals}段)"
             }
             val meta = buildList {
+                res.omitSec.takeIf { it > 0 }?.let { add("剔除预热 ${it}s") }
                 res.stabilityPercent?.let { add("稳定度 ${NetBenchMarkdownFormatter.formatPercent(it)}") }
                 res.retransmits?.takeIf { it >= 0 }?.let { add("重传 $it") }
             }.joinToString(" · ")
             val maxMbps = maxOf(
-                res.intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
+                res.measuredIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
                 displayedIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0,
                 res.maxIntervalMbps,
                 1.0,
@@ -1613,7 +1614,8 @@ object AndroidNetBenchCardImageGenerator : NetBenchCardImageGenerator {
         result: SanitizedIperf3Presentation,
         maxRows: Int,
     ): List<Iperf3IntervalSample> {
-        val raw = result.intervals
+        // Warm-up (`-O`) samples are excluded from the forum card, matching the averaged window.
+        val raw = result.measuredIntervals
         if (raw.isEmpty()) {
             return listOf(
                 Iperf3IntervalSample(

@@ -355,15 +355,31 @@ data class Iperf3Config(
     val preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
     val useProxy: Boolean = false,
     val parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
+    /**
+     * Warm-up seconds excluded from statistics (official `iperf3 -O`). The test runs for
+     * `omitSec + durationSec` seconds in total; the first [omitSec] seconds (TCP slow start)
+     * are reported as `omitted` intervals and do not count toward averages.
+     */
+    val omitSec: Int = 0,
 ) {
     val normalizedPort: Int get() = port.coerceIn(1, 65535)
-    val normalizedDurationSec: Int get() = durationSec.coerceIn(1, 60)
+    val normalizedDurationSec: Int get() = durationSec.coerceIn(MIN_DURATION_SEC, MAX_DURATION_SEC)
+    val normalizedOmitSec: Int get() = omitSec.coerceIn(0, MAX_OMIT_SEC)
     val normalizedChunkSize: Int get() = chunkSizeBytes.coerceIn(4096, 1024 * 1024)
     val normalizedParallelStreams: Int get() = parallelStreams.coerceIn(MIN_PARALLEL_STREAMS, MAX_PARALLEL_STREAMS)
 
     companion object {
         const val DEFAULT_PORT = 5201
-        const val DEFAULT_DURATION_SEC = 5
+        /** Matches the official `iperf3 -t` default so phone and desktop results are comparable. */
+        const val DEFAULT_DURATION_SEC = 10
+        const val MIN_DURATION_SEC = 1
+        const val MAX_DURATION_SEC = 60
+        val DURATION_PRESETS = listOf(5, 10, 30)
+
+        /** UI default warm-up exclusion (`-O 1`) that drops the TCP slow-start second. */
+        const val DEFAULT_UI_OMIT_SEC = 1
+        const val MAX_OMIT_SEC = 5
+        val OMIT_PRESETS = listOf(0, 1, 2)
         const val DEFAULT_CHUNK_SIZE = 131_072 // 128 KiB
         const val DEFAULT_CONNECT_TIMEOUT_MS = 4_000
         const val DEFAULT_PARALLEL_STREAMS = 1
@@ -443,12 +459,22 @@ data class Iperf3Result(
     val errorMessage: String? = null,
     val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
     val intervals: List<Iperf3IntervalSample> = emptyList(),
+    /** Warm-up seconds actually excluded from [durationSec] / averages (`iperf3 -O`). */
+    val omitSec: Int = 0,
 ) {
     /**
-     * Best-available throughput value in Mbps (prefers measured client rate, falls back to server rate).
+     * Best-available throughput in Mbps, always taken from the **receiver** side (like the official
+     * iperf3 `receiver` summary line):
+     * - Download (`-R`): the phone is the receiver -> [clientMbps].
+     * - Upload: the VPS is the receiver -> [serverMbps]. The client-side figure counts bytes written
+     *   into the local socket send buffer (not yet delivered), which overstates upload throughput.
+     * Falls back to the other side when the preferred figure is unavailable.
      */
     val effectiveMbps: Double
-        get() = if (clientMbps > 0.0) clientMbps else (serverMbps ?: 0.0)
+        get() = when (direction) {
+            Iperf3Direction.UPLOAD -> serverMbps?.takeIf { it > 0.0 } ?: clientMbps.coerceAtLeast(0.0)
+            else -> if (clientMbps > 0.0) clientMbps else (serverMbps ?: 0.0)
+        }
 
     /**
      * Minimum non-omitted per-interval bitrate in Mbps (if interval samples exist).
@@ -496,7 +522,7 @@ data class Iperf3Result(
 }
 
 /**
- * Live progress emitted every ~250ms while running iperf3.
+ * Live progress emitted every ~500ms while running iperf3.
  */
 data class Iperf3Progress(
     val direction: Iperf3Direction,
@@ -513,6 +539,8 @@ data class Iperf3Progress(
     val errorKind: Iperf3ErrorKind? = null,
     val errorMessage: String? = null,
     val parallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
+    /** `true` while the warm-up (`-O`) seconds are running and samples are not yet counted. */
+    val inOmitPhase: Boolean = false,
 ) {
     val progressFraction: Float
         get() = if (stage == Iperf3Stage.COMPLETED) {
@@ -759,4 +787,22 @@ data class NetBenchHistoryEntry(
     val lastOriginType: IpOriginType? = null,
     val lastRegionSummary: String? = null,
     val testedAtEpochMillis: Long = System.currentTimeMillis(),
-)
+) {
+    /**
+     * Drops corrupted latency values persisted by older builds (e.g. `745123913967336.8 ms` caused by
+     * NAT-mangled ICMP payload timestamps) so they are never rendered in the recent-target chips.
+     */
+    fun sanitizedMetrics(): NetBenchHistoryEntry {
+        fun Double?.saneRtt(): Double? = this?.takeIf { it.isFinite() && it >= 0.0 && it <= MAX_SANE_HISTORY_RTT_MS }
+        val cleanLoss = lastPingLossPercent?.takeIf { it.isFinite() && it in 0.0..100.0 }
+        val cleanAvg = lastAvgMs.saneRtt()
+        val cleanPing = lastPingAvgMs.saneRtt()
+        if (cleanLoss == lastPingLossPercent && cleanAvg == lastAvgMs && cleanPing == lastPingAvgMs) return this
+        return copy(lastAvgMs = cleanAvg, lastPingAvgMs = cleanPing, lastPingLossPercent = cleanLoss)
+    }
+
+    companion object {
+        /** Same ceiling as `IcmpPingParser.MAX_VALID_RTT_MS`. */
+        const val MAX_SANE_HISTORY_RTT_MS = 30_000.0
+    }
+}

@@ -402,7 +402,10 @@ data class SanitizedIperf3Presentation(
     val targetHeaderText: String,
     val durationSec: Double,
     val bytesTransferred: Long,
+    /** Receiver-side throughput (download: phone, upload: VPS), see [Iperf3Result.effectiveMbps]. */
     val effectiveMbps: Double,
+    /** Raw client-side rate (download: received, upload: written to the local socket). */
+    val clientMbps: Double,
     val serverMbps: Double?,
     val maxIntervalMbps: Double,
     val minIntervalMbps: Double?,
@@ -414,7 +417,13 @@ data class SanitizedIperf3Presentation(
     val success: Boolean,
     val errorCategory: NetBenchErrorCategory?,
     val publicErrorMessage: String?,
-)
+    /** Warm-up seconds excluded from statistics (`iperf3 -O`). */
+    val omitSec: Int = 0,
+) {
+    /** Intervals inside the measured window (warm-up `omitted` samples removed). */
+    val measuredIntervals: List<Iperf3IntervalSample>
+        get() = intervals.filter { !it.omitted }
+}
 
 /**
  * Unified, privacy-sanitized presentation model consumed by BOTH [NetBenchMarkdownFormatter]
@@ -957,6 +966,7 @@ object NetBenchReportSanitizer {
             durationSec = result.durationSec,
             bytesTransferred = result.bytesTransferred,
             effectiveMbps = result.effectiveMbps,
+            clientMbps = result.clientMbps,
             serverMbps = result.serverMbps,
             maxIntervalMbps = result.maxIntervalMbps,
             minIntervalMbps = result.minIntervalMbps,
@@ -968,6 +978,7 @@ object NetBenchReportSanitizer {
             success = result.success,
             errorCategory = errCategory,
             publicErrorMessage = errCategory?.publicLabel,
+            omitSec = result.omitSec,
         )
     }
 

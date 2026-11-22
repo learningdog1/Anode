@@ -749,16 +749,24 @@ object NetBenchMarkdownFormatter {
 
         val avgCell = buildString {
             append("**${formatMbps(result.effectiveMbps)}**")
-            val srv = result.serverMbps?.takeIf { it > 0.0 }
-            if (srv != null) {
-                append(" (服务端 ${formatMbps(srv)})")
+            if (result.direction == Iperf3Direction.UPLOAD) {
+                // Upload headline is already the VPS receiver figure; show the local send rate for reference.
+                val cli = result.clientMbps.takeIf { it > 0.0 && result.serverMbps?.takeIf { s -> s > 0.0 } != null }
+                if (cli != null) {
+                    append(" (本机发送 ${formatMbps(cli)})")
+                }
+            } else {
+                val srv = result.serverMbps?.takeIf { it > 0.0 }
+                if (srv != null) {
+                    append(" (服务端 ${formatMbps(srv)})")
+                }
             }
         }
 
         val peakMinCell = buildString {
             append("峰值 `${formatMbps(result.maxIntervalMbps)}`")
             val minSeg = result.minIntervalMbps
-            if (minSeg != null && result.intervals.size >= 2) {
+            if (minSeg != null && result.measuredIntervals.size >= 2) {
                 append(" / 最低 `${formatMbps(minSeg)}`")
             }
         }
@@ -770,6 +778,9 @@ object NetBenchMarkdownFormatter {
                 add("单流")
             }
             add("耗时 ${formatSeconds(result.durationSec)}")
+            if (result.omitSec > 0) {
+                add("剔除预热 ${result.omitSec}s")
+            }
             add("传输 ${formatBytes(result.bytesTransferred)}")
         }.joinToString(" · ")
 
@@ -798,10 +809,11 @@ object NetBenchMarkdownFormatter {
         } else {
             "Upload mode (Client -> Server)"
         }
-        val streamDesc = if (result.parallelStreams > 1) {
-            "-P ${result.parallelStreams} parallel streams"
-        } else {
-            "1 stream"
+        val streamDesc = buildString {
+            append(if (result.parallelStreams > 1) "-P ${result.parallelStreams} parallel streams" else "1 stream")
+            if (result.omitSec > 0) {
+                append(" · -O ${result.omitSec} (warm-up omitted)")
+            }
         }
 
         val effectiveIntervals = if (result.intervals.isNotEmpty()) {
@@ -881,7 +893,7 @@ object NetBenchMarkdownFormatter {
             }
             IperfSummaryTuple(
                 senderBytes = result.bytesTransferred,
-                senderMbps = result.effectiveMbps,
+                senderMbps = result.clientMbps.takeIf { it > 0.0 } ?: result.effectiveMbps,
                 senderRole = "sender (client)",
                 receiverBytes = srvBytes,
                 receiverMbps = srvMbps,
@@ -1145,8 +1157,10 @@ object NetBenchMarkdownFormatter {
             if (dl?.success == true || ul?.success == true) {
                 val parts = mutableListOf<String>()
                 if (dl?.success == true) {
-                    val firstSeg = dl.intervals.firstOrNull()?.bitrateMbps
-                    val rampNote = if (firstSeg != null && dl.intervals.size >= 2) {
+                    val measured = dl.measuredIntervals
+                    val firstSeg = measured.firstOrNull()?.bitrateMbps
+                    val omitPrefix = if (dl.omitSec > 0) "已剔除前 ${dl.omitSec}s 慢启动，" else ""
+                    val rampNote = omitPrefix + if (firstSeg != null && measured.size >= 2) {
                         val ratio = firstSeg / dl.maxIntervalMbps.coerceAtLeast(1.0)
                         if (ratio >= 0.75) "首秒即达 `${formatMbps(firstSeg)}` 起速迅猛" else "首秒 `${formatMbps(firstSeg)}` 随后爬升至峰值 `${formatMbps(dl.maxIntervalMbps)}`"
                     } else {

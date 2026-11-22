@@ -89,6 +89,7 @@ data class MobileNetBenchUiState(
     val enableIperf3: Boolean = false,
     val iperfPortText: String = Iperf3Config.DEFAULT_PORT.toString(),
     val iperfDurationSec: Int = Iperf3Config.DEFAULT_DURATION_SEC,
+    val iperfOmitSec: Int = Iperf3Config.DEFAULT_UI_OMIT_SEC,
     val iperfParallelStreams: Int = Iperf3Config.DEFAULT_PARALLEL_STREAMS,
     val iperfTestMode: Iperf3TestMode = Iperf3TestMode.DOWNLOAD,
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
@@ -367,7 +368,18 @@ class NetBenchSessionController(
     }
 
     fun updateIperfDurationSec(seconds: Int) {
-        _uiState.update { it.copy(iperfDurationSec = seconds.coerceIn(1, 30)) }
+        _uiState.update {
+            it.copy(
+                iperfDurationSec = seconds.coerceIn(
+                    Iperf3Config.MIN_DURATION_SEC,
+                    Iperf3Config.MAX_DURATION_SEC,
+                ),
+            )
+        }
+    }
+
+    fun updateIperfOmitSec(seconds: Int) {
+        _uiState.update { it.copy(iperfOmitSec = seconds.coerceIn(0, Iperf3Config.MAX_OMIT_SEC)) }
     }
 
     fun updateIperfParallelStreams(streams: Int) {
@@ -755,6 +767,7 @@ class NetBenchSessionController(
                             target = endpoint.resolvedTarget.resolvedIp,
                             port = effectiveIperfPort,
                             durationSec = snapshot.iperfDurationSec,
+                            omitSec = snapshot.iperfOmitSec,
                             direction = Iperf3Direction.DOWNLOAD,
                             preferredFamily = snapshot.preferredFamily,
                             useProxy = snapshot.testViaProxy,
@@ -785,6 +798,7 @@ class NetBenchSessionController(
                             target = endpoint.resolvedTarget.resolvedIp,
                             port = effectiveIperfPort,
                             durationSec = snapshot.iperfDurationSec,
+                            omitSec = snapshot.iperfOmitSec,
                             direction = Iperf3Direction.UPLOAD,
                             preferredFamily = snapshot.preferredFamily,
                             useProxy = snapshot.testViaProxy,
@@ -1146,6 +1160,7 @@ class MobileNetBenchViewModel(
     fun refreshClientEgress() = controller.refreshClientEgress()
     fun updateIperfPortText(value: String) = controller.updateIperfPortText(value)
     fun updateIperfDurationSec(seconds: Int) = controller.updateIperfDurationSec(seconds)
+    fun updateIperfOmitSec(seconds: Int) = controller.updateIperfOmitSec(seconds)
     fun updateIperfParallelStreams(streams: Int) = controller.updateIperfParallelStreams(streams)
     fun updateIperfTestMode(mode: Iperf3TestMode) = controller.updateIperfTestMode(mode)
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) = controller.selectMarkdownStyle(style)

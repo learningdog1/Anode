@@ -68,6 +68,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -1424,7 +1425,11 @@ private fun Iperf3SingleDirectionBlock(
                 )
             }
             PulseAccentPill(
-                text = progress.stage.label,
+                text = if (progress.inOmitPhase && progress.stage == Iperf3Stage.TEST_RUNNING) {
+                    "慢启动预热中"
+                } else {
+                    progress.stage.label
+                },
                 containerColor = if (progress.stage == Iperf3Stage.FAILED) {
                     MaterialTheme.colorScheme.errorContainer
                 } else {
@@ -1492,6 +1497,8 @@ private fun Iperf3IntervalBreakdownPanel(
         maxOf(intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0, progress.peakMbps, 1.0)
     }
     val finalRes = progress.finalResult
+    val measuredCount = intervals.count { !it.omitted }
+    val omittedCount = intervals.size - measuredCount
     val metaTags = buildList {
         finalRes?.stabilityPercent?.let { add("稳定度 ${NetBenchMarkdownFormatter.formatPercent(it)}") }
         finalRes?.retransmits?.takeIf { it >= 0 }?.let { add("重传 $it") }
@@ -1512,7 +1519,11 @@ private fun Iperf3IntervalBreakdownPanel(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "${progress.direction.flagLabel} · 逐秒测速明细 (${intervals.size}段)",
+                text = if (omittedCount > 0) {
+                    "${progress.direction.flagLabel} · 逐秒明细 (${measuredCount}段+预热)"
+                } else {
+                    "${progress.direction.flagLabel} · 逐秒测速明细 (${intervals.size}段)"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -1532,7 +1543,9 @@ private fun Iperf3IntervalBreakdownPanel(
         displayed.forEach { sample ->
             val ratio = (sample.bitrateMbps / maxMbps).toFloat().coerceIn(0.04f, 1f)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (sample.omitted) 0.5f else 1f),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1559,7 +1572,11 @@ private fun Iperf3IntervalBreakdownPanel(
                     )
                 }
                 Text(
-                    text = NetBenchMarkdownFormatter.formatBytes(sample.bytesTransferred),
+                    text = if (sample.omitted) {
+                        "预热"
+                    } else {
+                        NetBenchMarkdownFormatter.formatBytes(sample.bytesTransferred)
+                    },
                     style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

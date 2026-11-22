@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
@@ -478,6 +479,65 @@ fun NetBenchQuickBottomSheet(
                                     selected = uiState.iperfTestMode == mode,
                                     enabled = !uiState.isRunning,
                                     onClick = { controller.updateIperfTestMode(mode) },
+                                )
+                            }
+                        }
+
+                        var showCustomDurationDialog by rememberSaveable { mutableStateOf(false) }
+                        val isCustomDuration = uiState.iperfDurationSec !in Iperf3Config.DURATION_PRESETS
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "时长 -t",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Iperf3Config.DURATION_PRESETS.forEach { sec ->
+                                NetBenchSelectableChip(
+                                    label = "${sec}s",
+                                    selected = uiState.iperfDurationSec == sec,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { controller.updateIperfDurationSec(sec) },
+                                )
+                            }
+                            NetBenchSelectableChip(
+                                label = if (isCustomDuration) "${uiState.iperfDurationSec}s" else "自定义",
+                                selected = isCustomDuration,
+                                icon = Icons.Rounded.Edit,
+                                enabled = !uiState.isRunning,
+                                onClick = { showCustomDurationDialog = true },
+                            )
+                        }
+                        if (showCustomDurationDialog) {
+                            IperfCustomDurationDialog(
+                                initialSec = uiState.iperfDurationSec,
+                                onConfirm = { sec ->
+                                    controller.updateIperfDurationSec(sec)
+                                    showCustomDurationDialog = false
+                                },
+                                onDismiss = { showCustomDurationDialog = false },
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "预热剔除 -O",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Iperf3Config.OMIT_PRESETS.forEach { sec ->
+                                NetBenchSelectableChip(
+                                    label = "${sec}s",
+                                    selected = uiState.iperfOmitSec == sec,
+                                    enabled = !uiState.isRunning,
+                                    onClick = { controller.updateIperfOmitSec(sec) },
                                 )
                             }
                         }

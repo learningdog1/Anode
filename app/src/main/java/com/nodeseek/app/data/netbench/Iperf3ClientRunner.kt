@@ -61,7 +61,8 @@ import java.util.concurrent.atomic.AtomicLong
  *    - [STATE_CREATE_STREAMS] (10): open `parallel` data TCP socket(s) and send the same 37-byte
  *      cookie on each without locking `SO_RCVBUF`/`SO_SNDBUF` so OS TCP auto-tuning scales `rwnd`/`cwnd`.
  *    - [STATE_TEST_START] (1) -> [STATE_TEST_RUNNING] (2): transfer 128 KiB chunks in a tight
- *      blocking I/O loop while emitting live [Iperf3Progress] every ~250ms, then signal [STATE_TEST_END] (4)
+ *      blocking I/O loop while emitting live [Iperf3Progress] every ~500ms (the first `omit` seconds are
+ *      flagged as warm-up and excluded, like `iperf3 -O`), then signal [STATE_TEST_END] (4)
  *      (keeping reverse-mode receivers draining until [STATE_IPERF_DONE] so server writes never stall).
  *    - [STATE_EXCHANGE_RESULTS] (13): send client results JSON & parse server results JSON.
  *    - [STATE_DISPLAY_RESULTS] (14) -> send [STATE_IPERF_DONE] (16).
@@ -90,6 +91,7 @@ class Iperf3ClientRunner(
     ): Flow<Iperf3Progress> = flow {
         val direction = config.direction
         val durationSec = config.normalizedDurationSec
+        val omitSec = config.normalizedOmitSec
         val chunkSize = config.normalizedChunkSize
         val connectTimeoutMs = config.connectTimeoutMs.coerceIn(1_000, 15_000)
         val streamsCount = parallelStreams.coerceIn(MIN_PARALLEL_STREAMS, MAX_PARALLEL_STREAMS)
@@ -189,6 +191,7 @@ class Iperf3ClientRunner(
             var peakMbps = 0.0
             val throughputHistory = mutableListOf<Double>()
             var measuredIntervals: List<Iperf3IntervalSample> = emptyList()
+            var appliedOmitSec = 0
             var serverStats: ParsedServerResults? = null
             var testExecuted = false
 
@@ -222,6 +225,7 @@ class Iperf3ClientRunner(
                                     serverStats = serverStats,
                                     parallelStreams = streamsCount,
                                     intervals = measuredIntervals,
+                                    omitSec = appliedOmitSec,
                                 )
                                 emit(completedProgress(finalRes, durationSec, throughputHistory))
                             } else {
@@ -257,6 +261,7 @@ class Iperf3ClientRunner(
                                 )
                                 val paramsJson = buildClientParamsJson(
                                     durationSec = durationSec,
+                                    omitSec = omitSec,
                                     chunkSize = chunkSize,
                                     direction = direction,
                                     parallelStreams = streamsCount,
@@ -330,6 +335,7 @@ class Iperf3ClientRunner(
                                     stopTransferFlag = stopTransferFlag,
                                     direction = direction,
                                     durationSec = durationSec,
+                                    omitSec = omitSec,
                                     chunkSize = chunkSize,
                                     dataSockets = dataSockets,
                                     controlIn = controlIn,
@@ -349,6 +355,7 @@ class Iperf3ClientRunner(
                                 measuredPerStreamBytes = transferSummary.perStreamBytes
                                 measuredElapsedSec = transferSummary.elapsedSec
                                 measuredIntervals = transferSummary.intervals
+                                appliedOmitSec = transferSummary.appliedOmitSec
                                 peakMbps = maxOf(peakMbps, transferSummary.peakMbps)
 
                                 if (transferSummary.sentTestEndByClient) {
@@ -432,6 +439,7 @@ class Iperf3ClientRunner(
                                     serverStats = serverStats,
                                     parallelStreams = streamsCount,
                                     intervals = measuredIntervals,
+                                    omitSec = appliedOmitSec,
                                 )
                                 emit(completedProgress(finalRes, durationSec, throughputHistory))
                                 break@stateLoop
@@ -600,6 +608,7 @@ class Iperf3ClientRunner(
         val peakMbps: Double,
         val intervals: List<Iperf3IntervalSample>,
         val sentTestEndByClient: Boolean,
+        val appliedOmitSec: Int,
     )
 
     private suspend fun runDataTransferLoop(
@@ -608,6 +617,7 @@ class Iperf3ClientRunner(
         stopTransferFlag: AtomicBoolean,
         direction: Iperf3Direction,
         durationSec: Int,
+        omitSec: Int,
         chunkSize: Int,
         dataSockets: List<Socket>,
         controlIn: DataInputStream,
@@ -635,7 +645,15 @@ class Iperf3ClientRunner(
         }
 
         val startNanos = System.nanoTime()
-        val deadlineNanos = startNanos + durationSec * 1_000_000_000L
+        val omitNanos = omitSec.coerceAtLeast(0) * 1_000_000_000L
+        val durationNanos = durationSec * 1_000_000_000L
+        // Measurement window opens once the warm-up (`-O`) seconds elapse; it is re-anchored to the exact
+        // switch instant so the counted window is always the full `durationSec`.
+        var omitDone = omitNanos <= 0L
+        var measureStartNanos = startNanos + omitNanos
+        var deadlineNanos = measureStartNanos + durationNanos
+        val omitBaseline = LongArray(streamCount)
+        var omitBaselineSum = 0L
 
         for (streamIdx in 0 until streamCount) {
             val socket = dataSockets[streamIdx]
@@ -699,24 +717,73 @@ class Iperf3ClientRunner(
             return sum
         }
 
+        fun measuredPerStreamBytes(): LongArray =
+            LongArray(streamCount) { idx -> (streamCounters[idx].get() - omitBaseline[idx]).coerceAtLeast(0L) }
+
         fun allStreamsFinished(): Boolean = streamFinished.all { it.get() }
         fun allStreamsEof(): Boolean = streamEof.all { it.get() }
 
+        val totalTargetSec = omitSec.coerceAtLeast(0) + durationSec
         var lastReportNanos = startNanos
-        var lastReportBytes = 0L
+        var lastReportBytes = 0L // raw (warm-up inclusive) byte counter
         var lastInstantMbps = 0.0
         var peakMbps = 0.0
         val reportStepNanos = progressIntervalMs.coerceIn(50L, 1_000L) * 1_000_000L
 
+        // Per-phase interval bookkeeping. Like official `iperf3 -O`, warm-up intervals are labelled
+        // relative to the test start and flagged `omitted`, then measured intervals restart at 0.00s.
+        var phaseOriginNanos = startNanos
+        var phaseLenSec = if (omitDone) durationSec else omitSec
+        var phaseOmitted = !omitDone
         var intervalStartNanos = startNanos
-        var intervalStartBytes = 0L
+        var intervalStartBytes = 0L // raw byte counter
         var nextIntervalBoundaryIdx = 1
         val recordedIntervals = mutableListOf<Iperf3IntervalSample>()
+
+        fun recordInterval(endNanos: Long, rawBytesAtEnd: Long) {
+            val deltaBytes = (rawBytesAtEnd - intervalStartBytes).coerceAtLeast(0L)
+            val startSec = ((intervalStartNanos - phaseOriginNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
+            val endSec = ((endNanos - phaseOriginNanos) / 1_000_000_000.0).coerceAtLeast(startSec + 0.001)
+            val segMbps = computeMbps(deltaBytes, (endSec - startSec).coerceAtLeast(0.001))
+            recordedIntervals += Iperf3IntervalSample(
+                index = recordedIntervals.size + 1,
+                startSec = startSec,
+                endSec = endSec,
+                bytesTransferred = deltaBytes,
+                bitrateMbps = segMbps,
+                streams = streamCount,
+                omitted = phaseOmitted,
+            )
+            if (!phaseOmitted) peakMbps = maxOf(peakMbps, segMbps)
+            intervalStartNanos = endNanos
+            intervalStartBytes = rawBytesAtEnd
+        }
+
+        fun phaseEndNanos(): Long = if (phaseOmitted) measureStartNanos else deadlineNanos
 
         while (!allStreamsFinished()) {
             currentCoroutineContext().ensureActive()
             val now = System.nanoTime()
-            if (now >= deadlineNanos) {
+
+            if (!omitDone && now >= measureStartNanos) {
+                // Close the warm-up window: freeze per-stream baselines and restart the clock.
+                for (idx in 0 until streamCount) omitBaseline[idx] = streamCounters[idx].get()
+                omitBaselineSum = omitBaseline.sum()
+                if (now > intervalStartNanos) recordInterval(now, omitBaselineSum)
+                omitDone = true
+                measureStartNanos = now
+                deadlineNanos = now + durationNanos
+                phaseOriginNanos = now
+                phaseLenSec = durationSec
+                phaseOmitted = false
+                intervalStartNanos = now
+                intervalStartBytes = omitBaselineSum
+                nextIntervalBoundaryIdx = 1
+                lastReportNanos = now
+                lastReportBytes = omitBaselineSum
+            }
+
+            if (omitDone && now >= deadlineNanos) {
                 break
             }
             if (runCatching { controlIn.available() > 0 }.getOrDefault(false)) {
@@ -724,81 +791,87 @@ class Iperf3ClientRunner(
                 break
             }
 
-            if (nextIntervalBoundaryIdx < durationSec) {
-                val boundaryNanos = startNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
-                if (now >= boundaryNanos && deadlineNanos - now >= MIN_TAIL_INTERVAL_NANOS) {
-                    val curBytes = sumTransferredBytes()
-                    val deltaBytes = (curBytes - intervalStartBytes).coerceAtLeast(0L)
-                    val startSec = ((intervalStartNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
-                    val endSec = ((now - startNanos) / 1_000_000_000.0).coerceAtLeast(startSec + 0.001)
-                    val segDuration = (endSec - startSec).coerceAtLeast(0.001)
-                    val segMbps = computeMbps(deltaBytes, segDuration)
-                    recordedIntervals += Iperf3IntervalSample(
-                        index = recordedIntervals.size + 1,
-                        startSec = startSec,
-                        endSec = endSec,
-                        bytesTransferred = deltaBytes,
-                        bitrateMbps = segMbps,
-                        streams = streamCount,
-                    )
-                    peakMbps = maxOf(peakMbps, segMbps)
-                    intervalStartNanos = now
-                    intervalStartBytes = curBytes
+            if (nextIntervalBoundaryIdx < phaseLenSec) {
+                val boundaryNanos = phaseOriginNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
+                if (now >= boundaryNanos && phaseEndNanos() - now >= MIN_TAIL_INTERVAL_NANOS) {
+                    recordInterval(now, sumTransferredBytes())
+                    val endSec = (now - phaseOriginNanos) / 1_000_000_000.0
                     nextIntervalBoundaryIdx = maxOf(nextIntervalBoundaryIdx + 1, endSec.toInt() + 1)
                 }
             }
 
             if (now - lastReportNanos >= reportStepNanos) {
-                val curBytes = sumTransferredBytes()
-                val deltaBytes = (curBytes - lastReportBytes).coerceAtLeast(0L)
+                val rawBytes = sumTransferredBytes()
+                val deltaBytes = (rawBytes - lastReportBytes).coerceAtLeast(0L)
                 val deltaSec = ((now - lastReportNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
-                val elapsedSec = ((now - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
+                val phaseElapsedSec = ((now - phaseOriginNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
+                val phaseBytes = (rawBytes - omitBaselineSum).coerceAtLeast(0L)
                 val instantMbps = computeMbps(deltaBytes, deltaSec)
-                val avgMbps = computeMbps(curBytes, elapsedSec)
+                val avgMbps = computeMbps(phaseBytes, phaseElapsedSec)
                 lastInstantMbps = instantMbps
-                peakMbps = maxOf(peakMbps, instantMbps, avgMbps)
+                if (omitDone) {
+                    peakMbps = maxOf(peakMbps, instantMbps, avgMbps)
+                }
+                val totalElapsedSec = ((now - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
 
                 onProgress(
                     Iperf3Progress(
                         direction = direction,
                         stage = Iperf3Stage.TEST_RUNNING,
-                        elapsedSec = elapsedSec.coerceAtMost(durationSec.toDouble()),
-                        targetDurationSec = durationSec,
-                        bytesTransferred = curBytes,
+                        elapsedSec = totalElapsedSec.coerceAtMost(totalTargetSec.toDouble()),
+                        targetDurationSec = totalTargetSec,
+                        bytesTransferred = phaseBytes,
                         instantMbps = instantMbps,
                         averageMbps = avgMbps,
                         peakMbps = peakMbps,
                         intervals = recordedIntervals.toList(),
                         parallelStreams = streamCount,
+                        inOmitPhase = !omitDone,
                     ),
                 )
                 lastReportNanos = now
-                lastReportBytes = curBytes
+                lastReportBytes = rawBytes
             }
 
             val afterReportNanos = System.nanoTime()
-            val remainingToDeadlineMs = ((deadlineNanos - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
+            val remainingToPhaseEndMs = ((phaseEndNanos() - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
             val remainingToReportMs = ((reportStepNanos - (afterReportNanos - lastReportNanos) + 999_999L) / 1_000_000L)
                 .coerceAtLeast(1L)
-            val remainingToIntervalMs = if (nextIntervalBoundaryIdx < durationSec) {
-                val nextBoundaryNanos = startNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
+            val remainingToIntervalMs = if (nextIntervalBoundaryIdx < phaseLenSec) {
+                val nextBoundaryNanos = phaseOriginNanos + nextIntervalBoundaryIdx * INTERVAL_STEP_NANOS
                 ((nextBoundaryNanos - afterReportNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
             } else {
-                remainingToDeadlineMs
+                remainingToPhaseEndMs
             }
-            delay(minOf(POLL_STEP_MS, remainingToDeadlineMs, remainingToReportMs, remainingToIntervalMs))
+            delay(minOf(POLL_STEP_MS, remainingToPhaseEndMs, remainingToReportMs, remainingToIntervalMs))
         }
 
         // Freeze measurement counters immediately before any join/control-channel round-trip so
         // post-deadline teardown latency never inflates the elapsed-time denominator.
         val endedBeforeDeadline = allStreamsFinished()
         countingActive.set(false)
+
+        // If the server ended the test while still inside the warm-up window, there is no measured window:
+        // fall back to counting everything from the start (equivalent to `-O 0`).
+        val appliedOmitSec: Int
+        if (!omitDone) {
+            appliedOmitSec = 0
+            for (i in recordedIntervals.indices) {
+                recordedIntervals[i] = recordedIntervals[i].copy(omitted = false)
+                peakMbps = maxOf(peakMbps, recordedIntervals[i].bitrateMbps)
+            }
+            measureStartNanos = startNanos
+            phaseOriginNanos = startNanos
+        } else {
+            appliedOmitSec = omitSec.coerceAtLeast(0)
+        }
+
         var snapshotNanos = if (endedBeforeDeadline) {
-            streamFinishNanos.maxOfOrNull { it.get() }?.takeIf { it > startNanos } ?: System.nanoTime()
+            streamFinishNanos.maxOfOrNull { it.get() }?.takeIf { it > measureStartNanos } ?: System.nanoTime()
         } else {
             System.nanoTime()
         }
-        var perStreamBytes = LongArray(streamCount) { idx -> streamCounters[idx].get() }
+        var perStreamBytes = measuredPerStreamBytes()
 
         val sentTestEnd: Boolean
         if (direction == Iperf3Direction.UPLOAD) {
@@ -811,7 +884,7 @@ class Iperf3ClientRunner(
             } ?: false
 
             if (joinedEarly) {
-                val updatedBytes = LongArray(streamCount) { idx -> streamCounters[idx].get() }
+                val updatedBytes = measuredPerStreamBytes()
                 if (updatedBytes.sum() > perStreamBytes.sum()) {
                     perStreamBytes = updatedBytes
                     snapshotNanos = System.nanoTime()
@@ -868,13 +941,15 @@ class Iperf3ClientRunner(
         }
 
         val finalBytes = perStreamBytes.sum()
-        val finalElapsedSec = ((snapshotNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
+        val finalRawBytes = finalBytes + omitBaselineSum
+        val finalElapsedSec = ((snapshotNanos - measureStartNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
         val finalAvgMbps = computeMbps(finalBytes, finalElapsedSec)
 
         val tailIntervalNanos = snapshotNanos - intervalStartNanos
-        val tailIntervalBytes = (finalBytes - intervalStartBytes).coerceAtLeast(0L)
-        if (recordedIntervals.isEmpty() || tailIntervalNanos >= MIN_TAIL_INTERVAL_NANOS) {
-            val startSec = ((intervalStartNanos - startNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
+        val tailIntervalBytes = (finalRawBytes - intervalStartBytes).coerceAtLeast(0L)
+        val lastMeasuredIdx = recordedIntervals.indexOfLast { !it.omitted }
+        if (lastMeasuredIdx < 0 || tailIntervalNanos >= MIN_TAIL_INTERVAL_NANOS) {
+            val startSec = ((intervalStartNanos - phaseOriginNanos) / 1_000_000_000.0).coerceAtLeast(0.0)
             val endSec = finalElapsedSec.coerceAtLeast(startSec + 0.001)
             val segDuration = (endSec - startSec).coerceAtLeast(0.001)
             val segMbps = computeMbps(tailIntervalBytes, segDuration)
@@ -887,12 +962,11 @@ class Iperf3ClientRunner(
                 streams = streamCount,
             )
         } else {
-            val lastIdx = recordedIntervals.lastIndex
-            val prev = recordedIntervals[lastIdx]
+            val prev = recordedIntervals[lastMeasuredIdx]
             val mergedBytes = prev.bytesTransferred + tailIntervalBytes
             val mergedEndSec = finalElapsedSec.coerceAtLeast(prev.startSec + 0.001)
             val mergedDuration = (mergedEndSec - prev.startSec).coerceAtLeast(0.001)
-            recordedIntervals[lastIdx] = prev.copy(
+            recordedIntervals[lastMeasuredIdx] = prev.copy(
                 endSec = mergedEndSec,
                 bytesTransferred = mergedBytes,
                 bitrateMbps = computeMbps(mergedBytes, mergedDuration),
@@ -901,14 +975,14 @@ class Iperf3ClientRunner(
 
         val rawTailNanos = snapshotNanos - lastReportNanos
         val tailInstantMbps = if (rawTailNanos >= MIN_TAIL_SAMPLE_NANOS) {
-            val tailDeltaBytes = (finalBytes - lastReportBytes).coerceAtLeast(0L)
+            val tailDeltaBytes = (finalRawBytes - lastReportBytes).coerceAtLeast(0L)
             computeMbps(tailDeltaBytes, rawTailNanos / 1_000_000_000.0)
         } else if (lastInstantMbps > 0.0) {
             lastInstantMbps
         } else {
             finalAvgMbps
         }
-        val maxIntervalMbps = recordedIntervals.maxOfOrNull { it.bitrateMbps } ?: 0.0
+        val maxIntervalMbps = recordedIntervals.filter { !it.omitted }.maxOfOrNull { it.bitrateMbps } ?: 0.0
         peakMbps = maxOf(peakMbps, finalAvgMbps, tailInstantMbps, maxIntervalMbps)
         val finalizedIntervals = recordedIntervals.toList()
 
@@ -934,11 +1008,13 @@ class Iperf3ClientRunner(
             peakMbps = peakMbps,
             intervals = finalizedIntervals,
             sentTestEndByClient = sentTestEnd,
+            appliedOmitSec = appliedOmitSec,
         )
     }
 
     private fun buildClientParamsJson(
         durationSec: Int,
+        omitSec: Int,
         chunkSize: Int,
         direction: Iperf3Direction,
         parallelStreams: Int,
@@ -946,7 +1022,7 @@ class Iperf3ClientRunner(
     ): String {
         val obj = buildJsonObject {
             put("tcp", true)
-            put("omit", 0)
+            put("omit", omitSec.coerceAtLeast(0))
             put("time", durationSec)
             put("num", 0)
             put("blockcount", 0)
@@ -1087,10 +1163,11 @@ class Iperf3ClientRunner(
         serverStats: ParsedServerResults?,
         parallelStreams: Int = DEFAULT_PARALLEL_STREAMS,
         intervals: List<Iperf3IntervalSample> = emptyList(),
+        omitSec: Int = 0,
     ): Iperf3Result {
         val safeDuration = measuredElapsedSec.coerceAtLeast(0.001)
         val clientMbps = computeMbps(measuredBytes, safeDuration)
-        val intervalPeak = intervals.maxOfOrNull { it.bitrateMbps } ?: 0.0
+        val intervalPeak = intervals.filter { !it.omitted }.maxOfOrNull { it.bitrateMbps } ?: 0.0
         return Iperf3Result(
             direction = direction,
             port = port,
@@ -1104,6 +1181,7 @@ class Iperf3ClientRunner(
             success = true,
             parallelStreams = parallelStreams,
             intervals = intervals,
+            omitSec = omitSec,
         )
     }
 
@@ -1166,7 +1244,12 @@ class Iperf3ClientRunner(
     companion object {
         const val COOKIE_SIZE: Int = 37
         const val CLIENT_VERSION: String = "3.16"
-        const val DEFAULT_PROGRESS_INTERVAL_MS: Long = 250L
+        /**
+         * Live UI sample cadence. 500 ms halves Compose recomposition / gauge animation and Markdown
+         * regeneration work during the transfer compared with 250 ms, while per-second interval
+         * accounting is unaffected.
+         */
+        const val DEFAULT_PROGRESS_INTERVAL_MS: Long = 500L
         const val DEFAULT_PARALLEL_STREAMS: Int = 1
         const val MIN_PARALLEL_STREAMS: Int = 1
         const val MAX_PARALLEL_STREAMS: Int = 16

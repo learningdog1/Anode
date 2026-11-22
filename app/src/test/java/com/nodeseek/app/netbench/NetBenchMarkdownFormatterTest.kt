@@ -218,7 +218,8 @@ class NetBenchMarkdownFormatterTest {
         assertTrue(replyMd.contains("抖动 `2.8 ms`"))
         assertTrue(replyMd.contains("丢包 `0.0%`"))
         assertTrue(replyMd.contains("下载 **432.0 Mbps**"))
-        assertTrue(replyMd.contains("上传 **88.0 Mbps**"))
+        // Upload headline is the VPS receiver figure (87.6), not the local send-buffer rate (88.0).
+        assertTrue(replyMd.contains("上传 **87.6 Mbps**"))
         assertTrue(replyMd.contains("AS20473"))
         assertTrue(replyMd.contains("广播 IP (注册地 US -> 播放在 JP"))
         assertTrue(replyMd.contains("综合简评"))
