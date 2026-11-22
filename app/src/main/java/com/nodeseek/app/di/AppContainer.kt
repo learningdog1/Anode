@@ -6,7 +6,9 @@ import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.restock.FlareSolverrClient
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.activity.ActivityRepository
+import com.nodeseek.app.domain.activity.NoOpActivityMonitorController
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
@@ -57,6 +59,8 @@ interface AppContainer {
     val restockNotificationHelper: RestockNotificationHelper
     val flareSolverrClient: FlareSolverrClient
     val activityRepository: ActivityRepository
+    val activityMonitorController: ActivityMonitorController
+        get() = NoOpActivityMonitorController
     val sellerTrustRepository: SellerTrustRepository
     val officialTradeRepository: OfficialTradeRepository
         get() = NoOpOfficialTradeRepository

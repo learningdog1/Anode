@@ -33,7 +33,7 @@
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
 | **当前版本** | `v2.6.1`（`versionCode = 16`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与活动预留页 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针监控与 VPS 资产账本 · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) · 签名加密社区抽奖/福利活动聚合与新活动通知 · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针监控与 VPS 资产账本 · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
@@ -293,7 +293,7 @@
 </table>
 </div>
 
-- **功能栏聚合中心与活动预留 (`FeatureHubScreen` · `ActivityScreen`)**：底部中间「功能栏」主标签按 **社区服务**（`邮箱` / `活动`）、**情报与监控**（`海外情报` / `补货监控`）、**主机与网络**（`我的服务器` / `手机端测机`）与 Hero **轻量 SSH** 分组汇聚全部效率入口，并实时展示 Seek 邮箱配置状态、补货监控启用数与未读提醒、探针主机数量与 SSH 保险库台数；「活动」页预留 `ForumWatch` 活动聚合接入点。
+- **功能栏聚合中心与社区活动专题 (`FeatureHubScreen` · `ActivityScreen`)**：底部中间「功能栏」主标签按 **社区服务**（`邮箱` / `活动`）、**情报与监控**（`海外情报` / `补货监控`）、**主机与网络**（`我的服务器` / `手机端测机`）与 Hero **轻量 SSH** 分组汇聚全部效率入口，实时展示 Seek 邮箱配置状态、进行中社区活动场次、补货监控启用数与未读提醒、探针主机数量与 SSH 保险库台数；「活动」页正式接入 **ForumWatch 社区活动签名加密 API**（TLS 证书/SPKI 双重固定、`HMAC-SHA256` 请求签名、`AES-256-GCM` 响应信封解密、`ETag/304` 零字节条件缓存与同源帖子去重），聚合展示社区抽奖、赠送福利、限时特惠与抢楼活动（支持状态筛选、设备时钟实时到期流转、奖品/开奖楼层/开奖链接结构化提取、1 楼 Markdown 详情底栏与 NodeSeek 帖子原生直跳），并提供页内默认关闭的可选「新活动通知」开关（首次开启静默建档防历史刷屏，支持前后台低频巡检与点击通知直达原帖）。
 - **VPS 补货 / 抢购监控 (`RestockMonitorScreen`)**：自动识别 WHMCS / SolusVM / HostBill / VirtFusion 面板购买页（支持顶栏粘贴链接或帖子内长按商品链接加入监控），后台 `缺货 → 有货` 波次去重巡检并发送高优先级通知，点击直跳下单页，亦支持一键导入资产账本。
 - **交易前“查一查”卖家信誉卡 (`SellerTrustCardSheet` · `SellerTrustQuickBadge`)**：采用 **内存 LRU + 本地磁盘两级缓存（v2）**（正结果 18 小时 / 部分失败 15 分钟 / 负结果 3 分钟 / 7 天过期兜底）、单飞请求合并与 `429/503` 退避冷却保护；通过**本地缓存版块交叉回填 + 真实交易语料/成交结帖标题识别 + 自适应低频多页扫描（默认最多 6 页 90 篇，支持一键断点续扫更早历史）**精准统计卖家历史交易帖；默认打开通过共享 `/categories/expose` 曝光版快照匹配（**零 `/search` 流量**），并提供按需单次深度 `/search` 查验、Google `site:www.nodeseek.com` 站外兜底、全版块帖子与主页一致常驻的快捷查信誉徽章及本机私人标签备注；同时支持在设置中配置 **NodeSeek 官方交易平台（`agent.nodeseek.org`）** API Key（Android Keystore 本机加密保存、不随备份导出），在信誉卡中独立展示卖家成功交易场次、累计成交金额（¥）、最近成交时间与买家/卖家/中介分角色明细（重名账号自动逐条标注平台用户 ID，快捷徽章仅零网络读取本地缓存展示官方成交标记）。
 - **我的服务器：探针接入 + 资产账本 (`MyServersScreen`)**：同时接入哪吒探针 v0/v1 与 Komari 面板 API 查看主机实时在线状态、CPU/内存/硬盘、双向流量与掉线推送提醒；内置多币种续费资产账本与到期提醒，点击「不想续了 · 一键出机」直接联动估值器生成交易帖并跳入发帖页。
@@ -338,7 +338,7 @@ flowchart TD
     UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · adaptive · explore · boards · topic · composer · hub · activity · mail · radar · valuation · restock · trust · fleet · netbench · ssh · overseas · update"]
     NAV["Navigation Shell<br/>MainActivity · NavHost · UrlRouter · AppDestination"]
     DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · Activity · Backup · Filter · SeekMail · Radar · Valuation · Restock · Trust · Fleet · NetBench · Ssh · Overseas · Update"]
-    DATA["Data Layer<br/>Repositories · NodeSeekApiClient · SeekMailApiClient · OverseasIntelApiClient (HMAC/AES-GCM) · GitHubReleaseClient · Jsoup/RSS · JSch SSH · ICMP/TCP/iperf3 NetBench · Room DB · DataStore · Keystore · Backup"]
+    DATA["Data Layer<br/>Repositories · NodeSeekApiClient · SeekMailApiClient · ForumWatchActivityApiClient & OverseasIntelApiClient (HMAC/AES-GCM) · GitHubReleaseClient · Jsoup/RSS · JSch SSH · ICMP/TCP/iperf3 NetBench · Room DB · DataStore · Keystore · Backup"]
 
     NAV --> UI
     UI --> DOMAIN
@@ -355,7 +355,7 @@ app/src/main/java/com/nodeseek/app/
 ├── navigation/                      # Kotlinx Serialization 类型安全导航、ComposerPrefillStore 与外链路由
 ├── notifications/                   # 通知渠道、Android 13+ 权限诊断与点击意图路由
 ├── domain/
-│   ├── activity/                    # ForumWatch 活动数据聚合契约与空状态模型
+│   ├── activity/                    # ForumWatch 社区活动领域模型、实时到期流转与前后台巡检控制器契约
 │   ├── backup/                      # 版本化 JSON 备份导出、预览与合并/覆盖恢复领域模型
 │   ├── filter/                      # 信息流与搜索关键词/正则过滤引擎及静音版块配置
 │   ├── fleet/                       # 哪吒/Komari 探针聚合、VPS 资产账本与一键出机发帖模型
@@ -371,6 +371,7 @@ app/src/main/java/com/nodeseek/app/
 │   ├── update/                      # GitHub Releases 更新模型、SemVer 比较器与管理器接口
 │   └── valuation/                   # BigDecimal VPS 剩余价值与过户交易估值引擎
 ├── data/
+│   ├── activity/                    # ForumWatchActivityApiClient（TLS Pinning / HMAC / AES-GCM / ETag）、磁盘缓存与新活动巡检 Worker
 │   ├── backup/                      # BackupManagerImpl 全量配置/雷达/书签/草稿/过滤规则序列化恢复
 │   ├── fleet/                       # 哪吒 v0/v1 / Komari 探针 API 客户端、资产持久化与巡检 Worker
 │   ├── local/                       # Room 数据库（离线收藏快照、阅读进度、雷达规则、版块）与 DataStore
@@ -390,7 +391,7 @@ app/src/main/java/com/nodeseek/app/
     ├── theme/                       # 清雾浅色/深岩深色/Pitch 色板、15 版块规范、Lv.0–6 等级光环与默认 90% 排版缩放
     ├── components/                  # PulseTopicCard、FloatingPillDock、MarkdownRenderer、ANSI/贴纸支持
     ├── adaptive/                    # 平板与折叠屏双栏主从视图（AdaptiveLayout）与侧边 NavigationRail
-    ├── activity/                    # 活动页占位视图（预留 ForumWatch 数据接入）
+    ├── activity/                    # 社区活动聚合页（状态筛选、详情 Markdown 底栏、新活动通知开关与权限绑定）
     ├── explore/                     # 脉冲首页流 Screen & ViewModel（支持再点置顶刷新）
     ├── boards/                      # 全站统一搜索与版块过滤 Screen & ViewModel
     ├── topic/                       # 杂志级帖子阅读器、楼层滑块与快捷回复工作台
@@ -459,6 +460,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与 `NodeSeek` 官方交易平台 API Key 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）与测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
+- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与 `NodeSeek` 官方交易平台 API Key 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、社区活动与海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）以及测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。

@@ -46,6 +46,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.R
+import com.nodeseek.app.data.activity.PreviewForumWatchActivityRepository
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
@@ -58,8 +59,11 @@ import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.activity.ActivityMonitorController
+import com.nodeseek.app.domain.activity.ActivityMonitorRuntimeStatus
+import com.nodeseek.app.domain.activity.ActivityMonitorSettings
+import com.nodeseek.app.domain.activity.ActivityPollOutcome
 import com.nodeseek.app.domain.activity.ActivityRepository
-import com.nodeseek.app.domain.activity.EmptyActivityRepository
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentBlockRule
@@ -637,7 +641,34 @@ internal class PreviewAppContainer(
             RestockBackgroundPollOutcome.Completed()
     }
 
-    override val activityRepository: ActivityRepository = EmptyActivityRepository()
+    override val activityRepository: ActivityRepository = PreviewForumWatchActivityRepository()
+
+    override val activityMonitorController: ActivityMonitorController =
+        object : ActivityMonitorController {
+            private val settingsState = MutableStateFlow(ActivityMonitorSettings())
+            override val settingsFlow: StateFlow<ActivityMonitorSettings> = settingsState.asStateFlow()
+            override val runtimeStatus: StateFlow<ActivityMonitorRuntimeStatus> =
+                MutableStateFlow(ActivityMonitorRuntimeStatus(isRunningInForeground = true)).asStateFlow()
+
+            override fun start() = Unit
+            override fun stop() = Unit
+            override fun onForegroundChanged(inForeground: Boolean) = Unit
+            override fun triggerImmediateCheck() = Unit
+            override suspend fun setNotificationsEnabled(enabled: Boolean) {
+                settingsState.update { it.copy(notificationsEnabled = enabled) }
+            }
+            override suspend fun updateSettings(
+                transform: (ActivityMonitorSettings) -> ActivityMonitorSettings,
+            ): ActivityMonitorSettings {
+                val next = transform(settingsState.value).normalized()
+                settingsState.value = next
+                return next
+            }
+            override suspend fun checkNow(manualTrigger: Boolean): ActivityPollOutcome =
+                ActivityPollOutcome.Completed()
+            override suspend fun runBackgroundPollPass(): ActivityPollOutcome =
+                ActivityPollOutcome.Completed()
+        }
 
     override val sellerTrustRepository: SellerTrustRepository = object : SellerTrustRepository {
         private val notes = MutableStateFlow<Map<Long, LocalSellerNote>>(emptyMap())

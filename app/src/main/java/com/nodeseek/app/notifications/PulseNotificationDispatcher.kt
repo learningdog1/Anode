@@ -14,15 +14,18 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.nodeseek.app.MainActivity
 import com.nodeseek.app.R
+import com.nodeseek.app.domain.activity.ForumWatchActivityItem
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.radar.LocalAlertRecord
 import com.nodeseek.app.domain.radar.NotificationTapTarget
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshRunStatus
+import com.nodeseek.app.navigation.ActivityRoute
 import com.nodeseek.app.navigation.AppDestination
 import com.nodeseek.app.navigation.OverseasIntelDetailRoute
 import com.nodeseek.app.navigation.OverseasIntelRoute
+import com.nodeseek.app.navigation.TopicDetailRoute
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -99,6 +102,15 @@ open class PulseNotificationDispatcher(
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "当海外情报监测到新的海外 VPS 与服务器促销帖时主动推送通知"
+                enableVibration(true)
+                setShowBadge(true)
+            },
+            NotificationChannel(
+                CHANNEL_COMMUNITY_ACTIVITIES,
+                CHANNEL_COMMUNITY_ACTIVITIES_NAME,
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "开启「新活动通知」后，发现新的社区抽奖、福利与专题活动时推送提醒"
                 enableVibration(true)
                 setShowBadge(true)
             },
@@ -519,6 +531,111 @@ open class PulseNotificationDispatcher(
         notifySafely(ID_OVERSEAS_PROMO_SUMMARY, notification)
     }
 
+    open fun postCommunityActivityNotifications(activities: List<ForumWatchActivityItem>) {
+        val validActivities = activities.filter { it.id.isNotBlank() && it.title.isNotBlank() }
+        if (validActivities.isEmpty() || !canPostNotification()) return
+        ensureChannels()
+
+        val individualTargets = validActivities
+            .take(MAX_INDIVIDUAL_COMMUNITY_ACTIVITY_NOTIFICATIONS)
+            .asReversed()
+        for (activity in individualTargets) {
+            postCommunityActivityNotification(activity)
+        }
+
+        if (validActivities.size > MAX_INDIVIDUAL_COMMUNITY_ACTIVITY_NOTIFICATIONS) {
+            postCommunityActivitySummaryNotification(validActivities)
+        }
+    }
+
+    open fun postCommunityActivityNotification(activity: ForumWatchActivityItem) {
+        val cleanId = activity.id.trim()
+        val cleanTitle = activity.title.trim()
+        if (cleanId.isEmpty() || cleanTitle.isEmpty() || !canPostNotification()) return
+        ensureChannels()
+
+        val notificationId = notificationIdForKey("activity:$cleanId", BASE_ID_COMMUNITY_ACTIVITY)
+        val contentTitle = formatCommunityActivityNotificationTitle(activity)
+        val summaryLine = formatCommunityActivityNotificationSummary(activity)
+        val bigText = if (!summaryLine.equals(cleanTitle, ignoreCase = true)) {
+            "$cleanTitle\n$summaryLine"
+        } else {
+            summaryLine
+        }
+
+        val tapIntent = createCommunityActivityTapIntent(
+            context = appContext,
+            activityId = cleanId,
+            topicId = activity.resolvedNodeSeekTopicId() ?: 0L,
+            title = cleanTitle,
+            sourceUrl = activity.sourceUrl.trim(),
+        )
+        val pendingIntent = PendingIntent.getActivity(
+            appContext,
+            notificationId,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_COMMUNITY_ACTIVITIES)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(contentTitle)
+            .setContentText(summaryLine)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(contentTitle)
+                    .bigText(bigText),
+            )
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setGroup(GROUP_COMMUNITY_ACTIVITIES)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notifySafely(notificationId, notification)
+    }
+
+    protected open fun postCommunityActivitySummaryNotification(activities: List<ForumWatchActivityItem>) {
+        if (activities.isEmpty() || !canPostNotification()) return
+        val count = activities.size
+        val title = "发现 $count 场新社区活动"
+        val previewLines = activities.take(5).map { item ->
+            "[${item.kind.displayLabel}] ${item.title.trim()}"
+        }
+        val summaryLine = previewLines.firstOrNull().orEmpty().ifBlank { "点击查看最新社区抽奖与福利活动" }
+        val bigText = buildString {
+            append(previewLines.joinToString("\n• ", prefix = "• "))
+            if (count > previewLines.size) {
+                append("\n…等共 $count 场社区活动")
+            }
+        }
+
+        val tapIntent = createCommunityActivityTapIntent(context = appContext, activityId = null)
+        val pendingIntent = PendingIntent.getActivity(
+            appContext,
+            ID_COMMUNITY_ACTIVITY_SUMMARY,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_COMMUNITY_ACTIVITIES)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(summaryLine)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
+            .setGroup(GROUP_COMMUNITY_ACTIVITIES)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notifySafely(ID_COMMUNITY_ACTIVITY_SUMMARY, notification)
+    }
+
     private fun canPostNotification(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -566,6 +683,8 @@ open class PulseNotificationDispatcher(
         const val CHANNEL_SSH_BENCHMARK_RESULT = "pulse_ssh_benchmark_result"
         const val CHANNEL_OVERSEAS_PROMOS = "pulse_overseas_promos"
         const val CHANNEL_OVERSEAS_PROMOS_NAME = "海外情报促销推送"
+        const val CHANNEL_COMMUNITY_ACTIVITIES = "pulse_community_activities"
+        const val CHANNEL_COMMUNITY_ACTIVITIES_NAME = "社区活动提醒"
 
         private val LEGACY_LOW_IMPORTANCE_CHANNEL_IDS = listOf(
             "pulse_keyword_alerts",
@@ -583,6 +702,15 @@ open class PulseNotificationDispatcher(
         private const val EXTRA_OVERSEAS_SOURCE_URL = "com.nodeseek.app.extra.OVERSEAS_SOURCE_URL"
         private const val GROUP_OVERSEAS_PROMOS = "com.nodeseek.app.group.OVERSEAS_PROMOS"
         const val MAX_INDIVIDUAL_OVERSEAS_NOTIFICATIONS = 3
+
+        const val ACTION_OPEN_COMMUNITY_ACTIVITY = "com.nodeseek.app.action.OPEN_COMMUNITY_ACTIVITY"
+        private const val EXTRA_COMMUNITY_ACTIVITY_PAYLOAD = "com.nodeseek.app.extra.COMMUNITY_ACTIVITY_PAYLOAD"
+        private const val EXTRA_COMMUNITY_ACTIVITY_ID = "com.nodeseek.app.extra.COMMUNITY_ACTIVITY_ID"
+        private const val EXTRA_COMMUNITY_ACTIVITY_TOPIC_ID = "com.nodeseek.app.extra.COMMUNITY_ACTIVITY_TOPIC_ID"
+        private const val EXTRA_COMMUNITY_ACTIVITY_TITLE = "com.nodeseek.app.extra.COMMUNITY_ACTIVITY_TITLE"
+        private const val EXTRA_COMMUNITY_ACTIVITY_SOURCE_URL = "com.nodeseek.app.extra.COMMUNITY_ACTIVITY_SOURCE_URL"
+        private const val GROUP_COMMUNITY_ACTIVITIES = "com.nodeseek.app.group.COMMUNITY_ACTIVITIES"
+        const val MAX_INDIVIDUAL_COMMUNITY_ACTIVITY_NOTIFICATIONS = 3
 
         const val ACTION_OPEN_RADAR_TARGET = "com.nodeseek.app.action.OPEN_RADAR_TARGET"
         private const val EXTRA_TARGET_PAYLOAD = "com.nodeseek.app.extra.RADAR_TARGET_PAYLOAD"
@@ -610,6 +738,8 @@ open class PulseNotificationDispatcher(
         const val ID_SSH_ONGOING = 59_100
         internal const val BASE_ID_OVERSEAS_PROMO = 70_000
         const val ID_OVERSEAS_PROMO_SUMMARY = 79_100
+        internal const val BASE_ID_COMMUNITY_ACTIVITY = 80_000
+        const val ID_COMMUNITY_ACTIVITY_SUMMARY = 89_100
 
         internal fun notificationIdForKey(key: String, baseOffset: Int): Int {
             val masked = key.hashCode() and 0x00FF_FFFF
@@ -931,6 +1061,141 @@ open class PulseNotificationDispatcher(
                         initialTitle = params["title"].orEmpty(),
                         initialSourceUrl = params["sourceUrl"].orEmpty(),
                     )
+                }
+                else -> null
+            }
+        }
+
+        internal fun formatCommunityActivityNotificationTitle(activity: ForumWatchActivityItem): String {
+            val cleanTitle = activity.title.trim().ifBlank { "社区新活动" }
+            return "新活动 · ${activity.kind.displayLabel}：$cleanTitle"
+        }
+
+        internal fun formatCommunityActivityNotificationSummary(activity: ForumWatchActivityItem): String {
+            val metaParts = buildList {
+                activity.prize?.trim()?.takeIf { it.isNotEmpty() }?.let { add("奖品：$it") }
+                activity.organizer.trim().takeIf { it.isNotEmpty() }?.let { add("发起：$it") }
+            }
+            val cleanSummary = activity.summary.replace(Regex("""\s+"""), " ").trim()
+            return buildString {
+                if (metaParts.isNotEmpty()) {
+                    append(metaParts.joinToString(" · "))
+                }
+                if (cleanSummary.isNotEmpty()) {
+                    if (isNotEmpty()) append(" — ")
+                    append(cleanSummary)
+                }
+            }.ifBlank { "点击查看活动详情与参与方式" }
+        }
+
+        fun createCommunityActivityTapIntent(
+            context: Context,
+            activityId: String?,
+            topicId: Long = 0L,
+            title: String = "",
+            sourceUrl: String = "",
+        ): Intent {
+            val cleanId = activityId?.trim()?.takeIf { it.isNotEmpty() }
+            val safeTopicId = topicId.coerceAtLeast(0L)
+            return Intent(context, MainActivity::class.java).apply {
+                action = ACTION_OPEN_COMMUNITY_ACTIVITY
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(
+                    EXTRA_COMMUNITY_ACTIVITY_PAYLOAD,
+                    encodeCommunityActivityTarget(
+                        activityId = cleanId,
+                        topicId = safeTopicId,
+                        title = title,
+                        sourceUrl = sourceUrl,
+                    ),
+                )
+                if (cleanId != null) {
+                    putExtra(EXTRA_COMMUNITY_ACTIVITY_ID, cleanId)
+                    putExtra(EXTRA_COMMUNITY_ACTIVITY_TOPIC_ID, safeTopicId)
+                    putExtra(EXTRA_COMMUNITY_ACTIVITY_TITLE, title)
+                    putExtra(EXTRA_COMMUNITY_ACTIVITY_SOURCE_URL, sourceUrl)
+                }
+            }
+        }
+
+        fun parseCommunityActivityDestination(intent: Intent?): AppDestination? {
+            if (intent == null) return null
+            decodeCommunityActivityTarget(intent.getStringExtra(EXTRA_COMMUNITY_ACTIVITY_PAYLOAD))?.let { return it }
+            if (intent.action != ACTION_OPEN_COMMUNITY_ACTIVITY) return null
+
+            val topicId = intent.getLongExtra(EXTRA_COMMUNITY_ACTIVITY_TOPIC_ID, 0L)
+            return if (topicId > 0L) {
+                TopicDetailRoute(
+                    topicId = topicId,
+                    initialFloor = 0,
+                    titleHint = intent.getStringExtra(EXTRA_COMMUNITY_ACTIVITY_TITLE).orEmpty(),
+                )
+            } else {
+                ActivityRoute
+            }
+        }
+
+        fun clearCommunityActivityExtras(intent: Intent?) {
+            if (intent == null) return
+            if (intent.action == ACTION_OPEN_COMMUNITY_ACTIVITY) {
+                intent.action = null
+            }
+            intent.removeExtra(EXTRA_COMMUNITY_ACTIVITY_PAYLOAD)
+            intent.removeExtra(EXTRA_COMMUNITY_ACTIVITY_ID)
+            intent.removeExtra(EXTRA_COMMUNITY_ACTIVITY_TOPIC_ID)
+            intent.removeExtra(EXTRA_COMMUNITY_ACTIVITY_TITLE)
+            intent.removeExtra(EXTRA_COMMUNITY_ACTIVITY_SOURCE_URL)
+        }
+
+        internal fun encodeCommunityActivityTarget(
+            activityId: String?,
+            topicId: Long = 0L,
+            title: String = "",
+            sourceUrl: String = "",
+        ): String {
+            val cleanId = activityId?.trim().orEmpty()
+            if (cleanId.isEmpty()) {
+                return "nodepulse://activity/list"
+            }
+            val params = buildList {
+                add("activityId=${urlEncode(cleanId)}")
+                if (topicId > 0L) {
+                    add("topicId=$topicId")
+                }
+                if (title.isNotBlank()) {
+                    add("title=${urlEncode(title)}")
+                }
+                if (sourceUrl.isNotBlank()) {
+                    add("sourceUrl=${urlEncode(sourceUrl)}")
+                }
+            }
+            return "nodepulse://activity/item?${params.joinToString("&")}"
+        }
+
+        internal fun decodeCommunityActivityTarget(encoded: String?): AppDestination? {
+            if (encoded.isNullOrBlank()) return null
+            val trimmed = encoded.trim()
+            if (!trimmed.startsWith("nodepulse://activity/")) return null
+
+            val pathAndQuery = trimmed.removePrefix("nodepulse://activity/")
+            val qIdx = pathAndQuery.indexOf('?')
+            val path = if (qIdx >= 0) pathAndQuery.substring(0, qIdx) else pathAndQuery
+            val query = if (qIdx >= 0) pathAndQuery.substring(qIdx + 1) else ""
+            val params = parseQueryMap(query)
+
+            return when (path) {
+                "list" -> ActivityRoute
+                "item" -> {
+                    val topicId = params["topicId"]?.toLongOrNull()?.takeIf { it > 0L }
+                    if (topicId != null) {
+                        TopicDetailRoute(
+                            topicId = topicId,
+                            initialFloor = 0,
+                            titleHint = params["title"].orEmpty(),
+                        )
+                    } else {
+                        ActivityRoute
+                    }
                 }
                 else -> null
             }

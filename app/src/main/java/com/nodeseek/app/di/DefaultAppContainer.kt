@@ -3,6 +3,11 @@ package com.nodeseek.app.di
 import android.content.Context
 import android.os.Build
 import com.nodeseek.app.BuildConfig
+import com.nodeseek.app.data.activity.ActivityMonitorControllerImpl
+import com.nodeseek.app.data.activity.ActivityMonitorWorker
+import com.nodeseek.app.data.activity.ActivityPreferencesStore
+import com.nodeseek.app.data.activity.ActivityWorkScheduler
+import com.nodeseek.app.data.activity.ForumWatchActivityRepositoryImpl
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
 import com.nodeseek.app.data.fleet.FleetAlertNotifier
@@ -58,8 +63,8 @@ import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.activity.ActivityRepository
-import com.nodeseek.app.domain.activity.EmptyActivityRepository
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
@@ -462,8 +467,28 @@ class DefaultAppContainer(
     }
 
     override val activityRepository: ActivityRepository by lazy {
-        // TODO(ForumWatch): 接入真实 ForumWatch ActivityRepository 实现
-        EmptyActivityRepository()
+        ForumWatchActivityRepositoryImpl(
+            context = appContext,
+            externalScope = applicationScope,
+        )
+    }
+
+    val activityPreferencesStore: ActivityPreferencesStore by lazy {
+        ActivityPreferencesStore(context = appContext)
+    }
+
+    override val activityMonitorController: ActivityMonitorController by lazy {
+        ActivityMonitorControllerImpl(
+            appContext = appContext,
+            repository = activityRepository,
+            preferencesStore = activityPreferencesStore,
+            notificationDispatcher = notificationDispatcher,
+            scope = applicationScope,
+        )
+    }
+
+    val activityWorkScheduler: ActivityWorkScheduler by lazy {
+        ActivityWorkScheduler(appContext)
     }
 
     override val sellerTrustRepository: SellerTrustRepository by lazy {
@@ -535,7 +560,11 @@ class DefaultAppContainer(
         fleetAlertNotifier.ensureChannels()
         RestockCheckWorker.registerControllerProvider { restockMonitorController }
         OverseasPromoWorker.registerControllerProvider { overseasPromoMonitorController }
+        ActivityMonitorWorker.registerControllerProvider { activityMonitorController }
         FleetMonitorWorker.externalRepositoryFactory = { fleetRepository }
+        applicationScope.launch {
+            runCatching { activityRepository.loadCachedActivities() }
+        }
         restockWorkScheduler.observe(
             scope = applicationScope,
             settingsFlow = restockRepository.settingsFlow,
@@ -544,6 +573,10 @@ class DefaultAppContainer(
         overseasPromoWorkScheduler.observe(
             scope = applicationScope,
             settingsFlow = overseasPromoMonitorController.settingsFlow,
+        )
+        activityWorkScheduler.observe(
+            scope = applicationScope,
+            settingsFlow = activityMonitorController.settingsFlow,
         )
         fleetWorkScheduler.observeRepository(
             scope = applicationScope,

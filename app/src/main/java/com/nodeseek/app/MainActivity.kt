@@ -111,6 +111,11 @@ class MainActivity : ComponentActivity() {
             pendingShortcutDestination.trySend(destination)
             return
         }
+        PulseNotificationDispatcher.parseCommunityActivityDestination(targetIntent)?.let { destination ->
+            PulseNotificationDispatcher.clearCommunityActivityExtras(targetIntent)
+            pendingShortcutDestination.trySend(destination)
+            return
+        }
         val target = PulseNotificationDispatcher.parseTapTarget(targetIntent) ?: return
         PulseNotificationDispatcher.clearTapTargetExtras(targetIntent)
         pendingNotificationTap.trySend(target)

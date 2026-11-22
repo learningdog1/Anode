@@ -70,6 +70,8 @@ import com.nodeseek.app.ui.theme.withTabularNumbers
 @Immutable
 data class FeatureHubTelemetry(
     val seekMailConfigured: Boolean = false,
+    val ongoingActivityCount: Int = 0,
+    val totalActivityCount: Int = 0,
     val activeRestockWatchCount: Int = 0,
     val restockUnreadCount: Int = 0,
     val fleetServerCount: Int = 0,
@@ -115,15 +117,27 @@ fun FeatureHubScreen(
         val settings by appContainer.settingsRepository.settings.collectAsStateWithLifecycle(
             initialValue = AppSettings(),
         )
+        val activitySnapshot by appContainer.activityRepository.snapshot.collectAsStateWithLifecycle()
         val restockWatches by appContainer.restockRepository.watchItemsFlow.collectAsStateWithLifecycle()
         val restockEvents by appContainer.restockRepository.eventHistoryFlow.collectAsStateWithLifecycle()
         val fleetAssets by appContainer.fleetRepository.assetsFlow.collectAsStateWithLifecycle()
         val fleetSnapshots by appContainer.fleetRepository.snapshotsFlow.collectAsStateWithLifecycle()
         val sshServers by appContainer.sshVaultRepository.serversFlow.collectAsStateWithLifecycle()
 
-        remember(settings.seekMailApiKey, restockWatches, restockEvents, fleetAssets, fleetSnapshots, sshServers) {
+        remember(
+            settings.seekMailApiKey,
+            activitySnapshot,
+            restockWatches,
+            restockEvents,
+            fleetAssets,
+            fleetSnapshots,
+            sshServers,
+        ) {
+            val liveCounts = activitySnapshot.liveCounts()
             FeatureHubTelemetry(
                 seekMailConfigured = settings.seekMailApiKey.isNotBlank(),
+                ongoingActivityCount = liveCounts.ongoing,
+                totalActivityCount = liveCounts.all,
                 activeRestockWatchCount = restockWatches.count { it.isEnabled },
                 restockUnreadCount = restockEvents.count { !it.isRead },
                 fleetServerCount = maxOf(fleetAssets.size, fleetSnapshots.size),
@@ -160,10 +174,14 @@ fun FeatureHubScreen(
         ),
         FeatureTileItem(
             title = "活动",
-            subtitle = "ForumWatch 活动数据聚合",
+            subtitle = "社区抽奖与福利专题聚合",
             icon = Icons.Rounded.Celebration,
-            statusText = "即将接入",
-            isStatusHighlighted = false,
+            statusText = when {
+                resolvedTelemetry.ongoingActivityCount > 0 -> "${resolvedTelemetry.ongoingActivityCount} 场进行中"
+                resolvedTelemetry.totalActivityCount > 0 -> "${resolvedTelemetry.totalActivityCount} 场活动"
+                else -> "实时聚合"
+            },
+            isStatusHighlighted = resolvedTelemetry.ongoingActivityCount > 0,
             accentColor = secondary,
             onClick = onOpenActivity,
         ),

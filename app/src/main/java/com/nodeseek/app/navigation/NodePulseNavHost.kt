@@ -132,6 +132,8 @@ import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.WebViewSessionSheet
 import com.nodeseek.app.ui.components.rememberInAppMessagePopupState
 import com.nodeseek.app.ui.activity.ActivityScreen
+import com.nodeseek.app.ui.activity.openActivityAppNotificationSettings
+import com.nodeseek.app.ui.activity.rememberActivityNotificationBinding
 import com.nodeseek.app.ui.composer.TopicComposerScreen
 import com.nodeseek.app.ui.explore.ExploreScreen
 import com.nodeseek.app.ui.fleet.MyServersScreen
@@ -855,6 +857,10 @@ fun NodePulseNavHost(
     LaunchedEffect(shortcutDestinationFlow, navController) {
         shortcutDestinationFlow?.collect { destination ->
             isDetailPaneMaximized = false
+            if (destination is TopicDetailRoute) {
+                openTopicFromExternal(destination.topicId, destination.initialFloor, destination.titleHint)
+                return@collect
+            }
             if (destination is OverseasIntelDetailRoute &&
                 navController.currentBackStackEntry?.destination?.hasRoute<OverseasIntelRoute>() != true
             ) {
@@ -1619,11 +1625,31 @@ fun NodePulseNavHost(
                 )
             }
 
-            // Feature 2: Community Activity Hub (ForumWatch integration placeholder)
+            // Feature 2: Community Activity Hub (ForumWatch integration + opt-in notifications)
             composable<ActivityRoute> {
+                val activityNotificationBinding = rememberActivityNotificationBinding(
+                    controller = container.activityMonitorController,
+                    notificationDispatcher = container.notificationDispatcher,
+                    onFeedbackMessage = { message, showOpenSettingsAction ->
+                        appScope.launch {
+                            val result = rootSnackbarHostState.showSnackbar(
+                                message = message,
+                                actionLabel = if (showOpenSettingsAction) "去设置" else null,
+                            )
+                            if (showOpenSettingsAction && result == SnackbarResult.ActionPerformed) {
+                                openActivityAppNotificationSettings(context)
+                            }
+                        }
+                    },
+                )
                 ActivityScreen(
                     repository = container.activityRepository,
                     onBack = safePopBackStack,
+                    notificationsEnabled = activityNotificationBinding.isNotificationsEnabled,
+                    onToggleNotifications = activityNotificationBinding.onToggleNotifications,
+                    onOpenTopic = openTopic,
+                    onOpenUser = navigateToUser,
+                    onOpenCategory = selectBoardAndOpenExplore,
                 )
             }
 

@@ -178,7 +178,7 @@ Replaces classic bottom tab bars with an **Edge-to-Edge Viewport + Floating Tona
 - **Floating Tonal Pill Dock (`FloatingPillDock` in `NavigationShellComponents.kt`)**:
   - **3 Focused Top-Level Destinations (`PulseNavTab`)**:
     1. **`首页` (`EXPLORE`)** — `Icons.Rounded.Home` / `Icons.Outlined.Home`: Main topic stream, sort switcher, full board strip. **Re-tapping** while active smoothly scrolls the active feed list to index `0` and triggers pull-to-refresh.
-    2. **`功能栏` (`FEATURE_HUB`)** — `Icons.Rounded.GridView` / `Icons.Outlined.GridView`: Categorized toolbox hub (`FeatureHubScreen`) linking Seek Mail, Activity placeholder, Overseas Intel, Restock Monitor, My Servers, Mobile NetBench, and Lite SSH Hero card with live telemetry badges.
+    2. **`功能栏` (`FEATURE_HUB`)** — `Icons.Rounded.GridView` / `Icons.Outlined.GridView`: Categorized toolbox hub (`FeatureHubScreen`) linking Seek Mail, Community Activity Hub (`ForumWatch`), Overseas Intel, Restock Monitor, My Servers, Mobile NetBench, and Lite SSH Hero card with live telemetry badges.
     3. **`我的` (`PULSE_HUB`)** — `Icons.Rounded.Person` / `Icons.Outlined.Person` (showing unread count badge when `unreadNotifications > 0`, or indicator dot when daily check-in is pending): Personal profile Hero card, 1-line check-in bar, grouped Messages & Content links, and Settings.
   - **Selection Indicator**: Sliding `primaryContainer` / `secondaryContainer` gradient stadium pill (`pulseNavActiveIndicatorBrush`) animating smoothly between tabs.
 - **Contextual Expressive FAB (`CollapsingSquircleFab`)**:
@@ -432,7 +432,7 @@ Reorganized in `v2.x` from the initial Bento concept into an elevated **Hero Ran
 ### 3.6 Feature Hub (`功能栏`) & v2.4.0 Toolbox UX Architecture
 
 1. **Feature Hub (`FeatureHubScreen`)**: Categorized architectural tile grid with live `FeatureHubTelemetry` badges:
-   - **社区服务**: `邮箱` (`SeekMailScreen`, `已配置 / 待配置`) & `活动` (`ActivityScreen`, ForumWatch placeholder `即将接入`).
+   - **社区服务**: `邮箱` (`SeekMailScreen`, `已配置 / 待配置`) & `活动` (`ActivityScreen`, ForumWatch signed/encrypted community lottery & giveaway feed with live ongoing count badge and opt-in push notifications).
    - **情报与监控**: `海外情报` (`OverseasIntelScreen`) & `补货监控` (`RestockMonitorScreen`, active watch & unread badges).
    - **主机与网络**: `我的服务器` (`MyServersScreen`, server count) & `手机端测机` (`MobileNetBenchScreen`).
    - **Hero Card**: `轻量 SSH` (`LiteSshScreen`, saved vault count).

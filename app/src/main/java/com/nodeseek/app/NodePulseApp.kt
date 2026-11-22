@@ -15,10 +15,12 @@ import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import coil3.svg.SvgDecoder
+import com.nodeseek.app.data.activity.ActivityMonitorHost
 import com.nodeseek.app.data.overseas.OverseasPromoMonitorHost
 import com.nodeseek.app.data.radar.AppContainerHost
 import com.nodeseek.app.data.restock.RestockMonitorHost
 import com.nodeseek.app.di.DefaultAppContainer
+import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.restock.RestockMonitorController
 
@@ -27,7 +29,8 @@ class NodePulseApp :
     SingletonImageLoader.Factory,
     AppContainerHost,
     RestockMonitorHost,
-    OverseasPromoMonitorHost {
+    OverseasPromoMonitorHost,
+    ActivityMonitorHost {
 
     override lateinit var container: DefaultAppContainer
         private set
@@ -37,6 +40,9 @@ class NodePulseApp :
 
     override val overseasPromoMonitorController: OverseasPromoMonitorController
         get() = container.overseasPromoMonitorController
+
+    override val activityMonitorController: ActivityMonitorController
+        get() = container.activityMonitorController
 
     private var startedActivityCount: Int = 0
     private var isActivityChangingConfigurations: Boolean = false
@@ -60,6 +66,7 @@ class NodePulseApp :
                         container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
                         container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
                         container.overseasPromoMonitorController.onForegroundChanged(startedActivityCount > 0)
+                        container.activityMonitorController.onForegroundChanged(startedActivityCount > 0)
                     }
                 }
 
@@ -78,6 +85,10 @@ class NodePulseApp :
                         container.overseasPromoWorkScheduler.onAppEnteredBackground(
                             container.overseasPromoMonitorController.settingsFlow.value,
                         )
+                        container.activityMonitorController.onForegroundChanged(false)
+                        container.activityWorkScheduler.onAppEnteredBackground(
+                            container.activityMonitorController.settingsFlow.value,
+                        )
                     }
                 }
 
@@ -92,6 +103,8 @@ class NodePulseApp :
         container.restockMonitorController.start()
         container.overseasPromoMonitorController.onForegroundChanged(startedActivityCount > 0)
         container.overseasPromoMonitorController.start()
+        container.activityMonitorController.onForegroundChanged(startedActivityCount > 0)
+        container.activityMonitorController.start()
     }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader {
