@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -147,6 +148,11 @@ fun ExploreScreen(
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: (() -> Unit)? = null,
     externalCategorySlug: String? = null,
+    onExternalCategoryConsumed: () -> Unit = {},
+    externalSort: FeedSort? = null,
+    onExternalSortConsumed: () -> Unit = {},
+    onSelectedCategoryChanged: (String) -> Unit = {},
+    refreshTrigger: Long = 0L,
     scrollToTopTrigger: Int = 0,
     onScrollToTopConsumed: () -> Unit = {},
     refreshOnScrollToTop: Boolean = false,
@@ -210,19 +216,43 @@ fun ExploreScreen(
         }
     }
 
+    // Report active category back to host (e.g. so FAB composer defaults to the current board)
+    LaunchedEffect(uiState.selectedCategorySlug) {
+        onSelectedCategoryChanged(uiState.selectedCategorySlug)
+    }
+
+    // Apply external sort selection (e.g. /award curated deep link)
+    LaunchedEffect(externalSort) {
+        val targetSort = externalSort ?: return@LaunchedEffect
+        viewModel.selectSort(targetSort)
+        onExternalSortConsumed()
+    }
+
+    // Refresh feed when returning from publishing a new topic
+    var lastHandledRefreshTrigger by rememberSaveable { mutableStateOf(0L) }
+    LaunchedEffect(refreshTrigger) {
+        if (refreshTrigger > 0L && refreshTrigger != lastHandledRefreshTrigger) {
+            lastHandledRefreshTrigger = refreshTrigger
+            viewModel.refresh()
+        }
+    }
+
     // Synchronize external board selection when navigated from Boards tab or deep link
-    LaunchedEffect(externalCategorySlug, boardTabs.size) {
+    LaunchedEffect(externalCategorySlug, boardTabs) {
         val targetSlug = externalCategorySlug ?: return@LaunchedEffect
         if (targetSlug != uiState.selectedCategorySlug) {
             viewModel.selectCategory(targetSlug)
         }
-        val targetIndex = boardTabs.indexOfFirst { it.slug == targetSlug }.coerceAtLeast(0)
-        if (pagerState.currentPage != targetIndex) {
-            if (abs(targetIndex - pagerState.currentPage) <= 1) {
-                pagerState.animateScrollToPage(targetIndex)
-            } else {
-                pagerState.scrollToPage(targetIndex)
+        val targetIndex = boardTabs.indexOfFirst { it.slug == targetSlug }
+        if (targetIndex >= 0) {
+            if (pagerState.currentPage != targetIndex) {
+                if (abs(targetIndex - pagerState.currentPage) <= 1) {
+                    pagerState.animateScrollToPage(targetIndex)
+                } else {
+                    pagerState.scrollToPage(targetIndex)
+                }
             }
+            onExternalCategoryConsumed()
         }
     }
 
@@ -241,9 +271,19 @@ fun ExploreScreen(
         }
     }
 
-    // Notify ViewModel immediately when horizontal swipe commits to a target board tab
+    // Notify ViewModel immediately when horizontal swipe commits to a target board tab,
+    // re-aligning pager index first if `boardTabs` reordered so tab updates never drift selection.
     val currentSelectedSlug by rememberUpdatedState(uiState.selectedCategorySlug)
     LaunchedEffect(pagerState, boardTabs) {
+        if (externalCategorySlug == null) {
+            val expectedIndex = boardTabs.indexOfFirst { it.slug == currentSelectedSlug }
+            if (expectedIndex >= 0 &&
+                pagerState.currentPage != expectedIndex &&
+                !pagerState.isScrollInProgress
+            ) {
+                pagerState.scrollToPage(expectedIndex)
+            }
+        }
         snapshotFlow { pagerState.targetPage }
             .distinctUntilChanged()
             .collect { targetPage ->
@@ -322,6 +362,27 @@ fun ExploreScreen(
                     ExploreBrandTitle()
 
                     Spacer(modifier = Modifier.weight(1f))
+
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .pulseBouncyClickable(
+                                pressedScale = NodePulseMotion.chipPressScale,
+                                role = Role.Button,
+                                onClickLabel = "全部版块与常驻管理",
+                                showRipple = false,
+                                onClick = onOpenBoardsTab,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.GridView,
+                            contentDescription = "版块目录",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(19.dp),
+                        )
+                    }
 
                     Box(
                         modifier = Modifier

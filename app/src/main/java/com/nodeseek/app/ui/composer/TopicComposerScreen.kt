@@ -3,10 +3,7 @@
 package com.nodeseek.app.ui.composer
 
 import android.content.ActivityNotFoundException
-import android.content.ContentResolver
-import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,6 +55,7 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EmojiEmotions
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.FormatBold
 import androidx.compose.material.icons.rounded.FormatItalic
 import androidx.compose.material.icons.rounded.FormatQuote
@@ -70,6 +68,7 @@ import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Tab
+import androidx.compose.material.icons.rounded.TableChart
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Title
 import androidx.compose.material.icons.rounded.Visibility
@@ -166,6 +165,14 @@ private const val TABS_MARKDOWN_TEMPLATE = """
 ::::
 """
 
+private const val TABLE_MARKDOWN_TEMPLATE = """
+| 项目 | 规格 / 实测 | 备注 |
+| --- | --- | --- |
+| CPU | 2 vCPU |  |
+| 内存 | 2 GB |  |
+| 线路 | 三网直连 |  |
+"""
+
 /**
  * Anode Markdown Topic Composer Screen (`TopicComposerScreen`).
  *
@@ -199,6 +206,7 @@ fun TopicComposerScreen(
             initialCategorySlug = initialCategorySlug,
             initialTitle = initialTitle,
             initialMarkdown = initialMarkdown,
+            prefillKey = prefillKey,
         ),
     ),
 ) {
@@ -244,7 +252,10 @@ fun TopicComposerScreen(
         viewModel.events.collect { event ->
             when (event) {
                 is TopicComposerUiEvent.ShowMessage -> {
-                    snackbarHostState.showSnackbar(event.message)
+                    launch {
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        snackbarHostState.showSnackbar(event.message)
+                    }
                 }
                 is TopicComposerUiEvent.PublishedSuccess -> {
                     onTopicPublished(event.editedTopicId)
@@ -264,17 +275,23 @@ fun TopicComposerScreen(
     val handlePickedImageUri: (Uri?) -> Unit = { uri ->
         if (uri != null) {
             coroutineScope.launch {
-                val payload = withContext(Dispatchers.IO) {
-                    readPickedImagePayload(context = context, uri = uri)
+                val readResult = withContext(Dispatchers.IO) {
+                    readPickedImagePayloadBounded(context = context, uri = uri)
                 }
-                if (payload != null) {
-                    viewModel.onPhotoBytesSelected(
-                        bytes = payload.bytes,
-                        mimeType = payload.mimeType,
-                        fileName = payload.fileName,
-                    )
-                } else {
-                    viewModel.reportPhotoReadError("无法读取所选图片，请确认文件权限或更换格式")
+                when (readResult) {
+                    is ImagePayloadReadResult.Success -> {
+                        viewModel.onPhotoBytesSelected(
+                            bytes = readResult.bytes,
+                            mimeType = readResult.mimeType,
+                            fileName = readResult.fileName,
+                        )
+                    }
+                    is ImagePayloadReadResult.TooLarge -> {
+                        viewModel.reportPhotoReadError(readResult.message)
+                    }
+                    is ImagePayloadReadResult.ReadError -> {
+                        viewModel.reportPhotoReadError(readResult.message)
+                    }
                 }
             }
         }
@@ -304,7 +321,10 @@ fun TopicComposerScreen(
                 canSubmit = uiState.canSubmit,
                 isSubmitting = uiState.isSubmitting,
                 categorySlug = uiState.selectedCategorySlug,
-                onBack = onBack,
+                onBack = {
+                    viewModel.flushDraftNow()
+                    onBack()
+                },
                 onSelectTab = viewModel::setActiveTab,
                 onPublish = viewModel::onPublishClicked,
             )
@@ -327,6 +347,9 @@ fun TopicComposerScreen(
                         } catch (_: ActivityNotFoundException) {
                             fallbackDocumentLauncher.launch(arrayOf("image/*"))
                         }
+                    },
+                    onPickImageFile = {
+                        fallbackDocumentLauncher.launch(arrayOf("image/*"))
                     },
                 )
             }
@@ -1310,6 +1333,7 @@ private fun ComposerBottomFormattingBar(
     onOpenSshInsert: () -> Unit,
     onOpenStickers: () -> Unit,
     onPickPhoto: () -> Unit,
+    onPickImageFile: () -> Unit,
 ) {
     val categoryAccent = NodePulseThemeTokens.categorySpec(categorySlug).spineColor
     Column(
@@ -1387,6 +1411,11 @@ private fun ComposerBottomFormattingBar(
                     label = "图床上传",
                     onClick = onPickPhoto,
                 )
+                ComposerToolbarButton(
+                    icon = Icons.Rounded.FolderOpen,
+                    label = "文件选图",
+                    onClick = onPickImageFile,
+                )
             }
 
             Box(
@@ -1462,6 +1491,15 @@ private fun ComposerBottomFormattingBar(
                 onClick = {
                     onApplyTransform {
                         insertComposerMarkdown(it, prefix = "[", suffix = "](https://)", placeholder = "链接文字")
+                    }
+                },
+            )
+            ComposerToolbarButton(
+                icon = Icons.Rounded.TableChart,
+                label = "表格",
+                onClick = {
+                    onApplyTransform {
+                        insertComposerMarkdown(it, prefix = TABLE_MARKDOWN_TEMPLATE)
                     }
                 },
             )
@@ -2161,52 +2199,6 @@ private fun ComposerNodeImageKeyDialog(
         )
     }
 }
-
-private data class PickedImagePayload(
-    val bytes: ByteArray,
-    val mimeType: String,
-    val fileName: String?,
-)
-
-private fun readPickedImagePayload(
-    context: Context,
-    uri: Uri,
-): PickedImagePayload? = runCatching {
-    val resolver = context.contentResolver
-    val mimeType = resolver.getType(uri).orEmpty()
-    val fileName = queryPickedImageDisplayName(resolver = resolver, uri = uri)
-    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-    if (bytes.isEmpty()) return@runCatching null
-    PickedImagePayload(
-        bytes = bytes,
-        mimeType = mimeType,
-        fileName = fileName,
-    )
-}.getOrNull()
-
-private fun queryPickedImageDisplayName(
-    resolver: ContentResolver,
-    uri: Uri,
-): String? = runCatching {
-    resolver.query(
-        uri,
-        arrayOf(OpenableColumns.DISPLAY_NAME),
-        null,
-        null,
-        null,
-    )?.use { cursor ->
-        if (!cursor.moveToFirst()) return@use null
-        val columnIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (columnIndex >= 0) {
-            cursor.getString(columnIndex)?.trim()?.takeIf { it.isNotEmpty() }
-        } else {
-            null
-        }
-    }
-}.getOrNull() ?: uri.lastPathSegment
-    ?.substringAfterLast('/')
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
 
 @Composable
 private fun ComposerLoadErrorCard(

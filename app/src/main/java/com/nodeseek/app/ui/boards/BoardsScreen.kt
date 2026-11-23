@@ -384,6 +384,7 @@ fun BoardsScreen(
                         pinnedCount = pinnedBoardCount,
                         totalBoardCount = visibleBoardCount,
                         focusRequester = focusRequester,
+                        onBack = onBack,
                         onQueryChange = viewModel::updateQueryInput,
                         onFocusSearch = { viewModel.setSearchModeActive(true) },
                         onSubmitSearch = {
@@ -474,7 +475,9 @@ fun BoardsScreen(
                             },
                             onSubmitCurrentQuery = {
                                 dismissSearchKeyboard()
-                                viewModel.submitSearch()
+                                viewModel.submitSearch(
+                                    uiState.queryInput.trim().ifEmpty { uiState.submittedQuery },
+                                )
                             },
                             onOpenGoogleSearch = {
                                 dismissSearchKeyboard()
@@ -550,6 +553,7 @@ private fun BoardsDirectorySearchHeader(
     onSubmitSearch: () -> Unit,
     onCancelSearch: () -> Unit,
     onClearInput: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
@@ -576,6 +580,24 @@ private fun BoardsDirectorySearchHeader(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                if (onBack != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(ext.cardSurface)
+                            .border(width = 0.8.dp, color = ext.cardBorder, shape = CircleShape)
+                            .clickable(role = Role.Button, onClick = onBack),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "返回",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .width(4.dp)
@@ -1765,11 +1787,20 @@ private fun UnifiedSearchContent(
             total > 0 && last >= total - 4
         }
     }
-    LaunchedEffect(shouldLoadMore, uiState.searchHasNextPage, uiState.isSearchingNextPage) {
+    LaunchedEffect(
+        shouldLoadMore,
+        uiState.searchHasNextPage,
+        uiState.isSearchingNextPage,
+        uiState.searchNextPageError,
+    ) {
         snapshotFlow { shouldLoadMore }
             .distinctUntilChanged()
             .collect { nearEnd ->
-                if (nearEnd && uiState.searchHasNextPage && !uiState.isSearchingNextPage) {
+                if (nearEnd &&
+                    uiState.searchHasNextPage &&
+                    !uiState.isSearchingNextPage &&
+                    uiState.searchNextPageError == null
+                ) {
                     onLoadNextPage()
                 }
             }
@@ -2233,6 +2264,40 @@ private fun UnifiedSearchContent(
                     if (uiState.isSearchingNextPage) {
                         item(key = "search_more_spinner") {
                             LoadingMoreFooter(label = "正在加载更多结果…")
+                        }
+                    } else if (uiState.searchNextPageError != null) {
+                        item(key = "search_next_page_error") {
+                            ExpressiveStateCard(
+                                icon = if (uiState.isSearchChallengeRequired) {
+                                    Icons.Rounded.Shield
+                                } else {
+                                    Icons.Rounded.CloudOff
+                                },
+                                title = "加载下一页失败",
+                                description = uiState.searchNextPageError,
+                                accentColor = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                actions = {
+                                    if (uiState.isSearchChallengeRequired) {
+                                        Button(onClick = onVerifyWebView, shape = CircleShape) {
+                                            Text(
+                                                text = "完成网页验证",
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                    OutlinedButton(onClick = onLoadNextPage, shape = CircleShape) {
+                                        Text(
+                                            text = "重试加载更多",
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                },
+                            )
                         }
                     }
                 }

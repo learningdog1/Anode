@@ -17,7 +17,10 @@ import com.nodeseek.app.domain.model.TopicAccessException
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.radar.RadarRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -217,8 +220,15 @@ class TopicDetailViewModel(
     val events = _events.receiveAsFlow()
 
     private var saveDraftJob: Job? = null
+    @Volatile
+    private var pendingDraftSave: Pair<String, Long?>? = null
     private var historyRecordJob: Job? = null
     private var highlightClearJob: Job? = null
+    private var pageLoadJob: Job? = null
+    private var appendNextPageJob: Job? = null
+    private var prependPreviousPageJob: Job? = null
+    private var userResolveJob: Job? = null
+    private var pageWindowGeneration: Long = 0L
     private var pendingImageUpload: PendingUploadPayload? = null
     private var lastHandledRefreshTrigger: Long = 0L
 
@@ -395,11 +405,16 @@ class TopicDetailViewModel(
                         cachedOpeningFloor = freshOpening,
                     )
                 }
+                refreshOfflineSnapshotIfBookmarked(page1)
             }
         }
     }
 
     fun refreshCurrentPage() {
+        pageLoadJob?.cancel()
+        appendNextPageJob?.cancel()
+        prependPreviousPageJob?.cancel()
+        pageWindowGeneration++
         val page = internalState.value.loadedStartPage.coerceAtLeast(1)
         internalState.update { state ->
             val retained = state.pagesCache[page]?.let { mapOf(page to it) } ?: emptyMap()
@@ -488,7 +503,9 @@ class TopicDetailViewModel(
             return
         }
 
-        viewModelScope.launch {
+        val generation = pageWindowGeneration
+        appendNextPageJob?.cancel()
+        appendNextPageJob = viewModelScope.launch {
             internalState.update { it.copy(isAppendingNextPage = true) }
             val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
             val result = container.forumRepository.getTopicDetail(
@@ -496,6 +513,7 @@ class TopicDetailViewModel(
                 page = nextPage,
                 includeBlocked = includeBlocked,
             )
+            if (generation != pageWindowGeneration) return@launch
             result.fold(
                 onSuccess = { detail ->
                     internalState.update { s ->
@@ -541,11 +559,7 @@ class TopicDetailViewModel(
         val cachedPrev = state.pagesCache[prevPage]
         if (cachedPrev != null && !cachedPrev.isOfflineSnapshot) {
             internalState.update { s ->
-                val updatedOpening = if (prevPage == 1) {
-                    cachedPrev.openingFloor ?: s.cachedOpeningFloor
-                } else {
-                    cachedPrev.openingFloor ?: s.cachedOpeningFloor
-                }
+                val updatedOpening = cachedPrev.openingFloor ?: s.cachedOpeningFloor
                 s.copy(
                     loadedStartPage = minOf(s.loadedStartPage, prevPage),
                     cachedOpeningFloor = updatedOpening,
@@ -554,7 +568,9 @@ class TopicDetailViewModel(
             return
         }
 
-        viewModelScope.launch {
+        val generation = pageWindowGeneration
+        prependPreviousPageJob?.cancel()
+        prependPreviousPageJob = viewModelScope.launch {
             internalState.update { it.copy(isPrependingPreviousPage = true) }
             val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
             val result = container.forumRepository.getTopicDetail(
@@ -562,6 +578,7 @@ class TopicDetailViewModel(
                 page = prevPage,
                 includeBlocked = includeBlocked,
             )
+            if (generation != pageWindowGeneration) return@launch
             result.fold(
                 onSuccess = { detail ->
                     internalState.update { s ->
@@ -798,12 +815,21 @@ class TopicDetailViewModel(
             return
         }
 
-        viewModelScope.launch {
+        if (!preserveWindowIfContiguous) {
+            appendNextPageJob?.cancel()
+            prependPreviousPageJob?.cancel()
+            pageWindowGeneration++
+        }
+        val generation = pageWindowGeneration
+        pageLoadJob?.cancel()
+        pageLoadJob = viewModelScope.launch {
             internalState.update { state ->
                 state.copy(
                     isInitialLoading = isInitial && state.pagesCache.isEmpty(),
                     isRefreshing = isPullRefresh,
                     isPageSwitching = !isInitial && !isPullRefresh,
+                    isAppendingNextPage = if (preserveWindowIfContiguous) state.isAppendingNextPage else false,
+                    isPrependingPreviousPage = if (preserveWindowIfContiguous) state.isPrependingPreviousPage else false,
                     accessError = if (state.pagesCache.isEmpty()) null else state.accessError,
                 )
             }
@@ -814,6 +840,7 @@ class TopicDetailViewModel(
                 page = safePage,
                 includeBlocked = includeBlocked,
             )
+            if (generation != pageWindowGeneration) return@launch
 
             result.fold(
                 onSuccess = { detail ->
@@ -1020,7 +1047,9 @@ class TopicDetailViewModel(
     private suspend fun refreshOfflineSnapshotIfBookmarked(detail: TopicDetailPage) {
         val isCurrentlyBookmarked = uiState.value.isBookmarked
         if (!isCurrentlyBookmarked || detail.isOfflineSnapshot) return
-        val opening = internalState.value.cachedOpeningFloor ?: detail.openingFloor
+        // Only persist Page 1 with a valid opening floor so subpage loads never overwrite the offline OP snapshot
+        if (detail.currentPage != 1) return
+        val opening = internalState.value.cachedOpeningFloor ?: detail.openingFloor ?: return
         val snapshot = detail.copy(openingFloor = opening, isOfflineSnapshot = true)
         runCatching {
             container.bookmarkAndHistoryRepository.saveOfflineBookmark(
@@ -1063,9 +1092,12 @@ class TopicDetailViewModel(
         viewModelScope.launch {
             val isSignedIn = container.sessionRepository.sessionState.value != null
             if (targetBookmarked) {
-                val opening = internalState.value.cachedOpeningFloor ?: page.openingFloor
-                val offlineSnapshot = page.copy(openingFloor = opening, isOfflineSnapshot = true)
-                val summary = page.toTopicSummary(isBookmarked = true)
+                val baseSnapshotPage = internalState.value.pagesCache[1]?.takeUnless { it.isOfflineSnapshot } ?: page
+                val opening = internalState.value.cachedOpeningFloor
+                    ?: baseSnapshotPage.openingFloor
+                    ?: page.openingFloor
+                val offlineSnapshot = baseSnapshotPage.copy(openingFloor = opening, isOfflineSnapshot = true)
+                val summary = baseSnapshotPage.toTopicSummary(isBookmarked = true)
 
                 var serverSynced = false
                 if (isSignedIn) {
@@ -1096,9 +1128,11 @@ class TopicDetailViewModel(
                 }
             } else {
                 runCatching { container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId) }
+                var remoteFailed = false
                 if (isSignedIn) {
                     container.bookmarkAndHistoryRepository.setTopicBookmarked(topicId, false)
                         .onFailure { err ->
+                            remoteFailed = true
                             _events.trySend(
                                 TopicDetailUiEvent.ShowMessage(
                                     err.message ?: "取消云端收藏失败，已移除本地收藏"
@@ -1106,7 +1140,9 @@ class TopicDetailViewModel(
                             )
                         }
                 }
-                _events.trySend(TopicDetailUiEvent.ShowMessage("已取消收藏"))
+                if (!remoteFailed) {
+                    _events.trySend(TopicDetailUiEvent.ShowMessage("已取消收藏"))
+                }
             }
         }
     }
@@ -1134,12 +1170,12 @@ class TopicDetailViewModel(
             return
         }
 
-        // 2. Query userRepository.searchUsers(username)
-        viewModelScope.launch {
+        // 2. Query userRepository.searchUsers(username) with exact-match guard (never fuzzy jump to wrong user)
+        userResolveJob?.cancel()
+        userResolveJob = viewModelScope.launch {
             container.userRepository.searchUsers(cleaned)
                 .onSuccess { candidates ->
                     val exact = candidates.firstOrNull { it.username.equals(cleaned, ignoreCase = true) }
-                        ?: candidates.firstOrNull()
                     if (exact != null && exact.uid > 0L) {
                         _events.trySend(TopicDetailUiEvent.NavigateToUser(exact.uid, exact.username))
                     } else {
@@ -1457,18 +1493,25 @@ class TopicDetailViewModel(
     }
 
     fun closeReplySheet() {
+        flushReplyDraftNow()
+        val editingWasActive = internalState.value.replyComposer.isEditMode
         internalState.update { state ->
-            val editingWasActive = state.replyComposer.isEditMode
             state.copy(
                 replyComposer = state.replyComposer.copy(
                     isSheetOpen = false,
                     showStickerPicker = false,
+                    editingComment = if (editingWasActive) null else state.replyComposer.editingComment,
+                    draftMarkdown = if (editingWasActive) "" else state.replyComposer.draftMarkdown,
+                    composerRevision = if (editingWasActive) {
+                        state.replyComposer.composerRevision + 1
+                    } else {
+                        state.replyComposer.composerRevision
+                    },
                 )
-            ).also {
-                if (editingWasActive) {
-                    restoreReplyDraft()
-                }
-            }
+            )
+        }
+        if (editingWasActive) {
+            restoreReplyDraft()
         }
     }
 
@@ -1526,29 +1569,51 @@ class TopicDetailViewModel(
     }
 
     private fun scheduleReplyDraftSave(markdown: String, editingCommentId: Long?) {
+        pendingDraftSave = markdown to editingCommentId
         saveDraftJob?.cancel()
         saveDraftJob = viewModelScope.launch {
             delay(450)
-            val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
-            val draftKey = if (editingCommentId != null) {
-                EditorDraft.editReplyKey(editingCommentId)
-            } else {
-                EditorDraft.replyKey(topicId)
-            }
-            if (markdown.isBlank()) {
-                container.draftRepository.deleteDraft(uid, draftKey)
-            } else {
-                container.draftRepository.saveDraft(
-                    EditorDraft(
-                        draftKey = draftKey,
-                        accountUid = uid,
-                        markdownContent = markdown,
-                        categorySlug = uiState.value.pageData?.categorySlug ?: "daily",
-                        updatedAtMillis = System.currentTimeMillis(),
-                    )
-                )
+            pendingDraftSave = null
+            persistReplyDraft(markdown = markdown, editingCommentId = editingCommentId)
+        }
+    }
+
+    fun flushReplyDraftNow() {
+        val pending = pendingDraftSave ?: return
+        pendingDraftSave = null
+        saveDraftJob?.cancel()
+        nonCancellableDraftScope.launch {
+            runCatching {
+                persistReplyDraft(markdown = pending.first, editingCommentId = pending.second)
             }
         }
+    }
+
+    private suspend fun persistReplyDraft(markdown: String, editingCommentId: Long?) {
+        val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
+        val draftKey = if (editingCommentId != null) {
+            EditorDraft.editReplyKey(editingCommentId)
+        } else {
+            EditorDraft.replyKey(topicId)
+        }
+        if (markdown.isBlank()) {
+            container.draftRepository.deleteDraft(uid, draftKey)
+        } else {
+            container.draftRepository.saveDraft(
+                EditorDraft(
+                    draftKey = draftKey,
+                    accountUid = uid,
+                    markdownContent = markdown,
+                    categorySlug = uiState.value.pageData?.categorySlug ?: "daily",
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+            )
+        }
+    }
+
+    override fun onCleared() {
+        flushReplyDraftNow()
+        super.onCleared()
     }
 
     fun submitReply() {
@@ -1563,6 +1628,7 @@ class TopicDetailViewModel(
 
         viewModelScope.launch {
             saveDraftJob?.cancel()
+            pendingDraftSave = null
             internalState.update { state ->
                 state.copy(replyComposer = state.replyComposer.copy(isSubmitting = true))
             }
@@ -2179,6 +2245,8 @@ class TopicDetailViewModel(
     )
 
     companion object {
+        private val nonCancellableDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
         fun factory(
             container: AppContainer,
             topicId: Long,

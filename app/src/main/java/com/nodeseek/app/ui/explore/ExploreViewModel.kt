@@ -201,7 +201,19 @@ class ExploreViewModel(
         val readMap: Map<Long, ReadHistoryEntry>,
         val filterConfig: com.nodeseek.app.domain.filter.ContentFilterConfig,
         val awayDigest: AwayDigestState,
+        val challengeRequired: Boolean,
     )
+
+    private data class FilteredSliceCacheEntry(
+        val rawPinned: List<TopicSummary>,
+        val rawTopics: List<TopicSummary>,
+        val filterConfig: com.nodeseek.app.domain.filter.ContentFilterConfig,
+        val includeBlocked: Boolean,
+        val filteredPinned: List<TopicSummary>,
+        val filteredTopics: List<TopicSummary>,
+    )
+
+    private val filteredSliceCache = HashMap<FeedSliceKey, FilteredSliceCacheEntry>()
 
     val uiState: StateFlow<ExploreUiState> = combine(
         _streamState,
@@ -213,38 +225,92 @@ class ExploreViewModel(
             readStateMapFlow,
             contentFilterRepository.config,
             awayDigestRepository.state,
-        ) { bookmarks, reads, filterConfig, awayDigest ->
-            LocalEnrichmentBundle(bookmarks, reads, filterConfig, awayDigest)
+            sessionRepository.challengeRequired,
+        ) { bookmarks, reads, filterConfig, awayDigest, challengeRequired ->
+            LocalEnrichmentBundle(bookmarks, reads, filterConfig, awayDigest, challengeRequired)
         },
     ) { raw, categories, settings, session, enrichment ->
         val bookmarkedIds = enrichment.bookmarkedIds
         val readMap = enrichment.readMap
         val filterConfig = enrichment.filterConfig
         val awayDigest = enrichment.awayDigest
-        val challengeActive = sessionRepository.challengeRequired.value
+        val challengeActive = enrichment.challengeRequired
         val includeBlocked = settings.includeBlockedTopics
         val orderedTabs = buildOrderedTabs(
             categories = categories,
             pinnedCategorySlugs = settings.pinnedCategorySlugs,
             selectedCategorySlug = raw.selectedCategorySlug,
         )
+        if (filteredSliceCache.size > 40) {
+            filteredSliceCache.clear()
+        }
 
         val enrichedSlices = buildMap<String, ExploreBoardSliceUiState>(orderedTabs.size + 1) {
             orderedTabs.forEach { tab ->
                 val tabSort = effectiveSortForCategory(tab.slug, raw.selectedSort)
-                val slice = raw.slices[FeedSliceKey(tab.slug, tabSort)] ?: BoardPageSlice()
-                val visiblePinned = ContentFilterEngine.filterTopics(
-                    topics = slice.rawPinnedTopics,
-                    config = filterConfig,
-                    includeBlockedTopics = includeBlocked,
-                    activeBoardSlug = tab.slug,
-                ).map { it.enrichWithLocalState(bookmarkedIds, readMap) }
-                val visibleTopics = ContentFilterEngine.filterTopics(
-                    topics = slice.rawTopics,
-                    config = filterConfig,
-                    includeBlockedTopics = includeBlocked,
-                    activeBoardSlug = tab.slug,
-                ).map { it.enrichWithLocalState(bookmarkedIds, readMap) }
+                val sliceKey = FeedSliceKey(tab.slug, tabSort)
+                val slice = raw.slices[sliceKey]
+                if (slice == null) {
+                    put(
+                        tab.slug,
+                        ExploreBoardSliceUiState(
+                            categorySlug = tab.slug,
+                            sort = tabSort,
+                            isChallengeOrAuthRequired = challengeActive,
+                        ),
+                    )
+                    return@forEach
+                }
+
+                val cachedFilter = filteredSliceCache[sliceKey]
+                val filteredEntry = if (cachedFilter != null &&
+                    cachedFilter.rawPinned === slice.rawPinnedTopics &&
+                    cachedFilter.rawTopics === slice.rawTopics &&
+                    cachedFilter.filterConfig == filterConfig &&
+                    cachedFilter.includeBlocked == includeBlocked
+                ) {
+                    cachedFilter
+                } else {
+                    val fPinned = if (slice.rawPinnedTopics.isEmpty()) {
+                        emptyList()
+                    } else {
+                        ContentFilterEngine.filterTopics(
+                            topics = slice.rawPinnedTopics,
+                            config = filterConfig,
+                            includeBlockedTopics = includeBlocked,
+                            activeBoardSlug = tab.slug,
+                        )
+                    }
+                    val fTopics = if (slice.rawTopics.isEmpty()) {
+                        emptyList()
+                    } else {
+                        ContentFilterEngine.filterTopics(
+                            topics = slice.rawTopics,
+                            config = filterConfig,
+                            includeBlockedTopics = includeBlocked,
+                            activeBoardSlug = tab.slug,
+                        )
+                    }
+                    FilteredSliceCacheEntry(
+                        rawPinned = slice.rawPinnedTopics,
+                        rawTopics = slice.rawTopics,
+                        filterConfig = filterConfig,
+                        includeBlocked = includeBlocked,
+                        filteredPinned = fPinned,
+                        filteredTopics = fTopics,
+                    ).also { filteredSliceCache[sliceKey] = it }
+                }
+
+                val visiblePinned = if (filteredEntry.filteredPinned.isEmpty()) {
+                    emptyList()
+                } else {
+                    filteredEntry.filteredPinned.map { it.enrichWithLocalState(bookmarkedIds, readMap) }
+                }
+                val visibleTopics = if (filteredEntry.filteredTopics.isEmpty()) {
+                    emptyList()
+                } else {
+                    filteredEntry.filteredTopics.map { it.enrichWithLocalState(bookmarkedIds, readMap) }
+                }
                 put(
                     tab.slug,
                     ExploreBoardSliceUiState(
@@ -310,9 +376,11 @@ class ExploreViewModel(
                 sort = initialKey.sort,
                 maxAgeMillis = BOARD_CACHE_TTL_MS,
             )
+            val dedupPinned = diskCached.pinnedTopics.distinctBy { it.id }
+            val pinnedIds = dedupPinned.asSequence().map { it.id }.toHashSet()
             val seededSlice = BoardPageSlice(
-                rawPinnedTopics = diskCached.pinnedTopics,
-                rawTopics = diskCached.topics,
+                rawPinnedTopics = dedupPinned,
+                rawTopics = diskCached.topics.filterNot { it.id in pinnedIds }.distinctBy { it.id },
                 isInitialLoading = false,
                 isRefreshing = true,
                 isManualRefreshing = false,
@@ -546,8 +614,13 @@ class ExploreViewModel(
                     bookmarked = targetBookmarked,
                 )
                 remoteResult.onFailure { err ->
+                    val fallbackMsg = if (targetBookmarked) {
+                        "云端收藏同步未完成，已保存在本机"
+                    } else {
+                        "取消云端收藏同步未完成，已从本机移除"
+                    }
                     _streamState.update {
-                        it.copy(snackbarMessage = err.message ?: "云端收藏同步未完成，已保存在本机")
+                        it.copy(snackbarMessage = err.message ?: fallbackMsg)
                     }
                 }
             } else {
@@ -676,9 +749,11 @@ class ExploreViewModel(
         val repoCached = forumRepository.getCachedFeed(normalized, nextSort)
         if (repoCached != null && (!repoCached.isFromRssFallback || rssExpected)) {
             val isRepoFresh = forumRepository.isFeedFresh(normalized, nextSort, BOARD_CACHE_TTL_MS)
+            val dedupPinned = repoCached.pinnedTopics.distinctBy { it.id }
+            val pinnedIds = dedupPinned.asSequence().map { it.id }.toHashSet()
             val cachedSlice = BoardPageSlice(
-                rawPinnedTopics = repoCached.pinnedTopics,
-                rawTopics = repoCached.topics,
+                rawPinnedTopics = dedupPinned,
+                rawTopics = repoCached.topics.filterNot { it.id in pinnedIds }.distinctBy { it.id },
                 isInitialLoading = false,
                 isRefreshing = !isRepoFresh,
                 isManualRefreshing = false,
@@ -798,10 +873,11 @@ class ExploreViewModel(
                         if (activeFeedJobs[nextKey]?.isActive == true) {
                             return@update state
                         }
-                        val pinnedIds = pageResult.pinnedTopics.asSequence().map { it.id }.toHashSet()
-                        val regular = pageResult.topics.filterNot { it.id in pinnedIds }
+                        val dedupPinned = pageResult.pinnedTopics.distinctBy { it.id }
+                        val pinnedIds = dedupPinned.asSequence().map { it.id }.toHashSet()
+                        val regular = pageResult.topics.filterNot { it.id in pinnedIds }.distinctBy { it.id }
                         val prefetchedSlice = BoardPageSlice(
-                            rawPinnedTopics = pageResult.pinnedTopics,
+                            rawPinnedTopics = dedupPinned,
                             rawTopics = regular,
                             currentPage = 1,
                             hasNextPage = pageResult.hasNextPage,
@@ -892,14 +968,14 @@ class ExploreViewModel(
                     _streamState.update { state ->
                         val curSlice = state.slices[key] ?: BoardPageSlice()
                         val mergedPinned = if (reset) {
-                            pageResult.pinnedTopics
+                            pageResult.pinnedTopics.distinctBy { it.id }
                         } else {
                             (curSlice.rawPinnedTopics + pageResult.pinnedTopics).distinctBy { it.id }
                         }
                         val pinnedIds = mergedPinned.asSequence().map { it.id }.toHashSet()
                         val incomingRegular = pageResult.topics.filterNot { it.id in pinnedIds }
                         val mergedTopics = if (reset) {
-                            incomingRegular
+                            incomingRegular.distinctBy { it.id }
                         } else {
                             (curSlice.rawTopics + incomingRegular).distinctBy { it.id }
                         }

@@ -1216,6 +1216,62 @@ class AwayDigestFeatureTest {
         assertEquals("2026-11-23 16:20:00", parsed.topics.single().activityDate)
     }
 
+    @Test
+    fun `failed away digest scan resets loadedSessionId so non-force refresh can retry`() = runTest {
+        val baseTime = Instant.parse("2026-11-22T09:00:00Z").toEpochMilli()
+        var now = baseTime
+        val store = InMemoryAwayDigestStore()
+        store.setLastActiveTimestampMillis(baseTime)
+        now += 4L * 3_600_000L
+
+        var shouldFail = true
+        val topicInWindow = buildTopic(
+            id = 505L,
+            title = "网络恢复后应可见的热帖",
+            slug = "tech",
+            replies = 20,
+            views = 600,
+            iso = Instant.ofEpochMilli(baseTime + 2L * 3_600_000L).toString(),
+            drumsticks = 5,
+        )
+        val baseForum = FakeDigestForumRepository(pagesByNumber = mapOf(1 to listOf(topicInWindow)))
+        val flakyForum = object : ForumRepository by baseForum {
+            override suspend fun getFeed(
+                categorySlug: String,
+                sort: FeedSort,
+                page: Int,
+                includeBlocked: Boolean,
+                forceRefresh: Boolean,
+            ): Result<FeedPageResult> {
+                if (shouldFail) {
+                    return Result.failure(IOException("transient network failure"))
+                }
+                return baseForum.getFeed(categorySlug, sort, page, includeBlocked, forceRefresh)
+            }
+        }
+
+        val repo = AwayDigestRepositoryImpl(
+            store = store,
+            forumRepository = flakyForum,
+            bookmarkAndHistoryRepository = FakeDigestHistoryRepository(),
+            sessionRepository = FakeDigestSessionRepository(),
+            settingsRepository = FakeSettingsRepository(),
+            contentFilterRepository = FakeDigestFilterRepository(),
+            scope = backgroundScope,
+            clockMillis = { now },
+        )
+
+        repo.onAppForegrounded(now)
+        val failedState = repo.state.first { !it.isLoading && it.errorMessage != null }
+        assertTrue(failedState.items.isEmpty())
+
+        // Network recovers: non-force refreshCurrentSessionDigest(forceReload = false) MUST retry!
+        shouldFail = false
+        repo.refreshCurrentSessionDigest(forceReload = false)
+        val recoveredState = repo.state.first { !it.isLoading && it.items.isNotEmpty() }
+        assertEquals(listOf(505L), recoveredState.items.map { it.topic.id })
+    }
+
     private fun buildTopic(
         id: Long,
         title: String,

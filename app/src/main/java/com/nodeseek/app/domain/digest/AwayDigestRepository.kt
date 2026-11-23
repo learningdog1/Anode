@@ -195,8 +195,11 @@ class AwayDigestRepositoryImpl(
             }
         }
 
+        var lastHandledSettings = settingsRepository.settings.value
         scope.launch {
             settingsRepository.settings.collect { settings ->
+                if (settings == lastHandledSettings) return@collect
+                lastHandledSettings = settings
                 onSettingsChanged(settings)
             }
         }
@@ -712,6 +715,13 @@ class AwayDigestRepositoryImpl(
             val candidatesList = collectedById.values
                 .filter { minAllowedTopicId == null || it.id >= minAllowedTopicId }
             if (candidatesList.isEmpty()) {
+                if (lastError != null || sessionRepository.challengeRequired.value) {
+                    synchronized(lifecycleLock) {
+                        if (loadedSessionId == session.sessionId) {
+                            loadedSessionId = null
+                        }
+                    }
+                }
                 _rawState.update { state ->
                     if (state.activeSession?.sessionId != session.sessionId) {
                         state
@@ -781,6 +791,9 @@ class AwayDigestRepositoryImpl(
                     shortlist.map { candidate ->
                         async {
                             semaphore.withPermit {
+                                if (sessionRepository.challengeRequired.value) {
+                                    return@withPermit null
+                                }
                                 withTimeoutOrNull(DETAIL_ENRICH_TIMEOUT_MILLIS) {
                                     forumRepository.getTopicDetail(
                                         topicId = candidate.id,
@@ -837,6 +850,11 @@ class AwayDigestRepositoryImpl(
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
+            synchronized(lifecycleLock) {
+                if (loadedSessionId == session.sessionId) {
+                    loadedSessionId = null
+                }
+            }
             _rawState.update { state ->
                 if (state.activeSession?.sessionId != session.sessionId) {
                     state
@@ -853,8 +871,8 @@ class AwayDigestRepositoryImpl(
     companion object {
         const val DEFAULT_MAX_PAGES_TO_SCAN = 6
         const val DEFAULT_MAX_DIGEST_ITEMS = 10
-        const val DEFAULT_MAX_DETAIL_ENRICH_CANDIDATES = 20
-        const val DEFAULT_DETAIL_CONCURRENCY = 4
+        const val DEFAULT_MAX_DETAIL_ENRICH_CANDIDATES = 12
+        const val DEFAULT_DETAIL_CONCURRENCY = 3
         private const val DETAIL_ENRICH_TIMEOUT_MILLIS = 4_500L
         private const val DETAIL_META_TTL_MILLIS = 10L * 60_000L
         internal const val STALE_ACTIVE_SESSION_TTL_MILLIS = 3L * 3_600_000L

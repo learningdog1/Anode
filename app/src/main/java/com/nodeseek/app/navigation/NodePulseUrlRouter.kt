@@ -16,15 +16,11 @@ fun openNodeSeekOrExternalUrl(
     onOpenTopic: ((topicId: Long, initialFloor: Int, titleHint: String) -> Unit)? = null,
     onOpenUser: ((uid: Long, usernameHint: String) -> Unit)? = null,
     onOpenCategory: ((slug: String) -> Unit)? = null,
+    onOpenCurated: (() -> Unit)? = null,
     onOpenCheckIn: (() -> Unit)? = null,
     onOpenInbox: (() -> Unit)? = null,
 ) {
-    val unwrapped = unwrapNodeSeekJumpUrl(rawUrl)
-    val normalizedUrl = if (unwrapped.startsWith("/")) {
-        "https://www.nodeseek.com$unwrapped"
-    } else {
-        unwrapped
-    }
+    val normalizedUrl = normalizeNodeSeekUrl(rawUrl)
     when (val parsed = DeepLinkParser.parseUrl(normalizedUrl)) {
         is NodePulseDeepLink.TopicDetail -> {
             if (currentTopicId != null &&
@@ -35,39 +31,80 @@ fun openNodeSeekOrExternalUrl(
             } else if (onOpenTopic != null) {
                 onOpenTopic(parsed.topicId, parsed.initialFloor, "")
             } else {
-                runCatching { uriHandler.openUri(normalizedUrl) }
+                openSafeExternalUri(uriHandler, normalizedUrl)
             }
         }
         is NodePulseDeepLink.UserSpace -> {
             if (onOpenUser != null) {
                 onOpenUser(parsed.uid, "")
             } else {
-                runCatching { uriHandler.openUri(normalizedUrl) }
+                openSafeExternalUri(uriHandler, normalizedUrl)
             }
         }
         is NodePulseDeepLink.CategoryBoard -> {
             if (onOpenCategory != null) {
                 onOpenCategory(parsed.slug)
             } else {
-                runCatching { uriHandler.openUri(normalizedUrl) }
+                openSafeExternalUri(uriHandler, normalizedUrl)
+            }
+        }
+        NodePulseDeepLink.CuratedFeed -> {
+            if (onOpenCurated != null) {
+                onOpenCurated()
+            } else if (onOpenCategory != null) {
+                onOpenCategory("")
+            } else {
+                openSafeExternalUri(uriHandler, normalizedUrl)
             }
         }
         NodePulseDeepLink.CheckInBoard -> {
             if (onOpenCheckIn != null) {
                 onOpenCheckIn()
             } else {
-                runCatching { uriHandler.openUri(normalizedUrl) }
+                openSafeExternalUri(uriHandler, normalizedUrl)
             }
         }
         NodePulseDeepLink.Inbox -> {
             if (onOpenInbox != null) {
                 onOpenInbox()
             } else {
-                runCatching { uriHandler.openUri(normalizedUrl) }
+                openSafeExternalUri(uriHandler, normalizedUrl)
             }
         }
         null -> {
-            runCatching { uriHandler.openUri(normalizedUrl) }
+            openSafeExternalUri(uriHandler, normalizedUrl)
         }
+    }
+}
+
+internal fun normalizeNodeSeekUrl(rawUrl: String): String {
+    val unwrapped = unwrapNodeSeekJumpUrl(rawUrl).trim()
+    return when {
+        unwrapped.startsWith("//") -> "https:$unwrapped"
+        unwrapped.startsWith("/") -> "https://www.nodeseek.com$unwrapped"
+        else -> unwrapped
+    }
+}
+
+internal fun isSafeExternalHttpUrl(url: String): Boolean {
+    val trimmed = url.trim()
+    if (trimmed.isEmpty() || trimmed.any { it.isISOControl() }) return false
+    val schemeEnd = trimmed.indexOf("://")
+    if (schemeEnd <= 0) return false
+    val scheme = trimmed.substring(0, schemeEnd).lowercase()
+    if (scheme != "http" && scheme != "https") return false
+    val remainder = trimmed.substring(schemeEnd + 3)
+    val authorityEnd = remainder.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        .let { if (it < 0) remainder.length else it }
+    val authority = remainder.substring(0, authorityEnd)
+    return authority.isNotBlank() && !authority.any { it.isWhitespace() || it.isISOControl() }
+}
+
+private fun openSafeExternalUri(
+    uriHandler: UriHandler,
+    url: String,
+) {
+    if (isSafeExternalHttpUrl(url)) {
+        runCatching { uriHandler.openUri(url) }
     }
 }

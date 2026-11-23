@@ -2,12 +2,12 @@
 
 package com.nodeseek.app.ui.topic
 
-import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.nodeseek.app.ui.composer.ImagePayloadReadResult
+import com.nodeseek.app.ui.composer.readPickedImagePayloadBounded
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
@@ -187,137 +187,6 @@ internal fun insertOrWrapMarkdown(
     )
 }
 
-private class ResolvedImagePayload(
-    val bytes: ByteArray,
-    val mimeType: String,
-    val displayName: String?,
-)
-
-private fun readImagePayloadFromUri(
-    context: Context,
-    uri: Uri,
-): Result<ResolvedImagePayload> = runCatching {
-    val resolver = context.contentResolver
-    val displayName = runCatching {
-        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) cursor.getString(idx) else null
-                } else {
-                    null
-                }
-            }
-    }.getOrNull()
-
-    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: throw IllegalStateException("无法打开所选图片输入流，请重新选择或从文件管理器选取")
-    if (bytes.isEmpty()) {
-        throw IllegalStateException("所选图片文件为空，请重新选择有效图片")
-    }
-
-    val resolvedMime = detectImageMimeType(
-        bytes = bytes,
-        resolverMime = runCatching { resolver.getType(uri) }.getOrNull(),
-        displayName = displayName,
-    )
-    ResolvedImagePayload(
-        bytes = bytes,
-        mimeType = resolvedMime,
-        displayName = displayName,
-    )
-}
-
-private fun detectImageMimeType(
-    bytes: ByteArray,
-    resolverMime: String?,
-    displayName: String?,
-): String {
-    if (bytes.size >= 8 &&
-        bytes[0] == 0x89.toByte() &&
-        bytes[1] == 0x50.toByte() &&
-        bytes[2] == 0x4E.toByte() &&
-        bytes[3] == 0x47.toByte() &&
-        bytes[4] == 0x0D.toByte() &&
-        bytes[5] == 0x0A.toByte() &&
-        bytes[6] == 0x1A.toByte() &&
-        bytes[7] == 0x0A.toByte()
-    ) {
-        return "image/png"
-    }
-    if (bytes.size >= 3 &&
-        bytes[0] == 0xFF.toByte() &&
-        bytes[1] == 0xD8.toByte() &&
-        bytes[2] == 0xFF.toByte()
-    ) {
-        return "image/jpeg"
-    }
-    if (bytes.size >= 6) {
-        val header6 = bytes.copyOfRange(0, 6).toString(Charsets.US_ASCII)
-        if (header6 == "GIF87a" || header6 == "GIF89a") {
-            return "image/gif"
-        }
-    }
-    if (bytes.size >= 12) {
-        val riff = bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII)
-        val webp = bytes.copyOfRange(8, 12).toString(Charsets.US_ASCII)
-        if (riff == "RIFF" && webp == "WEBP") {
-            return "image/webp"
-        }
-        val boxType = bytes.copyOfRange(4, 8).toString(Charsets.US_ASCII)
-        if (boxType == "ftyp") {
-            val brands = bytes.copyOfRange(8, minOf(bytes.size, 64))
-                .toString(Charsets.US_ASCII)
-                .lowercase()
-            when {
-                brands.contains("avif") || brands.contains("avis") -> return "image/avif"
-                brands.contains("heic") || brands.contains("heix") ||
-                    brands.contains("hevc") || brands.contains("hevx") -> return "image/heic"
-                brands.contains("mif1") || brands.contains("msf1") ||
-                    brands.contains("heif") -> return "image/heif"
-            }
-        }
-    }
-    if (bytes.size >= 2 && bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) {
-        return "image/bmp"
-    }
-    val textHead = bytes.copyOfRange(0, minOf(bytes.size, 512))
-        .toString(Charsets.UTF_8)
-        .trimStart()
-        .lowercase()
-    if (textHead.startsWith("<svg") || (textHead.startsWith("<?xml") && textHead.contains("<svg"))) {
-        return "image/svg+xml"
-    }
-
-    normalizeImageMimeType(resolverMime)?.let { return it }
-
-    val ext = displayName?.substringAfterLast('.', "")?.lowercase().orEmpty()
-    return when (ext) {
-        "jpg", "jpeg", "jpe" -> "image/jpeg"
-        "png" -> "image/png"
-        "webp" -> "image/webp"
-        "gif" -> "image/gif"
-        "heic" -> "image/heic"
-        "heif" -> "image/heif"
-        "avif" -> "image/avif"
-        "bmp" -> "image/bmp"
-        "svg" -> "image/svg+xml"
-        else -> "image/jpeg"
-    }
-}
-
-private fun normalizeImageMimeType(rawMime: String?): String? {
-    val clean = rawMime?.substringBefore(';')?.trim()?.lowercase() ?: return null
-    if (!clean.startsWith("image/") || clean == "image/*") return null
-    return when (clean) {
-        "image/jpg", "image/pjpeg" -> "image/jpeg"
-        "image/x-png" -> "image/png"
-        "image/x-webp" -> "image/webp"
-        "image/x-ms-bmp", "image/x-bmp" -> "image/bmp"
-        else -> clean
-    }
-}
-
 /**
  * Full Markdown Reply & Edit-Reply Modal Bottom Sheet with:
  * - Segmented `编辑 / 预览` switcher
@@ -343,6 +212,7 @@ internal fun ReplyComposerBottomSheet(
     onPhotoReadError: (String) -> Unit = {},
     onOpenFullNetBench: ((String) -> Unit)? = null,
     onOpenFullLiteSsh: (() -> Unit)? = null,
+    onPublishSshToComposer: ((suggestedTitle: String, markdownContent: String) -> Unit)? = null,
 ) {
     val appContainer = LocalAppContainer.current
     val ext = NodePulseThemeTokens.extendedColors
@@ -374,21 +244,6 @@ internal fun ReplyComposerBottomSheet(
         latestOnDraftChanged(updated.text)
     }
 
-    LaunchedEffect(state.draftMarkdown) {
-        if (textFieldValue.text != state.draftMarkdown) {
-            val clampedStart = textFieldValue.selection.start.coerceIn(0, state.draftMarkdown.length)
-            val clampedEnd = textFieldValue.selection.end.coerceIn(0, state.draftMarkdown.length)
-            textFieldValue = TextFieldValue(
-                text = state.draftMarkdown,
-                selection = if (textFieldValue.text.isEmpty()) {
-                    TextRange(state.draftMarkdown.length)
-                } else {
-                    TextRange(clampedStart, clampedEnd)
-                },
-            )
-        }
-    }
-
     LaunchedEffect(insertedUploadSnippets, state.composerRevision) {
         insertedUploadSnippets.collect { snippet ->
             val updated = insertOrWrapMarkdown(textFieldValue, prefix = snippet)
@@ -401,19 +256,19 @@ internal fun ReplyComposerBottomSheet(
         if (uri != null) {
             coroutineScope.launch {
                 val readResult = withContext(Dispatchers.IO) {
-                    readImagePayloadFromUri(context, uri)
+                    readPickedImagePayloadBounded(context = context, uri = uri)
                 }
-                readResult.fold(
-                    onSuccess = { payload ->
-                        latestOnPhotoBytesPicked(payload.bytes, payload.mimeType, payload.displayName)
-                    },
-                    onFailure = { error ->
-                        latestOnPhotoReadError(
-                            error.message?.takeIf { it.isNotBlank() }
-                                ?: "读取所选图片失败，请尝试其他格式或从系统文件选择器打开",
-                        )
-                    },
-                )
+                when (readResult) {
+                    is ImagePayloadReadResult.Success -> {
+                        latestOnPhotoBytesPicked(readResult.bytes, readResult.mimeType, readResult.fileName)
+                    }
+                    is ImagePayloadReadResult.TooLarge -> {
+                        latestOnPhotoReadError(readResult.message)
+                    }
+                    is ImagePayloadReadResult.ReadError -> {
+                        latestOnPhotoReadError(readResult.message)
+                    }
+                }
             }
         }
     }
@@ -826,6 +681,13 @@ internal fun ReplyComposerBottomSheet(
             onInsertMarkdown = { markdown ->
                 showSshSheet = false
                 applyTransform { insertMarkdownBlockAtCursor(it, markdown) }
+            },
+            onPublishToComposer = onPublishSshToComposer?.let { publishToComposer ->
+                { suggestedTitle, markdown ->
+                    showSshSheet = false
+                    onDismiss()
+                    publishToComposer(suggestedTitle, markdown)
+                }
             },
             onOpenFullLiteSsh = onOpenFullLiteSsh?.let { openFull ->
                 {

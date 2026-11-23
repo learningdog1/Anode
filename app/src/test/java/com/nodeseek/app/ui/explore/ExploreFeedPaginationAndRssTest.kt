@@ -350,6 +350,42 @@ class ExploreFeedPaginationAndRssTest {
 
         collectJob.cancel()
     }
+
+    @Test
+    fun `challengeRequired flow change reactively updates uiState and duplicate topic IDs are deduplicated on reset`() = runTest {
+        val fakeSession = MutableFakeSessionRepository()
+        val fakeForum = RecordingForumRepository { _, _, _, _ ->
+            Result.success(
+                FeedPageResult(
+                    pinnedTopics = listOf(topic(1L, "", "置顶 A"), topic(1L, "", "置顶重复")),
+                    topics = listOf(topic(1L, "", "与置顶重复"), topic(2L, "", "正常帖"), topic(2L, "", "正常帖重复")),
+                    currentPage = 1,
+                    hasNextPage = false,
+                ),
+            )
+        }
+
+        val viewModel = ExploreViewModel(
+            forumRepository = fakeForum,
+            sessionRepository = fakeSession,
+            bookmarkAndHistoryRepository = StubBookmarkAndHistoryRepository(),
+            settingsRepository = FakeSettingsRepository(),
+            contentFilterRepository = StubContentFilterRepository(),
+        )
+        val collectJob = launch(testDispatcher) { viewModel.uiState.collect {} }
+
+        val loaded = viewModel.uiState.first { !it.isInitialLoading && it.topics.isNotEmpty() }
+        assertEquals(listOf(1L), loaded.pinnedTopics.map { it.id })
+        assertEquals(listOf(2L), loaded.topics.map { it.id })
+        assertFalse(loaded.isChallengeOrAuthRequired)
+
+        // Flip challengeRequired reactively without touching streamState
+        fakeSession.challengeRequired.value = true
+        val challenged = viewModel.uiState.first { it.isChallengeOrAuthRequired }
+        assertTrue(challenged.isChallengeOrAuthRequired)
+
+        collectJob.cancel()
+    }
 }
 
 private class RecordingForumRepository(

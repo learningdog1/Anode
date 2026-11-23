@@ -163,6 +163,7 @@ fun AwayDigestHeroCard(
                 ) {
                     Text(
                         text = digestState.headlineText,
+                        modifier = Modifier.weight(1f, fill = false),
                         style = MaterialTheme.typography.titleMedium.withTabularNumbers(),
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface,

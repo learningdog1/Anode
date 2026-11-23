@@ -10,7 +10,10 @@ import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.TopicAccessException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,6 +94,7 @@ data class TopicComposerUiState(
     val hasRestoredDraft: Boolean = false,
     val canResetToOriginalFloor: Boolean = false,
     val isSubmitting: Boolean = false,
+    val hasPublished: Boolean = false,
     val isUploadingImage: Boolean = false,
     val showBoardSheet: Boolean = false,
     val showPermissionSheet: Boolean = false,
@@ -110,6 +114,7 @@ data class TopicComposerUiState(
     val canSubmit: Boolean
         get() = !isLoadingInitialTopic &&
             !isSubmitting &&
+            !hasPublished &&
             title.trim().isNotEmpty() &&
             markdownContent.trim().isNotEmpty()
 }
@@ -128,6 +133,7 @@ private data class InternalComposerState(
     val activeTab: ComposerModeTab = ComposerModeTab.WRITE,
     val hasRestoredDraft: Boolean = false,
     val isSubmitting: Boolean = false,
+    val hasPublished: Boolean = false,
     val isUploadingImage: Boolean = false,
     val showBoardSheet: Boolean = false,
     val showPermissionSheet: Boolean = false,
@@ -148,6 +154,7 @@ class TopicComposerViewModel(
     private val initialCategorySlug: String = "daily",
     private val initialTitle: String = "",
     private val initialMarkdown: String = "",
+    private val prefillKey: String = "",
 ) : ViewModel() {
 
     private val sanitizedInitialCategory = initialCategorySlug
@@ -155,6 +162,8 @@ class TopicComposerViewModel(
         .lowercase()
         .takeIf { it.isNotEmpty() }
         ?: "daily"
+
+    private val sanitizedPrefillKey = prefillKey.trim()
 
     private val hasExplicitPrefill = editTopicId == null &&
         (initialTitle.isNotBlank() || initialMarkdown.isNotBlank())
@@ -172,6 +181,8 @@ class TopicComposerViewModel(
     val events = _events.receiveAsFlow()
 
     private var draftSaveJob: Job? = null
+    @Volatile
+    private var hasPendingDraftFlush: Boolean = false
     private var pendingImage: PendingComposerImage? = null
 
     val uiState: StateFlow<TopicComposerUiState> = combine(
@@ -217,6 +228,7 @@ class TopicComposerViewModel(
             hasRestoredDraft = state.hasRestoredDraft,
             canResetToOriginalFloor = canResetOriginal,
             isSubmitting = state.isSubmitting,
+            hasPublished = state.hasPublished,
             isUploadingImage = state.isUploadingImage,
             showBoardSheet = state.showBoardSheet,
             showPermissionSheet = state.showPermissionSheet,
@@ -242,21 +254,31 @@ class TopicComposerViewModel(
         }
         if (editTopicId != null) {
             loadTopicForEditing(editTopicId)
-        } else if (!hasExplicitPrefill) {
+        } else if (hasExplicitPrefill) {
+            viewModelScope.launch {
+                persistCurrentDraft(internalState.value)
+            }
+        } else if (sanitizedPrefillKey.isNotBlank()) {
+            restoreDraftForKey(draftKey())
+        } else {
             restoreNewTopicDraft()
         }
     }
 
-    private fun draftKey(): String = if (editTopicId != null) {
-        EditorDraft.editTopicKey(editTopicId)
-    } else {
-        EditorDraft.NEW_TOPIC_KEY
+    private fun draftKey(): String = when {
+        editTopicId != null -> EditorDraft.editTopicKey(editTopicId)
+        sanitizedPrefillKey.isNotBlank() -> "composer_prefill_$sanitizedPrefillKey"
+        else -> EditorDraft.NEW_TOPIC_KEY
     }
 
     private fun restoreNewTopicDraft() {
+        restoreDraftForKey(EditorDraft.NEW_TOPIC_KEY)
+    }
+
+    private fun restoreDraftForKey(key: String) {
         viewModelScope.launch {
             val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
-            val draft = container.draftRepository.getDraft(uid, EditorDraft.NEW_TOPIC_KEY) ?: return@launch
+            val draft = container.draftRepository.getDraft(uid, key) ?: return@launch
             if (draft.title.isBlank() && draft.markdownContent.isBlank()) return@launch
 
             val useDraftBoard = initialCategorySlug.isBlank() || initialCategorySlug == "daily"
@@ -416,6 +438,7 @@ class TopicComposerViewModel(
 
     fun clearDraftOrReset() {
         draftSaveJob?.cancel()
+        hasPendingDraftFlush = false
         viewModelScope.launch {
             val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
             runCatching { container.draftRepository.deleteDraft(uid, draftKey()) }
@@ -446,38 +469,60 @@ class TopicComposerViewModel(
         }
     }
 
+    fun flushDraftNow() {
+        val state = internalState.value
+        if (state.isLoadingInitialTopic || state.hasPublished || !hasPendingDraftFlush) return
+        draftSaveJob?.cancel()
+        hasPendingDraftFlush = false
+        nonCancellableDraftScope.launch {
+            runCatching { persistCurrentDraft(state) }
+        }
+    }
+
+    override fun onCleared() {
+        flushDraftNow()
+        super.onCleared()
+    }
+
     private fun scheduleAutoSaveDraft() {
-        if (internalState.value.isLoadingInitialTopic) return
+        if (internalState.value.isLoadingInitialTopic || internalState.value.hasPublished) return
+        hasPendingDraftFlush = true
         draftSaveJob?.cancel()
         draftSaveJob = viewModelScope.launch {
             delay(450)
             val state = internalState.value
-            val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
-            val key = draftKey()
-
-            if (state.title.isBlank() && state.markdownContent.isBlank()) {
-                container.draftRepository.deleteDraft(uid, key)
-                return@launch
-            }
-            if (editTopicId != null &&
-                state.title == state.originalTitle &&
-                state.markdownContent == state.originalMarkdown
-            ) {
-                container.draftRepository.deleteDraft(uid, key)
-                return@launch
-            }
-
-            container.draftRepository.saveDraft(
-                EditorDraft(
-                    draftKey = key,
-                    accountUid = uid,
-                    title = state.title,
-                    markdownContent = state.markdownContent,
-                    categorySlug = state.selectedCategorySlug,
-                    updatedAtMillis = System.currentTimeMillis(),
-                )
-            )
+            if (state.hasPublished) return@launch
+            hasPendingDraftFlush = false
+            persistCurrentDraft(state)
         }
+    }
+
+    private suspend fun persistCurrentDraft(state: InternalComposerState) {
+        val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
+        val key = draftKey()
+
+        if (state.title.isBlank() && state.markdownContent.isBlank()) {
+            container.draftRepository.deleteDraft(uid, key)
+            return
+        }
+        if (editTopicId != null &&
+            state.title == state.originalTitle &&
+            state.markdownContent == state.originalMarkdown
+        ) {
+            container.draftRepository.deleteDraft(uid, key)
+            return
+        }
+
+        container.draftRepository.saveDraft(
+            EditorDraft(
+                draftKey = key,
+                accountUid = uid,
+                title = state.title,
+                markdownContent = state.markdownContent,
+                categorySlug = state.selectedCategorySlug,
+                updatedAtMillis = System.currentTimeMillis(),
+            )
+        )
     }
 
     // ── Publish & Edit Submission (with Coin Confirmations) ───────────────────
@@ -491,6 +536,7 @@ class TopicComposerViewModel(
         }
 
         val state = uiState.value
+        if (state.isSubmitting || state.hasPublished) return
         if (state.title.trim().isEmpty()) {
             _events.trySend(TopicComposerUiEvent.ShowMessage("请输入帖子标题"))
             return
@@ -499,7 +545,6 @@ class TopicComposerViewModel(
             _events.trySend(TopicComposerUiEvent.ShowMessage("请输入帖子正文内容"))
             return
         }
-        if (state.isSubmitting) return
 
         // Check coin fees before executing network write:
         // 1. Editing an existing non-private topic into Private (`requiredViewLevel = 255`) costs 10 coins.
@@ -532,11 +577,13 @@ class TopicComposerViewModel(
 
     private fun executePublishOrEdit() {
         val state = uiState.value
+        if (state.isSubmitting || state.hasPublished) return
         val trimmedTitle = state.title.trim()
         val trimmedMarkdown = state.markdownContent.trim()
 
         viewModelScope.launch {
             draftSaveJob?.cancel()
+            hasPendingDraftFlush = false
             internalState.update { it.copy(isSubmitting = true) }
 
             val result = if (editTopicId != null) {
@@ -561,7 +608,13 @@ class TopicComposerViewModel(
                     val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
                     runCatching { container.draftRepository.deleteDraft(uid, draftKey()) }
 
-                    internalState.update { it.copy(isSubmitting = false, hasRestoredDraft = false) }
+                    internalState.update {
+                        it.copy(
+                            isSubmitting = false,
+                            hasPublished = true,
+                            hasRestoredDraft = false,
+                        )
+                    }
                     _events.trySend(
                         TopicComposerUiEvent.ShowMessage(
                             if (editTopicId != null) "主题修改已保存" else "新主题已成功发布"
@@ -686,12 +739,15 @@ class TopicComposerViewModel(
     }
 
     companion object {
+        private val nonCancellableDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
         fun factory(
             container: AppContainer,
             editTopicId: Long? = null,
             initialCategorySlug: String = "daily",
             initialTitle: String = "",
             initialMarkdown: String = "",
+            prefillKey: String = "",
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -701,6 +757,7 @@ class TopicComposerViewModel(
                     initialCategorySlug = initialCategorySlug,
                     initialTitle = initialTitle,
                     initialMarkdown = initialMarkdown,
+                    prefillKey = prefillKey,
                 ) as T
             }
         }
