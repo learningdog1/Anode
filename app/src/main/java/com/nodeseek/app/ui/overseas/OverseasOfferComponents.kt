@@ -150,8 +150,15 @@ fun OverseasOfferFeedContent(
 
                     if (uiState.searchQuery.isBlank() && uiState.syncStatus.hasMore) {
                         item(key = "overseas_load_more_footer", contentType = "load_more") {
-                            LaunchedEffect(uiState.offerCards.size, uiState.syncStatus.currentPage) {
-                                onLoadNextPage()
+                            val loadMoreError = uiState.syncStatus.errorMessage?.takeIf { it.isNotBlank() }
+                            LaunchedEffect(
+                                uiState.offerCards.size,
+                                uiState.syncStatus.currentPage,
+                                loadMoreError,
+                            ) {
+                                if (!uiState.syncStatus.isLoadingMore && loadMoreError == null) {
+                                    onLoadNextPage()
+                                }
                             }
                             Box(
                                 modifier = Modifier
@@ -159,10 +166,28 @@ fun OverseasOfferFeedContent(
                                     .padding(vertical = 12.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(22.dp),
-                                    strokeWidth = 2.2.dp,
-                                )
+                                if (!uiState.syncStatus.isLoadingMore && loadMoreError != null) {
+                                    FilledTonalButton(
+                                        onClick = onLoadNextPage,
+                                        shape = CircleShape,
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Refresh,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "加载更多失败，点击重试",
+                                            style = MaterialTheme.typography.labelLarge,
+                                        )
+                                    }
+                                } else {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(22.dp),
+                                        strokeWidth = 2.2.dp,
+                                    )
+                                }
                             }
                         }
                     }

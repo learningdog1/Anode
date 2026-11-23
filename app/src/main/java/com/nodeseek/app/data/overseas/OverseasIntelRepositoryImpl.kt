@@ -241,8 +241,9 @@ class OverseasIntelRepositoryImpl(
         val trimmed = query.trim()
         val lastSynced = _snapshot.value.syncStatus.lastSyncedEpochMillis
         val now = nowMillisProvider()
+        val hasRawOffers = ioMutex.withLock { rawOffers.isNotEmpty() }
         if (trimmed.isEmpty() &&
-            rawOffers.isNotEmpty() &&
+            hasRawOffers &&
             lastSynced > 0L &&
             (now - lastSynced) < maxAgeMillis.coerceAtLeast(0L)
         ) {
@@ -256,13 +257,15 @@ class OverseasIntelRepositoryImpl(
         val trimmedQuery = query.trim()
         val now = nowMillisProvider()
 
-        if (trimmedQuery.isEmpty() &&
-            minRefreshCooldownMillis > 0L &&
-            lastRefreshAttemptMillis > 0L &&
-            (now - lastRefreshAttemptMillis) < minRefreshCooldownMillis &&
-            rawOffers.isNotEmpty() &&
-            _snapshot.value.syncStatus.errorMessage == null
-        ) {
+        val canServeFromCooldown = ioMutex.withLock {
+            trimmedQuery.isEmpty() &&
+                minRefreshCooldownMillis > 0L &&
+                lastRefreshAttemptMillis > 0L &&
+                (now - lastRefreshAttemptMillis) < minRefreshCooldownMillis &&
+                rawOffers.isNotEmpty() &&
+                _snapshot.value.syncStatus.errorMessage == null
+        }
+        if (canServeFromCooldown) {
             return@withContext Result.success(_snapshot.value.offers)
         }
 
@@ -272,21 +275,25 @@ class OverseasIntelRepositoryImpl(
     }
 
     private suspend fun executeRefresh(trimmedQuery: String): Result<List<OverseasDealOffer>> {
+        val (ifNoneMatch, ifModifiedSince) = ioMutex.withLock {
+            if (trimmedQuery.isEmpty()) {
+                lastRefreshAttemptMillis = nowMillisProvider()
+                listEtag to listLastModified
+            } else {
+                null to null
+            }
+        }
+
         if (trimmedQuery.isEmpty()) {
-            lastRefreshAttemptMillis = nowMillisProvider()
+            _snapshot.update { current ->
+                current.copy(
+                    syncStatus = current.syncStatus.copy(
+                        isRefreshing = true,
+                        errorMessage = null,
+                    ),
+                )
+            }
         }
-
-        _snapshot.update { current ->
-            current.copy(
-                syncStatus = current.syncStatus.copy(
-                    isRefreshing = true,
-                    errorMessage = null,
-                ),
-            )
-        }
-
-        val ifNoneMatch = if (trimmedQuery.isEmpty()) listEtag else null
-        val ifModifiedSince = if (trimmedQuery.isEmpty()) listLastModified else null
 
         val condResult = try {
             apiClient.fetchOffersPageConditional(
@@ -298,96 +305,112 @@ class OverseasIntelRepositoryImpl(
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            val fallbackOffers = _snapshot.value.offers
-            val errMsg = t.message?.takeIf { it.isNotBlank() } ?: "网络连接异常，无法同步最新促销情报"
-            _snapshot.update { current ->
-                current.copy(
-                    syncStatus = current.syncStatus.copy(
-                        isRefreshing = false,
-                        errorMessage = if (fallbackOffers.isNotEmpty()) {
-                            "$errMsg（当前显示离线缓存）"
-                        } else {
-                            errMsg
-                        },
-                        loadedFromCache = fallbackOffers.isNotEmpty(),
-                    ),
-                )
+            if (trimmedQuery.isEmpty()) {
+                val fallbackOffers = _snapshot.value.offers
+                val errMsg = t.message?.takeIf { it.isNotBlank() } ?: "网络连接异常，无法同步最新促销情报"
+                _snapshot.update { current ->
+                    current.copy(
+                        syncStatus = current.syncStatus.copy(
+                            isRefreshing = false,
+                            errorMessage = if (fallbackOffers.isNotEmpty()) {
+                                "$errMsg（当前显示离线缓存）"
+                            } else {
+                                errMsg
+                            },
+                            loadedFromCache = fallbackOffers.isNotEmpty(),
+                        ),
+                    )
+                }
             }
             return Result.failure(t)
         }
 
         val syncedAt = nowMillisProvider()
-        if (condResult.notModified && trimmedQuery.isEmpty() && rawOffers.isNotEmpty()) {
-            val activeFilter = filterConfig
-            val filtered = OverseasOfferQualityFilter.filter(rawOffers, activeFilter)
-            val filteredOut = (rawOffers.size - filtered.size).coerceAtLeast(0)
-            listEtag = condResult.etag ?: listEtag
-            listLastModified = condResult.lastModified ?: listLastModified
-
-            val currentSync = _snapshot.value.syncStatus
-            _snapshot.update { current ->
-                current.copy(
-                    offers = filtered,
-                    syncStatus = current.syncStatus.copy(
-                        isRefreshing = false,
-                        isLoadingMore = false,
-                        lastSyncedEpochMillis = syncedAt,
-                        errorMessage = null,
-                        loadedFromCache = false,
-                    ),
-                    filterConfig = activeFilter,
-                    filteredOutCount = filteredOut,
-                )
+        if (condResult.notModified && trimmedQuery.isEmpty()) {
+            val notModifiedState = ioMutex.withLock {
+                if (rawOffers.isEmpty()) {
+                    null
+                } else {
+                    val activeFilter = filterConfig
+                    val currentRaw = rawOffers
+                    val filtered = OverseasOfferQualityFilter.filter(currentRaw, activeFilter)
+                    val filteredOut = (currentRaw.size - filtered.size).coerceAtLeast(0)
+                    listEtag = condResult.etag ?: listEtag
+                    listLastModified = condResult.lastModified ?: listLastModified
+                    val etagSnapshot = listEtag
+                    val lastModifiedSnapshot = listLastModified
+                    val currentSync = _snapshot.value.syncStatus
+                    _snapshot.update { current ->
+                        current.copy(
+                            offers = filtered,
+                            syncStatus = current.syncStatus.copy(
+                                isRefreshing = false,
+                                isLoadingMore = false,
+                                lastSyncedEpochMillis = syncedAt,
+                                errorMessage = null,
+                                loadedFromCache = false,
+                            ),
+                            filterConfig = activeFilter,
+                            filteredOutCount = filteredOut,
+                        )
+                    }
+                    persistListCacheLocked(
+                        offers = currentRaw,
+                        syncedAt = syncedAt,
+                        totalCount = currentSync.totalCount,
+                        hasMore = currentSync.hasMore,
+                        currentPage = currentSync.currentPage,
+                        etag = etagSnapshot,
+                        lastModified = lastModifiedSnapshot,
+                    )
+                    filtered
+                }
             }
-
-            persistListCache(
-                offers = rawOffers,
-                syncedAt = syncedAt,
-                totalCount = currentSync.totalCount,
-                hasMore = currentSync.hasMore,
-                currentPage = currentSync.currentPage,
-                etag = listEtag,
-                lastModified = listLastModified,
-            )
-            return Result.success(filtered)
+            if (notModifiedState != null) {
+                return Result.success(notModifiedState)
+            }
         }
 
         val pageResult = condResult.data
             ?: return Result.failure(IOException("Empty offers response from server"))
 
-        val activeFilter = filterConfig
-        rawOffers = pageResult.items
-        val filteredOffers = OverseasOfferQualityFilter.filter(rawOffers, activeFilter)
-        val filteredCount = (rawOffers.size - filteredOffers.size).coerceAtLeast(0)
-        if (trimmedQuery.isEmpty()) {
+        if (trimmedQuery.isNotEmpty()) {
+            val activeFilter = ioMutex.withLock { filterConfig }
+            val filteredSearchOffers = OverseasOfferQualityFilter.filter(pageResult.items, activeFilter)
+            return Result.success(filteredSearchOffers)
+        }
+
+        val filteredOffers = ioMutex.withLock {
+            val activeFilter = filterConfig
+            rawOffers = pageResult.items
+            val filtered = OverseasOfferQualityFilter.filter(rawOffers, activeFilter)
+            val filteredCount = (rawOffers.size - filtered.size).coerceAtLeast(0)
             listEtag = condResult.etag
             listLastModified = condResult.lastModified
             lastLoadMoreErrorKey = null
             lastLoadMoreError = null
-        }
 
-        val updatedStatus = OverseasSyncStatus(
-            isRefreshing = false,
-            isLoadingMore = false,
-            lastSyncedEpochMillis = syncedAt,
-            currentPage = pageResult.page,
-            totalCount = pageResult.total,
-            hasMore = pageResult.hasMore,
-            errorMessage = null,
-            loadedFromCache = false,
-        )
-
-        _snapshot.update { current ->
-            current.copy(
-                offers = filteredOffers,
-                syncStatus = updatedStatus,
-                filterConfig = activeFilter,
-                filteredOutCount = filteredCount,
+            val updatedStatus = OverseasSyncStatus(
+                isRefreshing = false,
+                isLoadingMore = false,
+                lastSyncedEpochMillis = syncedAt,
+                currentPage = pageResult.page,
+                totalCount = pageResult.total,
+                hasMore = pageResult.hasMore,
+                errorMessage = null,
+                loadedFromCache = false,
             )
-        }
 
-        if (trimmedQuery.isEmpty()) {
-            persistListCache(
+            _snapshot.update { current ->
+                current.copy(
+                    offers = filtered,
+                    syncStatus = updatedStatus,
+                    filterConfig = activeFilter,
+                    filteredOutCount = filteredCount,
+                )
+            }
+
+            persistListCacheLocked(
                 offers = rawOffers,
                 syncedAt = syncedAt,
                 totalCount = pageResult.total,
@@ -396,6 +419,7 @@ class OverseasIntelRepositoryImpl(
                 etag = listEtag,
                 lastModified = listLastModified,
             )
+            filtered
         }
 
         return Result.success(filteredOffers)
@@ -412,13 +436,18 @@ class OverseasIntelRepositoryImpl(
         val pageKey = "page:$nextPage:$trimmedQuery"
         val now = nowMillisProvider()
 
-        if (loadMoreErrorCooldownMillis > 0L &&
-            lastLoadMoreErrorKey == pageKey &&
-            (now - lastLoadMoreErrorAtMillis) < loadMoreErrorCooldownMillis
-        ) {
-            return@withContext Result.failure(
-                lastLoadMoreError ?: IOException("加载更多冷却中，请稍后重试"),
-            )
+        val throttledError = ioMutex.withLock {
+            if (loadMoreErrorCooldownMillis > 0L &&
+                lastLoadMoreErrorKey == pageKey &&
+                (now - lastLoadMoreErrorAtMillis) < loadMoreErrorCooldownMillis
+            ) {
+                lastLoadMoreError ?: IOException("加载更多冷却中，请稍后重试")
+            } else {
+                null
+            }
+        }
+        if (throttledError != null) {
+            return@withContext Result.failure(throttledError)
         }
 
         coalesceInFlight(pageKey) {
@@ -448,9 +477,11 @@ class OverseasIntelRepositoryImpl(
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            lastLoadMoreErrorKey = pageKey
-            lastLoadMoreErrorAtMillis = nowMillisProvider()
-            lastLoadMoreError = t
+            ioMutex.withLock {
+                lastLoadMoreErrorKey = pageKey
+                lastLoadMoreErrorAtMillis = nowMillisProvider()
+                lastLoadMoreError = t
+            }
             _snapshot.update {
                 it.copy(
                     syncStatus = it.syncStatus.copy(
@@ -462,39 +493,59 @@ class OverseasIntelRepositoryImpl(
             return Result.failure(t)
         }
 
-        lastLoadMoreErrorKey = null
-        lastLoadMoreError = null
-
-        val activeFilter = filterConfig
-        rawOffers = (rawOffers + pageResult.items).distinctBy { it.id }
-        val filteredMerged = OverseasOfferQualityFilter.filter(rawOffers, activeFilter)
-        val filteredCount = (rawOffers.size - filteredMerged.size).coerceAtLeast(0)
-
-        _snapshot.update { state ->
-            state.copy(
-                offers = filteredMerged,
-                syncStatus = state.syncStatus.copy(
-                    isLoadingMore = false,
-                    currentPage = pageResult.page,
-                    totalCount = pageResult.total.coerceAtLeast(filteredMerged.size),
-                    hasMore = pageResult.hasMore,
-                    errorMessage = null,
-                ),
-                filterConfig = activeFilter,
-                filteredOutCount = filteredCount,
-            )
+        if (trimmedQuery.isNotEmpty()) {
+            val activeFilter = ioMutex.withLock {
+                lastLoadMoreErrorKey = null
+                lastLoadMoreError = null
+                filterConfig
+            }
+            val mergedSearch = (_snapshot.value.offers + OverseasOfferQualityFilter.filter(pageResult.items, activeFilter))
+                .distinctBy { it.id }
+            _snapshot.update { state ->
+                state.copy(
+                    syncStatus = state.syncStatus.copy(
+                        isLoadingMore = false,
+                        errorMessage = null,
+                    ),
+                )
+            }
+            return Result.success(mergedSearch)
         }
 
-        if (trimmedQuery.isEmpty()) {
-            persistListCache(
+        val filteredMerged = ioMutex.withLock {
+            lastLoadMoreErrorKey = null
+            lastLoadMoreError = null
+
+            val activeFilter = filterConfig
+            rawOffers = (rawOffers + pageResult.items).distinctBy { it.id }
+            val merged = OverseasOfferQualityFilter.filter(rawOffers, activeFilter)
+            val filteredCount = (rawOffers.size - merged.size).coerceAtLeast(0)
+
+            _snapshot.update { state ->
+                state.copy(
+                    offers = merged,
+                    syncStatus = state.syncStatus.copy(
+                        isLoadingMore = false,
+                        currentPage = pageResult.page,
+                        totalCount = pageResult.total.coerceAtLeast(merged.size),
+                        hasMore = pageResult.hasMore,
+                        errorMessage = null,
+                    ),
+                    filterConfig = activeFilter,
+                    filteredOutCount = filteredCount,
+                )
+            }
+
+            persistListCacheLocked(
                 offers = rawOffers,
                 syncedAt = _snapshot.value.syncStatus.lastSyncedEpochMillis,
-                totalCount = pageResult.total.coerceAtLeast(filteredMerged.size),
+                totalCount = pageResult.total.coerceAtLeast(merged.size),
                 hasMore = pageResult.hasMore,
                 currentPage = pageResult.page,
                 etag = listEtag,
                 lastModified = listLastModified,
             )
+            merged
         }
 
         return Result.success(filteredMerged)
@@ -679,7 +730,7 @@ class OverseasIntelRepositoryImpl(
         return deferred.await()
     }
 
-    private suspend fun persistListCache(
+    private fun persistListCacheLocked(
         offers: List<OverseasDealOffer>,
         syncedAt: Long,
         totalCount: Int,
@@ -688,18 +739,16 @@ class OverseasIntelRepositoryImpl(
         etag: String?,
         lastModified: String?,
     ) {
-        ioMutex.withLock {
-            val payload = OverseasListDiskCachePayload(
-                lastSyncedEpochMillis = syncedAt,
-                totalCount = totalCount,
-                hasMore = hasMore,
-                currentPage = currentPage,
-                offers = offers.take(MAX_CACHED_OFFERS).map { it.toDto() },
-                etag = etag,
-                lastModified = lastModified,
-            )
-            writeJsonAtomically(listCacheFile, json.encodeToString(payload))
-        }
+        val payload = OverseasListDiskCachePayload(
+            lastSyncedEpochMillis = syncedAt,
+            totalCount = totalCount,
+            hasMore = hasMore,
+            currentPage = currentPage,
+            offers = offers.take(MAX_CACHED_OFFERS).map { it.toDto() },
+            etag = etag,
+            lastModified = lastModified,
+        )
+        writeJsonAtomically(listCacheFile, json.encodeToString(payload))
     }
 
     private fun readListCacheLocked(): OverseasListDiskCachePayload {

@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -24,14 +26,19 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,6 +63,7 @@ import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
+import com.nodeseek.app.domain.overseas.OverseasOfferFilterConfig
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
 import com.nodeseek.app.ui.components.PulseSnackbarHost
@@ -69,6 +77,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -109,6 +118,7 @@ fun OverseasIntelScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var fallbackSelectedOfferId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showFilterDialog by rememberSaveable { mutableStateOf(false) }
     var localFallbackPromoEnabled by rememberSaveable(promoNotificationsEnabled) {
         mutableStateOf(promoNotificationsEnabled)
     }
@@ -135,6 +145,13 @@ fun OverseasIntelScreen(
         }
     }
 
+    LaunchedEffect(viewModel) {
+        while (true) {
+            delay(60_000L)
+            viewModel.refreshRelativeTime()
+        }
+    }
+
     LaunchedEffect(viewModel, onShareDealToForum) {
         viewModel.repostDraftEvents.collect { draft ->
             onShareDealToForum?.invoke(draft.title, draft.markdownBody)
@@ -158,6 +175,18 @@ fun OverseasIntelScreen(
         return
     }
 
+    if (showFilterDialog) {
+        OverseasQualityFilterDialog(
+            currentConfig = uiState.filterConfig,
+            filteredOutCount = uiState.filteredOutCount,
+            onDismiss = { showFilterDialog = false },
+            onApply = { updated ->
+                viewModel.updateFilterConfig(updated)
+                showFilterDialog = false
+            },
+        )
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -166,8 +195,11 @@ fun OverseasIntelScreen(
         topBar = {
             OverseasIntelTopBar(
                 totalCount = uiState.syncStatus.totalCount,
+                filteredOutCount = uiState.filteredOutCount,
+                filterEnabled = uiState.filterConfig.enabled,
                 isRefreshing = uiState.syncStatus.isRefreshing,
                 onBack = onBack,
+                onOpenFilterConfig = { showFilterDialog = true },
                 onRefresh = viewModel::refresh,
             )
         },
@@ -246,6 +278,13 @@ fun EmbeddedOverseasOfferFeed(
             } else {
                 openOverseasExternalUrl(context, url)
             }
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        while (true) {
+            delay(60_000L)
+            viewModel.refreshRelativeTime()
         }
     }
 
@@ -432,8 +471,11 @@ private fun OverseasPromoControlCard(
 @Composable
 private fun OverseasIntelTopBar(
     totalCount: Int,
+    filteredOutCount: Int,
+    filterEnabled: Boolean,
     isRefreshing: Boolean,
     onBack: () -> Unit,
+    onOpenFilterConfig: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     Row(
@@ -461,10 +503,11 @@ private fun OverseasIntelTopBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            val subtitleText = if (totalCount > 0) {
-                "LowEndTalk 实时促销 · $totalCount 条"
-            } else {
-                "LowEndTalk 全量促销实时监控"
+            val subtitleText = when {
+                totalCount > 0 && filteredOutCount > 0 ->
+                    "LowEndTalk 实时促销 · $totalCount 条（已过滤 $filteredOutCount 条）"
+                totalCount > 0 -> "LowEndTalk 实时促销 · $totalCount 条"
+                else -> "LowEndTalk 全量促销实时监控"
             }
             Text(
                 text = subtitleText,
@@ -472,6 +515,18 @@ private fun OverseasIntelTopBar(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        IconButton(onClick = onOpenFilterConfig) {
+            Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = "质量过滤配置",
+                tint = if (filterEnabled) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
         }
 
@@ -489,6 +544,188 @@ private fun OverseasIntelTopBar(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun OverseasQualityFilterDialog(
+    currentConfig: OverseasOfferFilterConfig,
+    filteredOutCount: Int,
+    onDismiss: () -> Unit,
+    onApply: (OverseasOfferFilterConfig) -> Unit,
+) {
+    var enabled by remember(currentConfig) { mutableStateOf(currentConfig.enabled) }
+    var excludeBuzz by remember(currentConfig) { mutableStateOf(currentConfig.excludeGenericMarketingBuzz) }
+    var excludeNonServer by remember(currentConfig) { mutableStateOf(currentConfig.excludeNonServerServices) }
+    var requireSignal by remember(currentConfig) { mutableStateOf(currentConfig.requireMinimumHostingSignal) }
+    var blockedMerchantsText by remember(currentConfig) {
+        mutableStateOf(currentConfig.blockedMerchants.joinToString(", "))
+    }
+    var blockedKeywordsText by remember(currentConfig) {
+        mutableStateOf(currentConfig.extraBlockedKeywords.joinToString(", "))
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "海外情报质量过滤",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                )
+                Text(
+                    text = if (filteredOutCount > 0) {
+                        "当前已自动拦截 $filteredOutCount 条低质/非服务器帖"
+                    } else {
+                        "控制低质广告过滤规则与自定义屏蔽名单"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                FilterToggleRow(
+                    title = "启用质量过滤",
+                    subtitle = "关闭后将展示原始全量促销列表",
+                    checked = enabled,
+                    onCheckedChange = { enabled = it },
+                )
+                FilterToggleRow(
+                    title = "屏蔽通用营销口水帖",
+                    subtitle = "拦截无具体配置/价格的泛化推广帖",
+                    checked = excludeBuzz,
+                    enabled = enabled,
+                    onCheckedChange = { excludeBuzz = it },
+                )
+                FilterToggleRow(
+                    title = "屏蔽非服务器/非 VPS 服务",
+                    subtitle = "拦截支付网关、面板软件、纯代理广告等",
+                    checked = excludeNonServer,
+                    enabled = enabled,
+                    onCheckedChange = { excludeNonServer = it },
+                )
+                FilterToggleRow(
+                    title = "要求最低主机信号",
+                    subtitle = "至少包含配置、价格或常见 VPS 促销特征",
+                    checked = requireSignal,
+                    enabled = enabled,
+                    onCheckedChange = { requireSignal = it },
+                )
+
+                OutlinedTextField(
+                    value = blockedMerchantsText,
+                    onValueChange = { blockedMerchantsText = it },
+                    enabled = enabled,
+                    label = { Text("自定义屏蔽商家（逗号分隔）") },
+                    placeholder = { Text("例如：SpamHost, DemoCloud") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = blockedKeywordsText,
+                    onValueChange = { blockedKeywordsText = it },
+                    enabled = enabled,
+                    label = { Text("自定义屏蔽关键词（逗号分隔）") },
+                    placeholder = { Text("例如：trial, crypto") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val parsedMerchants = blockedMerchantsText
+                        .split(',', '，', '\n')
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                    val parsedKeywords = blockedKeywordsText
+                        .split(',', '，', '\n')
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                    onApply(
+                        OverseasOfferFilterConfig(
+                            enabled = enabled,
+                            excludeGenericMarketingBuzz = excludeBuzz,
+                            excludeNonServerServices = excludeNonServer,
+                            requireMinimumHostingSignal = requireSignal,
+                            blockedMerchants = parsedMerchants,
+                            extraBlockedKeywords = parsedKeywords,
+                        ),
+                    )
+                },
+            ) {
+                Text("保存规则")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(
+                    onClick = {
+                        val defaults = OverseasOfferFilterConfig()
+                        enabled = defaults.enabled
+                        excludeBuzz = defaults.excludeGenericMarketingBuzz
+                        excludeNonServer = defaults.excludeNonServerServices
+                        requireSignal = defaults.requireMinimumHostingSignal
+                        blockedMerchantsText = ""
+                        blockedKeywordsText = ""
+                    },
+                ) {
+                    Text("恢复默认")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("取消")
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun FilterToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                },
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                    alpha = if (enabled) 1f else 0.5f,
+                ),
+            )
+        }
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+        )
     }
 }
 

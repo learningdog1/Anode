@@ -218,7 +218,9 @@ class OverseasTranslator(
         val finalMarkdown = OverseasForumPostFormatter.cleanAndNormalizeMarkdown(
             renderedSegments.joinToString("\n"),
         )
-        writeCacheEntry(contentKey, finalMarkdown, dominantTier)
+        if (dominantTier == TranslationTier.GOOGLE_GTX) {
+            writeCacheEntry(contentKey, finalMarkdown, dominantTier)
+        }
         TranslationResult(finalMarkdown, dominantTier, fromCache = false)
     }
 
@@ -263,7 +265,9 @@ class OverseasTranslator(
             .trim()
             .ifBlank { offlineFallback().ifBlank { normalized } }
 
-        writeCacheEntry(contentKey, restored, rawTranslated.tier)
+        if (rawTranslated.tier == TranslationTier.GOOGLE_GTX) {
+            writeCacheEntry(contentKey, restored, rawTranslated.tier)
+        }
         TranslationResult(restored, rawTranslated.tier, fromCache = false)
     }
 
@@ -470,7 +474,7 @@ class OverseasTranslator(
             when (val span = spans[idx]) {
                 is MaskedSpan.Verbatim -> {
                     val tokenRegex = Regex("""(?i)KPH\s*${idx}\s*KPH""")
-                    current = tokenRegex.replace(current) { Regex.escapeReplacement(span.raw) }
+                    current = tokenRegex.replace(current) { span.raw }
                 }
                 is MaskedSpan.LinkUrl -> {
                     val bracketedRegex = Regex("""[\[【]\s*([^\]】\n]+?)\s*[\]】]\s*(?i:KPH\s*${idx}\s*KPH)""")
@@ -481,7 +485,7 @@ class OverseasTranslator(
                         }
                     } else {
                         Regex("""(?i)KPH\s*${idx}\s*KPH""").replace(current) {
-                            Regex.escapeReplacement("(${span.url})")
+                            "(${span.url})"
                         }
                     }
                 }
@@ -555,6 +559,22 @@ class OverseasTranslator(
     }
 
     private suspend fun translateViaGoogleGtx(text: String): String {
+        if (text.length <= MAX_GTX_QUERY_CHARS) {
+            return translateSingleGtxChunk(text)
+        }
+        val chunks = splitOversizedTextForGtx(text, MAX_GTX_QUERY_CHARS)
+        val translatedParts = ArrayList<String>(chunks.size)
+        for (chunk in chunks) {
+            if (chunk.isBlank()) {
+                translatedParts += chunk
+            } else {
+                translatedParts += translateSingleGtxChunk(chunk)
+            }
+        }
+        return translatedParts.joinToString(" ")
+    }
+
+    private suspend fun translateSingleGtxChunk(text: String): String {
         val base = gtxBaseUrl.toHttpUrlOrNull()
             ?: throw IOException("Invalid Google GTX URL")
         val url = base.newBuilder()
@@ -562,7 +582,7 @@ class OverseasTranslator(
             .setQueryParameter("sl", "auto")
             .setQueryParameter("tl", "zh-CN")
             .setQueryParameter("dt", "t")
-            .setQueryParameter("q", text.take(2800))
+            .setQueryParameter("q", text)
             .build()
 
         val request = Request.Builder()
@@ -574,6 +594,43 @@ class OverseasTranslator(
 
         val body = executeCall(request)
         return parseGoogleGtxResponse(body) ?: throw IOException("Google GTX 响应格式无效")
+    }
+
+    internal fun splitOversizedTextForGtx(text: String, maxChars: Int = MAX_GTX_QUERY_CHARS): List<String> {
+        if (text.length <= maxChars || maxChars <= 0) return listOf(text)
+        val chunks = ArrayList<String>()
+        var start = 0
+        while (start < text.length) {
+            val remaining = text.length - start
+            if (remaining <= maxChars) {
+                chunks += text.substring(start)
+                break
+            }
+            var splitAt = start + maxChars
+            // Prefer splitting on newline, sentence end, or whitespace in the second half of the window.
+            val minPreferred = start + (maxChars / 2)
+            val newlineIdx = text.lastIndexOf('\n', splitAt - 1)
+            val spaceIdx = text.lastIndexOf(' ', splitAt - 1)
+            splitAt = when {
+                newlineIdx >= minPreferred -> newlineIdx + 1
+                spaceIdx >= minPreferred -> spaceIdx + 1
+                else -> splitAt
+            }
+            // Avoid splitting inside a KPH<digits>KPH placeholder token.
+            val placeholderStart = text.lastIndexOf("KPH", (splitAt - 1).coerceAtLeast(start))
+            if (placeholderStart > start) {
+                val placeholderEnd = text.indexOf("KPH", placeholderStart + 3)
+                if (placeholderEnd != -1 && placeholderEnd + 3 > splitAt) {
+                    splitAt = placeholderStart
+                }
+            }
+            if (splitAt <= start) {
+                splitAt = (start + maxChars).coerceAtMost(text.length)
+            }
+            chunks += text.substring(start, splitAt)
+            start = splitAt
+        }
+        return chunks
     }
 
     private suspend fun executeCall(request: Request): String =
@@ -675,6 +732,7 @@ class OverseasTranslator(
         const val TRANSLATIONS_CACHE_FILE_NAME = "overseas_translations.json"
         private const val MAX_CACHE_ENTRIES = 600
         private const val MAX_CHUNK_CHARS = 1800
+        internal const val MAX_GTX_QUERY_CHARS = 2800
 
         private val HORIZONTAL_RULE_REGEX = Regex("""^(?:-{3,}|\*{3,}|_{3,})$""")
         private val STANDALONE_IMAGE_REGEX = Regex("""^!\[[^\]]*\]\([^\)\s]+\)$""")
