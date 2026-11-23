@@ -4,6 +4,7 @@ import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.FeePayer
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import java.math.BigDecimal
+import java.time.LocalDate
 import java.util.Locale
 
 /**
@@ -152,6 +153,7 @@ data class VpsAssetRecord(
     val panelManageUrl: String = "",
     val linkedProbeKey: String? = null,
     val monthlyTrafficQuotaGb: Double? = null,
+    val trafficResetDay: Int? = null,
     val remindDaysBeforeExpiry: Int = DEFAULT_REMIND_DAYS_BEFORE_EXPIRY,
     val autoRenewNote: String = "",
     val notes: String = "",
@@ -266,12 +268,106 @@ data class ParsedRestockAssetDraft(
 )
 
 /**
- * Persistent deduplication state for probe outage alerts and renewal reminders.
+ * Rolling daily CPU utilization bucket recorded per probe node (`probeKey` + `yyyy-MM-dd`).
+ */
+data class ProbeDailyCpuBucket(
+    val dateIso: String,
+    val avgCpuPercent: Double,
+    val sampleCount: Int,
+    val maxCpuPercent: Double = avgCpuPercent,
+    val lastSampleEpochMillis: Long = 0L,
+)
+
+/**
+ * Indicates where a server's monthly traffic reset day (`1..31`) was resolved from.
+ */
+enum class TrafficResetDaySource {
+    EXPLICIT_ASSET_CONFIG,
+    ASSET_EXPIRY_DAY_FALLBACK,
+    FIRST_OF_MONTH_DEFAULT,
+}
+
+/**
+ * Traffic cycle window, usage ratio, burn-rate calculation, and exhaustion forecast for a probe server.
+ */
+data class ServerTrafficForecast(
+    val probeKey: String,
+    val usedBytes: Long,
+    val limitBytes: Long?,
+    val usageRatio: Double?,
+    val anchorResetDay: Int,
+    val resetDaySource: TrafficResetDaySource,
+    val cycleStartDate: LocalDate,
+    val nextResetDate: LocalDate,
+    val elapsedMillis: Long,
+    val dailyBurnBytes: Long?,
+    val projectedCycleUsageRatio: Double?,
+    val isAtOrAboveAlertThreshold: Boolean,
+    val isExhausted: Boolean,
+    val willExhaustBeforeReset: Boolean,
+    val predictedExhaustionDate: LocalDate?,
+    val exhaustionForecastText: String?,
+)
+
+/**
+ * Configurable thresholds for 30-day idle server ("闲置") classification.
+ */
+data class FleetIdleThresholdConfig(
+    val maxAvgCpuPercent: Double = DEFAULT_IDLE_MAX_AVG_CPU_PERCENT,
+    val maxTrafficUsageRatio: Double = DEFAULT_IDLE_MAX_TRAFFIC_RATIO,
+    val maxUnlimitedMonthlyTransferBytes: Long = DEFAULT_IDLE_MAX_UNLIMITED_TRANSFER_BYTES,
+    val minRecordedDays: Int = DEFAULT_IDLE_MIN_RECORDED_DAYS,
+    val minTotalSamples: Int = DEFAULT_IDLE_MIN_TOTAL_SAMPLES,
+) {
+    companion object {
+        const val ROLLING_WINDOW_DAYS: Int = 30
+        const val DEFAULT_IDLE_MAX_AVG_CPU_PERCENT: Double = 8.0
+        const val DEFAULT_IDLE_MAX_TRAFFIC_RATIO: Double = 0.15
+        const val DEFAULT_IDLE_MAX_UNLIMITED_TRANSFER_BYTES: Long = 20L * 1024L * 1024L * 1024L
+        const val DEFAULT_IDLE_MIN_RECORDED_DAYS: Int = 7
+        const val DEFAULT_IDLE_MIN_TOTAL_SAMPLES: Int = 7
+    }
+}
+
+/**
+ * 30-day utilization classification status for a server.
+ */
+enum class IdleClassificationStatus {
+    IDLE,
+    ACTIVE,
+    COLD_START_OBSERVING,
+    OFFLINE_OR_NO_DATA,
+}
+
+/**
+ * 30-day CPU + traffic idle evaluation result for a probe server (and its optional linked ledger asset).
+ */
+data class ServerIdleAssessment(
+    val probeKey: String,
+    val serverName: String,
+    val linkedAsset: VpsAssetRecord? = null,
+    val status: IdleClassificationStatus,
+    val avgCpu30dPercent: Double?,
+    val recordedDays: Int,
+    val totalSamples: Int,
+    val trafficUsageRatio: Double?,
+    val projectedTrafficUsageRatio: Double?,
+    val monthlyTransferBytes: Long,
+    val trafficLimitBytes: Long?,
+    val recommendationText: String? = null,
+) {
+    val isIdle: Boolean
+        get() = status == IdleClassificationStatus.IDLE
+}
+
+/**
+ * Persistent deduplication state for probe outage alerts, renewal reminders, and per-cycle traffic alerts.
  */
 data class FleetAlertTrackerState(
     val lastKnownOnlineByProbeKey: Map<String, Boolean> = emptyMap(),
     val activeOutageNotifiedKeys: Set<String> = emptySet(),
     val notifiedRenewalKeys: Set<String> = emptySet(),
+    val notifiedTrafficCycleKeys: Set<String> = emptySet(),
 )
 
 /**
@@ -295,6 +391,20 @@ sealed interface FleetAlertTransition {
         val daysRemaining: Long,
         val renewalCny: BigDecimal,
     ) : FleetAlertTransition
+
+    data class TrafficThresholdReached(
+        val panelId: String,
+        val panelName: String,
+        val server: ProbeServerSnapshot,
+        val linkedAsset: VpsAssetRecord? = null,
+        val usedBytes: Long,
+        val limitBytes: Long,
+        val usageRatio: Double,
+        val cycleStartDateIso: String,
+        val nextResetDateIso: String,
+        val predictedExhaustionDateIso: String? = null,
+        val exhaustionForecastText: String? = null,
+    ) : FleetAlertTransition
 }
 
 /**
@@ -308,6 +418,7 @@ data class FleetMonitorCheckReport(
     val offlineAlerts: List<FleetAlertTransition.OfflineDetected> = emptyList(),
     val recoveryAlerts: List<FleetAlertTransition.RecoveredOnline> = emptyList(),
     val renewalReminders: List<FleetAlertTransition.RenewalReminderDue> = emptyList(),
+    val trafficAlerts: List<FleetAlertTransition.TrafficThresholdReached> = emptyList(),
     val checkedAtEpochMillis: Long = 0L,
 )
 

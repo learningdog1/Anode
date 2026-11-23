@@ -4,7 +4,6 @@ import android.content.Context
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasDetailSection
 import com.nodeseek.app.domain.overseas.OverseasDetailStructured
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasLabeledLink
@@ -14,9 +13,6 @@ import com.nodeseek.app.domain.overseas.OverseasOfferFilterConfig
 import com.nodeseek.app.domain.overseas.OverseasOfferQualityFilter
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
-import com.nodeseek.app.domain.overseas.TranslationEngineKind
-import com.nodeseek.app.domain.overseas.TranslationTier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -108,8 +104,6 @@ private data class CachedOfferDetailDto(
     val tgHtml: String = "",
     val tgPlainText: String = "",
     val structured: CachedStructuredDto? = null,
-    val translatedMarkdown: String? = null,
-    val translationTierName: String = TranslationTier.NONE.name,
     val cachedAtEpochMillis: Long = 0L,
     val etag: String? = null,
     val lastModified: String? = null,
@@ -143,13 +137,7 @@ private data class OverseasDetailRepostCachePayload(
 )
 
 @Serializable
-private data class OverseasTranslatorPrefsPayload(
-    val engineKindName: String = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY.name,
-    val customEndpointUrl: String = "",
-    val customApiKey: String = "",
-    val customModel: String = OverseasTranslationConfig.DEFAULT_OPENAI_MODEL,
-    val autoTranslateOnRefresh: Boolean = false,
-    val displayModeName: String = OverseasDisplayMode.ORIGINAL.name,
+private data class OverseasFilterPrefsPayload(
     val filterEnabled: Boolean = true,
     val excludeGenericMarketingBuzz: Boolean = true,
     val excludeNonServerServices: Boolean = true,
@@ -163,14 +151,13 @@ private data class OverseasTranslatorPrefsPayload(
  * - [OverseasIntelApiClient] (HMAC-SHA256 request signing + AES-256-GCM response decryption + retry)
  * - `filesDir/overseas_intel_offers_v2.json` for instant cold-start and offline feed display
  * - `filesDir/overseas_intel_details_v2.json` for offline detail & repost caching
- * - `filesDir/overseas_translator_prefs.json` + [OverseasTranslator] for detail translation
+ * - `filesDir/overseas_intel_prefs.json` for offer quality filter preferences
  */
 class OverseasIntelRepositoryImpl(
     private val listCacheFile: File,
     private val detailCacheFile: File,
     private val prefsFile: File,
     private val apiClient: OverseasIntelApiClient = OverseasIntelApiClient(),
-    private val translator: OverseasTranslator,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val pageSize: Int = OverseasIntelApiClient.DEFAULT_PAGE_SIZE,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
@@ -183,13 +170,11 @@ class OverseasIntelRepositoryImpl(
     constructor(
         context: Context,
         apiClient: OverseasIntelApiClient = OverseasIntelApiClient(),
-        translator: OverseasTranslator = OverseasTranslator(context),
     ) : this(
         listCacheFile = File((context.applicationContext ?: context).filesDir, LIST_CACHE_FILE_NAME),
         detailCacheFile = File((context.applicationContext ?: context).filesDir, DETAIL_CACHE_FILE_NAME),
-        prefsFile = File((context.applicationContext ?: context).filesDir, TRANSLATOR_PREFS_FILE_NAME),
+        prefsFile = File((context.applicationContext ?: context).filesDir, PREFS_FILE_NAME),
         apiClient = apiClient,
-        translator = translator,
     )
 
     private val json = Json {
@@ -224,8 +209,7 @@ class OverseasIntelRepositoryImpl(
         ioMutex.withLock {
             if (!diskLoaded) {
                 diskLoaded = true
-                val (transPrefs, loadedFilterConfig) = readPrefsLocked()
-                filterConfig = loadedFilterConfig
+                filterConfig = readFilterPrefsLocked()
                 val cachedList = readListCacheLocked()
                 rawOffers = cachedList.offers.map { it.toDomain() }
                 listEtag = cachedList.etag?.takeIf { it.isNotBlank() }
@@ -234,7 +218,6 @@ class OverseasIntelRepositoryImpl(
                 val filteredCount = (rawOffers.size - filteredOffers.size).coerceAtLeast(0)
                 _snapshot.value = OverseasIntelSnapshot(
                     offers = filteredOffers,
-                    translationConfig = transPrefs,
                     syncStatus = OverseasSyncStatus(
                         lastSyncedEpochMillis = cachedList.lastSyncedEpochMillis,
                         currentPage = cachedList.currentPage.coerceAtLeast(1),
@@ -577,77 +560,12 @@ class OverseasIntelRepositoryImpl(
             ?: return cachedDetail?.let { Result.success(it) }
                 ?: Result.failure(IOException("Empty offer detail response"))
 
-        val mergedWithPrevTranslation = if (
-            cachedDetail != null &&
-            cachedDetail.tgMarkdown == freshDetail.tgMarkdown &&
-            !cachedDetail.translatedMarkdown.isNullOrBlank()
-        ) {
-            freshDetail.copy(
-                translatedMarkdown = cachedDetail.translatedMarkdown,
-                translationTier = cachedDetail.translationTier,
-            )
-        } else {
-            freshDetail
-        }
-
-        val config = _snapshot.value.translationConfig
-        val finalDetail = if (config.autoTranslateOnRefresh && mergedWithPrevTranslation.translatedMarkdown.isNullOrBlank()) {
-            val trans = runCatching {
-                translator.translateMarkdown(
-                    markdown = mergedWithPrevTranslation.tgMarkdown,
-                    config = config,
-                    forceRefresh = false,
-                )
-            }.getOrNull()
-            if (trans != null && trans.translatedText.isNotBlank()) {
-                mergedWithPrevTranslation.copy(
-                    translatedMarkdown = trans.translatedText,
-                    translationTier = trans.tier,
-                )
-            } else {
-                mergedWithPrevTranslation
-            }
-        } else {
-            mergedWithPrevTranslation
-        }
-
         saveCachedDetail(
-            detail = finalDetail,
+            detail = freshDetail,
             etag = condResult.etag,
             lastModified = condResult.lastModified,
         )
-        return Result.success(finalDetail)
-    }
-
-    override suspend fun translateOfferDetail(
-        offerId: String,
-        forceRefresh: Boolean,
-    ): Result<OverseasOfferDetail> = withContext(ioDispatcher) {
-        val baseDetailResult = getOfferDetail(offerId = offerId, forceRefresh = false)
-        val detail = baseDetailResult.getOrElse { return@withContext Result.failure(it) }
-
-        val config = _snapshot.value.translationConfig
-        return@withContext try {
-            val transResult = translator.translateMarkdown(
-                markdown = detail.tgMarkdown,
-                config = config,
-                forceRefresh = forceRefresh,
-            )
-            val updated = detail.copy(
-                translatedMarkdown = transResult.translatedText,
-                translationTier = transResult.tier,
-            )
-            val existingDto = readCachedDetailDto(detail.id)
-            saveCachedDetail(
-                detail = updated,
-                etag = existingDto?.etag,
-                lastModified = existingDto?.lastModified,
-            )
-            Result.success(updated)
-        } catch (t: Throwable) {
-            if (t is CancellationException) throw t
-            Result.failure(t)
-        }
+        return Result.success(freshDetail)
     }
 
     override suspend fun getRepostContent(
@@ -711,26 +629,11 @@ class OverseasIntelRepositoryImpl(
         return Result.success(fresh)
     }
 
-    override suspend fun updateTranslationConfig(config: OverseasTranslationConfig) = withContext(ioDispatcher) {
-        ioMutex.withLock {
-            writePrefsLocked(config, filterConfig)
-            _snapshot.update { it.copy(translationConfig = config) }
-        }
-    }
-
-    override suspend fun updateDisplayMode(mode: OverseasDisplayMode) = withContext(ioDispatcher) {
-        ioMutex.withLock {
-            val updated = _snapshot.value.translationConfig.copy(displayMode = mode)
-            writePrefsLocked(updated, filterConfig)
-            _snapshot.update { it.copy(translationConfig = updated) }
-        }
-    }
-
     override suspend fun updateFilterConfig(config: OverseasOfferFilterConfig) = withContext(ioDispatcher) {
         loadFromCache()
         ioMutex.withLock {
             filterConfig = config
-            writePrefsLocked(_snapshot.value.translationConfig, config)
+            writeFilterPrefsLocked(config)
             val filtered = OverseasOfferQualityFilter.filter(rawOffers, config)
             val filteredOut = (rawOffers.size - filtered.size).coerceAtLeast(0)
             _snapshot.update {
@@ -740,22 +643,6 @@ class OverseasIntelRepositoryImpl(
                     filteredOutCount = filteredOut,
                 )
             }
-        }
-    }
-
-    override suspend fun testTranslationConfig(config: OverseasTranslationConfig): Result<String> =
-        translator.testConnection(config)
-
-    override suspend fun clearTranslationCache() = withContext(ioDispatcher) {
-        translator.clearCache()
-        detailMutex.withLock {
-            ensureDetailsLoadedLocked()
-            val cleared = detailMemoryCache.mapValues { (_, dto) ->
-                dto.copy(translatedMarkdown = null, translationTierName = TranslationTier.NONE.name)
-            }
-            detailMemoryCache.clear()
-            detailMemoryCache.putAll(cleared)
-            persistDetailCacheLocked()
         }
     }
 
@@ -811,7 +698,7 @@ class OverseasIntelRepositoryImpl(
                 etag = etag,
                 lastModified = lastModified,
             )
-            writeJsonAtomically(listCacheFile, json.encodeToString(payload), restrictPermissions = false)
+            writeJsonAtomically(listCacheFile, json.encodeToString(payload))
         }
     }
 
@@ -903,28 +790,26 @@ class OverseasIntelRepositoryImpl(
             details = detailMemoryCache.toMap(),
             reposts = repostMemoryCache.toMap(),
         )
-        writeJsonAtomically(detailCacheFile, json.encodeToString(payload), restrictPermissions = false)
+        writeJsonAtomically(detailCacheFile, json.encodeToString(payload))
     }
 
-    private fun readPrefsLocked(): Pair<OverseasTranslationConfig, OverseasOfferFilterConfig> {
-        if (!prefsFile.exists()) return OverseasTranslationConfig() to OverseasOfferFilterConfig()
-        val dto = runCatching {
-            val content = prefsFile.readText(Charsets.UTF_8)
-            if (content.isBlank()) null
-            else json.decodeFromString<OverseasTranslatorPrefsPayload>(content)
-        }.getOrNull() ?: return OverseasTranslationConfig() to OverseasOfferFilterConfig()
+    private fun readFilterPrefsLocked(): OverseasOfferFilterConfig {
+        val sourceFile = when {
+            prefsFile.exists() -> prefsFile
+            prefsFile.parentFile != null -> {
+                val legacyFile = File(prefsFile.parentFile, LEGACY_PREFS_FILE_NAME)
+                if (legacyFile.exists()) legacyFile else null
+            }
+            else -> null
+        } ?: return OverseasOfferFilterConfig()
 
-        val translation = OverseasTranslationConfig(
-            engineKind = runCatching { TranslationEngineKind.valueOf(dto.engineKindName) }
-                .getOrDefault(TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY),
-            customEndpointUrl = dto.customEndpointUrl,
-            customApiKey = dto.customApiKey,
-            customModel = dto.customModel.ifBlank { OverseasTranslationConfig.DEFAULT_OPENAI_MODEL },
-            autoTranslateOnRefresh = dto.autoTranslateOnRefresh,
-            displayMode = runCatching { OverseasDisplayMode.valueOf(dto.displayModeName) }
-                .getOrDefault(OverseasDisplayMode.ORIGINAL),
-        )
-        val filter = OverseasOfferFilterConfig(
+        val dto = runCatching {
+            val content = sourceFile.readText(Charsets.UTF_8)
+            if (content.isBlank()) null
+            else json.decodeFromString<OverseasFilterPrefsPayload>(content)
+        }.getOrNull() ?: return OverseasOfferFilterConfig()
+
+        val migrated = OverseasOfferFilterConfig(
             enabled = dto.filterEnabled,
             excludeGenericMarketingBuzz = dto.excludeGenericMarketingBuzz,
             excludeNonServerServices = dto.excludeNonServerServices,
@@ -932,20 +817,16 @@ class OverseasIntelRepositoryImpl(
             blockedMerchants = dto.blockedMerchants.toSet(),
             extraBlockedKeywords = dto.extraBlockedKeywords.toSet(),
         )
-        return translation to filter
+
+        if (sourceFile != prefsFile) {
+            writeFilterPrefsLocked(migrated)
+            runCatching { sourceFile.delete() }
+        }
+        return migrated
     }
 
-    private fun writePrefsLocked(
-        translation: OverseasTranslationConfig,
-        filter: OverseasOfferFilterConfig,
-    ) {
-        val dto = OverseasTranslatorPrefsPayload(
-            engineKindName = translation.engineKind.name,
-            customEndpointUrl = translation.customEndpointUrl.trim(),
-            customApiKey = translation.customApiKey.trim(),
-            customModel = translation.customModel.trim().ifBlank { OverseasTranslationConfig.DEFAULT_OPENAI_MODEL },
-            autoTranslateOnRefresh = translation.autoTranslateOnRefresh,
-            displayModeName = translation.displayMode.name,
+    private fun writeFilterPrefsLocked(filter: OverseasOfferFilterConfig) {
+        val dto = OverseasFilterPrefsPayload(
             filterEnabled = filter.enabled,
             excludeGenericMarketingBuzz = filter.excludeGenericMarketingBuzz,
             excludeNonServerServices = filter.excludeNonServerServices,
@@ -953,30 +834,19 @@ class OverseasIntelRepositoryImpl(
             blockedMerchants = filter.blockedMerchants.map { it.trim() }.filter { it.isNotEmpty() },
             extraBlockedKeywords = filter.extraBlockedKeywords.map { it.trim() }.filter { it.isNotEmpty() },
         )
-        writeJsonAtomically(prefsFile, json.encodeToString(dto), restrictPermissions = true)
+        writeJsonAtomically(prefsFile, json.encodeToString(dto))
     }
 
     private fun writeJsonAtomically(
         targetFile: File,
         encoded: String,
-        restrictPermissions: Boolean,
     ) {
         runCatching {
             targetFile.parentFile?.mkdirs()
             val tmpFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
             tmpFile.writeText(encoded, Charsets.UTF_8)
-            if (restrictPermissions) {
-                tmpFile.setReadable(false, false)
-                tmpFile.setReadable(true, true)
-                tmpFile.setWritable(false, false)
-                tmpFile.setWritable(true, true)
-            }
             if (!tmpFile.renameTo(targetFile)) {
                 targetFile.writeText(encoded, Charsets.UTF_8)
-                if (restrictPermissions) {
-                    targetFile.setReadable(false, false)
-                    targetFile.setReadable(true, true)
-                }
                 tmpFile.delete()
             }
         }
@@ -1035,8 +905,6 @@ class OverseasIntelRepositoryImpl(
                 aiModel = st.aiModel,
             )
         },
-        translatedMarkdown = translatedMarkdown,
-        translationTierName = translationTier.name,
         cachedAtEpochMillis = cachedAt,
         etag = etag,
         lastModified = lastModified,
@@ -1069,9 +937,6 @@ class OverseasIntelRepositoryImpl(
                 aiModel = st.aiModel,
             )
         },
-        translatedMarkdown = translatedMarkdown,
-        translationTier = runCatching { TranslationTier.valueOf(translationTierName) }
-            .getOrDefault(TranslationTier.NONE),
     )
 
     private fun OverseasRepostContent.toDto(
@@ -1118,7 +983,8 @@ class OverseasIntelRepositoryImpl(
     companion object {
         const val LIST_CACHE_FILE_NAME = "overseas_intel_offers_v2.json"
         const val DETAIL_CACHE_FILE_NAME = "overseas_intel_details_v2.json"
-        const val TRANSLATOR_PREFS_FILE_NAME = "overseas_translator_prefs.json"
+        const val PREFS_FILE_NAME = "overseas_intel_prefs.json"
+        private const val LEGACY_PREFS_FILE_NAME = "overseas_translator_prefs.json"
         private const val MAX_CACHED_OFFERS = 160
         private const val MAX_CACHED_DETAILS = 80
         const val DEFAULT_MIN_REFRESH_COOLDOWN_MS = 8_000L

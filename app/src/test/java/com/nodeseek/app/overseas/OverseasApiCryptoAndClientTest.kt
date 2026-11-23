@@ -6,7 +6,6 @@ import com.nodeseek.app.data.overseas.OverseasApiException
 import com.nodeseek.app.data.overseas.OverseasApiSecretVault
 import com.nodeseek.app.data.overseas.OverseasIntelApiClient
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
-import com.nodeseek.app.data.overseas.OverseasTranslator
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -331,7 +330,6 @@ class OverseasApiCryptoAndClientTest {
         val listCache = File(tempFolder.root, "offers.json")
         val detailCache = File(tempFolder.root, "details.json")
         val prefsFile = File(tempFolder.root, "prefs.json")
-        val transCache = File(tempFolder.root, "trans.json")
 
         val baseUrl = server.url("/").toString()
         try {
@@ -346,7 +344,6 @@ class OverseasApiCryptoAndClientTest {
                 detailCacheFile = detailCache,
                 prefsFile = prefsFile,
                 apiClient = onlineClient,
-                translator = OverseasTranslator(cacheFile = transCache),
             )
 
             val offers = repo.refresh().getOrThrow()
@@ -375,7 +372,6 @@ class OverseasApiCryptoAndClientTest {
             detailCacheFile = detailCache,
             prefsFile = prefsFile,
             apiClient = offlineClient,
-            translator = OverseasTranslator(cacheFile = transCache),
         )
 
         val coldOffers = offlineRepo.loadFromCache()

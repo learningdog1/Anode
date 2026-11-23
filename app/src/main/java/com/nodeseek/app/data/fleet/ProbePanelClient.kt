@@ -9,8 +9,14 @@ import com.nodeseek.app.domain.fleet.extractCountryCode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -27,9 +33,13 @@ import okhttp3.Callback
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import java.io.IOException
 import java.time.Instant
 import java.time.LocalDateTime
@@ -39,6 +49,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -216,10 +227,10 @@ class ProbePanelClient(
         originUrl: HttpUrl,
         apiToken: String?,
     ): DiscoveryAttempt {
-        val outcome = try {
-            executeGet(
-                initialUrl = buildEndpointUrl(originUrl, "api", "nodes"),
-                headers = buildKomariHeaders(apiToken),
+        val (outcome, effectiveHeaders) = try {
+            executeKomariGet(
+                url = buildEndpointUrl(originUrl, "api", "nodes"),
+                apiToken = apiToken,
                 expectedOrigin = originUrl,
             )
         } catch (c: CancellationException) {
@@ -236,13 +247,47 @@ class ProbePanelClient(
                 errorMessage = "Komari 面板需要认证 (HTTP ${outcome.code})，请填入 API Token 或 Cookie",
             )
         }
-        if (!outcome.isSuccessful) return DiscoveryAttempt()
+        if (outcome.isSuccessful) {
+            val root = parseJsonOrNull(outcome.body)
+            if (root != null && looksLikeKomariNodes(root)) {
+                val nodes = parseKomariNodesList(panelId, root)
+                val merged = enrichKomariWithLiveTelemetry(originUrl, effectiveHeaders, nodes)
+                return DiscoveryAttempt(
+                    result = ProbePanelFetchResult(
+                        detectedPanelType = ProbePanelType.KOMARI,
+                        snapshots = merged,
+                    ),
+                )
+            }
+        }
 
-        val root = parseJsonOrNull(outcome.body) ?: return DiscoveryAttempt()
-        if (!looksLikeKomariNodes(root)) return DiscoveryAttempt()
+        // Fallback probe via Komari JSON-RPC 2.0 `POST /api/rpc2` (`common:getNodes`)
+        val (rpcOutcome, rpcHeaders) = try {
+            executeKomariPostJson(
+                url = buildEndpointUrl(originUrl, "api", "rpc2"),
+                jsonBody = KOMARI_RPC_GET_NODES_BODY,
+                apiToken = apiToken,
+                expectedOrigin = originUrl,
+            )
+        } catch (c: CancellationException) {
+            throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (_: IOException) {
+            return DiscoveryAttempt()
+        }
+        if (rpcOutcome.code == 401 || rpcOutcome.code == 403) {
+            return DiscoveryAttempt(
+                isAuthError = true,
+                errorMessage = "Komari 面板需要认证 (HTTP ${rpcOutcome.code})，请填入 API Token 或 Cookie",
+            )
+        }
+        if (!rpcOutcome.isSuccessful) return DiscoveryAttempt()
+        val rpcRoot = parseJsonOrNull(rpcOutcome.body) ?: return DiscoveryAttempt()
+        if (!looksLikeKomariNodes(rpcRoot)) return DiscoveryAttempt()
 
-        val nodes = parseKomariNodesList(panelId, root)
-        val merged = enrichKomariWithLiveTelemetry(panelId, originUrl, apiToken, nodes)
+        val nodes = parseKomariNodesList(panelId, rpcRoot)
+        val merged = enrichKomariWithLiveTelemetry(originUrl, rpcHeaders, nodes)
         return DiscoveryAttempt(
             result = ProbePanelFetchResult(
                 detectedPanelType = ProbePanelType.KOMARI,
@@ -657,66 +702,190 @@ class ProbePanelClient(
         originUrl: HttpUrl,
         apiToken: String?,
     ): List<ProbeServerSnapshot> {
-        val headers = buildKomariHeaders(apiToken)
-        val nodesResp = executeGet(
-            initialUrl = buildEndpointUrl(originUrl, "api", "nodes"),
-            headers = headers,
+        val (nodesResp, effectiveHeaders) = executeKomariGet(
+            url = buildEndpointUrl(originUrl, "api", "nodes"),
+            apiToken = apiToken,
             expectedOrigin = originUrl,
         )
         if (nodesResp.code == 401 || nodesResp.code == 403) {
             throw IOException("Komari 认证失败 (HTTP ${nodesResp.code})，请检查 API Token / Cookie")
         }
-        if (!nodesResp.isSuccessful) {
-            throw IOException("Komari /api/nodes 请求失败 (HTTP ${nodesResp.code})")
+
+        if (nodesResp.isSuccessful) {
+            val nodesRoot = parseJsonOrNull(nodesResp.body)
+                ?: throw IOException("Komari /api/nodes 返回数据非有效 JSON")
+            if (nodesRoot is JsonObject && nodesRoot["error"] != null && nodesRoot["error"] !is JsonNull) {
+                val errMsg = (nodesRoot["error"] as? JsonObject)?.getFirstString("message")
+                    ?: nodesRoot["error"]?.stringOrNull()
+                    ?: "RPC 错误"
+                throw IOException("Komari /api/nodes 返回错误：$errMsg")
+            }
+            val baseNodes = parseKomariNodesList(panelId, nodesRoot)
+            return enrichKomariWithLiveTelemetry(originUrl, effectiveHeaders, baseNodes)
         }
-        val nodesRoot = parseJsonOrNull(nodesResp.body)
-            ?: throw IOException("Komari /api/nodes 返回数据非有效 JSON")
-        val baseNodes = parseKomariNodesList(panelId, nodesRoot)
-        return enrichKomariWithLiveTelemetry(panelId, originUrl, apiToken, baseNodes)
+
+        // Fallback to JSON-RPC 2.0 `common:getNodes` when `/api/nodes` is disabled (404/405)
+        if (nodesResp.code == 404 || nodesResp.code == 405) {
+            val (rpcResp, rpcHeaders) = executeKomariPostJson(
+                url = buildEndpointUrl(originUrl, "api", "rpc2"),
+                jsonBody = KOMARI_RPC_GET_NODES_BODY,
+                apiToken = apiToken,
+                expectedOrigin = originUrl,
+            )
+            if (rpcResp.code == 401 || rpcResp.code == 403) {
+                throw IOException("Komari 认证失败 (HTTP ${rpcResp.code})，请检查 API Token / Cookie")
+            }
+            if (rpcResp.isSuccessful) {
+                val rpcRoot = parseJsonOrNull(rpcResp.body)
+                    ?: throw IOException("Komari /api/rpc2 返回数据非有效 JSON")
+                val baseNodes = parseKomariNodesList(panelId, rpcRoot)
+                return enrichKomariWithLiveTelemetry(originUrl, rpcHeaders, baseNodes)
+            }
+        }
+
+        throw IOException("Komari /api/nodes 请求失败 (HTTP ${nodesResp.code})")
+    }
+
+    private suspend fun executeKomariGet(
+        url: HttpUrl,
+        apiToken: String?,
+        expectedOrigin: HttpUrl,
+    ): Pair<HttpOutcome, Map<String, String>> {
+        val trimmedToken = apiToken?.trim().orEmpty()
+        val primaryHeaders = buildKomariHeaders(trimmedToken, asCookie = false)
+        val first = executeGet(initialUrl = url, headers = primaryHeaders, expectedOrigin = expectedOrigin)
+        if ((first.code == 401 || first.code == 403) &&
+            trimmedToken.isNotEmpty() &&
+            !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
+            !trimmedToken.startsWith("Basic ", ignoreCase = true) &&
+            !trimmedToken.contains('=')
+        ) {
+            val cookieHeaders = buildKomariHeaders(trimmedToken, asCookie = true)
+            val second = executeGet(initialUrl = url, headers = cookieHeaders, expectedOrigin = expectedOrigin)
+            if (second.isSuccessful) return second to cookieHeaders
+        }
+        return first to primaryHeaders
+    }
+
+    private suspend fun executeKomariPostJson(
+        url: HttpUrl,
+        jsonBody: String,
+        apiToken: String?,
+        expectedOrigin: HttpUrl,
+    ): Pair<HttpOutcome, Map<String, String>> {
+        val trimmedToken = apiToken?.trim().orEmpty()
+        val primaryHeaders = buildKomariHeaders(trimmedToken, asCookie = false)
+        val first = executePostJson(
+            initialUrl = url,
+            jsonBody = jsonBody,
+            headers = primaryHeaders,
+            expectedOrigin = expectedOrigin,
+        )
+        if ((first.code == 401 || first.code == 403) &&
+            trimmedToken.isNotEmpty() &&
+            !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
+            !trimmedToken.startsWith("Basic ", ignoreCase = true) &&
+            !trimmedToken.contains('=')
+        ) {
+            val cookieHeaders = buildKomariHeaders(trimmedToken, asCookie = true)
+            val second = executePostJson(
+                initialUrl = url,
+                jsonBody = jsonBody,
+                headers = cookieHeaders,
+                expectedOrigin = expectedOrigin,
+            )
+            if (second.isSuccessful) return second to cookieHeaders
+        }
+        return first to primaryHeaders
     }
 
     private fun looksLikeKomariNodes(root: JsonElement): Boolean {
-        val dataArray = when (root) {
+        if (root is JsonObject && root["error"] != null && root["error"] !is JsonNull) {
+            return false
+        }
+        val container = when (root) {
             is JsonArray -> root
             is JsonObject -> {
                 val status = root["status"]?.stringOrNull()
-                val arr = root["data"] as? JsonArray
-                if (status.equals("success", ignoreCase = true) && arr != null && arr.isEmpty()) {
-                    return true
+                val isJsonRpc = root["jsonrpc"]?.stringOrNull() == "2.0"
+                val inner = root["data"] ?: root["result"] ?: root["nodes"]
+                when (inner) {
+                    is JsonArray -> {
+                        if (inner.isEmpty() && (status.equals("success", ignoreCase = true) || isJsonRpc)) {
+                            return true
+                        }
+                        inner
+                    }
+                    is JsonObject -> {
+                        if (inner.isEmpty() && (status.equals("success", ignoreCase = true) || isJsonRpc)) {
+                            return true
+                        }
+                        inner
+                    }
+                    else -> null
                 }
-                arr
             }
             else -> null
         } ?: return false
 
-        val first = dataArray.firstOrNull() as? JsonObject ?: return false
+        val first = when (container) {
+            is JsonArray -> container.firstOrNull() as? JsonObject
+            is JsonObject -> container.values.firstOrNull() as? JsonObject
+            else -> null
+        } ?: return false
+
         return first.containsKey("uuid") ||
             first.containsKey("cpu_cores") ||
             first.containsKey("cpu_name") ||
             (first.containsKey("region") && !first.containsKey("state"))
     }
 
+    private data class KomariTelemetryBatch(
+        val recordsByUuid: Map<String, KomariLiveTelemetry>,
+        val authoritativeOnlineIds: Set<String>? = null,
+        val isFullPanelSnapshot: Boolean = false,
+    )
+
     private suspend fun enrichKomariWithLiveTelemetry(
-        panelId: String,
         originUrl: HttpUrl,
-        apiToken: String?,
+        headers: Map<String, String>,
         baseNodes: List<ProbeServerSnapshot>,
     ): List<ProbeServerSnapshot> {
         if (baseNodes.isEmpty()) return emptyList()
-        val headers = buildKomariHeaders(apiToken)
 
-        // Try `/api/recent` first, then `/api/client`
-        val liveMap = fetchKomariTelemetryMap(buildEndpointUrl(originUrl, "api", "recent"), headers, originUrl)
-            ?: fetchKomariTelemetryMap(buildEndpointUrl(originUrl, "api", "client"), headers, originUrl)
+        // 1. Official Komari JSON-RPC 2.0 bulk live status (`POST /api/rpc2` -> `common:getNodesLatestStatus`)
+        // 2. Legacy/custom bulk HTTP endpoints (`/api/recent`, `/api/client`)
+        // 3. Komari WebSocket `/api/clients` (`"get"` frame -> online list + latest reports)
+        // 4. Per-node whitelisted ring-buffer endpoint (`GET /api/recent/{uuid}`)
+        val batch = fetchKomariRpcLatestStatus(originUrl, headers)
+            ?: fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "recent"), headers, originUrl)
+            ?: fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "client"), headers, originUrl)
+            ?: fetchKomariTelemetryWebSocketBatch(originUrl, headers)
+            ?: fetchKomariPerNodeRecentBatch(originUrl, headers, baseNodes)
             ?: return baseNodes
 
         val now = nowMillisProvider()
         return baseNodes.map { node ->
-            val live = liveMap[node.remoteServerId] ?: return@map node
+            val live = batch.recordsByUuid[node.remoteServerId]
+            if (live == null) {
+                if (batch.authoritativeOnlineIds != null || batch.isFullPanelSnapshot) {
+                    val isOnline = batch.authoritativeOnlineIds?.contains(node.remoteServerId) == true
+                    return@map node.copy(
+                        isOnline = isOnline,
+                        cpuPercent = if (isOnline) node.cpuPercent else 0.0,
+                        netInSpeedBps = if (isOnline) node.netInSpeedBps else 0L,
+                        netOutSpeedBps = if (isOnline) node.netOutSpeedBps else 0L,
+                    )
+                }
+                return@map node
+            }
+
             val mergedMemTotal = live.memTotalBytes.takeIf { it > 0L } ?: node.memTotalBytes
             val mergedDiskTotal = live.diskTotalBytes.takeIf { it > 0L } ?: node.diskTotalBytes
             val mergedLastActive = live.lastActiveEpochMillis.takeIf { it > 0L } ?: node.lastActiveEpochMillis
-            val isOnline = live.explicitOnline ?: resolveOnlineState(
+            val explicitOnline = live.explicitOnline
+                ?: batch.authoritativeOnlineIds?.contains(node.remoteServerId)
+            val isOnline = explicitOnline ?: resolveOnlineState(
                 explicitOnline = null,
                 lastActiveMillis = mergedLastActive,
                 uptimeSeconds = live.uptimeSeconds,
@@ -725,17 +894,17 @@ class ProbePanelClient(
                 nowEpochMillis = now,
             )
             node.copy(
-                cpuPercent = live.cpuPercent.coerceIn(0.0, 100.0),
-                memUsedBytes = live.memUsedBytes.coerceAtLeast(0L),
+                cpuPercent = if (isOnline) live.cpuPercent.coerceIn(0.0, 100.0) else 0.0,
+                memUsedBytes = if (isOnline || live.memUsedBytes > 0L) live.memUsedBytes.coerceAtLeast(0L) else 0L,
                 memTotalBytes = mergedMemTotal.coerceAtLeast(0L),
                 diskUsedBytes = live.diskUsedBytes.coerceAtLeast(0L),
                 diskTotalBytes = mergedDiskTotal.coerceAtLeast(0L),
-                netInSpeedBps = live.netInSpeedBps.coerceAtLeast(0L),
-                netOutSpeedBps = live.netOutSpeedBps.coerceAtLeast(0L),
+                netInSpeedBps = if (isOnline) live.netInSpeedBps.coerceAtLeast(0L) else 0L,
+                netOutSpeedBps = if (isOnline) live.netOutSpeedBps.coerceAtLeast(0L) else 0L,
                 monthlyTransferInBytes = live.monthlyTransferInBytes.coerceAtLeast(0L),
                 monthlyTransferOutBytes = live.monthlyTransferOutBytes.coerceAtLeast(0L),
-                uptimeSeconds = live.uptimeSeconds.coerceAtLeast(0L),
-                load1 = live.load1 ?: node.load1,
+                uptimeSeconds = if (isOnline) live.uptimeSeconds.coerceAtLeast(0L) else 0L,
+                load1 = if (isOnline) (live.load1 ?: node.load1) else null,
                 isOnline = isOnline,
                 lastActiveEpochMillis = mergedLastActive,
             )
@@ -758,11 +927,37 @@ class ProbePanelClient(
         val lastActiveEpochMillis: Long = 0L,
     )
 
-    private suspend fun fetchKomariTelemetryMap(
+    private suspend fun fetchKomariRpcLatestStatus(
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+    ): KomariTelemetryBatch? {
+        val resp = try {
+            executePostJson(
+                initialUrl = buildEndpointUrl(originUrl, "api", "rpc2"),
+                jsonBody = KOMARI_RPC_LATEST_STATUS_BODY,
+                headers = headers,
+                expectedOrigin = originUrl,
+            )
+        } catch (c: CancellationException) {
+            throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (_: Throwable) {
+            return null
+        }
+        if (!resp.isSuccessful) return null
+        val root = parseJsonOrNull(resp.body) as? JsonObject ?: return null
+        if (root["error"] != null && root["error"] !is JsonNull) return null
+        val resultElem = root["result"] ?: return null
+        val parsed = parseKomariTelemetryBatch(resultElem, inheritedOnlineSet = null)
+        return parsed.copy(isFullPanelSnapshot = true)
+    }
+
+    private suspend fun fetchKomariTelemetryHttpBatch(
         url: HttpUrl,
         headers: Map<String, String>,
         expectedOrigin: HttpUrl,
-    ): Map<String, KomariLiveTelemetry>? {
+    ): KomariTelemetryBatch? {
         val resp = try {
             executeGet(initialUrl = url, headers = headers, expectedOrigin = expectedOrigin)
         } catch (c: CancellationException) {
@@ -774,8 +969,111 @@ class ProbePanelClient(
         }
         if (!resp.isSuccessful) return null
         val root = parseJsonOrNull(resp.body) ?: return null
-        val parsed = parseKomariTelemetryMap(root)
-        return parsed.takeIf { it.isNotEmpty() }
+        if (root is JsonObject && root["error"] != null && root["error"] !is JsonNull) return null
+        val parsed = parseKomariTelemetryBatch(root, inheritedOnlineSet = null)
+        return parsed.takeIf { it.recordsByUuid.isNotEmpty() || it.authoritativeOnlineIds != null }
+    }
+
+    private suspend fun fetchKomariTelemetryWebSocketBatch(
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+    ): KomariTelemetryBatch? {
+        val wsUrl = buildEndpointUrl(originUrl, "api", "clients")
+        val rawMessage = try {
+            fetchKomariSingleWebSocketFrame(
+                url = wsUrl,
+                headers = headers,
+                expectedOrigin = originUrl,
+                outboundPrompt = "get",
+            )
+        } catch (c: CancellationException) {
+            throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (_: Throwable) {
+            return null
+        } ?: return null
+
+        val root = parseJsonOrNull(rawMessage) ?: return null
+        val parsed = parseKomariTelemetryBatch(root, inheritedOnlineSet = null)
+        return parsed.takeIf { it.recordsByUuid.isNotEmpty() || it.authoritativeOnlineIds != null }
+            ?.copy(isFullPanelSnapshot = true)
+    }
+
+    private suspend fun fetchKomariPerNodeRecentBatch(
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+        baseNodes: List<ProbeServerSnapshot>,
+    ): KomariTelemetryBatch? {
+        val semaphore = Semaphore(KOMARI_RECENT_CONCURRENCY)
+        val pairs = coroutineScope {
+            baseNodes.map { node ->
+                async {
+                    semaphore.withPermit {
+                        val single = fetchKomariSingleNodeRecent(
+                            originUrl = originUrl,
+                            headers = headers,
+                            uuid = node.remoteServerId,
+                        )
+                        if (single != null) node.remoteServerId to single else null
+                    }
+                }
+            }.awaitAll()
+        }.filterNotNull()
+
+        if (pairs.isEmpty()) return null
+        return KomariTelemetryBatch(
+            recordsByUuid = pairs.toMap(LinkedHashMap()),
+            authoritativeOnlineIds = null,
+            isFullPanelSnapshot = pairs.size == baseNodes.size,
+        )
+    }
+
+    private suspend fun fetchKomariSingleNodeRecent(
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+        uuid: String,
+    ): KomariLiveTelemetry? {
+        val url = buildEndpointUrl(originUrl, "api", "recent", uuid)
+        val resp = try {
+            executeGet(initialUrl = url, headers = headers, expectedOrigin = originUrl)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (_: Throwable) {
+            return null
+        }
+        if (!resp.isSuccessful) return null
+        val root = parseJsonOrNull(resp.body) ?: return null
+        val array = when (root) {
+            is JsonArray -> root
+            is JsonObject -> {
+                if (root["error"] != null && root["error"] !is JsonNull) return null
+                (root["data"] as? JsonArray) ?: (root["result"] as? JsonArray) ?: (root["records"] as? JsonArray)
+            }
+            else -> null
+        } ?: return null
+
+        // `/api/recent/:uuid` holds the in-memory 1-minute sliding window; an empty array means offline.
+        if (array.isEmpty()) {
+            return KomariLiveTelemetry(explicitOnline = false)
+        }
+
+        var latest: KomariLiveTelemetry? = null
+        for (elem in array) {
+            val obj = elem as? JsonObject ?: continue
+            val candidate = extractKomariTelemetryObject(obj, forcedOnline = null)
+            if (latest == null || candidate.lastActiveEpochMillis >= latest.lastActiveEpochMillis) {
+                latest = candidate
+            }
+        }
+        val resolved = latest ?: return KomariLiveTelemetry(explicitOnline = false)
+        return if (resolved.explicitOnline == null && resolved.lastActiveEpochMillis == 0L) {
+            resolved.copy(explicitOnline = true)
+        } else {
+            resolved
+        }
     }
 
     internal fun parseKomariNodesList(
@@ -783,16 +1081,26 @@ class ProbePanelClient(
         root: JsonElement,
     ): List<ProbeServerSnapshot> {
         val now = nowMillisProvider()
-        val array = when (root) {
-            is JsonArray -> root
-            is JsonObject -> (root["data"] as? JsonArray) ?: (root["nodes"] as? JsonArray)
-            else -> null
-        } ?: return emptyList()
+        val entries: List<Pair<String?, JsonObject>> = when (root) {
+            is JsonArray -> root.mapNotNull { (it as? JsonObject)?.let { obj -> null to obj } }
+            is JsonObject -> {
+                val container = root["data"] ?: root["result"] ?: root["nodes"]
+                when (container) {
+                    is JsonArray -> container.mapNotNull { (it as? JsonObject)?.let { obj -> null to obj } }
+                    is JsonObject -> container.entries.mapNotNull { (k, v) ->
+                        (v as? JsonObject)?.let { obj -> k to obj }
+                    }
+                    else -> emptyList()
+                }
+            }
+            else -> emptyList()
+        }
+        if (entries.isEmpty()) return emptyList()
 
-        return array.mapNotNull { elem ->
-            val obj = elem as? JsonObject ?: return@mapNotNull null
-            val remoteId = obj.getFirstString("uuid", "id", "client_id")
-                ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        return entries.mapNotNull { (keyHint, obj) ->
+            val remoteId = (obj.getFirstString("uuid", "id", "client_id") ?: keyHint)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val name = obj.getFirstString("name", "hostname")?.takeIf { it.isNotBlank() } ?: remoteId
             val rawRegion = obj.getFirstString("region", "country_code", "country").orEmpty()
             val countryCode = extractCountryCode(rawRegion)
@@ -805,16 +1113,26 @@ class ProbePanelClient(
             val diskTotal = obj.getFirstLong("disk_total") ?: 0L
             val trafficLimit = obj.getFirstLong("traffic_limit", "traffic_quota")?.takeIf { it > 0L }
 
-            // Some Komari deployments embed live metrics directly inside `/api/nodes`
-            val embeddedTelemetry = extractKomariTelemetryObject(obj, forcedOnline = null)
-            val isOnline = embeddedTelemetry.explicitOnline ?: resolveOnlineState(
-                explicitOnline = null,
-                lastActiveMillis = embeddedTelemetry.lastActiveEpochMillis,
-                uptimeSeconds = embeddedTelemetry.uptimeSeconds,
-                cpuPercent = embeddedTelemetry.cpuPercent,
-                memUsedBytes = embeddedTelemetry.memUsedBytes,
-                nowEpochMillis = now,
-            )
+            // Standard Komari `/api/nodes` returns static `Client` rows where `updated_at` is DB edit time,
+            // NOT live heartbeat time. Only infer online state here when embedded live metrics are present.
+            val hasEmbeddedLive = hasKomariEmbeddedLiveTelemetry(obj)
+            val embeddedTelemetry = if (hasEmbeddedLive) {
+                extractKomariTelemetryObject(obj, forcedOnline = null)
+            } else {
+                KomariLiveTelemetry()
+            }
+            val isOnline = if (hasEmbeddedLive) {
+                embeddedTelemetry.explicitOnline ?: resolveOnlineState(
+                    explicitOnline = null,
+                    lastActiveMillis = embeddedTelemetry.lastActiveEpochMillis,
+                    uptimeSeconds = embeddedTelemetry.uptimeSeconds,
+                    cpuPercent = embeddedTelemetry.cpuPercent,
+                    memUsedBytes = embeddedTelemetry.memUsedBytes,
+                    nowEpochMillis = now,
+                )
+            } else {
+                false
+            }
 
             ProbeServerSnapshot(
                 panelId = panelId,
@@ -838,20 +1156,49 @@ class ProbePanelClient(
                 uptimeSeconds = embeddedTelemetry.uptimeSeconds.coerceAtLeast(0L),
                 load1 = embeddedTelemetry.load1,
                 isOnline = isOnline,
-                lastActiveEpochMillis = embeddedTelemetry.lastActiveEpochMillis,
+                lastActiveEpochMillis = if (hasEmbeddedLive) embeddedTelemetry.lastActiveEpochMillis else 0L,
             )
         }
     }
 
-    private fun parseKomariTelemetryMap(root: JsonElement): Map<String, KomariLiveTelemetry> {
+    private fun hasKomariEmbeddedLiveTelemetry(obj: JsonObject): Boolean =
+        obj.containsKey("online") ||
+            obj.containsKey("is_online") ||
+            obj.containsKey("cpu") ||
+            obj.containsKey("cpu_usage") ||
+            obj.containsKey("ram") ||
+            obj.containsKey("mem") ||
+            obj.containsKey("ram_used") ||
+            obj.containsKey("mem_used") ||
+            obj.containsKey("disk") ||
+            obj.containsKey("disk_used") ||
+            obj.containsKey("network") ||
+            obj.containsKey("net_in") ||
+            obj.containsKey("net_in_speed") ||
+            obj.containsKey("uptime") ||
+            obj.containsKey("status") ||
+            obj.containsKey("state") ||
+            obj.containsKey("report")
+
+    private fun parseKomariTelemetryBatch(
+        root: JsonElement,
+        inheritedOnlineSet: Set<String>?,
+    ): KomariTelemetryBatch {
         val result = LinkedHashMap<String, KomariLiveTelemetry>()
+        var discoveredOnlineSet: Set<String>? = inheritedOnlineSet
 
         fun processDataContainer(data: JsonElement, onlineSet: Set<String>?) {
+            if (onlineSet != null) {
+                discoveredOnlineSet = onlineSet
+            }
             when (data) {
                 is JsonArray -> {
                     for (item in data) {
                         val obj = item as? JsonObject ?: continue
-                        val uuid = obj.getFirstString("uuid", "client", "id") ?: continue
+                        val clientObj = obj["client"] as? JsonObject
+                        val uuid = obj.getFirstString("uuid", "client", "id")
+                            ?: clientObj?.getFirstString("uuid", "id")
+                            ?: continue
                         val forcedOnline = onlineSet?.let { uuid in it }
                         val candidate = extractKomariTelemetryObject(obj, forcedOnline)
                         val existing = result[uuid]
@@ -863,19 +1210,37 @@ class ProbePanelClient(
                     }
                 }
                 is JsonObject -> {
-                    // Check Komari WS/client envelope `{ "online": [...], "data": { "<uuid>": {...} } }`
+                    // Check Komari WS/client or RPC envelope `{ "online": [...], "data"/"result": { "<uuid>": {...} } }`
                     val nestedOnline = (data["online"] as? JsonArray)
                         ?.mapNotNull { it.stringOrNull() }
                         ?.toSet()
-                    val nestedData = data["data"]
-                    if (nestedData != null && (nestedOnline != null || nestedData is JsonObject || nestedData is JsonArray)) {
+                    val nestedData = data["data"] ?: data["result"] ?: data["records"]
+                    if (nestedData != null &&
+                        (nestedOnline != null || nestedData is JsonObject || nestedData is JsonArray)
+                    ) {
                         processDataContainer(nestedData, nestedOnline ?: onlineSet)
+                        return
+                    }
+                    if (nestedOnline != null) {
+                        discoveredOnlineSet = nestedOnline
+                    }
+
+                    // Single record returned directly (e.g. `getNodesLatestStatus` filtered by single uuid)
+                    val directUuid = (data["client"] as? JsonPrimitive)?.stringOrNull()
+                        ?: (data["client"] as? JsonObject)?.getFirstString("uuid", "id")
+                        ?: data.getFirstString("uuid")
+                    if (directUuid != null && hasKomariEmbeddedLiveTelemetry(data)) {
+                        val forcedOnline = (nestedOnline ?: onlineSet)?.let { directUuid in it }
+                        result[directUuid] = extractKomariTelemetryObject(data, forcedOnline)
                         return
                     }
 
                     for ((uuid, value) in data) {
+                        if (uuid == "online" || uuid == "status" || uuid == "message" || uuid == "jsonrpc" || uuid == "id") {
+                            continue
+                        }
                         val obj = value as? JsonObject ?: continue
-                        val forcedOnline = onlineSet?.let { uuid in it }
+                        val forcedOnline = (nestedOnline ?: onlineSet)?.let { uuid in it }
                         result[uuid] = extractKomariTelemetryObject(obj, forcedOnline)
                     }
                 }
@@ -884,54 +1249,100 @@ class ProbePanelClient(
         }
 
         when (root) {
-            is JsonArray -> processDataContainer(root, null)
+            is JsonArray -> processDataContainer(root, inheritedOnlineSet)
             is JsonObject -> {
                 val topOnline = (root["online"] as? JsonArray)
                     ?.mapNotNull { it.stringOrNull() }
                     ?.toSet()
-                val dataElem = root["data"] ?: root["records"] ?: root
+                    ?: inheritedOnlineSet
+                val dataElem = root["result"] ?: root["data"] ?: root["records"] ?: root
                 processDataContainer(dataElem, topOnline)
             }
             else -> Unit
         }
-        return result
+        return KomariTelemetryBatch(
+            recordsByUuid = result,
+            authoritativeOnlineIds = discoveredOnlineSet,
+        )
     }
 
     private fun extractKomariTelemetryObject(
-        obj: JsonObject,
+        rawObj: JsonObject,
         forcedOnline: Boolean?,
     ): KomariLiveTelemetry {
-        val cpuElem = obj["cpu"]
+        val obj = (rawObj["report"] as? JsonObject)
+            ?: (rawObj["status"] as? JsonObject)
+            ?: (rawObj["state"] as? JsonObject)
+            ?: rawObj
+
+        val cpuElem = obj.getIgnoreCase("cpu")
         val cpuPercent = when (cpuElem) {
-            is JsonObject -> cpuElem.getFirstDouble("usage", "percent", "value") ?: 0.0
-            else -> cpuElem?.doubleOrNull() ?: 0.0
+            is JsonObject -> cpuElem.getFirstDoubleIgnoreCase("usage", "percent", "value") ?: 0.0
+            else -> cpuElem?.doubleOrNull()
+                ?: obj.getFirstDoubleIgnoreCase("cpu_usage", "cpu_percent")
+                ?: 0.0
         }
 
-        val ramObj = obj["ram"] as? JsonObject ?: obj["mem"] as? JsonObject
-        val memUsed = ramObj?.getFirstLong("used") ?: obj.getFirstLong("ram_used", "mem_used", "ram") ?: 0L
-        val memTotal = ramObj?.getFirstLong("total") ?: obj.getFirstLong("ram_total", "mem_total") ?: 0L
+        val ramElem = obj.getIgnoreCase("ram") ?: obj.getIgnoreCase("mem")
+        val ramObj = ramElem as? JsonObject
+        val memUsed = ramObj?.getFirstLongIgnoreCase("used", "value")
+            ?: obj.getFirstLongIgnoreCase("ram_used", "mem_used")
+            ?: (ramElem as? JsonPrimitive)?.longOrNull()
+            ?: 0L
+        val memTotal = ramObj?.getFirstLongIgnoreCase("total")
+            ?: obj.getFirstLongIgnoreCase("ram_total", "mem_total")
+            ?: 0L
 
-        val diskObj = obj["disk"] as? JsonObject
-        val diskUsed = diskObj?.getFirstLong("used") ?: obj.getFirstLong("disk_used", "disk") ?: 0L
-        val diskTotal = diskObj?.getFirstLong("total") ?: obj.getFirstLong("disk_total") ?: 0L
+        val diskElem = obj.getIgnoreCase("disk")
+        val diskObj = diskElem as? JsonObject
+        val diskUsed = diskObj?.getFirstLongIgnoreCase("used", "value")
+            ?: obj.getFirstLongIgnoreCase("disk_used")
+            ?: (diskElem as? JsonPrimitive)?.longOrNull()
+            ?: 0L
+        val diskTotal = diskObj?.getFirstLongIgnoreCase("total")
+            ?: obj.getFirstLongIgnoreCase("disk_total")
+            ?: 0L
 
-        val netObj = obj["network"] as? JsonObject
-        val netInSpeed = netObj?.getFirstLong("down", "in", "rx_speed")
-            ?: obj.getFirstLong("net_in", "net_in_speed", "down_speed") ?: 0L
-        val netOutSpeed = netObj?.getFirstLong("up", "out", "tx_speed")
-            ?: obj.getFirstLong("net_out", "net_out_speed", "up_speed") ?: 0L
-        val totalDown = netObj?.getFirstLong("totalDown", "total_down", "net_total_down")
-            ?: obj.getFirstLong("net_total_down", "total_down", "traffic_down", "net_in_transfer") ?: 0L
-        val totalUp = netObj?.getFirstLong("totalUp", "total_up", "net_total_up")
-            ?: obj.getFirstLong("net_total_up", "total_up", "traffic_up", "net_out_transfer") ?: 0L
+        val netObj = obj.getIgnoreCase("network") as? JsonObject
+        val netInSpeed = netObj?.getFirstLongIgnoreCase("down", "in", "rx_speed", "rx")
+            ?: obj.getFirstLongIgnoreCase("net_in", "net_in_speed", "down_speed")
+            ?: 0L
+        val netOutSpeed = netObj?.getFirstLongIgnoreCase("up", "out", "tx_speed", "tx")
+            ?: obj.getFirstLongIgnoreCase("net_out", "net_out_speed", "up_speed")
+            ?: 0L
+        val totalDown = netObj?.getFirstPositiveLongIgnoreCase("totalDown", "total_down", "net_total_down")
+            ?: obj.getFirstPositiveLongIgnoreCase("traffic_down", "net_total_down", "total_down", "net_in_transfer")
+            ?: netObj?.getFirstLongIgnoreCase("totalDown", "total_down", "net_total_down")
+            ?: obj.getFirstLongIgnoreCase("traffic_down", "net_total_down", "total_down", "net_in_transfer")
+            ?: 0L
+        val totalUp = netObj?.getFirstPositiveLongIgnoreCase("totalUp", "total_up", "net_total_up")
+            ?: obj.getFirstPositiveLongIgnoreCase("traffic_up", "net_total_up", "total_up", "net_out_transfer")
+            ?: netObj?.getFirstLongIgnoreCase("totalUp", "total_up", "net_total_up")
+            ?: obj.getFirstLongIgnoreCase("traffic_up", "net_total_up", "total_up", "net_out_transfer")
+            ?: 0L
 
-        val loadObj = obj["load"] as? JsonObject
-        val load1 = loadObj?.getFirstDouble("load1", "load_1", "1")
-            ?: obj.getFirstDouble("load", "load1", "load_1")
+        val loadElem = obj.getIgnoreCase("load")
+        val loadObj = loadElem as? JsonObject
+        val load1 = loadObj?.getFirstDoubleIgnoreCase("load1", "load_1", "1")
+            ?: (loadElem as? JsonPrimitive)?.doubleOrNull()
+            ?: obj.getFirstDoubleIgnoreCase("load1", "load_1")
 
-        val uptime = obj.getFirstLong("uptime") ?: 0L
-        val lastActive = parseEpochMillis(obj["updated_at"] ?: obj["time"] ?: obj["last_active"]) ?: 0L
-        val explicitOnline = forcedOnline ?: obj["online"]?.booleanOrNull() ?: obj["is_online"]?.booleanOrNull()
+        val uptime = obj.getFirstLongIgnoreCase("uptime")
+            ?: rawObj.getFirstLongIgnoreCase("uptime")
+            ?: 0L
+        val lastActive = parseEpochMillis(
+            obj.getIgnoreCase("time")
+                ?: obj.getIgnoreCase("updated_at")
+                ?: obj.getIgnoreCase("last_active")
+                ?: rawObj.getIgnoreCase("time")
+                ?: rawObj.getIgnoreCase("updated_at")
+                ?: rawObj.getIgnoreCase("last_active"),
+        ) ?: 0L
+        val explicitOnline = forcedOnline
+            ?: obj.getIgnoreCase("online")?.booleanOrNull()
+            ?: obj.getIgnoreCase("is_online")?.booleanOrNull()
+            ?: rawObj.getIgnoreCase("online")?.booleanOrNull()
+            ?: rawObj.getIgnoreCase("is_online")?.booleanOrNull()
 
         return KomariLiveTelemetry(
             cpuPercent = cpuPercent,
@@ -974,19 +1385,21 @@ class ProbePanelClient(
         }
     }
 
-    private fun buildKomariHeaders(apiToken: String?): Map<String, String> = buildMap {
+    private fun buildKomariHeaders(apiToken: String?, asCookie: Boolean = false): Map<String, String> = buildMap {
         put("Accept", "application/json")
         val token = apiToken?.trim().orEmpty()
         if (token.isNotEmpty()) {
-            if (token.contains('=')) {
-                put("Cookie", token)
-            } else {
-                val hasBearerPrefix = token.startsWith("Bearer ", ignoreCase = true)
-                val bearer = if (hasBearerPrefix) token else "Bearer $token"
-                val rawKey = if (hasBearerPrefix) token.substring("Bearer ".length).trim() else token
-                put("Authorization", bearer)
-                if (rawKey.isNotEmpty()) {
-                    put("X-API-Key", rawKey)
+            when {
+                asCookie -> put("Cookie", "session_token=$token; temp_key=$token")
+                token.contains('=') -> put("Cookie", token)
+                else -> {
+                    val hasBearerPrefix = token.startsWith("Bearer ", ignoreCase = true)
+                    val bearer = if (hasBearerPrefix) token else "Bearer $token"
+                    val rawKey = if (hasBearerPrefix) token.substring("Bearer ".length).trim() else token
+                    put("Authorization", bearer)
+                    if (rawKey.isNotEmpty()) {
+                        put("X-API-Key", rawKey)
+                    }
                 }
             }
         }
@@ -1090,6 +1503,180 @@ class ProbePanelClient(
             currentUrl = nextUrl
         }
         throw ProbeCredentialBoundaryException("探针面板重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）")
+    }
+
+    private suspend fun executePostJson(
+        initialUrl: HttpUrl,
+        jsonBody: String,
+        headers: Map<String, String>,
+        expectedOrigin: HttpUrl,
+    ): HttpOutcome {
+        val carriesCredentials = hasCredentialHeaders(headers)
+        val sanitizedHeaders = if (carriesCredentials) {
+            headers
+        } else {
+            headers.filterKeys { !isCredentialHeaderName(it) }
+        }
+
+        var currentUrl = initialUrl
+        var usePost = true
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            if (hasUserInfo(currentUrl)) {
+                throw ProbeCredentialBoundaryException("安全校验失败：禁止在探针请求 URL 中内嵌账号或密码信息")
+            }
+            if (carriesCredentials) {
+                if (!isAllowedCredentialOrigin(currentUrl, allowLoopbackHttpWithCredentials)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：配置了 API Token 或 Cookie 的探针面板必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送凭证",
+                    )
+                }
+                if (!isSameOrigin(expectedOrigin, currentUrl)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝向非同源地址 (${formatOrigin(currentUrl)}) 发送探针凭证",
+                    )
+                }
+            }
+
+            val builder = Request.Builder().url(currentUrl)
+            if (usePost) {
+                builder.post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            } else {
+                builder.get()
+            }
+            sanitizedHeaders.forEach { (k, v) -> builder.header(k, v) }
+            val raw = executeSingleCall(builder.build())
+
+            if (raw.code !in REDIRECT_STATUS_CODES) {
+                if (carriesCredentials && raw.code in 300..399) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：探针面板返回不受支持的重定向状态 (HTTP ${raw.code})",
+                    )
+                }
+                return HttpOutcome(code = raw.code, body = raw.body)
+            }
+
+            if (hop >= MAX_REDIRECT_HOPS) {
+                throw ProbeCredentialBoundaryException(
+                    "探针面板重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）",
+                )
+            }
+
+            val rawLocation = raw.location?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw ProbeCredentialBoundaryException(
+                    "安全校验失败：探针面板重定向响应缺少 Location 头 (HTTP ${raw.code})",
+                )
+            val nextUrl = currentUrl.resolve(rawLocation)
+                ?: throw ProbeCredentialBoundaryException(
+                    "安全校验失败：探针面板重定向目标地址无效或协议不受支持 (HTTP ${raw.code})",
+                )
+            if (hasUserInfo(nextUrl)) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：拒绝重定向至包含内嵌用户信息的探针地址 (HTTP ${raw.code})",
+                )
+            }
+            if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                !nextUrl.scheme.equals("https", ignoreCase = true)
+            ) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：拒绝将探针请求从 HTTPS 降级重定向至明文 HTTP (HTTP ${raw.code})",
+                )
+            }
+            if (carriesCredentials) {
+                if (!isAllowedCredentialOrigin(nextUrl, allowLoopbackHttpWithCredentials)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝将探针凭证重定向至非 HTTPS 地址 (HTTP ${raw.code})",
+                    )
+                }
+                if (!isSameOrigin(expectedOrigin, nextUrl)) {
+                    throw ProbeCredentialBoundaryException(
+                        "安全校验失败：拒绝跨源重定向探针请求 (${formatOrigin(expectedOrigin)} -> ${formatOrigin(nextUrl)})，已阻止泄露凭证",
+                    )
+                }
+            }
+            if (raw.code == 301 || raw.code == 302 || raw.code == 303) {
+                usePost = false
+            }
+            currentUrl = nextUrl
+        }
+        throw ProbeCredentialBoundaryException("探针面板重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）")
+    }
+
+    private suspend fun fetchKomariSingleWebSocketFrame(
+        url: HttpUrl,
+        headers: Map<String, String>,
+        expectedOrigin: HttpUrl,
+        outboundPrompt: String,
+    ): String? {
+        if (hasUserInfo(url)) {
+            throw ProbeCredentialBoundaryException("安全校验失败：禁止在探针请求 URL 中内嵌账号或密码信息")
+        }
+        val carriesCredentials = hasCredentialHeaders(headers)
+        if (carriesCredentials) {
+            if (!isAllowedCredentialOrigin(url, allowLoopbackHttpWithCredentials)) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：配置了 API Token 或 Cookie 的探针面板必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送凭证",
+                )
+            }
+            if (!isSameOrigin(expectedOrigin, url)) {
+                throw ProbeCredentialBoundaryException(
+                    "安全校验失败：拒绝向非同源地址 (${formatOrigin(url)}) 发送探针凭证",
+                )
+            }
+        }
+        val sanitizedHeaders = if (carriesCredentials) {
+            headers
+        } else {
+            headers.filterKeys { !isCredentialHeaderName(it) }
+        }
+
+        return withTimeoutOrNull(KOMARI_WS_TIMEOUT_MILLIS) {
+            suspendCancellableCoroutine { continuation ->
+                val resumed = AtomicBoolean(false)
+                val builder = Request.Builder().url(url).get()
+                sanitizedHeaders.forEach { (k, v) -> builder.header(k, v) }
+
+                val socket = transportClient.newWebSocket(
+                    builder.build(),
+                    object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) {
+                            runCatching { webSocket.send(outboundPrompt) }
+                        }
+
+                        override fun onMessage(webSocket: WebSocket, text: String) {
+                            if (resumed.compareAndSet(false, true)) {
+                                runCatching { webSocket.close(1000, null) }
+                                if (continuation.isActive) {
+                                    continuation.resume(text)
+                                }
+                            }
+                        }
+
+                        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                            runCatching { webSocket.close(1000, null) }
+                            if (resumed.compareAndSet(false, true) && continuation.isActive) {
+                                continuation.resume(null)
+                            }
+                        }
+
+                        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                            if (resumed.compareAndSet(false, true) && continuation.isActive) {
+                                continuation.resume(null)
+                            }
+                        }
+
+                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                            runCatching { webSocket.cancel() }
+                            if (resumed.compareAndSet(false, true) && continuation.isActive) {
+                                continuation.resume(null)
+                            }
+                        }
+                    },
+                )
+                continuation.invokeOnCancellation {
+                    runCatching { socket.cancel() }
+                }
+            }
+        }
     }
 
     private suspend fun executeSingleCall(request: Request): RawWireResponse =
@@ -1220,10 +1807,29 @@ class ProbePanelClient(
     private fun JsonObject.getFirstDouble(vararg keys: String): Double? =
         keys.firstNotNullOfOrNull { key -> this[key]?.doubleOrNull() }
 
+    private fun JsonObject.getIgnoreCase(key: String): JsonElement? =
+        this[key] ?: entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
+    private fun JsonObject.getFirstLongIgnoreCase(vararg keys: String): Long? =
+        keys.firstNotNullOfOrNull { key -> getIgnoreCase(key)?.longOrNull() }
+
+    private fun JsonObject.getFirstPositiveLongIgnoreCase(vararg keys: String): Long? =
+        keys.firstNotNullOfOrNull { key -> getIgnoreCase(key)?.longOrNull()?.takeIf { it > 0L } }
+
+    private fun JsonObject.getFirstDoubleIgnoreCase(vararg keys: String): Double? =
+        keys.firstNotNullOfOrNull { key -> getIgnoreCase(key)?.doubleOrNull() }
+
     companion object {
         const val DEFAULT_OFFLINE_THRESHOLD_MILLIS = 120_000L
         internal const val MAX_REDIRECT_HOPS = 5
         private const val CLOCK_SKEW_TOLERANCE_MILLIS = 300_000L
+        private const val KOMARI_WS_TIMEOUT_MILLIS = 5_000L
+        private const val KOMARI_RECENT_CONCURRENCY = 6
+        private const val KOMARI_RPC_GET_NODES_BODY =
+            """{"jsonrpc":"2.0","method":"common:getNodes","params":{},"id":1}"""
+        private const val KOMARI_RPC_LATEST_STATUS_BODY =
+            """{"jsonrpc":"2.0","method":"common:getNodesLatestStatus","params":{},"id":1}"""
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val REDIRECT_STATUS_CODES = setOf(301, 302, 303, 307, 308)
         private val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1")
         private val SPACE_DATE_TIME_FORMATTER: DateTimeFormatter =
@@ -1286,8 +1892,10 @@ class ProbePanelClient(
                 "/api/v1/server/details",
                 "/api/v1/server/list",
                 "/api/v1/server",
+                "/api/rpc2",
                 "/api/nodes",
                 "/api/recent",
+                "/api/clients",
                 "/api/client",
             )
             for (suffix in knownSuffixes) {

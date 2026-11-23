@@ -15,8 +15,8 @@ import java.time.LocalDate
 
 /**
  * Reusable background check runner executing one serialized pass of:
- * 1. Refreshing enabled probe panels
- * 2. Evaluating `ONLINE -> OFFLINE` transitions & upcoming VPS renewals
+ * 1. Refreshing enabled probe panels (recording rolling 30-day CPU utilization samples)
+ * 2. Evaluating `ONLINE -> OFFLINE` transitions, upcoming VPS renewals, and >=80% cycle traffic alerts
  * 3. Dispatching notifications through [FleetAlertSink]
  */
 class FleetMonitorRunner(

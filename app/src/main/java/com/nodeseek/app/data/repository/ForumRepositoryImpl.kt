@@ -899,6 +899,7 @@ class ForumRepositoryImpl(
         isLocked = isLocked,
         isBookmarked = isBookmarked == true,
         authorLevel = author.level,
+        drumstickCount = openingFloor?.drumstickCount ?: 0,
     )
 
     private fun mergeWithAllCategory(dtos: List<CategoryDto>): List<Category> {

@@ -14,6 +14,7 @@ import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.model.ReactionType
@@ -569,6 +570,92 @@ class RepositoryImplementationsTest {
     }
 
     @Test
+    fun `SettingsRepositoryImpl persists AwayDigest custom duration, trigger mode, and backup round-trip`() = runBlocking {
+        val tempDir = Files.createTempDirectory("settings_away_digest_test").toFile()
+        val dataStoreFile = File(tempDir, "away_digest_settings_test.preferences_pb")
+        val dataStoreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope1 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope2 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dataStore = PreferenceDataStoreFactory.create(
+                scope = dataStoreScope,
+                produceFile = { dataStoreFile },
+            )
+            val writerRepo = SettingsRepositoryImpl(
+                dataStore = dataStore,
+                externalScope = repoScope1,
+            )
+            assertEquals(true, writerRepo.settings.value.awayDigestEnabled)
+            assertEquals(AwayDigestTriggerMode.CUSTOM_DURATION, writerRepo.settings.value.awayDigestTriggerMode)
+            assertEquals(60, writerRepo.settings.value.awayDigestThresholdMinutes)
+
+            writerRepo.setAwayDigestTriggerMode(AwayDigestTriggerMode.DURATION_OR_REOPEN)
+            writerRepo.setAwayDigestThresholdMinutes(90)
+            writerRepo.setAwayDigestEnabled(false)
+
+            val updated = withTimeout(5_000L) {
+                writerRepo.settings.first {
+                    !it.awayDigestEnabled &&
+                        it.awayDigestTriggerMode == AwayDigestTriggerMode.DURATION_OR_REOPEN &&
+                        it.awayDigestThresholdMinutes == 90
+                }
+            }
+            assertEquals(false, updated.awayDigestEnabled)
+            assertEquals(AwayDigestTriggerMode.DURATION_OR_REOPEN, updated.awayDigestTriggerMode)
+            assertEquals(90, updated.awayDigestThresholdMinutes)
+
+            // Verify clamping of out-of-range custom minutes
+            writerRepo.setAwayDigestThresholdMinutes(1)
+            val clampedMin = withTimeout(5_000L) {
+                writerRepo.settings.first { it.awayDigestThresholdMinutes == AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES }
+            }
+            assertEquals(5, clampedMin.awayDigestThresholdMinutes)
+
+            writerRepo.setAwayDigestThresholdMinutes(99_999)
+            val clampedMax = withTimeout(5_000L) {
+                writerRepo.settings.first { it.awayDigestThresholdMinutes == AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES }
+            }
+            assertEquals(4320, clampedMax.awayDigestThresholdMinutes)
+
+            writerRepo.setAwayDigestThresholdMinutes(270)
+            writerRepo.setAwayDigestEnabled(true)
+            writerRepo.setAwayDigestTriggerMode(AwayDigestTriggerMode.ON_APP_REOPEN)
+            withTimeout(5_000L) {
+                writerRepo.settings.first {
+                    it.awayDigestEnabled &&
+                        it.awayDigestTriggerMode == AwayDigestTriggerMode.ON_APP_REOPEN &&
+                        it.awayDigestThresholdMinutes == 270
+                }
+            }
+
+            // Rebind fresh reader repo over persisted DataStore
+            val readerRepo = SettingsRepositoryImpl(
+                dataStore = dataStore,
+                externalScope = repoScope2,
+            )
+            val reloaded = withTimeout(5_000L) {
+                readerRepo.settings.first {
+                    it.awayDigestTriggerMode == AwayDigestTriggerMode.ON_APP_REOPEN &&
+                        it.awayDigestThresholdMinutes == 270
+                }
+            }
+            assertTrue(reloaded.awayDigestEnabled)
+            assertEquals(AwayDigestTriggerMode.ON_APP_REOPEN, reloaded.awayDigestTriggerMode)
+            assertEquals(270, reloaded.awayDigestThresholdMinutes)
+
+            val backupDto = readerRepo.exportSettingsForBackup(includeApiKeys = false)
+            assertEquals(true, backupDto.awayDigestEnabled)
+            assertEquals(AwayDigestTriggerMode.ON_APP_REOPEN, backupDto.awayDigestTriggerMode)
+            assertEquals(270, backupDto.awayDigestThresholdMinutes)
+        } finally {
+            repoScope1.cancel()
+            repoScope2.cancel()
+            dataStoreScope.cancel()
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `signOut clears local session cookies and state even when server returns 403 and signOutLocalOnly skips network`() = runTest {
         val baseUrl = server.url("/")
         cookieBridge.saveFromResponse(
@@ -716,6 +803,20 @@ internal class FakeSettingsRepository : SettingsRepository {
     override suspend fun setIgnoredUpdateTag(tag: String) {
         _settings.value = _settings.value.copy(ignoredUpdateTag = tag.trim())
     }
+    override suspend fun setAwayDigestEnabled(enabled: Boolean) {
+        _settings.value = _settings.value.copy(awayDigestEnabled = enabled)
+    }
+    override suspend fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {
+        _settings.value = _settings.value.copy(awayDigestTriggerMode = mode)
+    }
+    override suspend fun setAwayDigestThresholdMinutes(minutes: Int) {
+        _settings.value = _settings.value.copy(
+            awayDigestThresholdMinutes = minutes.coerceIn(
+                AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+                AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+            ),
+        )
+    }
     override suspend fun addRecentSearchQuery(query: String) {
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return
@@ -745,6 +846,9 @@ internal class FakeSettingsRepository : SettingsRepository {
             autoCheckUpdates = cur.autoCheckUpdates,
             includePrereleaseUpdates = cur.includePrereleaseUpdates,
             ignoredUpdateTag = cur.ignoredUpdateTag,
+            awayDigestEnabled = cur.awayDigestEnabled,
+            awayDigestTriggerMode = cur.awayDigestTriggerMode,
+            awayDigestThresholdMinutes = cur.awayDigestThresholdMinutes,
             recentSearchQueries = _recentSearchQueries.value,
         )
     }
@@ -779,6 +883,12 @@ internal class FakeSettingsRepository : SettingsRepository {
             autoCheckUpdates = backup.autoCheckUpdates,
             includePrereleaseUpdates = backup.includePrereleaseUpdates,
             ignoredUpdateTag = ignored,
+            awayDigestEnabled = backup.awayDigestEnabled,
+            awayDigestTriggerMode = backup.awayDigestTriggerMode,
+            awayDigestThresholdMinutes = backup.awayDigestThresholdMinutes.coerceIn(
+                AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+                AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+            ),
         )
         _recentSearchQueries.value = (
             if (merge) backup.recentSearchQueries + _recentSearchQueries.value else backup.recentSearchQueries

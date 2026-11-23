@@ -177,7 +177,7 @@ fun FeatureHubScreen(
             subtitle = "社区抽奖与福利专题聚合",
             icon = Icons.Rounded.Celebration,
             statusText = when {
-                resolvedTelemetry.ongoingActivityCount > 0 -> "${resolvedTelemetry.ongoingActivityCount} 场进行中"
+                resolvedTelemetry.ongoingActivityCount > 0 -> "${resolvedTelemetry.ongoingActivityCount} 场抽奖中"
                 resolvedTelemetry.totalActivityCount > 0 -> "${resolvedTelemetry.totalActivityCount} 场活动"
                 else -> "实时聚合"
             },

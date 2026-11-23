@@ -51,6 +51,7 @@ data class FeedTopicDto(
     val pinned: Boolean,
     val requiredRank: Int? = null,
     val excerpt: String? = null,
+    val likes: Int = 0,
 )
 
 data class ParsedFeedPageDto(
@@ -181,6 +182,7 @@ object NodeSeekHtmlParser {
                         activityDate = topic.lastCommentDate,
                         pinned = true,
                         requiredRank = topic.rank?.takeIf { it > 0 },
+                        likes = topic.likeCount,
                     )
                 }
             }
@@ -226,6 +228,10 @@ object NodeSeekHtmlParser {
 
             val views = parseCount(item.selectFirst(".info-views span")?.text())
             val replies = parseCount(item.selectFirst(".info-comments-count span")?.text())
+            val likes = parseCount(
+                item.selectFirst(".info-likes span, .info-likes-count span, .info-drumsticks span")?.text()
+                    ?: item.attr("data-likes").takeIf { it.isNotBlank() },
+            )
             val activityDate = item.selectFirst("time")?.attr("datetime")?.trim().orEmpty()
             val isPinned = item.selectFirst("[title=置顶]") != null
 
@@ -242,6 +248,7 @@ object NodeSeekHtmlParser {
                 activityDate = activityDate,
                 pinned = isPinned,
                 requiredRank = requiredRank,
+                likes = likes,
             )
         }
 

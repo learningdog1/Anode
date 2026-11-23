@@ -250,7 +250,7 @@ class FleetWorkScheduler internal constructor(
             panels: List<ProbePanelConfig>,
             assets: List<VpsAssetRecord>,
         ): Boolean =
-            panels.any { it.enabled && it.notifyOnOffline } ||
+            panels.any { it.enabled } ||
                 assets.any { it.remindDaysBeforeExpiry > 0 }
 
         fun shouldSchedule(

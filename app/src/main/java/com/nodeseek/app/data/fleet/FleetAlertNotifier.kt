@@ -17,16 +17,19 @@ import com.nodeseek.app.domain.fleet.FleetAlertTransition
 import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
+import com.nodeseek.app.domain.fleet.formatBytesBinary
 import java.math.BigDecimal
+import java.util.Locale
 
 /**
- * Abstraction for dispatching server offline, recovery, and VPS renewal reminder alerts.
+ * Abstraction for dispatching server offline, recovery, VPS renewal reminder, and >=80% traffic alerts.
  */
 interface FleetAlertSink {
     fun ensureChannels()
     fun notifyServerOffline(panelName: String, server: ProbeServerSnapshot)
     fun notifyServerRecovered(panelName: String, server: ProbeServerSnapshot)
     fun notifyRenewalReminder(asset: VpsAssetRecord, daysRemaining: Long, renewalCny: BigDecimal)
+    fun notifyTrafficWarning(alert: FleetAlertTransition.TrafficThresholdReached) = Unit
 
     fun dispatchReport(report: FleetMonitorCheckReport) {
         report.offlineAlerts.forEach { alert ->
@@ -37,6 +40,9 @@ interface FleetAlertSink {
         }
         report.renewalReminders.forEach { reminder ->
             notifyRenewalReminder(reminder.asset, reminder.daysRemaining, reminder.renewalCny)
+        }
+        report.trafficAlerts.forEach { alert ->
+            notifyTrafficWarning(alert)
         }
     }
 }
@@ -68,6 +74,13 @@ open class FleetAlertNotifier(
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
                 description = "当资产账本中的服务器临近到期日时发出续费提醒"
+            },
+            NotificationChannel(
+                CHANNEL_TRAFFIC_WARNING,
+                "服务器流量预警",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "当服务器周期流量使用达到 80% 时发出预警与耗尽预测"
             },
         )
         manager.createNotificationChannels(channels)
@@ -165,6 +178,31 @@ open class FleetAlertNotifier(
         notifySafely(notificationId, notification)
     }
 
+    override fun notifyTrafficWarning(alert: FleetAlertTransition.TrafficThresholdReached) {
+        if (!canPostNotification()) return
+        ensureChannels()
+
+        val (title, summary, bigBody) = formatTrafficWarningCopy(alert)
+        val notificationId = notificationIdForKey(
+            "traffic:${alert.server.probeKey}:${alert.cycleStartDateIso}",
+            BASE_ID_TRAFFIC,
+        )
+        val targetTab = if (alert.linkedAsset != null) EXTRA_TAB_ASSETS else EXTRA_TAB_PROBES
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_TRAFFIC_WARNING)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(summary)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigBody))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setAutoCancel(true)
+            .setContentIntent(createOpenFleetPendingIntent(notificationId, targetTab))
+            .build()
+
+        notifySafely(notificationId, notification)
+    }
+
     private fun createOpenFleetPendingIntent(requestCode: Int, targetTab: String): PendingIntent {
         val intent = Intent(appContext, MainActivity::class.java).apply {
             action = ACTION_OPEN_FLEET
@@ -207,6 +245,7 @@ open class FleetAlertNotifier(
     companion object {
         const val CHANNEL_SERVER_OFFLINE = "fleet_server_offline"
         const val CHANNEL_RENEWAL_REMINDER = "fleet_renewal_reminder"
+        const val CHANNEL_TRAFFIC_WARNING = "fleet_traffic_warning"
 
         const val ACTION_OPEN_FLEET = "com.nodeseek.app.action.OPEN_FLEET"
         const val EXTRA_FLEET_TAB = "com.nodeseek.app.extra.FLEET_TAB"
@@ -216,6 +255,35 @@ open class FleetAlertNotifier(
         private const val BASE_ID_OFFLINE = 60_000
         private const val BASE_ID_RECOVERY = 64_000
         private const val BASE_ID_RENEWAL = 68_000
+        private const val BASE_ID_TRAFFIC = 72_000
+
+        internal fun formatTrafficWarningCopy(
+            alert: FleetAlertTransition.TrafficThresholdReached,
+        ): Triple<String, String, String> {
+            val flagPrefix = alert.server.resolvedFlagEmoji.takeIf { it.isNotBlank() }?.let { "$it " }.orEmpty()
+            val displayName = alert.linkedAsset?.nickname?.takeIf { it.isNotBlank() } ?: alert.server.name
+            val pctInt = (alert.usageRatio * 100.0).toInt().coerceAtLeast(80)
+            val title = "流量预警 · $flagPrefix$displayName 已用 ${pctInt}%"
+
+            val usedLabel = formatBytesBinary(alert.usedBytes)
+            val limitLabel = formatBytesBinary(alert.limitBytes)
+            val forecastSuffix = alert.exhaustionForecastText?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+            val summary = "已用 $usedLabel / $limitLabel$forecastSuffix"
+
+            val bigBody = buildString {
+                append("周期流量已用 ")
+                append(usedLabel).append(" / ").append(limitLabel)
+                append(" (").append(String.format(Locale.US, "%.1f%%", alert.usageRatio * 100.0)).append(")")
+                if (!alert.exhaustionForecastText.isNullOrBlank()) {
+                    append("\n").append(alert.exhaustionForecastText)
+                }
+                append("\n下次重置日：").append(alert.nextResetDateIso)
+                if (alert.panelName.isNotBlank()) {
+                    append(" · 面板：").append(alert.panelName)
+                }
+            }
+            return Triple(title, summary, bigBody)
+        }
 
         internal fun notificationIdForKey(key: String, baseOffset: Int): Int {
             val masked = key.hashCode() and 0x00FF_FFFF

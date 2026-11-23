@@ -13,6 +13,7 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +38,7 @@ class SeekMailRepositoryImpl(
     private val settingsRepository: SettingsRepository,
     private val diskCache: SeekMailDiskCache? = null,
     private val externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val vpsMailAutoIngestService: VpsMailAutoIngestService? = null,
 ) : SeekMailRepository {
 
     private val stateMutex = Mutex()
@@ -182,11 +184,13 @@ class SeekMailRepositoryImpl(
             }
 
             val readIds = _locallyReadMailIds.value
-            if (readIds.isEmpty()) {
+            val overlaid = if (readIds.isEmpty()) {
                 page
             } else {
                 page.copy(items = page.items.map { overlayReadState(it, readIds) })
             }
+            notifyAutoIngestSummaries(overlaid.items)
+            overlaid
         }
 
     override suspend fun getUnreadMails(
@@ -203,11 +207,13 @@ class SeekMailRepositoryImpl(
                 cursor = cursor,
             )
             val readIds = _locallyReadMailIds.value
-            if (readIds.isEmpty()) {
+            val overlaid = if (readIds.isEmpty()) {
                 page
             } else {
                 page.copy(items = page.items.map { overlayReadState(it, readIds) })
             }
+            notifyAutoIngestSummaries(overlaid.items)
+            overlaid
         }
 
     override suspend fun getMailDetail(
@@ -220,9 +226,11 @@ class SeekMailRepositoryImpl(
                 val cached = diskCache?.getMailDetail(key, mailId)
                 if (cached != null) {
                     markMailReadLocallyForKey(key, mailId)
-                    return@runMailCatching cached.detail.copy(
+                    val resolvedCached = cached.detail.copy(
                         summary = cached.detail.summary.copy(isRead = true),
                     )
+                    notifyAutoIngestDetail(resolvedCached)
+                    return@runMailCatching resolvedCached
                 }
             }
 
@@ -241,7 +249,9 @@ class SeekMailRepositoryImpl(
             }
 
             markMailReadLocallyForKey(key, mailId)
-            detail.copy(summary = detail.summary.copy(isRead = true))
+            val resolvedDetail = detail.copy(summary = detail.summary.copy(isRead = true))
+            notifyAutoIngestDetail(resolvedDetail)
+            resolvedDetail
         }
 
     override suspend fun getRawMailEml(mailId: Long): Result<String> =
@@ -394,6 +404,29 @@ class SeekMailRepositoryImpl(
 
     private fun overlayReadState(summary: SeekMailSummary, readIds: Set<Long>): SeekMailSummary =
         if (summary.isRead || summary.id !in readIds) summary else summary.copy(isRead = true)
+
+    private suspend fun notifyAutoIngestSummaries(items: List<SeekMailSummary>) {
+        val service = vpsMailAutoIngestService ?: return
+        if (items.isEmpty()) return
+        try {
+            service.processIncomingSummaries(items)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            // Auto-ingest is best-effort and must never fail inbox loading.
+        }
+    }
+
+    private suspend fun notifyAutoIngestDetail(detail: SeekMailDetail) {
+        val service = vpsMailAutoIngestService ?: return
+        try {
+            service.processMailDetail(detail)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            // Auto-ingest is best-effort and must never fail detail loading.
+        }
+    }
 
     private fun shouldFallbackToCache(kind: SeekMailErrorKind): Boolean =
         kind == SeekMailErrorKind.NETWORK ||

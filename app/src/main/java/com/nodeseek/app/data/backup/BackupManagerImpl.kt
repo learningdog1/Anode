@@ -27,6 +27,7 @@ import com.nodeseek.app.domain.filter.ContentBlockRule
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.model.AccountSession
+import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.FloorAuthor
@@ -753,6 +754,10 @@ class BackupManagerImpl(
             nodeImageApiKey = bundle.settings.nodeImageApiKey.trim(),
             seekMailApiKey = bundle.settings.seekMailApiKey.trim(),
             ignoredUpdateTag = bundle.settings.ignoredUpdateTag.trim(),
+            awayDigestThresholdMinutes = bundle.settings.awayDigestThresholdMinutes.coerceIn(
+                AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+                AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+            ),
             recentSearchQueries = bundle.settings.recentSearchQueries
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }

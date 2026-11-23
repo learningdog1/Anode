@@ -4,7 +4,6 @@ import com.nodeseek.app.data.overseas.OverseasApiCrypto
 import com.nodeseek.app.data.overseas.OverseasApiException
 import com.nodeseek.app.data.overseas.OverseasIntelApiClient
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
-import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.domain.overseas.OfferFilterReason
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasOfferFilterConfig
@@ -372,7 +371,6 @@ class OverseasOfferFilterAndResilienceTest {
                 detailCacheFile = File(tempFolder.root, "details.json"),
                 prefsFile = File(tempFolder.root, "prefs.json"),
                 apiClient = client,
-                translator = OverseasTranslator(cacheFile = File(tempFolder.root, "trans.json")),
                 nowMillisProvider = { nowMs.get() },
                 minRefreshCooldownMillis = 8_000L,
                 detailCacheTtlMillis = 15L * 60_000L,
@@ -502,7 +500,6 @@ class OverseasOfferFilterAndResilienceTest {
                 detailCacheFile = File(tempFolder.root, "p_details.json"),
                 prefsFile = File(tempFolder.root, "p_prefs.json"),
                 apiClient = client,
-                translator = OverseasTranslator(cacheFile = File(tempFolder.root, "p_trans.json")),
                 pageSize = 1,
                 nowMillisProvider = { nowMs.get() },
                 minRefreshCooldownMillis = 0L,
@@ -534,6 +531,120 @@ class OverseasOfferFilterAndResilienceTest {
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test
+    fun repositoryCleanlyLoadsAndMigratesLegacyPrefsAndDetailCachesWithRemovedTranslationFields() = runTest {
+        val dir = tempFolder.newFolder("legacy_overseas_migration")
+        val listCacheFile = File(dir, OverseasIntelRepositoryImpl.LIST_CACHE_FILE_NAME)
+        val detailCacheFile = File(dir, OverseasIntelRepositoryImpl.DETAIL_CACHE_FILE_NAME)
+        val newPrefsFile = File(dir, OverseasIntelRepositoryImpl.PREFS_FILE_NAME)
+        val legacyPrefsFile = File(dir, "overseas_translator_prefs.json")
+
+        // Write legacy prefs file containing obsolete translator config + custom filter settings
+        legacyPrefsFile.writeText(
+            """
+            {
+              "engineKindName": "OPENAI_COMPATIBLE",
+              "customEndpointUrl": "https://api.example.com/v1/chat/completions",
+              "customApiKey": "sk-legacy-secret",
+              "customModel": "gpt-4o-mini",
+              "autoTranslateOnRefresh": true,
+              "displayModeName": "BILINGUAL",
+              "filterEnabled": true,
+              "excludeGenericMarketingBuzz": true,
+              "excludeNonServerServices": true,
+              "requireMinimumHostingSignal": true,
+              "blockedMerchants": ["BlockedHost"],
+              "extraBlockedKeywords": ["scamword"]
+            }
+            """.trimIndent(),
+            Charsets.UTF_8,
+        )
+
+        // Write list cache with one allowed and one blocked-merchant offer
+        listCacheFile.writeText(
+            """
+            {
+              "lastSyncedEpochMillis": 1700000000000,
+              "totalCount": 2,
+              "hasMore": false,
+              "currentPage": 1,
+              "offers": [
+                {
+                  "id": "501",
+                  "title": "RackNerd KVM VPS ${'$'}10/yr",
+                  "summary": "Los Angeles KVM plan",
+                  "merchant": "RackNerd",
+                  "sourceLink": "https://lowendtalk.com/discussion/501"
+                },
+                {
+                  "id": "502",
+                  "title": "BlockedHost KVM VPS ${'$'}10/yr",
+                  "summary": "Blocked merchant plan",
+                  "merchant": "BlockedHost",
+                  "sourceLink": "https://lowendtalk.com/discussion/502"
+                }
+              ]
+            }
+            """.trimIndent(),
+            Charsets.UTF_8,
+        )
+
+        // Write legacy detail cache containing removed translatedMarkdown & translationTierName fields
+        detailCacheFile.writeText(
+            """
+            {
+              "details": {
+                "501": {
+                  "id": "501",
+                  "title": "RackNerd 促销详情",
+                  "merchant": "RackNerd",
+                  "sourceLink": "https://lowendtalk.com/discussion/501",
+                  "tgMarkdown": "## RackNerd 促销\n- 1 vCPU / 1GB RAM",
+                  "translatedMarkdown": "旧版遗留译文",
+                  "translationTierName": "CUSTOM_API",
+                  "cachedAtEpochMillis": 1700000000000
+                }
+              },
+              "reposts": {}
+            }
+            """.trimIndent(),
+            Charsets.UTF_8,
+        )
+
+        val offlineClient = OverseasIntelApiClient(
+            baseUrlProvider = { "http://127.0.0.1:1" },
+            masterSecretProvider = { ByteArray(32) { 7 } },
+            httpClient = OkHttpClient(),
+            maxAttempts = 1,
+            sleeper = {},
+        )
+        val repo = OverseasIntelRepositoryImpl(
+            listCacheFile = listCacheFile,
+            detailCacheFile = detailCacheFile,
+            prefsFile = newPrefsFile,
+            apiClient = offlineClient,
+            nowMillisProvider = { 1_700_000_005_000L },
+        )
+
+        val offers = repo.loadFromCache()
+        assertEquals(1, offers.size)
+        assertEquals("501", offers.first().id)
+        assertEquals(setOf("BlockedHost"), repo.snapshot.value.filterConfig.blockedMerchants)
+        assertEquals(setOf("scamword"), repo.snapshot.value.filterConfig.extraBlockedKeywords)
+
+        // Legacy translator prefs file migrated to clean filter prefs file and removed
+        assertTrue(newPrefsFile.exists())
+        assertFalse(legacyPrefsFile.exists())
+        val migratedText = newPrefsFile.readText(Charsets.UTF_8)
+        assertFalse(migratedText.contains("customApiKey"))
+        assertFalse(migratedText.contains("engineKindName"))
+
+        // Legacy detail cache with removed translation fields deserializes cleanly
+        val detail = repo.getOfferDetail("501", forceRefresh = false).getOrThrow()
+        assertEquals("RackNerd 促销详情", detail.title)
+        assertTrue(detail.tgMarkdown.contains("1 vCPU"))
     }
 
     private fun offer(

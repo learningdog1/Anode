@@ -30,7 +30,7 @@ enum class ActivityStatusFilter(
     ENDED("已结束"),
     ;
 
-    fun matches(status: ActivityTimeStatus): Boolean =
+    fun matches(status: ActivityTimeStatus?): Boolean =
         when (this) {
             ALL -> true
             ONGOING -> status == ActivityTimeStatus.ONGOING
@@ -228,7 +228,7 @@ class ActivityViewModel(
             snap.activities
         } else {
             snap.activities.filter { item ->
-                controls.selectedFilter.matches(item.resolveLiveStatus(now))
+                controls.selectedFilter.matches(item.resolveLotteryStatusOrNull(now))
             }
         }
         val initialLoading = (!controls.hasBootstrapped || snap.isRefreshing) &&

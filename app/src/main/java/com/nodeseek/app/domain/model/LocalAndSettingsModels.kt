@@ -10,6 +10,17 @@ enum class ThemeMode {
 }
 
 @Serializable
+enum class AwayDigestTriggerMode {
+    CUSTOM_DURATION,
+    ON_APP_REOPEN,
+    DURATION_OR_REOPEN,
+    ;
+
+    val usesDurationThreshold: Boolean
+        get() = this == CUSTOM_DURATION || this == DURATION_OR_REOPEN
+}
+
+@Serializable
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val purePitchAmoled: Boolean = false,
@@ -24,9 +35,26 @@ data class AppSettings(
     val autoCheckUpdates: Boolean = true,
     val includePrereleaseUpdates: Boolean = false,
     val ignoredUpdateTag: String = "",
+    val awayDigestEnabled: Boolean = true,
+    val awayDigestTriggerMode: AwayDigestTriggerMode = AwayDigestTriggerMode.CUSTOM_DURATION,
+    val awayDigestThresholdMinutes: Int = DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES,
 ) {
     companion object {
         const val DEFAULT_FONT_SCALE: Float = 0.90f
+        const val DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 60
+        const val MIN_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 5
+        const val MAX_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 72 * 60
+
+        val PRESET_AWAY_DIGEST_MINUTES: List<Int> = listOf(
+            30,
+            60,
+            120,
+            240,
+            360,
+            540,
+            720,
+            1440,
+        )
 
         val DEFAULT_PINNED_CATEGORY_SLUGS: Set<String> = linkedSetOf(
             "daily",

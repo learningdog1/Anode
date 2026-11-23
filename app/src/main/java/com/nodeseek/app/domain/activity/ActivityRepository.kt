@@ -116,6 +116,15 @@ data class ForumWatchActivityItem(
     val createdAtEpochMillis: Long = 0L,
     val updatedAtEpochMillis: Long = 0L,
 ) {
+    val isLottery: Boolean
+        get() = kind == ActivityKind.LOTTERY
+
+    /**
+     * 仅针对「抽奖」(`LOTTERY`) 返回时间状态（进行中 / 即将开始 / 已结束）；非抽奖类活动返回 `null`。
+     */
+    fun resolveLotteryStatusOrNull(nowEpochMillis: Long = System.currentTimeMillis()): ActivityTimeStatus? =
+        if (isLottery) resolveLiveStatus(nowEpochMillis) else null
+
     /**
      * 基于当前设备时钟动态判定活动时间状态，使本地缓存条目在跨过开奖/截止时刻后即时变为「已结束」；
      * 同时尊重服务端 `forceEnded` / 锁帖 / 人工结案已标记的 `ENDED` 终态，绝不反向复活为进行中。
@@ -198,10 +207,11 @@ data class ActivityFeedSnapshot(
         var upcoming = 0
         var ended = 0
         for (item in activities) {
-            when (item.resolveLiveStatus(nowEpochMillis)) {
+            when (item.resolveLotteryStatusOrNull(nowEpochMillis)) {
                 ActivityTimeStatus.ONGOING -> ongoing++
                 ActivityTimeStatus.UPCOMING -> upcoming++
                 ActivityTimeStatus.ENDED -> ended++
+                null -> Unit
             }
         }
         return ActivityCounts(

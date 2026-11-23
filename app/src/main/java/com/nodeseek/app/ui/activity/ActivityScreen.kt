@@ -34,16 +34,13 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.CardGiftcard
 import androidx.compose.material.icons.rounded.Celebration
 import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.HowToVote
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -64,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +78,7 @@ import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityItem
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
 import com.nodeseek.app.ui.components.MarkdownRenderer
+import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
@@ -95,9 +94,6 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 
 /**
  * 「活动」页面：接入 ForumWatch 社区活动与福利聚合 API，支持状态筛选、下拉刷新、
@@ -218,12 +214,12 @@ fun ActivityScreen(
                         .fillMaxSize()
                         .navigationBarsPadding(),
                     contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 12.dp,
-                        bottom = 28.dp,
+                        start = 12.dp,
+                        end = 12.dp,
+                        top = 8.dp,
+                        bottom = 20.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     item(key = "activity_notification_switch") {
                         PulseStaggeredEntrance(index = 0) {
@@ -355,10 +351,13 @@ private fun ActivityTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = if (counts.all > 0) {
-                    "共 ${counts.all} 场社区活动 · ${counts.ongoing} 场进行中"
-                } else {
-                    "社区抽奖、福利赠送与限时活动聚合"
+                text = when {
+                    counts.all > 0 && counts.ongoing > 0 ->
+                        "共 ${counts.all} 场活动 · ${counts.ongoing} 场抽奖进行中"
+                    counts.all > 0 ->
+                        "共 ${counts.all} 场社区活动"
+                    else ->
+                        "社区抽奖、福利赠送与限时活动聚合"
                 },
                 style = MaterialTheme.typography.bodySmall.withTabularNumbers(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -394,11 +393,12 @@ private fun ActivityStatusFilterRow(
     counts: ActivityCounts,
     onSelectFilter: (ActivityStatusFilter) -> Unit,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         ActivityStatusFilter.entries.forEach { filter ->
             val count = when (filter) {
@@ -408,18 +408,43 @@ private fun ActivityStatusFilterRow(
                 ActivityStatusFilter.ENDED -> counts.ended
             }
             val selected = selectedFilter == filter
-            FilterChip(
-                selected = selected,
-                onClick = { onSelectFilter(filter) },
-                shape = CircleShape,
-                label = {
-                    Text(
-                        text = if (count > 0) "${filter.label} $count" else filter.label,
-                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            val bgColor = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerLow
+            }
+            val fgColor = if (selected) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            val borderColor = if (selected) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            } else {
+                ext.cardBorder
+            }
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(bgColor)
+                    .border(0.75.dp, borderColor, CircleShape)
+                    .pulseBouncyClickable(
+                        pressedScale = NodePulseMotion.chipPressScale,
+                        role = Role.Tab,
+                        onClick = { onSelectFilter(filter) },
                     )
-                },
-            )
+                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (count > 0) "${filter.label} $count" else filter.label,
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    color = fgColor,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
         }
     }
 }
@@ -432,9 +457,9 @@ private fun ActivityInlineErrorBanner(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -442,7 +467,7 @@ private fun ActivityInlineErrorBanner(
             imageVector = Icons.Rounded.WarningAmber,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onErrorContainer,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(16.dp),
         )
         Text(
             text = message,
@@ -455,7 +480,7 @@ private fun ActivityInlineErrorBanner(
         FilledTonalButton(
             onClick = onRetry,
             shape = CircleShape,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
         ) {
             Text(
                 text = "重试",
@@ -472,23 +497,21 @@ private fun ActivityLoadingSkeletonCard() {
         modifier = Modifier
             .fillMaxWidth()
             .pulseCard(
-                shape = PulseArchitecturalShapes.ElevatedTile,
+                shape = PulseArchitecturalShapes.EditorialCard,
                 elevation = PulseElevation.Card,
             )
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PulseShimmerBox(modifier = Modifier.size(width = 64.dp, height = 22.dp), shape = CircleShape)
-            PulseShimmerBox(modifier = Modifier.size(width = 56.dp, height = 22.dp), shape = CircleShape)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            PulseShimmerBox(modifier = Modifier.size(width = 48.dp, height = 18.dp), shape = CircleShape)
+            PulseShimmerBox(modifier = Modifier.size(width = 44.dp, height = 18.dp), shape = CircleShape)
         }
-        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.88f).height(20.dp))
-        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.68f).height(16.dp))
-        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.45f).height(14.dp))
+        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.88f).height(16.dp))
+        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.55f).height(13.dp))
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ActivityFeedCard(
     item: ForumWatchActivityItem,
@@ -498,20 +521,38 @@ private fun ActivityFeedCard(
     onOpenLuckyUrl: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    val liveStatus = item.resolveLiveStatus(nowEpochMillis)
-    val isEnded = liveStatus == ActivityTimeStatus.ENDED
+    val lotteryStatus = item.resolveLotteryStatusOrNull(nowEpochMillis)
+    val isEnded = lotteryStatus == ActivityTimeStatus.ENDED
     val accentColor = when {
         item.pinned -> MaterialTheme.colorScheme.primary
-        liveStatus == ActivityTimeStatus.ONGOING -> MaterialTheme.colorScheme.primary
-        liveStatus == ActivityTimeStatus.UPCOMING -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.outlineVariant
+        lotteryStatus == ActivityTimeStatus.ONGOING -> MaterialTheme.colorScheme.primary
+        lotteryStatus == ActivityTimeStatus.UPCOMING -> MaterialTheme.colorScheme.tertiary
+        lotteryStatus == ActivityTimeStatus.ENDED -> MaterialTheme.colorScheme.outlineVariant
+        else -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.65f)
+    }
+
+    val organizerLabel = when {
+        item.organizer.isNotBlank() -> "@${item.organizer}"
+        item.sourceId.isNotBlank() -> item.sourceId
+        else -> ""
+    }
+
+    val inlineMetaLine = buildString {
+        item.prize?.takeIf { it.isNotBlank() }?.let { append("奖品：$it") }
+        item.drawFloor?.takeIf { it > 0 }?.let { floor ->
+            if (isNotEmpty()) append(" · ")
+            append("开奖 #$floor")
+        }
+        if (isEmpty()) {
+            item.participation?.takeIf { it.isNotBlank() }?.let { append(it) }
+        }
     }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .pulseCard(
-                shape = PulseArchitecturalShapes.ElevatedTile,
+                shape = PulseArchitecturalShapes.EditorialCard,
                 elevation = if (item.pinned) PulseElevation.CardElevated else PulseElevation.Card,
                 accentColor = accentColor,
             )
@@ -520,42 +561,68 @@ private fun ActivityFeedCard(
                 onClickLabel = "打开活动：${item.title}",
                 onClick = onOpenPrimaryTarget,
             )
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+        // Row 1: Compact tags on left + organizer on right
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            if (item.pinned) {
-                PulseAccentPill(
-                    text = "置顶",
-                    icon = Icons.Rounded.PushPin,
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
+            Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (item.pinned) {
+                    ActivityCompactTag(
+                        text = "置顶",
+                        icon = Icons.Rounded.PushPin,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+                if (lotteryStatus != null) {
+                    ActivityStatusBadge(status = lotteryStatus, compact = true)
+                }
+                ActivityCompactTag(
+                    text = item.kind.displayLabel,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
+                if (item.category.isNotBlank()) {
+                    ActivityCompactTag(
+                        text = item.category,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-            ActivityStatusBadge(status = liveStatus)
-            PulseAccentPill(
-                text = item.kind.displayLabel,
-                containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-            if (item.category.isNotBlank()) {
-                PulseAccentPill(
-                    text = item.category,
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+
+            if (organizerLabel.isNotEmpty()) {
+                Text(
+                    text = organizerLabel,
+                    style = NodePulseThemeTokens.extraTypography.microLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .widthIn(max = 120.dp),
                 )
             }
         }
 
+        // Row 2: Title
         Text(
             text = item.title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = if (isEnded) {
-                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.70f)
             } else {
                 MaterialTheme.colorScheme.onSurface
             },
@@ -563,180 +630,164 @@ private fun ActivityFeedCard(
             overflow = TextOverflow.Ellipsis,
         )
 
+        // Row 3: Compact 1-line summary
         if (item.summary.isNotBlank()) {
             Text(
                 text = item.summary,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 3,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
 
-        val hasStructuredMeta = !item.prize.isNullOrBlank() ||
-            !item.participation.isNullOrBlank() ||
-            item.drawFloor != null ||
-            item.startsAtEpochMillis != null ||
-            item.endsAtEpochMillis != null
-
-        if (hasStructuredMeta) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                item.prize?.takeIf { it.isNotBlank() }?.let { prize ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.CardGiftcard,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Text(
-                            text = "奖品：$prize",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-
-                val participationLine = buildString {
-                    item.participation?.takeIf { it.isNotBlank() }?.let { append(it) }
-                    item.drawFloor?.takeIf { it > 0 }?.let { floor ->
-                        if (isNotEmpty()) append(" · ")
-                        append("开奖楼层 #$floor")
-                    }
-                }
-                if (participationLine.isNotEmpty()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.HowToVote,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Text(
-                            text = participationLine,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-
-                formatActivityTimingLabel(item, nowEpochMillis)?.let { timeLabel ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Schedule,
-                            contentDescription = null,
-                            tint = if (liveStatus == ActivityTimeStatus.ONGOING) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Text(
-                            text = timeLabel,
-                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                            color = if (liveStatus == ActivityTimeStatus.ONGOING) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
-        }
-
-        PulseGradientDivider()
-
+        // Row 4: Inline prize/participation meta + compact action chips
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            val organizerLabel = buildString {
-                if (item.organizer.isNotBlank()) {
-                    append("@")
-                    append(item.organizer)
-                } else if (item.sourceId.isNotBlank()) {
-                    append(item.sourceId)
-                } else {
-                    append("社区活动")
+            if (inlineMetaLine.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CardGiftcard,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        text = inlineMetaLine,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
             }
-            Text(
-                text = organizerLabel,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (onOpenLuckyUrl != null) {
-                    OutlinedButton(
+                    ActivityCompactActionChip(
+                        text = "开奖页",
+                        trailingIcon = Icons.AutoMirrored.Rounded.OpenInNew,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                        outlined = true,
                         onClick = onOpenLuckyUrl,
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    ) {
-                        Text(
-                            text = "开奖页",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                            contentDescription = null,
-                            modifier = Modifier.size(13.dp),
-                        )
-                    }
+                    )
                 }
-
-                FilledTonalButton(
+                ActivityCompactActionChip(
+                    text = "详情",
+                    leadingIcon = Icons.Rounded.Description,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    outlined = false,
                     onClick = onOpenDetail,
-                    shape = CircleShape,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Description,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "详情",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun ActivityCompactTag(
+    text: String,
+    containerColor: Color,
+    contentColor: Color,
+    icon: ImageVector? = null,
+) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(containerColor)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(11.dp),
+            )
+        }
+        Text(
+            text = text,
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            fontWeight = FontWeight.SemiBold,
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+private fun ActivityCompactActionChip(
+    text: String,
+    containerColor: Color,
+    contentColor: Color,
+    outlined: Boolean,
+    onClick: () -> Unit,
+    leadingIcon: ImageVector? = null,
+    trailingIcon: ImageVector? = null,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(containerColor)
+            .then(
+                if (outlined) {
+                    Modifier.border(0.75.dp, ext.cardBorder, CircleShape)
+                } else {
+                    Modifier
+                },
+            )
+            .pulseBouncyClickable(
+                pressedScale = NodePulseMotion.chipPressScale,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        if (leadingIcon != null) {
+            Icon(
+                imageVector = leadingIcon,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(12.dp),
+            )
+        }
+        Text(
+            text = text,
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            fontWeight = FontWeight.SemiBold,
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false,
+        )
+        if (trailingIcon != null) {
+            Icon(
+                imageVector = trailingIcon,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(11.dp),
+            )
         }
     }
 }
@@ -744,6 +795,7 @@ private fun ActivityFeedCard(
 @Composable
 private fun ActivityStatusBadge(
     status: ActivityTimeStatus,
+    compact: Boolean = false,
 ) {
     val (bg, fg) = when (status) {
         ActivityTimeStatus.ONGOING ->
@@ -753,11 +805,19 @@ private fun ActivityStatusBadge(
         ActivityTimeStatus.ENDED ->
             MaterialTheme.colorScheme.surfaceContainerHighest to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    PulseAccentPill(
-        text = status.displayLabel,
-        containerColor = bg,
-        contentColor = fg,
-    )
+    if (compact) {
+        ActivityCompactTag(
+            text = status.displayLabel,
+            containerColor = bg,
+            contentColor = fg,
+        )
+    } else {
+        PulseAccentPill(
+            text = status.displayLabel,
+            containerColor = bg,
+            contentColor = fg,
+        )
+    }
 }
 
 @Composable
@@ -873,7 +933,7 @@ private fun ActivityDetailModalSheet(
 ) {
     val modalState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val item = sheetState.detail?.item ?: sheetState.item
-    val liveStatus = item.resolveLiveStatus(nowEpochMillis)
+    val lotteryStatus = item.resolveLotteryStatusOrNull(nowEpochMillis)
     val markdownContent = sheetState.detail?.bodyMarkdown?.takeIf { it.isNotBlank() }
         ?: item.summary
 
@@ -894,7 +954,9 @@ private fun ActivityDetailModalSheet(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                ActivityStatusBadge(status = liveStatus)
+                if (lotteryStatus != null) {
+                    ActivityStatusBadge(status = lotteryStatus)
+                }
                 PulseAccentPill(
                     text = item.kind.displayLabel,
                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -915,14 +977,6 @@ private fun ActivityDetailModalSheet(
                 fontWeight = FontWeight.ExtraBold,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-
-            formatActivityTimingLabel(item, nowEpochMillis)?.let { timing ->
-                Text(
-                    text = timing,
-                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
 
             PulseGradientDivider()
 
@@ -1036,67 +1090,6 @@ private fun ActivityDetailModalSheet(
         }
     }
 }
-
-private val ACTIVITY_TIME_FORMATTER: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("MM-dd HH:mm")
-
-internal fun formatActivityTimingLabel(
-    item: ForumWatchActivityItem,
-    nowEpochMillis: Long,
-): String? {
-    val startsAt = item.startsAtEpochMillis?.takeIf { it > 0L }
-    val endsAt = item.endsAtEpochMillis?.takeIf { it > 0L }
-    val liveStatus = item.resolveLiveStatus(nowEpochMillis)
-
-    return when (liveStatus) {
-        ActivityTimeStatus.UPCOMING -> {
-            if (startsAt != null) {
-                val delta = (startsAt - nowEpochMillis).coerceAtLeast(0L)
-                "距开始 ${formatRelativeDurationCompact(delta)}（${formatLocalMonthDayTime(startsAt)}）"
-            } else {
-                null
-            }
-        }
-
-        ActivityTimeStatus.ONGOING -> {
-            if (endsAt != null && endsAt > nowEpochMillis) {
-                val delta = endsAt - nowEpochMillis
-                "距截止 ${formatRelativeDurationCompact(delta)}（${formatLocalMonthDayTime(endsAt)}）"
-            } else if (startsAt != null) {
-                "开始于 ${formatLocalMonthDayTime(startsAt)}"
-            } else {
-                null
-            }
-        }
-
-        ActivityTimeStatus.ENDED -> {
-            if (endsAt != null && endsAt <= nowEpochMillis) {
-                "已于 ${formatLocalMonthDayTime(endsAt)} 结束"
-            } else {
-                "活动已结束"
-            }
-        }
-    }
-}
-
-private fun formatRelativeDurationCompact(durationMs: Long): String {
-    val totalMinutes = (durationMs / 60_000L).coerceAtLeast(1L)
-    val days = totalMinutes / (60L * 24L)
-    val hours = (totalMinutes % (60L * 24L)) / 60L
-    val minutes = totalMinutes % 60L
-    return when {
-        days > 0L -> "${days}天${hours}小时"
-        hours > 0L -> "${hours}小时${minutes}分"
-        else -> "${minutes}分钟"
-    }
-}
-
-private fun formatLocalMonthDayTime(epochMillis: Long): String =
-    runCatching {
-        Instant.ofEpochMilli(epochMillis)
-            .atZone(ZoneId.systemDefault())
-            .format(ACTIVITY_TIME_FORMATTER)
-    }.getOrDefault("")
 
 @Preview(showBackground = true, widthDp = 412, heightDp = 840)
 @Composable

@@ -7,10 +7,12 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -165,6 +167,28 @@ class SettingsRepositoryImpl(
         }
     }
 
+    override suspend fun setAwayDigestEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[Keys.AWAY_DIGEST_ENABLED] = enabled
+        }
+    }
+
+    override suspend fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {
+        dataStore.edit { prefs ->
+            prefs[Keys.AWAY_DIGEST_TRIGGER_MODE] = mode.name
+        }
+    }
+
+    override suspend fun setAwayDigestThresholdMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(
+            AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+            AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+        )
+        dataStore.edit { prefs ->
+            prefs[Keys.AWAY_DIGEST_THRESHOLD_MINUTES] = clamped
+        }
+    }
+
     override suspend fun addRecentSearchQuery(query: String) {
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return
@@ -214,6 +238,9 @@ class SettingsRepositoryImpl(
             autoCheckUpdates = current.autoCheckUpdates,
             includePrereleaseUpdates = current.includePrereleaseUpdates,
             ignoredUpdateTag = current.ignoredUpdateTag,
+            awayDigestEnabled = current.awayDigestEnabled,
+            awayDigestTriggerMode = current.awayDigestTriggerMode,
+            awayDigestThresholdMinutes = current.awayDigestThresholdMinutes,
             recentSearchQueries = queries,
         )
     }
@@ -278,6 +305,12 @@ class SettingsRepositoryImpl(
             prefs[Keys.AUTO_CHECK_UPDATES] = backup.autoCheckUpdates
             prefs[Keys.INCLUDE_PRERELEASE_UPDATES] = backup.includePrereleaseUpdates
             prefs[Keys.IGNORED_UPDATE_TAG] = resolvedIgnoredTag
+            prefs[Keys.AWAY_DIGEST_ENABLED] = backup.awayDigestEnabled
+            prefs[Keys.AWAY_DIGEST_TRIGGER_MODE] = backup.awayDigestTriggerMode.name
+            prefs[Keys.AWAY_DIGEST_THRESHOLD_MINUTES] = backup.awayDigestThresholdMinutes.coerceIn(
+                AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+                AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+            )
             if (resolvedQueries.isEmpty()) {
                 prefs.remove(Keys.RECENT_SEARCH_QUERIES)
             } else {
@@ -296,6 +329,10 @@ class SettingsRepositoryImpl(
             runCatching { ThemeMode.valueOf(raw) }.getOrNull()
         } ?: ThemeMode.SYSTEM
 
+        val awayTriggerMode = this[Keys.AWAY_DIGEST_TRIGGER_MODE]?.let { raw ->
+            runCatching { AwayDigestTriggerMode.valueOf(raw) }.getOrNull()
+        } ?: AwayDigestTriggerMode.CUSTOM_DURATION
+
         return AppSettings(
             themeMode = mode,
             purePitchAmoled = this[Keys.PURE_PITCH_AMOLED] ?: false,
@@ -310,6 +347,14 @@ class SettingsRepositoryImpl(
             autoCheckUpdates = this[Keys.AUTO_CHECK_UPDATES] ?: true,
             includePrereleaseUpdates = this[Keys.INCLUDE_PRERELEASE_UPDATES] ?: false,
             ignoredUpdateTag = this[Keys.IGNORED_UPDATE_TAG] ?: "",
+            awayDigestEnabled = this[Keys.AWAY_DIGEST_ENABLED] ?: true,
+            awayDigestTriggerMode = awayTriggerMode,
+            awayDigestThresholdMinutes = (
+                this[Keys.AWAY_DIGEST_THRESHOLD_MINUTES] ?: AppSettings.DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES
+                ).coerceIn(
+                AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+                AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+            ),
         )
     }
 
@@ -334,6 +379,9 @@ class SettingsRepositoryImpl(
         val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
         val INCLUDE_PRERELEASE_UPDATES = booleanPreferencesKey("include_prerelease_updates")
         val IGNORED_UPDATE_TAG = stringPreferencesKey("ignored_update_tag")
+        val AWAY_DIGEST_ENABLED = booleanPreferencesKey("away_digest_enabled")
+        val AWAY_DIGEST_TRIGGER_MODE = stringPreferencesKey("away_digest_trigger_mode")
+        val AWAY_DIGEST_THRESHOLD_MINUTES = intPreferencesKey("away_digest_threshold_minutes")
         val RECENT_SEARCH_QUERIES = stringPreferencesKey("recent_search_queries")
     }
 

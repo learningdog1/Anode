@@ -24,6 +24,8 @@ interface FleetRepository {
     val panelsFlow: StateFlow<List<ProbePanelConfig>>
     val snapshotsFlow: StateFlow<List<ProbeServerSnapshot>>
     val assetsFlow: StateFlow<List<VpsAssetRecord>>
+    val cpuHistoryByProbeKeyFlow: StateFlow<Map<String, List<ProbeDailyCpuBucket>>>
+        get() = DEFAULT_CPU_HISTORY_FLOW
     val monitorSettingsFlow: StateFlow<FleetMonitorSettings>
     val lastSyncEpochMillisFlow: StateFlow<Long>
     val isRefreshingFlow: StateFlow<Boolean>
@@ -35,6 +37,7 @@ interface FleetRepository {
     suspend fun deletePanel(panelId: String)
     suspend fun testPanelConnection(config: ProbePanelConfig): ProbeConnectivityResult
     suspend fun refreshAllPanels(): FleetRefreshSummary
+    suspend fun refreshAllPanels(silent: Boolean): FleetRefreshSummary = refreshAllPanels()
     suspend fun refreshPanel(panelId: String): Result<List<ProbeServerSnapshot>>
 
     suspend fun upsertAsset(asset: VpsAssetRecord): VpsAssetRecord
@@ -58,5 +61,7 @@ interface FleetRepository {
     companion object {
         private val DEFAULT_PERSISTED_STATE_LOADED_FLOW: StateFlow<Boolean> =
             MutableStateFlow(true).asStateFlow()
+        private val DEFAULT_CPU_HISTORY_FLOW: StateFlow<Map<String, List<ProbeDailyCpuBucket>>> =
+            MutableStateFlow(emptyMap<String, List<ProbeDailyCpuBucket>>()).asStateFlow()
     }
 }

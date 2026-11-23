@@ -53,13 +53,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
 import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.theme.NodePulseTheme
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -74,7 +72,6 @@ import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 
 const val OVERSEAS_MONITOR_TG_CHANNEL_URL = "https://t.me/colmidad_lowendtalk_offer"
 
@@ -534,7 +531,6 @@ private fun buildShowcasePreviewRepository(): OverseasIntelRepository {
         private val _snapshot = MutableStateFlow(
             OverseasIntelSnapshot(
                 offers = sampleOffers,
-                translationConfig = OverseasTranslationConfig(),
                 syncStatus = OverseasSyncStatus(
                     lastSyncedEpochMillis = now - 120_000L,
                     currentPage = 1,
@@ -550,18 +546,8 @@ private fun buildShowcasePreviewRepository(): OverseasIntelRepository {
         override suspend fun loadNextPage(query: String) = Result.success(sampleOffers)
         override suspend fun getOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> =
             Result.failure(UnsupportedOperationException("preview"))
-        override suspend fun translateOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> =
-            Result.failure(UnsupportedOperationException("preview"))
         override suspend fun getRepostContent(offerId: String, forceRefresh: Boolean): Result<OverseasRepostContent> =
             Result.failure(UnsupportedOperationException("preview"))
-        override suspend fun updateTranslationConfig(config: OverseasTranslationConfig) {
-            _snapshot.update { it.copy(translationConfig = config) }
-        }
-        override suspend fun updateDisplayMode(mode: OverseasDisplayMode) {
-            _snapshot.update { it.copy(translationConfig = it.translationConfig.copy(displayMode = mode)) }
-        }
-        override suspend fun testTranslationConfig(config: OverseasTranslationConfig) = Result.success("ok")
-        override suspend fun clearTranslationCache() = Unit
     }
 }
 

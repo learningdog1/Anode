@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 
 package com.nodeseek.app.ui.hub
 
@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,6 +45,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Logout
@@ -59,6 +62,7 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
@@ -82,6 +86,8 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -117,6 +123,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -135,10 +142,12 @@ import coil3.SingletonImageLoader
 import com.nodeseek.app.BuildConfig
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.digest.AwayDurationFormatter
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.RadarPollingSettings
@@ -285,6 +294,30 @@ class SettingsViewModel(
 
     fun setPreferRssFallback(preferRss: Boolean) {
         viewModelScope.launch { container.settingsRepository.setPreferRssFallback(preferRss) }
+    }
+
+    fun setAwayDigestEnabled(enabled: Boolean) {
+        viewModelScope.launch { container.settingsRepository.setAwayDigestEnabled(enabled) }
+    }
+
+    fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {
+        viewModelScope.launch { container.settingsRepository.setAwayDigestTriggerMode(mode) }
+    }
+
+    fun setAwayDigestThresholdMinutes(
+        minutes: Int,
+        showConfirmation: Boolean = false,
+    ) {
+        val clamped = minutes.coerceIn(
+            AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+            AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+        )
+        viewModelScope.launch {
+            container.settingsRepository.setAwayDigestThresholdMinutes(clamped)
+            if (showConfirmation) {
+                _events.trySend("已将离开速览时长设为 ${AwayDurationFormatter.formatThresholdMinutes(clamped)}")
+            }
+        }
     }
 
     fun setAutoCheckUpdates(enabled: Boolean) {
@@ -683,6 +716,7 @@ fun SettingsScreen(
     }
 
     var showNodeImageKeyDialog by rememberSaveable { mutableStateOf(false) }
+    var showAwayDigestCustomDurationDialog by rememberSaveable { mutableStateOf(false) }
     var showClearHistoryConfirm by rememberSaveable { mutableStateOf(false) }
     var showSignOutConfirm by rememberSaveable { mutableStateOf(false) }
 
@@ -1018,6 +1052,27 @@ fun SettingsScreen(
                                     onClick = viewModel::openBlockedUsersManager,
                                 )
                             }
+                        }
+                    }
+                }
+
+                // ── Group 3.2: 离开期间速览 ──
+                item(key = "settings_away_digest") {
+                    PulseStaggeredEntrance(index = 3) {
+                        SettingsGroupedSection(title = "离开期间速览") {
+                            AwayDigestSettingsCardContent(
+                                enabled = settings.awayDigestEnabled,
+                                triggerMode = settings.awayDigestTriggerMode,
+                                thresholdMinutes = settings.awayDigestThresholdMinutes,
+                                onEnabledChange = viewModel::setAwayDigestEnabled,
+                                onTriggerModeSelect = viewModel::setAwayDigestTriggerMode,
+                                onPresetMinutesSelect = { minutes ->
+                                    viewModel.setAwayDigestThresholdMinutes(minutes)
+                                },
+                                onOpenCustomDurationDialog = {
+                                    showAwayDigestCustomDurationDialog = true
+                                },
+                            )
                         }
                     }
                 }
@@ -1444,6 +1499,20 @@ fun SettingsScreen(
                 viewModel.saveNodeImageApiKey(newKey)
             },
             onDismiss = { showNodeImageKeyDialog = false },
+        )
+    }
+
+    if (showAwayDigestCustomDurationDialog) {
+        AwayDigestCustomDurationDialog(
+            initialThresholdMinutes = settings.awayDigestThresholdMinutes,
+            onSave = { customMinutes ->
+                showAwayDigestCustomDurationDialog = false
+                viewModel.setAwayDigestThresholdMinutes(
+                    minutes = customMinutes,
+                    showConfirmation = true,
+                )
+            },
+            onDismiss = { showAwayDigestCustomDurationDialog = false },
         )
     }
 
@@ -2956,6 +3025,368 @@ private fun OfficialTradeSettingsCardContent(
                     },
                     maxLines = 1,
                     softWrap = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AwayDigestSettingsCardContent(
+    enabled: Boolean,
+    triggerMode: AwayDigestTriggerMode,
+    thresholdMinutes: Int,
+    onEnabledChange: (Boolean) -> Unit,
+    onTriggerModeSelect: (AwayDigestTriggerMode) -> Unit,
+    onPresetMinutesSelect: (Int) -> Unit,
+    onOpenCustomDurationDialog: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val formattedThreshold = remember(thresholdMinutes) {
+        AwayDurationFormatter.formatThresholdMinutes(thresholdMinutes)
+    }
+    val isCustomDuration = remember(thresholdMinutes) {
+        thresholdMinutes !in AppSettings.PRESET_AWAY_DIGEST_MINUTES
+    }
+
+    val modePillLabel = when (triggerMode) {
+        AwayDigestTriggerMode.CUSTOM_DURATION -> "满 $formattedThreshold"
+        AwayDigestTriggerMode.ON_APP_REOPEN -> "关闭重进"
+        AwayDigestTriggerMode.DURATION_OR_REOPEN -> "重进 / $formattedThreshold"
+    }
+
+    val modeHelperDescription = when (triggerMode) {
+        AwayDigestTriggerMode.CUSTOM_DURATION ->
+            "后台切回或冷启动进入时，离开达到 $formattedThreshold 即在首页展示未读好帖速览。"
+        AwayDigestTriggerMode.ON_APP_REOPEN ->
+            "退出或划掉关闭 App 后重新进入时立即展示离开期间未读好帖，日常普通切后台不打扰。"
+        AwayDigestTriggerMode.DURATION_OR_REOPEN ->
+            "关闭重进 App 时立即展示；未关闭但后台离开满 $formattedThreshold 后切回也展示。"
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SettingsSwitchRow(
+            icon = Icons.Rounded.Schedule,
+            title = "启用离开期间速览",
+            subtitle = "重返首页时按鸡腿数、回复数与热度精选最多 10 篇未读好帖",
+            checked = enabled,
+            onCheckedChange = onEnabledChange,
+        )
+
+        AnimatedVisibility(
+            visible = enabled,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                SettingsGroupDivider()
+
+                // ── Trigger Mode Selector ──
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        SettingsRowIconBadge(icon = Icons.Rounded.AutoAwesome)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                text = "触发时机",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "自定义按离开时长或关闭 App 后重进展示",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        PulseAccentPill(
+                            text = modePillLabel,
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(
+                            AwayDigestTriggerMode.CUSTOM_DURATION to "离开满设定时长",
+                            AwayDigestTriggerMode.ON_APP_REOPEN to "关闭 App 后进入时展示",
+                            AwayDigestTriggerMode.DURATION_OR_REOPEN to "两者皆可（关闭重进或满时长）",
+                        ).forEach { (optionMode, label) ->
+                            val selected = triggerMode == optionMode
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onTriggerModeSelect(optionMode) },
+                                shape = CircleShape,
+                                leadingIcon = if (selected) {
+                                    {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(FilterChipDefaults.IconSize),
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                    )
+                                },
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                            .border(0.75.dp, ext.cardBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 11.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = modeHelperDescription,
+                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                // ── Duration Selector (visible when mode uses duration threshold) ──
+                AnimatedVisibility(
+                    visible = triggerMode.usesDurationThreshold,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        SettingsGroupDivider()
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(9.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                SettingsRowIconBadge(icon = Icons.Rounded.Schedule)
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                                ) {
+                                    Text(
+                                        text = "离开时长阈值",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = "支持快捷档位或自定义任意分钟/小时",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                PulseAccentPill(
+                                    text = formattedThreshold,
+                                    containerColor = ext.drumstickContainer,
+                                    contentColor = ext.onDrumstickContainer,
+                                )
+                            }
+
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                AppSettings.PRESET_AWAY_DIGEST_MINUTES.forEach { presetMinutes ->
+                                    val selected = thresholdMinutes == presetMinutes
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { onPresetMinutesSelect(presetMinutes) },
+                                        shape = CircleShape,
+                                        leadingIcon = if (selected) {
+                                            {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Check,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(FilterChipDefaults.IconSize),
+                                                )
+                                            }
+                                        } else {
+                                            null
+                                        },
+                                        label = {
+                                            Text(
+                                                text = AwayDurationFormatter.formatThresholdMinutes(presetMinutes),
+                                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                                maxLines = 1,
+                                            )
+                                        },
+                                    )
+                                }
+
+                                FilterChip(
+                                    selected = isCustomDuration,
+                                    onClick = onOpenCustomDurationDialog,
+                                    shape = CircleShape,
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (isCustomDuration) Icons.Rounded.Check else Icons.Rounded.Edit,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(FilterChipDefaults.IconSize),
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = if (isCustomDuration) {
+                                                "自定义 · $formattedThreshold"
+                                            } else {
+                                                "自定义时长"
+                                            },
+                                            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                            fontWeight = if (isCustomDuration) FontWeight.Bold else FontWeight.Medium,
+                                            maxLines = 1,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AwayDigestCustomDurationDialog(
+    initialThresholdMinutes: Int,
+    onSave: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val safeInitial = initialThresholdMinutes.coerceIn(
+        AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
+        AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
+    )
+    var hoursDraft by rememberSaveable(safeInitial) {
+        mutableStateOf((safeInitial / 60).takeIf { it > 0 }?.toString().orEmpty())
+    }
+    var minutesDraft by rememberSaveable(safeInitial) {
+        mutableStateOf((safeInitial % 60).takeIf { it > 0 || safeInitial < 60 }?.toString().orEmpty())
+    }
+
+    val parsedMinutes = remember(hoursDraft, minutesDraft) {
+        AwayDurationFormatter.parseCustomThresholdMinutes(
+            hoursInput = hoursDraft,
+            minutesInput = minutesDraft,
+        )
+    }
+
+    PulseAlertDialog(
+        onDismissRequest = onDismiss,
+        icon = Icons.Rounded.Schedule,
+        title = "自定义离开时长",
+        message = "设置触发「离开期间速览」所需的离开时长（范围：5 分钟 ～ 72 小时）。",
+        buttons = {
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onDismiss) {
+                Text("取消", maxLines = 1, softWrap = false)
+            }
+            Button(
+                onClick = { parsedMinutes?.let(onSave) },
+                enabled = parsedMinutes != null,
+                shape = CircleShape,
+            ) {
+                Text("确定", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = hoursDraft,
+                    onValueChange = { raw ->
+                        hoursDraft = raw.filter { it.isDigit() }.take(2)
+                    },
+                    label = { Text("小时") },
+                    placeholder = { Text("0") },
+                    suffix = { Text("小时") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+
+                OutlinedTextField(
+                    value = minutesDraft,
+                    onValueChange = { raw ->
+                        minutesDraft = raw.filter { it.isDigit() }.take(4)
+                    },
+                    label = { Text("分钟") },
+                    placeholder = { Text("0") },
+                    suffix = { Text("分钟") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (parsedMinutes != null) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        } else {
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
+                        },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    text = if (parsedMinutes != null) {
+                        "当前设定：离开满 ${AwayDurationFormatter.formatThresholdMinutes(parsedMinutes)} 后展示未读速览"
+                    } else {
+                        "请输入 5 分钟 ～ 72 小时（4320 分钟）之间的有效时长"
+                    },
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    color = if (parsedMinutes != null) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    },
                 )
             }
         }

@@ -4,13 +4,10 @@ import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.data.overseas.PreviewOverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasDetailStructured
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
-import com.nodeseek.app.domain.overseas.TranslationEngineKind
 import com.nodeseek.app.ui.overseas.OVERSEAS_MONITOR_TG_CHANNEL_URL
 import com.nodeseek.app.ui.overseas.OverseasDetailContentSanitizer
 import com.nodeseek.app.ui.overseas.OverseasIntelDetailViewModel
@@ -26,7 +23,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -102,7 +98,7 @@ class OverseasUiAndDetailViewModelTest {
     }
 
     @Test
-    fun listViewModelDoesNotTranslateListTitlesAndExposesNoTranslationUiState() = runTest {
+    fun listViewModelDoesNotTranslateListTitlesAndExposesNoTranslationConfigState() = runTest {
         val server = MockWebServer()
         server.start()
         try {
@@ -116,11 +112,6 @@ class OverseasUiAndDetailViewModelTest {
             )
             val repo = TrackingDetailRepository(
                 initialOffers = listOf(englishOffer),
-                initialConfig = OverseasTranslationConfig(
-                    engineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY,
-                    autoTranslateOnRefresh = true,
-                    displayMode = OverseasDisplayMode.CHINESE,
-                ),
             )
             val translator = OverseasTranslator(
                 cacheFile = File(tempFolder.root, "list_trans.json"),
@@ -144,9 +135,11 @@ class OverseasUiAndDetailViewModelTest {
                 vm.uiState.value.offerCards.first().headlineTitle,
             )
 
-            // OverseasIntelUiState must not expose any translation UI fields
+            // OverseasIntelUiState & OverseasIntelSnapshot must not expose any translation config fields
             val stateFields = OverseasIntelUiState::class.java.declaredFields.map { it.name }.toSet()
             assertFalse(stateFields.any { it.contains("translat", ignoreCase = true) || it.contains("displayMode", ignoreCase = true) })
+            val snapshotFields = OverseasIntelSnapshot::class.java.declaredFields.map { it.name }.toSet()
+            assertFalse(snapshotFields.any { it.contains("translat", ignoreCase = true) || it.contains("displayMode", ignoreCase = true) })
 
             // Verify TG monitor channel URL constant on OverseasIntelScreen
             assertEquals("https://t.me/colmidad_lowendtalk_offer", OVERSEAS_MONITOR_TG_CHANNEL_URL)
@@ -228,7 +221,7 @@ class OverseasUiAndDetailViewModelTest {
 
             val loadedDetail = vm.uiState.value.detail
             assertNotNull(loadedDetail)
-            assertEquals(0, fakeRepo.translateDetailCalls)
+            assertEquals(1, fakeRepo.getDetailCalls)
 
             // Every single detail field must be 100% free of "telegram" (case-insensitive)!
             assertFalse(loadedDetail!!.title.contains("telegram", ignoreCase = true))
@@ -259,9 +252,11 @@ class OverseasUiAndDetailViewModelTest {
                 detailSourceText.contains("telegram", ignoreCase = true),
             )
 
-            // Confirm OverseasOfferDetailUiState exposes no translation fields
+            // Confirm OverseasOfferDetailUiState and OverseasOfferDetail expose no translation fields
             val fieldNames = OverseasOfferDetailUiState::class.java.declaredFields.map { it.name }.toSet()
             assertFalse(fieldNames.any { it.contains("translat", ignoreCase = true) || it.contains("displayMode", ignoreCase = true) })
+            val detailFieldNames = OverseasOfferDetail::class.java.declaredFields.map { it.name }.toSet()
+            assertFalse(detailFieldNames.any { it.contains("translat", ignoreCase = true) })
 
             // Trigger one-click repost from DetailViewModel -> auto-translates English OP title & body!
             val repostDeferred = async { vm.repostDraftEvents.first() }
@@ -299,7 +294,6 @@ class OverseasUiAndDetailViewModelTest {
 
     private class TrackingDetailRepository(
         initialOffers: List<OverseasDealOffer> = emptyList(),
-        initialConfig: OverseasTranslationConfig = OverseasTranslationConfig(),
         private var failFirstDetailFetch: Boolean = false,
         private val failureMessage: String = "网络超时",
         private val customDetail: OverseasOfferDetail? = null,
@@ -310,13 +304,11 @@ class OverseasUiAndDetailViewModelTest {
         private val _snapshot = MutableStateFlow(
             OverseasIntelSnapshot(
                 offers = initialOffers.ifEmpty { delegate.snapshot.value.offers },
-                translationConfig = initialConfig,
             ),
         )
         override val snapshot: StateFlow<OverseasIntelSnapshot> = _snapshot.asStateFlow()
 
         var getDetailCalls = 0
-        var translateDetailCalls = 0
 
         override suspend fun loadFromCache(): List<OverseasDealOffer> = _snapshot.value.offers
 
@@ -335,25 +327,7 @@ class OverseasUiAndDetailViewModelTest {
             return customDetail?.let { Result.success(it) } ?: delegate.getOfferDetail(offerId, forceRefresh)
         }
 
-        override suspend fun translateOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> {
-            translateDetailCalls++
-            return delegate.translateOfferDetail(offerId, forceRefresh)
-        }
-
         override suspend fun getRepostContent(offerId: String, forceRefresh: Boolean): Result<OverseasRepostContent> =
             customRepost?.let { Result.success(it) } ?: delegate.getRepostContent(offerId, forceRefresh)
-
-        override suspend fun updateTranslationConfig(config: OverseasTranslationConfig) {
-            _snapshot.update { it.copy(translationConfig = config) }
-        }
-
-        override suspend fun updateDisplayMode(mode: OverseasDisplayMode) {
-            _snapshot.update { it.copy(translationConfig = it.translationConfig.copy(displayMode = mode)) }
-        }
-
-        override suspend fun testTranslationConfig(config: OverseasTranslationConfig): Result<String> =
-            Result.success("ok")
-
-        override suspend fun clearTranslationCache() = Unit
     }
 }

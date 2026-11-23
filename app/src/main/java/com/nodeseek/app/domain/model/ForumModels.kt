@@ -89,9 +89,10 @@ data class TopicSummary(
     val isBookmarked: Boolean = false,
     val authorLevel: Int? = null,
     val lastReplierName: String? = null,
+    val drumstickCount: Int = 0,
 ) {
     val isHot: Boolean
-        get() = replyCount >= 30 || viewCount >= 1500
+        get() = replyCount >= 30 || viewCount >= 1500 || drumstickCount >= 5
 }
 
 @Serializable

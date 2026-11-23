@@ -1,6 +1,7 @@
 package com.nodeseek.app.domain.backup
 
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.FloorAuthor
@@ -48,6 +49,9 @@ data class AppSettingsBackupDto(
     val autoCheckUpdates: Boolean = true,
     val includePrereleaseUpdates: Boolean = false,
     val ignoredUpdateTag: String = "",
+    val awayDigestEnabled: Boolean = true,
+    val awayDigestTriggerMode: AwayDigestTriggerMode = AwayDigestTriggerMode.CUSTOM_DURATION,
+    val awayDigestThresholdMinutes: Int = AppSettings.DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES,
     val recentSearchQueries: List<String> = emptyList(),
 )
 

@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.mail.NoOpVpsMailAutoIngestService
+import com.nodeseek.app.domain.mail.ParsedVpsBillingMail
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -18,6 +20,9 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.mail.VpsBillingMailParser
+import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
+import com.nodeseek.app.domain.mail.VpsMailMatchStatus
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.Job
@@ -84,6 +89,44 @@ sealed interface PendingExportTarget {
 }
 
 @Immutable
+data class VpsMailInsightUiState(
+    val parsed: ParsedVpsBillingMail,
+    val matchStatus: VpsMailMatchStatus = VpsMailMatchStatus(),
+    val isPasswordRevealed: Boolean = false,
+    val isIngesting: Boolean = false,
+) {
+    val actionButtonLabel: String
+        get() = when {
+            parsed.hasSshCredentials && matchStatus.isAssetMatched && matchStatus.isSshMatched ->
+                "更新账本 + SSH"
+            parsed.hasSshCredentials ->
+                "一键入库账本 + SSH"
+            matchStatus.isAssetMatched ->
+                "更新服务器账本"
+            else ->
+                "入库服务器账本"
+        }
+
+    val matchedAssetStatusText: String
+        get() {
+            val matchedAsset = matchStatus.primaryMatchedAsset
+            val matchedSsh = matchStatus.matchedSshProfile
+            return when {
+                matchedAsset != null && matchedSsh != null ->
+                    "已匹配账本「${matchedAsset.nickname}」· SSH 已同步"
+                matchedAsset != null -> {
+                    val exp = matchedAsset.expiryDateIso.ifBlank { "待补" }
+                    "已匹配账本「${matchedAsset.nickname}」（到期 $exp）"
+                }
+                matchedSsh != null ->
+                    "SSH 已存在「${matchedSsh.displayName}」· 账本未录入"
+                else ->
+                    "尚未录入服务器账本"
+            }
+        }
+}
+
+@Immutable
 data class SeekMailUiState(
     val hasConfiguredKey: Boolean = false,
     val apiKeyMaskedHint: String = "",
@@ -135,6 +178,7 @@ data class SeekMailUiState(
     val isLoadingRawEml: Boolean = false,
     val rawEmlErrorMessage: String? = null,
     val allowRemoteImages: Boolean = false,
+    val openedVpsInsight: VpsMailInsightUiState? = null,
     val exportingKey: String? = null,
     val rateLimit: SeekMailRateLimit? = null,
     val fontScale: Float = AppSettings.DEFAULT_FONT_SCALE,
@@ -157,6 +201,7 @@ data class SeekMailUiState(
 class SeekMailViewModel(
     private val seekMailRepository: SeekMailRepository,
     private val settingsRepository: SettingsRepository,
+    private val vpsMailAutoIngestService: VpsMailAutoIngestService = NoOpVpsMailAutoIngestService,
     private val initialMailboxId: Long = 0L,
     initialMailId: Long = 0L,
 ) : ViewModel() {
@@ -211,6 +256,8 @@ class SeekMailViewModel(
         val isLoadingRawEml: Boolean = false,
         val rawEmlErrorMessage: String? = null,
         val allowedRemoteImageMailIds: Set<Long> = emptySet(),
+        val isVpsPasswordRevealed: Boolean = false,
+        val isIngestingVpsMail: Boolean = false,
         val exportingKey: String? = null,
     )
 
@@ -231,12 +278,21 @@ class SeekMailViewModel(
     private var rawEmlLoadJob: Job? = null
     private var contactsLoadJob: Job? = null
 
+    private val vpsSyncContextFlow = combine(
+        vpsMailAutoIngestService.assetsFlow,
+        vpsMailAutoIngestService.sshServersFlow,
+        vpsMailAutoIngestService.autoUpdatesByMailKeyFlow,
+    ) { assets, sshServers, autoUpdates ->
+        Triple(assets, sshServers, autoUpdates)
+    }
+
     val uiState: StateFlow<SeekMailUiState> = combine(
         _internalState,
         settingsRepository.settings,
         seekMailRepository.locallyReadMailIds,
         seekMailRepository.latestRateLimit,
-    ) { state, settings, readIds, rateLimit ->
+        vpsSyncContextFlow,
+    ) { state, settings, readIds, rateLimit, (assets, sshServers, autoUpdates) ->
         val trimmedKey = settings.seekMailApiKey.trim()
         val overlaidMails = if (readIds.isEmpty()) {
             state.mails
@@ -260,6 +316,33 @@ class SeekMailViewModel(
             state.createDomain
         } else {
             domains.firstOrNull() ?: SeekMailUiState.DEFAULT_DOMAINS.first()
+        }
+
+        val activeSummary = overlaidDetail?.summary ?: overlaidPreview
+        val parsedVpsMail = when {
+            overlaidDetail != null -> VpsBillingMailParser.parseDetail(overlaidDetail)
+            overlaidPreview != null -> VpsBillingMailParser.parse(
+                subject = overlaidPreview.subject,
+                bodyText = overlaidPreview.snippet,
+                fromName = overlaidPreview.fromName,
+                fromAddress = overlaidPreview.fromAddress,
+            )
+            else -> null
+        }
+        val openedVpsInsight = parsedVpsMail?.let { parsed ->
+            val matchStatus = vpsMailAutoIngestService.resolveMatchStatus(
+                summary = activeSummary,
+                parsed = parsed,
+                assets = assets,
+                sshServers = sshServers,
+                autoUpdatesByMailKey = autoUpdates,
+            )
+            VpsMailInsightUiState(
+                parsed = parsed,
+                matchStatus = matchStatus,
+                isPasswordRevealed = state.isVpsPasswordRevealed,
+                isIngesting = state.isIngestingVpsMail,
+            )
         }
 
         SeekMailUiState(
@@ -313,6 +396,7 @@ class SeekMailViewModel(
             isLoadingRawEml = state.isLoadingRawEml,
             rawEmlErrorMessage = state.rawEmlErrorMessage,
             allowRemoteImages = state.openedMailId != null && state.openedMailId in state.allowedRemoteImageMailIds,
+            openedVpsInsight = openedVpsInsight,
             exportingKey = state.exportingKey,
             rateLimit = rateLimit,
             fontScale = settings.fontScale,
@@ -331,6 +415,16 @@ class SeekMailViewModel(
     )
 
     init {
+        viewModelScope.launch {
+            runCatching { vpsMailAutoIngestService.ensureLoaded() }
+        }
+        viewModelScope.launch {
+            vpsMailAutoIngestService.renewalAutoUpdateEvents.collect { record ->
+                _snackbarChannel.trySend(
+                    "续费邮件已自动将「${record.assetNickname}」到期日更新至 ${record.newExpiryDateIso}",
+                )
+            }
+        }
         viewModelScope.launch {
             settingsRepository.settings
                 .map { it.seekMailApiKey.trim() }
@@ -716,6 +810,9 @@ class SeekMailViewModel(
                 mailsErrorKind = null,
             )
         }
+        viewModelScope.launch {
+            runCatching { vpsMailAutoIngestService.processIncomingSummaries(page.items) }
+        }
     }
 
     private fun applyUnreadPage(
@@ -753,6 +850,9 @@ class SeekMailViewModel(
                 mailsErrorMessage = null,
                 mailsErrorKind = null,
             )
+        }
+        viewModelScope.launch {
+            runCatching { vpsMailAutoIngestService.processIncomingSummaries(page.items) }
         }
     }
 
@@ -1053,6 +1153,8 @@ class SeekMailViewModel(
                 rawEml = null,
                 isLoadingRawEml = false,
                 rawEmlErrorMessage = null,
+                isVpsPasswordRevealed = false,
+                isIngestingVpsMail = false,
             )
         }
 
@@ -1060,6 +1162,7 @@ class SeekMailViewModel(
             seekMailRepository.getMailDetail(mailId = mailId, forceRefresh = forceRefresh)
                 .onSuccess { detail ->
                     if (_internalState.value.openedMailId != mailId) return@onSuccess
+                    runCatching { vpsMailAutoIngestService.processMailDetail(detail) }
                     val preferredMode = if (
                         detail.sanitizedBodyHtml.isBlank() && detail.bodyText.isNotBlank()
                     ) {
@@ -1206,7 +1309,48 @@ class SeekMailViewModel(
                 rawEml = null,
                 isLoadingRawEml = false,
                 rawEmlErrorMessage = null,
+                isVpsPasswordRevealed = false,
+                isIngestingVpsMail = false,
             )
+        }
+    }
+
+    fun toggleVpsPasswordVisibility() {
+        _internalState.update { it.copy(isVpsPasswordRevealed = !it.isVpsPasswordRevealed) }
+    }
+
+    fun ingestOpenedVpsMail() {
+        val current = _internalState.value
+        if (current.isIngestingVpsMail) return
+
+        val detail = current.openedDetail
+        val summary = detail?.summary ?: current.openedPreviewSummary
+        val parsed = when {
+            detail != null -> VpsBillingMailParser.parseDetail(detail)
+            summary != null -> VpsBillingMailParser.parse(
+                subject = summary.subject,
+                bodyText = summary.snippet,
+                fromName = summary.fromName,
+                fromAddress = summary.fromAddress,
+            )
+            else -> null
+        } ?: return
+
+        viewModelScope.launch {
+            _internalState.update { it.copy(isIngestingVpsMail = true) }
+            try {
+                vpsMailAutoIngestService.ingestMail(summary = summary, parsed = parsed)
+                    .onSuccess { outcome ->
+                        _snackbarChannel.trySend(outcome.summaryMessage)
+                    }
+                    .onFailure { err ->
+                        _snackbarChannel.trySend(
+                            "入库失败：${err.message?.takeIf { it.isNotBlank() } ?: "请稍后重试"}",
+                        )
+                    }
+            } finally {
+                _internalState.update { it.copy(isIngestingVpsMail = false) }
+            }
         }
     }
 
@@ -1318,6 +1462,7 @@ class SeekMailViewModel(
                 return SeekMailViewModel(
                     seekMailRepository = container.seekMailRepository,
                     settingsRepository = container.settingsRepository,
+                    vpsMailAutoIngestService = container.vpsMailAutoIngestService,
                     initialMailboxId = initialMailboxId,
                     initialMailId = initialMailId,
                 ) as T

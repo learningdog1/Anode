@@ -2,6 +2,7 @@ package com.nodeseek.app.domain.repository
 
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
 
@@ -23,6 +24,9 @@ interface SettingsRepository {
     suspend fun setAutoCheckUpdates(enabled: Boolean)
     suspend fun setIncludePrereleaseUpdates(enabled: Boolean)
     suspend fun setIgnoredUpdateTag(tag: String)
+    suspend fun setAwayDigestEnabled(enabled: Boolean) {}
+    suspend fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {}
+    suspend fun setAwayDigestThresholdMinutes(minutes: Int) {}
 
     suspend fun addRecentSearchQuery(query: String)
     suspend fun removeRecentSearchQuery(query: String)

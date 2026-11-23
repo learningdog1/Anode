@@ -224,7 +224,6 @@ class OverseasIntelDetailViewModel(
                             activeTranslator.translateRepostContent(
                                 repost = repostContent,
                                 fallbackOffer = fallbackOffer,
-                                config = repository.snapshot.value.translationConfig,
                             )
                         }.onFailure { if (it is CancellationException) throw it }
                             .getOrDefault(repostContent)

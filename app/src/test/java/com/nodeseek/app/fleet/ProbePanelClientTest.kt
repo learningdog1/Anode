@@ -784,6 +784,224 @@ class ProbePanelClientTest {
         }
     }
 
+    @Test
+    fun `Komari fetches real rpc2 common getNodesLatestStatus flat metrics and ignores misleading static updated_at`() = runTest {
+        var capturedRpcBody: String? = null
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/api/nodes" && request.method == "GET" -> MockResponse().setResponseCode(200).setBody(
+                    """
+                    {
+                      "code": 200,
+                      "message": "success",
+                      "data": [
+                        {
+                          "uuid": "komari-tyo-online",
+                          "name": "Tokyo-GIA",
+                          "region": "JP",
+                          "os": "Ubuntu 24.04",
+                          "cpu_name": "AMD EPYC 7763",
+                          "cpu_cores": 4,
+                          "mem_total": 4294967296,
+                          "disk_total": 53687091200,
+                          "traffic_limit": 1099511627776,
+                          "updated_at": "2024-01-01T00:00:00Z"
+                        },
+                        {
+                          "uuid": "komari-lax-offline",
+                          "name": "LAX-Offline-JustEditedInDb",
+                          "region": "US",
+                          "os": "Debian 12",
+                          "cpu_cores": 2,
+                          "mem_total": 2147483648,
+                          "disk_total": 21474836480,
+                          "updated_at": "2025-11-19T14:00:44Z"
+                        },
+                        {
+                          "uuid": "komari-hk-never-reported",
+                          "name": "HK-NeverConnected",
+                          "region": "HK",
+                          "os": "Alpine",
+                          "cpu_cores": 1,
+                          "mem_total": 1073741824,
+                          "disk_total": 10737418240,
+                          "updated_at": "2025-11-19T14:00:44Z"
+                        }
+                      ]
+                    }
+                    """.trimIndent(),
+                )
+                request.path == "/api/rpc2" && request.method == "POST" -> {
+                    capturedRpcBody = request.body.readUtf8()
+                    MockResponse().setResponseCode(200).setBody(
+                        """
+                        {
+                          "jsonrpc": "2.0",
+                          "id": 1,
+                          "result": {
+                            "komari-tyo-online": {
+                              "client": "komari-tyo-online",
+                              "time": "2025-11-19T14:00:43Z",
+                              "cpu": 37.4,
+                              "ram": 1610612736,
+                              "ram_total": 4294967296,
+                              "disk": 12884901888,
+                              "disk_total": 53687091200,
+                              "net_in": 850000,
+                              "net_out": 420000,
+                              "net_total_down": 64424509440,
+                              "net_total_up": 32212254720,
+                              "load": 0.68,
+                              "online": true,
+                              "uptime": 604800
+                            },
+                            "komari-lax-offline": {
+                              "client": "komari-lax-offline",
+                              "time": "2025-11-18T10:00:00Z",
+                              "cpu": 82.0,
+                              "ram": 1073741824,
+                              "ram_total": 2147483648,
+                              "disk": 5368709120,
+                              "disk_total": 21474836480,
+                              "net_in": 999999,
+                              "net_out": 888888,
+                              "online": false,
+                              "uptime": 1200
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
+        val fetched = client.fetchPanelServers(
+            ProbePanelConfig(
+                id = "p-komari-rpc2",
+                name = "Komari RPC2",
+                baseUrl = server.url("/").toString(),
+                panelType = ProbePanelType.AUTO,
+            ),
+        )
+
+        assertEquals(ProbePanelType.KOMARI, fetched.detectedPanelType)
+        assertNotNull(capturedRpcBody)
+        assertTrue(capturedRpcBody!!.contains("common:getNodesLatestStatus"))
+        assertEquals(3, fetched.snapshots.size)
+        assertEquals(1, fetched.snapshots.count { it.isOnline })
+        assertEquals(2, fetched.snapshots.count { !it.isOnline })
+
+        val tyo = fetched.snapshots.first { it.remoteServerId == "komari-tyo-online" }
+        assertTrue(tyo.isOnline)
+        assertEquals(37.4, tyo.cpuPercent, 0.01)
+        assertEquals(1610612736L, tyo.memUsedBytes)
+        assertEquals(4294967296L, tyo.memTotalBytes)
+        assertEquals(12884901888L, tyo.diskUsedBytes)
+        assertEquals(53687091200L, tyo.diskTotalBytes)
+        assertEquals(850000L, tyo.netInSpeedBps)
+        assertEquals(420000L, tyo.netOutSpeedBps)
+        assertEquals(64424509440L, tyo.monthlyTransferInBytes)
+        assertEquals(32212254720L, tyo.monthlyTransferOutBytes)
+        assertEquals(0.68, tyo.load1 ?: 0.0, 0.001)
+        assertEquals(604800L, tyo.uptimeSeconds)
+
+        val lax = fetched.snapshots.first { it.remoteServerId == "komari-lax-offline" }
+        assertFalse(lax.isOnline)
+        assertEquals(0.0, lax.cpuPercent, 0.001)
+        assertEquals(0L, lax.netInSpeedBps)
+        assertEquals(0L, lax.netOutSpeedBps)
+
+        val hk = fetched.snapshots.first { it.remoteServerId == "komari-hk-never-reported" }
+        assertFalse(hk.isOnline)
+    }
+
+    @Test
+    fun `Komari falls back to per-node api recent uuid ring buffer with PascalCase network fields when rpc2 and ws are unavailable`() = runTest {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/nodes" -> MockResponse().setResponseCode(200).setBody(
+                    """
+                    {
+                      "status": "success",
+                      "data": [
+                        {
+                          "uuid": "uuid-active",
+                          "name": "Active-Recent-Node",
+                          "region": "SG",
+                          "mem_total": 2147483648,
+                          "disk_total": 32212254720,
+                          "updated_at": "2024-05-01T00:00:00Z"
+                        },
+                        {
+                          "uuid": "uuid-empty-window",
+                          "name": "Offline-Recent-Node",
+                          "region": "DE",
+                          "mem_total": 1073741824,
+                          "disk_total": 10737418240,
+                          "updated_at": "2025-11-19T14:00:44Z"
+                        }
+                      ]
+                    }
+                    """.trimIndent(),
+                )
+                "/api/recent/uuid-active" -> MockResponse().setResponseCode(200).setBody(
+                    """
+                    {
+                      "status": "success",
+                      "data": [
+                        {
+                          "cpu": { "Usage": 22.5 },
+                          "ram": { "Used": 536870912, "Total": 2147483648 },
+                          "disk": { "Used": 8589934592, "Total": 32212254720 },
+                          "network": { "Down": 128000, "Up": 64000, "TotalDown": 1073741824, "TotalUp": 536870912 },
+                          "load": { "Load1": 0.31 },
+                          "uptime": 7200,
+                          "updated_at": "2025-11-19T14:00:40Z"
+                        }
+                      ]
+                    }
+                    """.trimIndent(),
+                )
+                "/api/recent/uuid-empty-window" -> MockResponse().setResponseCode(200).setBody(
+                    """{"status":"success","data":[]}""",
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val client = ProbePanelClient(
+            nowMillisProvider = { fixedNowMillis },
+            allowLoopbackHttpWithCredentials = true,
+        )
+        val fetched = client.fetchPanelServers(
+            ProbePanelConfig(
+                id = "p-komari-per-node",
+                name = "Komari Legacy HTTP",
+                baseUrl = server.url("/").toString(),
+                panelType = ProbePanelType.KOMARI,
+            ),
+        )
+
+        assertEquals(2, fetched.snapshots.size)
+        val active = fetched.snapshots.first { it.remoteServerId == "uuid-active" }
+        assertTrue(active.isOnline)
+        assertEquals(22.5, active.cpuPercent, 0.01)
+        assertEquals(536870912L, active.memUsedBytes)
+        assertEquals(8589934592L, active.diskUsedBytes)
+        assertEquals(128000L, active.netInSpeedBps)
+        assertEquals(64000L, active.netOutSpeedBps)
+        assertEquals(0.31, active.load1 ?: 0.0, 0.001)
+
+        val offline = fetched.snapshots.first { it.remoteServerId == "uuid-empty-window" }
+        assertFalse(offline.isOnline)
+    }
+
     companion object {
         private lateinit var tlsTempDir: File
         private lateinit var tlsFixture: ProbeTestTlsFixture

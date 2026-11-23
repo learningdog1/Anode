@@ -19,7 +19,6 @@ import com.nodeseek.app.data.overseas.OverseasPromoWorkManagerGateway
 import com.nodeseek.app.data.overseas.OverseasPromoWorkScheduler
 import com.nodeseek.app.data.overseas.OverseasPromoWorker
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
@@ -29,7 +28,6 @@ import com.nodeseek.app.domain.overseas.OverseasPromoMonitorSettings
 import com.nodeseek.app.domain.overseas.OverseasPromoPollOutcome
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
 import com.nodeseek.app.navigation.OverseasIntelDetailRoute
 import com.nodeseek.app.navigation.OverseasIntelRoute
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
@@ -170,20 +168,12 @@ class OverseasPromoMonitorTest {
         override suspend fun getOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> =
             Result.failure(UnsupportedOperationException("unused in monitor test"))
 
-        override suspend fun translateOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> =
-            Result.failure(UnsupportedOperationException("unused in monitor test"))
-
         override suspend fun getRepostContent(offerId: String, forceRefresh: Boolean): Result<OverseasRepostContent> =
             Result.failure(UnsupportedOperationException("unused in monitor test"))
 
-        override suspend fun updateTranslationConfig(config: OverseasTranslationConfig) = Unit
-        override suspend fun updateDisplayMode(mode: OverseasDisplayMode) = Unit
         override suspend fun updateFilterConfig(config: OverseasOfferFilterConfig) {
             _snapshot.update { it.copy(filterConfig = config) }
         }
-        override suspend fun testTranslationConfig(config: OverseasTranslationConfig): Result<String> =
-            Result.success("ok")
-        override suspend fun clearTranslationCache() = Unit
     }
 
     private fun sampleOffer(

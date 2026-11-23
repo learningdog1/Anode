@@ -92,6 +92,14 @@ class MainActivity : ComponentActivity() {
         dispatchNotificationTapIfPresent(intent)
     }
 
+    override fun onDestroy() {
+        val closingApp = !isChangingConfigurations && isFinishing
+        super.onDestroy()
+        if (closingApp) {
+            (application as? NodePulseApp)?.container?.onAppClosed()
+        }
+    }
+
     private fun dispatchNotificationTapIfPresent(targetIntent: Intent?) {
         if (targetIntent == null) return
         if (RestockNotificationHelper.isRestockMonitorIntent(targetIntent)) {

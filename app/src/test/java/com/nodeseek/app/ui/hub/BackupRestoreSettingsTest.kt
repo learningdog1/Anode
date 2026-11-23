@@ -1,11 +1,19 @@
 package com.nodeseek.app.ui.hub
 
+import com.nodeseek.app.data.backup.BackupManagerImpl
+import com.nodeseek.app.domain.backup.AppSettingsBackupDto
 import com.nodeseek.app.domain.backup.BackupRestoreSummary
 import com.nodeseek.app.domain.backup.BackupSyncTargetAccount
+import com.nodeseek.app.domain.backup.BlocklistBackupDto
+import com.nodeseek.app.domain.backup.NodePulseBackupBundle
+import com.nodeseek.app.domain.backup.RadarBackupDto
 import com.nodeseek.app.domain.backup.RemoteBlocklistSyncResult
 import com.nodeseek.app.domain.backup.RestoreStrategy
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.FloorAuthor
+import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,5 +90,49 @@ class BackupRestoreSettingsTest {
             "@u1、@u2、@u3、@u4、@u5、@u6 等 7 人",
             formatBlockedUsersPreview(sevenUsers, maxNames = 6),
         )
+    }
+
+    @Test
+    fun `legacy backup JSON without AwayDigest fields restores defaults and new fields round-trip cleanly`() {
+        val legacyJson = """
+            {
+              "schemaVersion": 1,
+              "appVersion": "1.0.0",
+              "exportedAtEpochMillis": 1760000000000,
+              "settings": {
+                "themeMode": "OBSIDIAN_DARK",
+                "purePitchAmoled": true,
+                "fontScale": 1.0
+              },
+              "radar": {},
+              "blocklist": {},
+              "bookmarks": [],
+              "drafts": []
+            }
+        """.trimIndent()
+
+        val decodedLegacy = BackupManagerImpl.backupJson.decodeFromString<NodePulseBackupBundle>(legacyJson)
+        assertTrue(decodedLegacy.settings.awayDigestEnabled)
+        assertEquals(AwayDigestTriggerMode.CUSTOM_DURATION, decodedLegacy.settings.awayDigestTriggerMode)
+        assertEquals(60, decodedLegacy.settings.awayDigestThresholdMinutes)
+
+        val customBundle = NodePulseBackupBundle(
+            appVersion = "1.2.0",
+            exportedAtEpochMillis = 1765000000000L,
+            settings = AppSettingsBackupDto(
+                awayDigestEnabled = false,
+                awayDigestTriggerMode = AwayDigestTriggerMode.DURATION_OR_REOPEN,
+                awayDigestThresholdMinutes = 240,
+            ),
+            radar = RadarBackupDto(),
+            blocklist = BlocklistBackupDto(),
+            bookmarks = emptyList(),
+            drafts = emptyList(),
+        )
+        val encoded = BackupManagerImpl.backupJson.encodeToString(customBundle)
+        val roundTripped = BackupManagerImpl.backupJson.decodeFromString<NodePulseBackupBundle>(encoded)
+        assertFalse(roundTripped.settings.awayDigestEnabled)
+        assertEquals(AwayDigestTriggerMode.DURATION_OR_REOPEN, roundTripped.settings.awayDigestTriggerMode)
+        assertEquals(240, roundTripped.settings.awayDigestThresholdMinutes)
     }
 }

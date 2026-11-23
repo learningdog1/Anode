@@ -7,6 +7,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.digest.AwayDigestRepository
+import com.nodeseek.app.domain.digest.AwayDigestState
+import com.nodeseek.app.domain.digest.NoOpAwayDigestRepository
 import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.model.AccountSession
@@ -80,6 +83,8 @@ data class ExploreUiState(
     val nextPageError: String? = null,
     val session: AccountSession? = null,
     val snackbarMessage: String? = null,
+    val awayDigest: AwayDigestState = AwayDigestState(),
+    val isAwayDigestExpanded: Boolean = false,
 ) {
     val activeCategoryName: String
         get() = if (selectedCategorySlug.isBlank()) {
@@ -123,6 +128,7 @@ private data class FeedRawStreamState(
     val selectedSort: FeedSort = FeedSort.LATEST_REPLY,
     val slices: Map<FeedSliceKey, BoardPageSlice> = emptyMap(),
     val snackbarMessage: String? = null,
+    val isAwayDigestExpanded: Boolean = false,
 ) {
     val activeKey: FeedSliceKey
         get() = FeedSliceKey(
@@ -149,6 +155,7 @@ class ExploreViewModel(
     private val settingsRepository: SettingsRepository,
     private val contentFilterRepository: ContentFilterRepository,
     initialCategorySlug: String = "",
+    private val awayDigestRepository: AwayDigestRepository = NoOpAwayDigestRepository,
 ) : ViewModel() {
 
     private val _streamState = MutableStateFlow(
@@ -189,6 +196,13 @@ class ExploreViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
 
+    private data class LocalEnrichmentBundle(
+        val bookmarkedIds: Set<Long>,
+        val readMap: Map<Long, ReadHistoryEntry>,
+        val filterConfig: com.nodeseek.app.domain.filter.ContentFilterConfig,
+        val awayDigest: AwayDigestState,
+    )
+
     val uiState: StateFlow<ExploreUiState> = combine(
         _streamState,
         categoriesFlow,
@@ -198,10 +212,15 @@ class ExploreViewModel(
             bookmarkedIdsFlow,
             readStateMapFlow,
             contentFilterRepository.config,
-        ) { bookmarks, reads, filterConfig ->
-            Triple(bookmarks, reads, filterConfig)
+            awayDigestRepository.state,
+        ) { bookmarks, reads, filterConfig, awayDigest ->
+            LocalEnrichmentBundle(bookmarks, reads, filterConfig, awayDigest)
         },
-    ) { raw, categories, settings, session, (bookmarkedIds, readMap, filterConfig) ->
+    ) { raw, categories, settings, session, enrichment ->
+        val bookmarkedIds = enrichment.bookmarkedIds
+        val readMap = enrichment.readMap
+        val filterConfig = enrichment.filterConfig
+        val awayDigest = enrichment.awayDigest
         val challengeActive = sessionRepository.challengeRequired.value
         val includeBlocked = settings.includeBlockedTopics
         val orderedTabs = buildOrderedTabs(
@@ -276,10 +295,13 @@ class ExploreViewModel(
             nextPageError = activeSlice.nextPageError,
             session = session,
             snackbarMessage = raw.snackbarMessage,
+            awayDigest = awayDigest,
+            isAwayDigestExpanded = raw.isAwayDigestExpanded && awayDigest.isVisible,
         )
     }.stateIn(viewModelScope, SharingStarted.Lazily, ExploreUiState())
 
     init {
+        awayDigestRepository.refreshCurrentSessionDigest(forceReload = false)
         val initialKey = _streamState.value.activeKey
         val diskCached = forumRepository.getCachedFeed(initialKey.categorySlug, initialKey.sort)
         if (diskCached != null) {
@@ -547,6 +569,38 @@ class ExploreViewModel(
 
     fun consumeSnackbar() {
         _streamState.update { it.copy(snackbarMessage = null) }
+    }
+
+    fun dismissAwayDigest() {
+        _streamState.update { it.copy(isAwayDigestExpanded = false) }
+        awayDigestRepository.dismissCurrentSession()
+    }
+
+    fun toggleAwayDigestExpanded() {
+        _streamState.update { it.copy(isAwayDigestExpanded = !it.isAwayDigestExpanded) }
+    }
+
+    fun onAwayDigestTopicClicked(topic: TopicSummary) {
+        awayDigestRepository.markTopicVisited(topic.id)
+        viewModelScope.launch {
+            val uid = sessionRepository.sessionState.value?.uid ?: 0L
+            runCatching {
+                bookmarkAndHistoryRepository.recordTopicVisit(
+                    ReadHistoryEntry(
+                        topicId = topic.id,
+                        title = topic.title,
+                        categoryName = topic.categoryName,
+                        authorName = topic.authorName,
+                        authorAvatarUrl = topic.authorAvatarUrl,
+                        lastReadPage = 1,
+                        lastReadFloor = topic.lastReadFloor ?: 0,
+                        visitedAtEpochMillis = System.currentTimeMillis(),
+                        categorySlug = topic.categorySlug,
+                        accountUid = uid,
+                    ),
+                )
+            }
+        }
     }
 
     private fun buildOrderedTabs(
@@ -932,6 +986,7 @@ class ExploreViewModel(
                     settingsRepository = container.settingsRepository,
                     contentFilterRepository = container.contentFilterRepository,
                     initialCategorySlug = initialCategorySlug,
+                    awayDigestRepository = container.awayDigestRepository,
                 )
             }
         }

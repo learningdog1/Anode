@@ -8,7 +8,9 @@ import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetRefreshSummary
 import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.fleet.FleetTrafficAndIdleAnalyzer
 import com.nodeseek.app.domain.fleet.ProbeConnectivityResult
+import com.nodeseek.app.domain.fleet.ProbeDailyCpuBucket
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
@@ -46,9 +48,19 @@ private data class FleetStorePayload(
     val panels: List<StoredProbePanelConfig> = emptyList(),
     val snapshots: List<StoredProbeServerSnapshot> = emptyList(),
     val assets: List<StoredVpsAssetRecord> = emptyList(),
+    val cpuHistoryByProbeKey: Map<String, List<StoredProbeDailyCpuBucket>> = emptyMap(),
     val monitorSettings: StoredFleetMonitorSettings = StoredFleetMonitorSettings(),
     val alertTracker: StoredFleetAlertTracker = StoredFleetAlertTracker(),
     val lastSyncEpochMillis: Long = 0L,
+)
+
+@Serializable
+private data class StoredProbeDailyCpuBucket(
+    val dateIso: String,
+    val avgCpuPercent: Double,
+    val sampleCount: Int,
+    val maxCpuPercent: Double = avgCpuPercent,
+    val lastSampleEpochMillis: Long = 0L,
 )
 
 @Serializable
@@ -110,6 +122,7 @@ private data class StoredVpsAssetRecord(
     val panelManageUrl: String = "",
     val linkedProbeKey: String? = null,
     val monthlyTrafficQuotaGb: Double? = null,
+    val trafficResetDay: Int? = null,
     val remindDaysBeforeExpiry: Int = VpsAssetRecord.DEFAULT_REMIND_DAYS_BEFORE_EXPIRY,
     val autoRenewNote: String = "",
     val notes: String = "",
@@ -131,6 +144,7 @@ private data class StoredFleetAlertTracker(
     val lastKnownOnlineByProbeKey: Map<String, Boolean> = emptyMap(),
     val activeOutageNotifiedKeys: Set<String> = emptySet(),
     val notifiedRenewalKeys: Set<String> = emptySet(),
+    val notifiedTrafficCycleKeys: Set<String> = emptySet(),
 )
 
 /**
@@ -155,6 +169,7 @@ class FleetRepositoryImpl(
         prettyPrint = false
     }
     private val mutex = Mutex()
+    private val refreshMutex = Mutex()
     private var diskLoaded = false
     private var cachedPayload = FleetStorePayload()
 
@@ -169,6 +184,11 @@ class FleetRepositoryImpl(
 
     private val _assetsFlow = MutableStateFlow<List<VpsAssetRecord>>(emptyList())
     override val assetsFlow: StateFlow<List<VpsAssetRecord>> = _assetsFlow.asStateFlow()
+
+    private val _cpuHistoryByProbeKeyFlow =
+        MutableStateFlow<Map<String, List<ProbeDailyCpuBucket>>>(emptyMap())
+    override val cpuHistoryByProbeKeyFlow: StateFlow<Map<String, List<ProbeDailyCpuBucket>>> =
+        _cpuHistoryByProbeKeyFlow.asStateFlow()
 
     private val _monitorSettingsFlow = MutableStateFlow(FleetMonitorSettings())
     override val monitorSettingsFlow: StateFlow<FleetMonitorSettings> = _monitorSettingsFlow.asStateFlow()
@@ -234,10 +254,15 @@ class FleetRepositoryImpl(
                         asset
                     }
                 }
+                val updatedCpuHistory = cachedPayload.cpuHistoryByProbeKey
+                    .filterKeys { !it.startsWith(prefix) }
                 val updatedTracker = cachedPayload.alertTracker.copy(
                     lastKnownOnlineByProbeKey = cachedPayload.alertTracker.lastKnownOnlineByProbeKey
                         .filterKeys { !it.startsWith(prefix) },
                     activeOutageNotifiedKeys = cachedPayload.alertTracker.activeOutageNotifiedKeys
+                        .filterNot { it.startsWith(prefix) }
+                        .toSet(),
+                    notifiedTrafficCycleKeys = cachedPayload.alertTracker.notifiedTrafficCycleKeys
                         .filterNot { it.startsWith(prefix) }
                         .toSet(),
                 )
@@ -246,6 +271,7 @@ class FleetRepositoryImpl(
                     panels = updatedPanels,
                     snapshots = updatedSnapshots,
                     assets = updatedAssets,
+                    cpuHistoryByProbeKey = updatedCpuHistory,
                     alertTracker = updatedTracker,
                 )
                 writeStoreToDiskLocked(nextPayload)
@@ -293,9 +319,15 @@ class FleetRepositoryImpl(
                             seededOnlineMap.putIfAbsent(snap.probeKey, true)
                         }
                     }
+                    val updatedCpuHistory = FleetTrafficAndIdleAnalyzer.recordCpuSamplesAndPrune(
+                        existingByProbeKey = cachedPayload.cpuHistoryByProbeKey.toDomainCpuHistory(),
+                        freshSnapshots = fetched.snapshots,
+                        nowEpochMillis = now,
+                    ).toStoredCpuHistory()
                     val nextPayload = cachedPayload.copy(
                         panels = updatedPanels,
                         snapshots = updatedSnapshots,
+                        cpuHistoryByProbeKey = updatedCpuHistory,
                         alertTracker = cachedPayload.alertTracker.copy(
                             lastKnownOnlineByProbeKey = seededOnlineMap,
                         ),
@@ -328,8 +360,38 @@ class FleetRepositoryImpl(
             }
         }
 
-    override suspend fun refreshAllPanels(): FleetRefreshSummary = withContext(ioDispatcher) {
-        _isRefreshingFlow.value = true
+    override suspend fun refreshAllPanels(): FleetRefreshSummary =
+        refreshAllPanels(silent = false)
+
+    override suspend fun refreshAllPanels(silent: Boolean): FleetRefreshSummary = withContext(ioDispatcher) {
+        if (silent) {
+            if (!refreshMutex.tryLock()) {
+                return@withContext FleetRefreshSummary(
+                    refreshedPanelCount = 0,
+                    succeededPanelCount = 0,
+                    failedPanelErrors = _panelErrorsFlow.value,
+                    snapshots = _snapshotsFlow.value,
+                    syncedAtEpochMillis = _lastSyncEpochMillisFlow.value,
+                )
+            }
+            try {
+                return@withContext performRefreshAllPanelsLocked(showRefreshingIndicator = _snapshotsFlow.value.isEmpty())
+            } finally {
+                refreshMutex.unlock()
+            }
+        }
+
+        refreshMutex.withLock {
+            performRefreshAllPanelsLocked(showRefreshingIndicator = true)
+        }
+    }
+
+    private suspend fun performRefreshAllPanelsLocked(
+        showRefreshingIndicator: Boolean,
+    ): FleetRefreshSummary {
+        if (showRefreshingIndicator) {
+            _isRefreshingFlow.value = true
+        }
         try {
             val activePanels = mutex.withLock {
                 ensureDiskLoadedLocked()
@@ -337,7 +399,7 @@ class FleetRepositoryImpl(
             }
             val now = nowMillisProvider()
             if (activePanels.isEmpty()) {
-                return@withContext FleetRefreshSummary(
+                return FleetRefreshSummary(
                     refreshedPanelCount = 0,
                     succeededPanelCount = 0,
                     failedPanelErrors = emptyMap(),
@@ -396,9 +458,15 @@ class FleetRepositoryImpl(
                         seededOnlineMap.putIfAbsent(snap.probeKey, true)
                     }
                 }
+                val updatedCpuHistory = FleetTrafficAndIdleAnalyzer.recordCpuSamplesAndPrune(
+                    existingByProbeKey = cachedPayload.cpuHistoryByProbeKey.toDomainCpuHistory(),
+                    freshSnapshots = freshDomainSnapshots,
+                    nowEpochMillis = now,
+                ).toStoredCpuHistory()
                 val nextPayload = cachedPayload.copy(
                     panels = updatedPanels,
                     snapshots = retainedSnapshots + newSnapshots,
+                    cpuHistoryByProbeKey = updatedCpuHistory,
                     alertTracker = cachedPayload.alertTracker.copy(
                         lastKnownOnlineByProbeKey = seededOnlineMap,
                     ),
@@ -411,7 +479,7 @@ class FleetRepositoryImpl(
                 _snapshotsFlow.value
             }
 
-            FleetRefreshSummary(
+            return FleetRefreshSummary(
                 refreshedPanelCount = activePanels.size,
                 succeededPanelCount = freshByPanelId.size,
                 failedPanelErrors = errors,
@@ -419,7 +487,9 @@ class FleetRepositoryImpl(
                 syncedAtEpochMillis = now,
             )
         } finally {
-            _isRefreshingFlow.value = false
+            if (showRefreshingIndicator) {
+                _isRefreshingFlow.value = false
+            }
         }
     }
 
@@ -442,6 +512,7 @@ class FleetRepositoryImpl(
                     purchaseUrl = asset.purchaseUrl.trim(),
                     panelManageUrl = asset.panelManageUrl.trim(),
                     linkedProbeKey = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() },
+                    trafficResetDay = asset.trafficResetDay?.coerceIn(1, 31),
                     remindDaysBeforeExpiry = asset.remindDaysBeforeExpiry.coerceIn(0, 365),
                     autoRenewNote = asset.autoRenewNote.trim(),
                     notes = asset.notes.trim(),
@@ -678,6 +749,7 @@ class FleetRepositoryImpl(
         _panelsFlow.value = panels
         _snapshotsFlow.value = snapshots
         _assetsFlow.value = assets
+        _cpuHistoryByProbeKeyFlow.value = cachedPayload.cpuHistoryByProbeKey.toDomainCpuHistory()
         _monitorSettingsFlow.value = cachedPayload.monitorSettings.toDomain()
         _lastSyncEpochMillisFlow.value = cachedPayload.lastSyncEpochMillis
     }
@@ -790,6 +862,7 @@ class FleetRepositoryImpl(
         panelManageUrl = panelManageUrl,
         linkedProbeKey = linkedProbeKey,
         monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
+        trafficResetDay = trafficResetDay?.coerceIn(1, 31),
         remindDaysBeforeExpiry = remindDaysBeforeExpiry,
         autoRenewNote = autoRenewNote,
         notes = notes,
@@ -813,12 +886,41 @@ class FleetRepositoryImpl(
         panelManageUrl = panelManageUrl,
         linkedProbeKey = linkedProbeKey,
         monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
+        trafficResetDay = trafficResetDay?.takeIf { it in 1..31 },
         remindDaysBeforeExpiry = remindDaysBeforeExpiry,
         autoRenewNote = autoRenewNote,
         notes = notes,
         createdAtEpochMillis = createdAtEpochMillis,
         updatedAtEpochMillis = updatedAtEpochMillis,
     )
+
+    private fun Map<String, List<StoredProbeDailyCpuBucket>>.toDomainCpuHistory():
+        Map<String, List<ProbeDailyCpuBucket>> =
+        mapValues { (_, list) ->
+            list.map { stored ->
+                ProbeDailyCpuBucket(
+                    dateIso = stored.dateIso,
+                    avgCpuPercent = stored.avgCpuPercent,
+                    sampleCount = stored.sampleCount,
+                    maxCpuPercent = stored.maxCpuPercent,
+                    lastSampleEpochMillis = stored.lastSampleEpochMillis,
+                )
+            }
+        }
+
+    private fun Map<String, List<ProbeDailyCpuBucket>>.toStoredCpuHistory():
+        Map<String, List<StoredProbeDailyCpuBucket>> =
+        mapValues { (_, list) ->
+            list.map { bucket ->
+                StoredProbeDailyCpuBucket(
+                    dateIso = bucket.dateIso,
+                    avgCpuPercent = bucket.avgCpuPercent,
+                    sampleCount = bucket.sampleCount,
+                    maxCpuPercent = bucket.maxCpuPercent,
+                    lastSampleEpochMillis = bucket.lastSampleEpochMillis,
+                )
+            }
+        }
 
     private fun FleetMonitorSettings.toStored() = StoredFleetMonitorSettings(
         backgroundMonitorEnabled = backgroundMonitorEnabled,
@@ -840,12 +942,14 @@ class FleetRepositoryImpl(
         lastKnownOnlineByProbeKey = lastKnownOnlineByProbeKey,
         activeOutageNotifiedKeys = activeOutageNotifiedKeys,
         notifiedRenewalKeys = notifiedRenewalKeys,
+        notifiedTrafficCycleKeys = notifiedTrafficCycleKeys,
     )
 
     private fun StoredFleetAlertTracker.toDomain() = FleetAlertTrackerState(
         lastKnownOnlineByProbeKey = lastKnownOnlineByProbeKey,
         activeOutageNotifiedKeys = activeOutageNotifiedKeys,
         notifiedRenewalKeys = notifiedRenewalKeys,
+        notifiedTrafficCycleKeys = notifiedTrafficCycleKeys,
     )
 
     companion object {

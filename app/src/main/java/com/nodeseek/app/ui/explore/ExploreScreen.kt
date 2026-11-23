@@ -90,6 +90,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.digest.AwayDigestState
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.TopicSummary
@@ -166,6 +167,7 @@ fun ExploreScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     var showBuiltInWebViewSheet by rememberSaveable { mutableStateOf(false) }
+    var showAwayDigestSheet by rememberSaveable { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
 
     val boardTabs = uiState.orderedBoardTabs
@@ -441,6 +443,8 @@ fun ExploreScreen(
             ExploreBoardFeedPage(
                 board = board,
                 slice = slice,
+                awayDigest = if (board.slug.isBlank()) uiState.awayDigest else AwayDigestState(),
+                isAwayDigestExpanded = uiState.isAwayDigestExpanded,
                 preferRssFallback = uiState.preferRssFallback,
                 isActivePage = isActivePage,
                 canConsumeScrollToTop = canConsumeScrollToTop,
@@ -456,11 +460,42 @@ fun ExploreScreen(
                 onSelectCategory = selectAndScrollToCategory,
                 onBookmarkToggle = viewModel::toggleBookmark,
                 onOpenTopic = onOpenTopic,
+                onOpenAwayDigestTopic = { digestTopic ->
+                    viewModel.onAwayDigestTopicClicked(digestTopic)
+                    onOpenTopic(
+                        digestTopic.id,
+                        digestTopic.lastReadFloor ?: 0,
+                        digestTopic.title,
+                    )
+                },
+                onToggleAwayDigestExpanded = viewModel::toggleAwayDigestExpanded,
+                onOpenAwayDigestSheet = { showAwayDigestSheet = true },
+                onDismissAwayDigest = {
+                    showAwayDigestSheet = false
+                    viewModel.dismissAwayDigest()
+                },
                 onOpenAuthorProfile = onOpenAuthorProfile,
                 onTriggerWebViewAuth = triggerWebViewAuth,
                 onSwitchToFullWebFeed = viewModel::disablePreferRssAndRefresh,
             )
         }
+    }
+
+    if (showAwayDigestSheet && uiState.awayDigest.items.isNotEmpty()) {
+        AwayDigestBottomSheet(
+            digestState = uiState.awayDigest,
+            onDismissSheet = { showAwayDigestSheet = false },
+            onDismissDigestSession = viewModel::dismissAwayDigest,
+            onTopicClick = { digestTopic ->
+                viewModel.onAwayDigestTopicClicked(digestTopic)
+                onOpenTopic(
+                    digestTopic.id,
+                    digestTopic.lastReadFloor ?: 0,
+                    digestTopic.title,
+                )
+            },
+            onSelectCategory = selectAndScrollToCategory,
+        )
     }
 
     if (showBuiltInWebViewSheet) {
@@ -663,6 +698,8 @@ private fun ExploreCategoryTab(
 private fun ExploreBoardFeedPage(
     board: Category,
     slice: ExploreBoardSliceUiState,
+    awayDigest: AwayDigestState,
+    isAwayDigestExpanded: Boolean,
     preferRssFallback: Boolean,
     isActivePage: Boolean,
     canConsumeScrollToTop: Boolean,
@@ -678,6 +715,10 @@ private fun ExploreBoardFeedPage(
     onSelectCategory: (String) -> Unit,
     onBookmarkToggle: (TopicSummary) -> Unit,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
+    onOpenAwayDigestTopic: (TopicSummary) -> Unit,
+    onToggleAwayDigestExpanded: () -> Unit,
+    onOpenAwayDigestSheet: () -> Unit,
+    onDismissAwayDigest: () -> Unit,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit,
     onTriggerWebViewAuth: () -> Unit,
     onSwitchToFullWebFeed: () -> Unit,
@@ -802,6 +843,23 @@ private fun ExploreBoardFeedPage(
                 bottom = bottomContentPadding + 12.dp,
             ),
         ) {
+            // While-You-Were-Away Top 10 Unread Digest ("你离开了 X 小时")
+            if (board.slug.isBlank() && awayDigest.isVisible) {
+                item(key = "away_digest_card") {
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
+                        AwayDigestHeroCard(
+                            digestState = awayDigest,
+                            isExpanded = isAwayDigestExpanded,
+                            onToggleExpanded = onToggleAwayDigestExpanded,
+                            onOpenFullSheet = onOpenAwayDigestSheet,
+                            onDismiss = onDismissAwayDigest,
+                            onTopicClick = onOpenAwayDigestTopic,
+                            onSelectCategory = onSelectCategory,
+                        )
+                    }
+                }
+            }
+
             // Compact Collapsible Pinned Ticker (Page 1)
             if (slice.pinnedTopics.isNotEmpty() && slice.sort != FeedSort.CURATED) {
                 item(key = "pinned_ticker_${board.slug}") {

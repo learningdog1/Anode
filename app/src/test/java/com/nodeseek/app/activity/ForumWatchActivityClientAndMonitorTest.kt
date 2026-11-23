@@ -30,12 +30,16 @@ import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import com.nodeseek.app.ui.activity.ActivityToggleDecision
 import com.nodeseek.app.ui.activity.resolveActivityToggleDecision
 import com.nodeseek.app.ui.activity.resolveEffectiveActivityNotificationsEnabled
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -741,5 +745,99 @@ class ForumWatchActivityClientAndMonitorTest {
                 systemNotificationsEnabled = true,
             ),
         )
+    }
+
+    @Test
+    fun `only LOTTERY items expose time status badges and count toward ongoing upcoming and ended filters`() {
+        val mainDispatcher = UnconfinedTestDispatcher()
+        Dispatchers.setMain(mainDispatcher)
+        try {
+            runTest(mainDispatcher) {
+                val nowMs = 1_763_820_000_000L
+                val lotteryOngoing = ForumWatchActivityItem(
+                    id = "lot-ongoing",
+                    title = "【抽奖】搬瓦工免单抽奖",
+                    status = ActivityTimeStatus.ONGOING,
+                    kind = ActivityKind.LOTTERY,
+                    startsAtEpochMillis = nowMs - 3_600_000L,
+                    endsAtEpochMillis = nowMs + 3_600_000L,
+                )
+                val lotteryUpcoming = ForumWatchActivityItem(
+                    id = "lot-upcoming",
+                    title = "【预告抽奖】整点抽小鸡",
+                    status = ActivityTimeStatus.UPCOMING,
+                    kind = ActivityKind.LOTTERY,
+                    startsAtEpochMillis = nowMs + 7_200_000L,
+                )
+                val lotteryEnded = ForumWatchActivityItem(
+                    id = "lot-ended",
+                    title = "【已开奖】昨日抽奖",
+                    status = ActivityTimeStatus.ENDED,
+                    kind = ActivityKind.LOTTERY,
+                )
+                val giveawayItem = ForumWatchActivityItem(
+                    id = "giveaway-1",
+                    title = "【福利】免费兑换码派送",
+                    status = ActivityTimeStatus.ONGOING,
+                    kind = ActivityKind.GIVEAWAY,
+                    startsAtEpochMillis = nowMs - 1_800_000L,
+                )
+                val eventItem = ForumWatchActivityItem(
+                    id = "event-1",
+                    title = "【社区活动】测速大赛",
+                    status = ActivityTimeStatus.ENDED,
+                    kind = ActivityKind.EVENT,
+                )
+                val promoItem = ForumWatchActivityItem(
+                    id = "promo-1",
+                    title = "【特惠】黑五闪购",
+                    status = ActivityTimeStatus.UPCOMING,
+                    kind = ActivityKind.PROMO,
+                    startsAtEpochMillis = nowMs + 3_600_000L,
+                )
+
+                assertEquals(ActivityTimeStatus.ONGOING, lotteryOngoing.resolveLotteryStatusOrNull(nowMs))
+                assertEquals(ActivityTimeStatus.UPCOMING, lotteryUpcoming.resolveLotteryStatusOrNull(nowMs))
+                assertEquals(ActivityTimeStatus.ENDED, lotteryEnded.resolveLotteryStatusOrNull(nowMs))
+                assertNull(giveawayItem.resolveLotteryStatusOrNull(nowMs))
+                assertNull(eventItem.resolveLotteryStatusOrNull(nowMs))
+                assertNull(promoItem.resolveLotteryStatusOrNull(nowMs))
+
+                val allItems = listOf(lotteryOngoing, lotteryUpcoming, lotteryEnded, giveawayItem, eventItem, promoItem)
+                val fakeRepo = FakeActivityRepository()
+                fakeRepo.setActivities(allItems, updatedAtMs = nowMs)
+
+                val vm = com.nodeseek.app.ui.activity.ActivityViewModel(
+                    repository = fakeRepo,
+                    clockMillis = { nowMs },
+                    enableClockTicker = false,
+                )
+                val collector = backgroundScope.launch(mainDispatcher) {
+                    vm.uiState.collect {}
+                }
+
+                assertEquals(6, vm.uiState.value.counts.all)
+                assertEquals(1, vm.uiState.value.counts.ongoing)
+                assertEquals(1, vm.uiState.value.counts.upcoming)
+                assertEquals(1, vm.uiState.value.counts.ended)
+                assertEquals(6, vm.uiState.value.filteredActivities.size)
+
+                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ONGOING)
+                assertEquals(listOf("lot-ongoing"), vm.uiState.value.filteredActivities.map { it.id })
+
+                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.UPCOMING)
+                assertEquals(listOf("lot-upcoming"), vm.uiState.value.filteredActivities.map { it.id })
+
+                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ENDED)
+                assertEquals(listOf("lot-ended"), vm.uiState.value.filteredActivities.map { it.id })
+
+                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ALL)
+                assertEquals(6, vm.uiState.value.filteredActivities.size)
+
+                collector.cancel()
+            }
+        } finally {
+            Dispatchers.resetMain()
+        }
     }
 }

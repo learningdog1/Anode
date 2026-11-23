@@ -80,6 +80,9 @@ class NodePulseApp :
                     if (startedActivityCount == 0 && !isActivityChangingConfigurations) {
                         container.radarMonitorController.onForegroundChanged(false)
                         container.onAppEnteredBackground()
+                        if (activity is MainActivity && activity.isFinishing) {
+                            container.onAppClosed()
+                        }
                         container.restockMonitorController.onForegroundChanged(false)
                         container.overseasPromoMonitorController.onForegroundChanged(false)
                         container.overseasPromoWorkScheduler.onAppEnteredBackground(
@@ -94,7 +97,14 @@ class NodePulseApp :
 
                 override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
-                override fun onActivityDestroyed(activity: Activity) = Unit
+                override fun onActivityDestroyed(activity: Activity) {
+                    if (activity is MainActivity &&
+                        !activity.isChangingConfigurations &&
+                        startedActivityCount == 0
+                    ) {
+                        container.onAppClosed()
+                    }
+                }
             },
         )
         container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)

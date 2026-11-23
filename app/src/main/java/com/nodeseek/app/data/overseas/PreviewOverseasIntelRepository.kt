@@ -1,18 +1,14 @@
 package com.nodeseek.app.data.overseas
 
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
-import com.nodeseek.app.domain.overseas.OverseasDisplayMode
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
-import com.nodeseek.app.domain.overseas.TranslationTier
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 
 /**
  * Lightweight in-memory [OverseasIntelRepository] suitable for Compose `@Preview` and `PreviewAppContainer`.
@@ -47,7 +43,6 @@ class PreviewOverseasIntelRepository(
     private val _snapshot = MutableStateFlow(
         OverseasIntelSnapshot(
             offers = sampleOffers,
-            translationConfig = OverseasTranslationConfig(),
             syncStatus = OverseasSyncStatus(
                 lastSyncedEpochMillis = nowEpochMillis - 120_000L,
                 currentPage = 1,
@@ -105,16 +100,6 @@ class PreviewOverseasIntelRepository(
         )
     }
 
-    override suspend fun translateOfferDetail(
-        offerId: String,
-        forceRefresh: Boolean,
-    ): Result<OverseasOfferDetail> = getOfferDetail(offerId, false).map {
-        it.copy(
-            translatedMarkdown = it.tgMarkdown,
-            translationTier = TranslationTier.OFFLINE_GLOSSARY,
-        )
-    }
-
     override suspend fun getRepostContent(
         offerId: String,
         forceRefresh: Boolean,
@@ -135,17 +120,4 @@ class PreviewOverseasIntelRepository(
             ),
         )
     }
-
-    override suspend fun updateTranslationConfig(config: OverseasTranslationConfig) {
-        _snapshot.update { it.copy(translationConfig = config) }
-    }
-
-    override suspend fun updateDisplayMode(mode: OverseasDisplayMode) {
-        _snapshot.update { it.copy(translationConfig = it.translationConfig.copy(displayMode = mode)) }
-    }
-
-    override suspend fun testTranslationConfig(config: OverseasTranslationConfig): Result<String> =
-        Result.success("预览模式测试通过")
-
-    override suspend fun clearTranslationCache() = Unit
 }

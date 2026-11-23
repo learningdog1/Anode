@@ -22,9 +22,11 @@ import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.local.NodePulseDatabase
 import com.nodeseek.app.data.local.RadarPreferencesStore
 import com.nodeseek.app.data.local.SettingsRepositoryImpl
+import com.nodeseek.app.data.local.SharedPreferencesAwayDigestStore
 import com.nodeseek.app.data.mail.SeekMailApiClient
 import com.nodeseek.app.data.mail.SeekMailDiskCache
 import com.nodeseek.app.data.mail.SeekMailRepositoryImpl
+import com.nodeseek.app.data.mail.VpsMailAutoIngestServiceImpl
 import java.io.File
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.network.CoilHttpClientFactory
@@ -69,11 +71,14 @@ import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
+import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.digest.AwayDigestRepository
+import com.nodeseek.app.domain.digest.AwayDigestRepositoryImpl
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.CheckInRepository
 import com.nodeseek.app.domain.repository.DraftRepository
@@ -247,6 +252,22 @@ class DefaultAppContainer(
     override val forumRepository: ForumRepository
         get() = forumRepositoryImpl
 
+    private val awayDigestStore: SharedPreferencesAwayDigestStore by lazy {
+        SharedPreferencesAwayDigestStore(appContext)
+    }
+
+    override val awayDigestRepository: AwayDigestRepository by lazy {
+        AwayDigestRepositoryImpl(
+            store = awayDigestStore,
+            forumRepository = forumRepositoryImpl,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepositoryImpl,
+            sessionRepository = sessionRepositoryImpl,
+            settingsRepository = settingsRepository,
+            contentFilterRepository = contentFilterRepository,
+            scope = applicationScope,
+        )
+    }
+
     override val checkInRepository: CheckInRepository by lazy {
         CheckInRepositoryImpl(
             apiClientProvider = { apiClient },
@@ -288,12 +309,33 @@ class DefaultAppContainer(
         )
     }
 
+    override val vpsMailAutoIngestService: VpsMailAutoIngestService by lazy {
+        VpsMailAutoIngestServiceImpl(
+            fleetRepository = fleetRepository,
+            sshVaultRepository = sshVaultRepository,
+            stateFile = File(appContext.filesDir, VpsMailAutoIngestServiceImpl.STATE_FILE_NAME),
+            mailDetailPeeker = { mailId ->
+                val apiKey = settingsRepository.settings.value.seekMailApiKey.trim()
+                if (apiKey.isEmpty() || mailId <= 0L) {
+                    null
+                } else {
+                    seekMailDiskCache.getMailDetail(apiKey, mailId)?.detail
+                        ?: runCatching {
+                            seekMailApiClient.getMailDetail(apiKey = apiKey, mailId = mailId)
+                                .also { fresh -> seekMailDiskCache.saveMailDetail(apiKey, mailId, fresh) }
+                        }.getOrNull()
+                }
+            },
+        )
+    }
+
     override val seekMailRepository: SeekMailRepository by lazy {
         SeekMailRepositoryImpl(
             apiClient = seekMailApiClient,
             settingsRepository = settingsRepository,
             diskCache = seekMailDiskCache,
             externalScope = applicationScope,
+            vpsMailAutoIngestService = vpsMailAutoIngestService,
         )
     }
 
@@ -342,13 +384,19 @@ class DefaultAppContainer(
 
     fun onAppEnteredForeground() {
         radarWorkScheduler.onAppEnteredForeground()
+        awayDigestRepository.onAppForegrounded()
     }
 
     fun onAppEnteredBackground() {
+        awayDigestRepository.onAppBackgrounded()
         radarWorkScheduler.onAppEnteredBackgroundAsync(applicationScope) {
             runCatching { radarRepository.getPollingSettings() }
                 .getOrDefault(RadarPollingSettings())
         }
+    }
+
+    fun onAppClosed() {
+        awayDigestRepository.onAppClosed()
     }
 
     val gitHubReleaseClient: GitHubReleaseClient by lazy {

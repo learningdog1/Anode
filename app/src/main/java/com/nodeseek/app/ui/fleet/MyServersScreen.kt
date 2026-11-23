@@ -88,12 +88,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
@@ -101,9 +105,12 @@ import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.domain.fleet.AssetExpiryUrgency
 import com.nodeseek.app.domain.fleet.FleetPortfolioSummary
 import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.fleet.FleetTrafficAndIdleAnalyzer
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
+import com.nodeseek.app.domain.fleet.ServerIdleAssessment
+import com.nodeseek.app.domain.fleet.ServerTrafficForecast
 import com.nodeseek.app.domain.fleet.UpcomingRenewalItem
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.fleet.formatBytesBinary
@@ -164,11 +171,21 @@ fun MyServersScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val isInspectionMode = LocalInspectionMode.current
     var pendingDeleteAsset by remember { mutableStateOf<VpsAssetRecord?>(null) }
 
     LaunchedEffect(resolvedViewModel) {
         resolvedViewModel.snackbarMessages.collect { message ->
             snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    LaunchedEffect(lifecycleOwner, resolvedViewModel, previewUiState, isInspectionMode) {
+        if (!isInspectionMode && previewUiState == null) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                resolvedViewModel.runForegroundProbeAutoRefresh()
+            }
         }
     }
 
@@ -256,6 +273,7 @@ fun MyServersScreen(
                         onSelectPanelFilter = resolvedViewModel::selectPanelFilter,
                         onOpenPanelManager = resolvedViewModel::openPanelManager,
                         onAddAssetFromProbe = resolvedViewModel::openAddAssetFromProbe,
+                        onOpenIdleSalePost = resolvedViewModel::openIdleSalePost,
                     )
                 }
                 MyServersTab.ASSETS -> {
@@ -266,6 +284,7 @@ fun MyServersScreen(
                         onRequestDeleteAsset = { pendingDeleteAsset = it },
                         onBindProbe = resolvedViewModel::openProbeBinder,
                         onOpenSalePost = resolvedViewModel::openSalePostSheet,
+                        onOpenIdleSalePost = resolvedViewModel::openIdleSalePost,
                         onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
                     )
                 }
@@ -307,6 +326,9 @@ fun MyServersScreen(
         val linkedProbe = remember(asset.linkedProbeKey, uiState.snapshots) {
             asset.linkedProbeKey?.let { key -> uiState.snapshots.firstOrNull { it.probeKey == key } }
         }
+        val idleAssessment = remember(asset.linkedProbeKey, uiState.idleAssessmentsByProbeKey) {
+            asset.linkedProbeKey?.let { key -> uiState.idleAssessmentsByProbeKey[key] }
+        }
         FleetSalePostSheet(
             asset = asset,
             linkedProbe = linkedProbe,
@@ -316,6 +338,7 @@ fun MyServersScreen(
                 coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
             },
             onDismiss = resolvedViewModel::closeSalePostSheet,
+            idleAssessment = idleAssessment,
         )
     }
 
@@ -569,8 +592,17 @@ private fun ProbesTabContent(
     onSelectPanelFilter: (String?) -> Unit,
     onOpenPanelManager: () -> Unit,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
+    onOpenIdleSalePost: (String) -> Unit,
 ) {
     val panelsById = remember(uiState.panels) { uiState.panels.associateBy { it.id } }
+    val panelScopedSnapshots = remember(uiState.snapshots, uiState.selectedPanelIdFilter) {
+        val panelFilter = uiState.selectedPanelIdFilter
+        if (panelFilter == null) {
+            uiState.snapshots
+        } else {
+            uiState.snapshots.filter { it.panelId == panelFilter }
+        }
+    }
     val assetsByProbeKey = remember(uiState.assets) {
         uiState.assets.mapNotNull { asset ->
             asset.linkedProbeKey?.let { key -> key to asset }
@@ -598,9 +630,9 @@ private fun ProbesTabContent(
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             ProbeOnlineFilter.entries.forEach { filter ->
                                 val count = when (filter) {
-                                    ProbeOnlineFilter.ALL -> uiState.snapshots.size
-                                    ProbeOnlineFilter.ONLINE -> uiState.snapshots.count { it.isOnline }
-                                    ProbeOnlineFilter.OFFLINE -> uiState.snapshots.count { !it.isOnline }
+                                    ProbeOnlineFilter.ALL -> panelScopedSnapshots.size
+                                    ProbeOnlineFilter.ONLINE -> panelScopedSnapshots.count { it.isOnline }
+                                    ProbeOnlineFilter.OFFLINE -> panelScopedSnapshots.count { !it.isOnline }
                                 }
                                 FleetChoiceChip(
                                     label = "${filter.label} $count",
@@ -680,6 +712,27 @@ private fun ProbesTabContent(
                 }
             }
 
+            if (uiState.highTrafficForecasts.isNotEmpty()) {
+                item(key = "probes_traffic_warning_banner") {
+                    TrafficThresholdWarningBanner(
+                        forecasts = uiState.highTrafficForecasts,
+                        snapshotsByKey = remember(uiState.snapshots) {
+                            uiState.snapshots.associateBy { it.probeKey }
+                        },
+                        assetsByProbeKey = assetsByProbeKey,
+                    )
+                }
+            }
+
+            if (uiState.idleServers.isNotEmpty()) {
+                item(key = "probes_idle_banner") {
+                    IdleFleetSummaryBanner(
+                        idleServers = uiState.idleServers,
+                        onOpenIdleSalePost = onOpenIdleSalePost,
+                    )
+                }
+            }
+
             // Empty States
             if (uiState.panels.isEmpty()) {
                 item(key = "probes_empty_panels") {
@@ -714,12 +767,17 @@ private fun ProbesTabContent(
                 ) { index, snapshot ->
                     val panel = panelsById[snapshot.panelId]
                     val linkedAsset = assetsByProbeKey[snapshot.probeKey]
+                    val trafficForecast = uiState.trafficForecastsByProbeKey[snapshot.probeKey]
+                    val idleAssessment = uiState.idleAssessmentsByProbeKey[snapshot.probeKey]
                     PulseStaggeredEntrance(index = index) {
                         ProbeServerCard(
                             snapshot = snapshot,
                             panel = panel,
                             linkedAsset = linkedAsset,
+                            trafficForecast = trafficForecast,
+                            idleAssessment = idleAssessment,
                             onAddAssetFromProbe = { onAddAssetFromProbe(snapshot) },
+                            onOpenIdleSalePost = { onOpenIdleSalePost(snapshot.probeKey) },
                         )
                     }
                 }
@@ -733,7 +791,10 @@ private fun ProbeServerCard(
     snapshot: ProbeServerSnapshot,
     panel: ProbePanelConfig?,
     linkedAsset: VpsAssetRecord?,
+    trafficForecast: ServerTrafficForecast?,
+    idleAssessment: ServerIdleAssessment?,
     onAddAssetFromProbe: () -> Unit,
+    onOpenIdleSalePost: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val dotColor = if (snapshot.isOnline) {
@@ -757,10 +818,8 @@ private fun ProbeServerCard(
         MaterialTheme.colorScheme.error.copy(alpha = 0.42f)
     }
 
-    val effectiveTrafficLimit = snapshot.trafficLimitBytes
-        ?: linkedAsset?.monthlyTrafficQuotaGb?.takeIf { it > 0.0 }?.let { gb ->
-            (gb * 1024.0 * 1024.0 * 1024.0).toLong()
-        }
+    val effectiveTrafficLimit = trafficForecast?.limitBytes
+        ?: FleetTrafficAndIdleAnalyzer.resolveEffectiveTrafficLimitBytes(snapshot, linkedAsset)
     val trafficRatio = effectiveTrafficLimit?.takeIf { it > 0L }?.let { limit ->
         (snapshot.totalMonthlyTransferBytes.toDouble() / limit.toDouble()).toFloat().coerceIn(0f, 1f)
     }
@@ -824,6 +883,13 @@ private fun ProbeServerCard(
                     )
                 }
             }
+            if (idleAssessment?.isIdle == true) {
+                PulseAccentPill(
+                    text = "闲置",
+                    containerColor = ext.drumstickContainer,
+                    contentColor = ext.onDrumstickContainer,
+                )
+            }
             Row(
                 modifier = Modifier
                     .clip(CircleShape)
@@ -879,6 +945,9 @@ private fun ProbeServerCard(
                     append("↓ ${formatBytesBinary(snapshot.monthlyTransferInBytes)}  ↑ ${formatBytesBinary(snapshot.monthlyTransferOutBytes)}")
                     if (effectiveTrafficLimit != null) {
                         append(" / ${formatBytesBinary(effectiveTrafficLimit)}")
+                        trafficForecast?.usageRatio?.let { ratio ->
+                            append(" (${(ratio * 100.0).toInt()}%)")
+                        }
                     }
                 }
                 ResourceMetricBar(
@@ -886,8 +955,20 @@ private fun ProbeServerCard(
                     detail = trafficDetail,
                     progress = trafficRatio ?: 0f,
                     showTrack = trafficRatio != null,
+                    warningThreshold = 0.80f,
                 )
+                if (trafficForecast != null && trafficForecast.limitBytes != null) {
+                    TrafficForecastCaptionRow(forecast = trafficForecast)
+                }
             }
+        }
+
+        if (idleAssessment?.isIdle == true) {
+            IdleServerCalloutStrip(
+                assessment = idleAssessment,
+                actionLabel = if (linkedAsset != null) "出掉回血" else "录入并出机",
+                onAction = onOpenIdleSalePost,
+            )
         }
 
         PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
@@ -988,16 +1069,18 @@ private fun ResourceMetricBar(
     detail: String,
     progress: Float,
     showTrack: Boolean = true,
+    warningThreshold: Float = 0.90f,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     val animatedProgress by animateFloatAsState(
         targetValue = progress.coerceIn(0f, 1f),
         animationSpec = tween(durationMillis = 380, easing = FastOutSlowInEasing),
         label = "fleetMetricProgress",
     )
-    val barColor = if (progress >= 0.90f) {
-        MaterialTheme.colorScheme.error
-    } else {
-        MaterialTheme.colorScheme.primary
+    val barColor = when {
+        progress >= 0.92f -> MaterialTheme.colorScheme.error
+        progress >= warningThreshold -> ext.onDrumstickContainer
+        else -> MaterialTheme.colorScheme.primary
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1050,6 +1133,7 @@ private fun AssetsTabContent(
     onRequestDeleteAsset: (VpsAssetRecord) -> Unit,
     onBindProbe: (VpsAssetRecord) -> Unit,
     onOpenSalePost: (VpsAssetRecord) -> Unit,
+    onOpenIdleSalePost: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
 ) {
     val renewalsByAssetId = remember(uiState.portfolioSummary.upcomingRenewals) {
@@ -1105,6 +1189,15 @@ private fun AssetsTabContent(
             }
         }
 
+        if (uiState.idleServers.isNotEmpty()) {
+            item(key = "assets_idle_banner") {
+                IdleFleetSummaryBanner(
+                    idleServers = uiState.idleServers,
+                    onOpenIdleSalePost = onOpenIdleSalePost,
+                )
+            }
+        }
+
         if (sortedAssets.isEmpty()) {
             item(key = "assets_empty") {
                 FleetEmptyStateCard(
@@ -1122,11 +1215,15 @@ private fun AssetsTabContent(
             ) { index, asset ->
                 val renewal = renewalsByAssetId[asset.id]
                 val linkedProbe = asset.linkedProbeKey?.let { probesByKey[it] }
+                val trafficForecast = asset.linkedProbeKey?.let { uiState.trafficForecastsByProbeKey[it] }
+                val idleAssessment = asset.linkedProbeKey?.let { uiState.idleAssessmentsByProbeKey[it] }
                 PulseStaggeredEntrance(index = index) {
                     VpsAssetCard(
                         asset = asset,
                         renewalItem = renewal,
                         linkedProbe = linkedProbe,
+                        trafficForecast = trafficForecast,
+                        idleAssessment = idleAssessment,
                         onEdit = { onEditAsset(asset) },
                         onDelete = { onRequestDeleteAsset(asset) },
                         onBindProbe = { onBindProbe(asset) },
@@ -1144,6 +1241,8 @@ private fun VpsAssetCard(
     asset: VpsAssetRecord,
     renewalItem: UpcomingRenewalItem?,
     linkedProbe: ProbeServerSnapshot?,
+    trafficForecast: ServerTrafficForecast?,
+    idleAssessment: ServerIdleAssessment?,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onBindProbe: () -> Unit,
@@ -1223,6 +1322,20 @@ private fun VpsAssetCard(
                     }
                     if (asset.routeTag.isNotBlank()) {
                         PulseAccentPill(text = asset.routeTag)
+                    }
+                    if (asset.trafficResetDay != null) {
+                        PulseAccentPill(
+                            text = "每月 ${asset.trafficResetDay} 号重置",
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (idleAssessment?.isIdle == true) {
+                        PulseAccentPill(
+                            text = "闲置",
+                            containerColor = ext.drumstickContainer,
+                            contentColor = ext.onDrumstickContainer,
+                        )
                     }
                 }
             }
@@ -1344,6 +1457,17 @@ private fun VpsAssetCard(
                     softWrap = false,
                 )
             }
+            if (trafficForecast != null && trafficForecast.limitBytes != null) {
+                TrafficForecastCaptionRow(forecast = trafficForecast)
+            }
+        }
+
+        if (idleAssessment?.isIdle == true) {
+            IdleServerCalloutStrip(
+                assessment = idleAssessment,
+                actionLabel = "出掉回血",
+                onAction = onOpenSalePost,
+            )
         }
 
         PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
@@ -1412,7 +1536,7 @@ private fun VpsAssetCard(
                     modifier = Modifier.size(15.dp),
                 )
                 Text(
-                    text = "不想续了 · 一键出机",
+                    text = if (idleAssessment?.isIdle == true) "出掉回血 · 生成出售帖" else "不想续了 · 一键出机",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onPrimary,
@@ -1563,6 +1687,275 @@ private fun FleetEmptyStateCard(
         Spacer(modifier = Modifier.height(4.dp))
         Button(onClick = onAction, shape = CircleShape) {
             Text(actionLabel)
+        }
+    }
+}
+
+@Composable
+private fun TrafficThresholdWarningBanner(
+    forecasts: List<ServerTrafficForecast>,
+    snapshotsByKey: Map<String, ProbeServerSnapshot>,
+    assetsByProbeKey: Map<String, VpsAssetRecord>,
+) {
+    if (forecasts.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.EditorialCard)
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                Icons.Rounded.NotificationsActive,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = "流量 80% 预警 (${forecasts.size} 台)",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
+        forecasts.take(3).forEach { fc ->
+            val name = assetsByProbeKey[fc.probeKey]?.nickname?.takeIf { it.isNotBlank() }
+                ?: snapshotsByKey[fc.probeKey]?.name
+                ?: fc.probeKey
+            val pct = ((fc.usageRatio ?: 0.8) * 100.0).toInt()
+            val forecastPart = fc.exhaustionForecastText?.let { " · $it" }.orEmpty()
+            Text(
+                text = "• $name：已用 ${pct}%$forecastPart（每月 ${fc.anchorResetDay} 号重置）",
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrafficForecastCaptionRow(
+    forecast: ServerTrafficForecast,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val resetLabel = "重置日：每月 ${forecast.anchorResetDay} 号"
+    val (rightText, rightColor, rightBold) = when {
+        forecast.isExhausted -> Triple("本周期流量已用完", MaterialTheme.colorScheme.error, true)
+        !forecast.exhaustionForecastText.isNullOrBlank() -> Triple(
+            forecast.exhaustionForecastText,
+            if (forecast.isAtOrAboveAlertThreshold) MaterialTheme.colorScheme.error else ext.onDrumstickContainer,
+            true,
+        )
+        forecast.isAtOrAboveAlertThreshold -> {
+            val pct = ((forecast.usageRatio ?: 0.8) * 100.0).toInt()
+            Triple("已达 80% 流量预警 (${pct}%)", ext.onDrumstickContainer, true)
+        }
+        else -> Triple(
+            "下次重置 ${forecast.nextResetDate.monthValue}月${forecast.nextResetDate.dayOfMonth}日",
+            MaterialTheme.colorScheme.onSurfaceVariant,
+            false,
+        )
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = resetLabel,
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+        )
+        Text(
+            text = rightText,
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            fontWeight = if (rightBold) FontWeight.SemiBold else FontWeight.Normal,
+            color = rightColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .padding(start = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun IdleServerCalloutStrip(
+    assessment: ServerIdleAssessment,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(ext.drumstickContainer.copy(alpha = 0.72f))
+            .border(0.75.dp, ext.onDrumstickContainer.copy(alpha = 0.25f), PulseArchitecturalShapes.SmallChip)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = assessment.recommendationText ?: "30天 CPU 与流量占用较低，建议出掉回血",
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            fontWeight = FontWeight.Medium,
+            color = ext.onDrumstickContainer,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp),
+        )
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary)
+                .pulseBouncyClickable(
+                    pressedScale = NodePulseMotion.chipPressScale,
+                    role = Role.Button,
+                    onClick = onAction,
+                )
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                Icons.Rounded.LocalOffer,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(13.dp),
+            )
+            Text(
+                text = actionLabel,
+                style = NodePulseThemeTokens.extraTypography.microLabel,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimary,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+    }
+}
+
+@Composable
+private fun IdleFleetSummaryBanner(
+    idleServers: List<ServerIdleAssessment>,
+    onOpenIdleSalePost: (String) -> Unit,
+) {
+    if (idleServers.isEmpty()) return
+    val ext = NodePulseThemeTokens.extendedColors
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                containerColor = ext.drumstickContainer.copy(alpha = 0.55f),
+                borderColor = ext.onDrumstickContainer.copy(alpha = 0.28f),
+                elevation = PulseElevation.Subtle,
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                PulseAccentPill(
+                    text = "闲置识别",
+                    containerColor = ext.drumstickContainer,
+                    contentColor = ext.onDrumstickContainer,
+                )
+                Text(
+                    text = "发现 ${idleServers.size} 台吃灰机器 · 建议出掉回血",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        idleServers.take(3).forEach { item ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PulseArchitecturalShapes.SmallChip)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.78f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = item.serverName,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = item.recommendationText ?: "30天 CPU 与流量占用较低，建议出掉",
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .pulseBouncyClickable(
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.Button,
+                            onClick = { onOpenIdleSalePost(item.probeKey) },
+                        )
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        Icons.Rounded.LocalOffer,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        text = if (item.linkedAsset != null) "生成出售帖" else "录入并出机",
+                        style = NodePulseThemeTokens.extraTypography.microLabel,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+            }
         }
     }
 }

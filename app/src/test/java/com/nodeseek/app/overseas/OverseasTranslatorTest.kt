@@ -1,11 +1,9 @@
 package com.nodeseek.app.overseas
 
 import com.nodeseek.app.data.overseas.OverseasTranslator
+import com.nodeseek.app.data.overseas.TranslationTier
 import com.nodeseek.app.domain.overseas.OverseasLabeledLink
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
-import com.nodeseek.app.domain.overseas.OverseasTranslationConfig
-import com.nodeseek.app.domain.overseas.TranslationEngineKind
-import com.nodeseek.app.domain.overseas.TranslationTier
 import com.nodeseek.app.domain.overseas.VpsGlossaryTranslator
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
@@ -46,9 +44,8 @@ class OverseasTranslatorTest {
                 gtxBaseUrl = server.url("/translate_a/single").toString(),
             )
             val input = "Flash Sale: Los Angeles NVMe VPS Unmetered traffic, Recurring ${'$'}14.99/yr"
-            val config = OverseasTranslationConfig(engineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY)
 
-            val first = translator.translateText(input, config)
+            val first = translator.translateText(input)
             assertEquals(TranslationTier.GOOGLE_GTX, first.tier)
             assertFalse(first.fromCache)
             assertTrue(first.translatedText.contains("限时闪购"))
@@ -61,7 +58,7 @@ class OverseasTranslatorTest {
                 cacheFile = cacheFile,
                 gtxBaseUrl = server.url("/translate_a/single").toString(),
             )
-            val second = reloadedTranslator.translateText(input, config)
+            val second = reloadedTranslator.translateText(input)
             assertTrue(second.fromCache)
             assertEquals(first.translatedText, second.translatedText)
             assertEquals(TranslationTier.GOOGLE_GTX, second.tier)
@@ -121,10 +118,7 @@ class OverseasTranslatorTest {
                 Tokyo Test IP &amp; Looking Glass: https://lg-tyo.example.com/100mb.bin
             """.trimIndent()
 
-            val res = translator.translateMarkdown(
-                markdown = rawMd,
-                config = OverseasTranslationConfig(engineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY),
-            )
+            val res = translator.translateMarkdown(markdown = rawMd)
 
             assertEquals(TranslationTier.GOOGLE_GTX, res.tier)
             val out = res.translatedText
@@ -163,10 +157,7 @@ class OverseasTranslatorTest {
                 - [Order Now](https://example.com/order?location=tokyo)
             """.trimIndent()
 
-            val res = translator.translateMarkdown(
-                markdown = rawMd,
-                config = OverseasTranslationConfig(engineKind = TranslationEngineKind.AUTO_GTX_WITH_GLOSSARY),
-            )
+            val res = translator.translateMarkdown(markdown = rawMd)
             assertEquals(TranslationTier.OFFLINE_GLOSSARY, res.tier)
             assertTrue(res.translatedText.contains("东京"))
             assertTrue(res.translatedText.contains("洛杉矶"))
@@ -227,51 +218,50 @@ class OverseasTranslatorTest {
     }
 
     @Test
-    fun supportsCustomOpenAiCompatibleAndDeepLxProviders() = runTest {
+    fun legacyDiskCacheWithRemovedTierAndUnknownJsonFieldsParsesWithoutCrashing() = runTest {
         val server = MockWebServer()
         server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setBody("""{"choices":[{"message":{"content":"【AI译】RackNerd 洛杉矶 2核4G NVMe 固态 续费同价 ${'$'}14.99/yr"}}]}"""),
-        )
-        server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setBody("""{"code":200,"data":"【DeepLX译】法兰克福大盘鸡不限流量 €15/yr"}"""),
+            MockResponse().setResponseCode(200).setBody(
+                """[[["法兰克福大盘鸡不限流量 €15/yr", "Frankfurt Storage VPS Unmetered €15/yr", null, null, 10]], null, "en"]""",
+            ),
         )
         server.start()
 
-        val cacheFile = File(tempFolder.root, "overseas_custom_cache.json")
+        val cacheFile = File(tempFolder.root, "legacy_translations.json")
         try {
+            val probeTranslator = OverseasTranslator(
+                cacheFile = cacheFile,
+                gtxBaseUrl = server.url("/translate_a/single").toString(),
+            )
+            val input = "Frankfurt Storage VPS Unmetered €15/yr"
+            val key = probeTranslator.sha256Hex(input)
+
+            // Write legacy cache file containing removed tierName "CUSTOM_API" and obsolete extra fields
+            cacheFile.writeText(
+                """
+                {
+                  "legacySchemaField": "v1",
+                  "entries": {
+                    "$key": {
+                      "translatedText": "旧自定义接口译文",
+                      "tierName": "CUSTOM_API",
+                      "updatedAtEpochMillis": 1700000000000,
+                      "obsoleteProviderModel": "gpt-4o-mini"
+                    }
+                  }
+                }
+                """.trimIndent(),
+                Charsets.UTF_8,
+            )
+
             val translator = OverseasTranslator(
                 cacheFile = cacheFile,
-                gtxBaseUrl = server.url("/unused").toString(),
+                gtxBaseUrl = server.url("/translate_a/single").toString(),
             )
-
-            val openAiConfig = OverseasTranslationConfig(
-                engineKind = TranslationEngineKind.OPENAI_COMPATIBLE,
-                customEndpointUrl = server.url("/v1").toString(),
-                customApiKey = "sk-test-123",
-                customModel = "gpt-4o-mini",
-            )
-            val openAiOut = translator.translateText("RackNerd LA 2vCPU 4GB NVMe \$14.99/yr", openAiConfig)
-            assertEquals(TranslationTier.CUSTOM_API, openAiOut.tier)
-            assertTrue(openAiOut.translatedText.contains("RackNerd"))
-            val openAiReq = server.takeRequest()
-            assertEquals("/v1/chat/completions", openAiReq.path)
-            assertEquals("Bearer sk-test-123", openAiReq.getHeader("Authorization"))
-
-            val deepLxConfig = OverseasTranslationConfig(
-                engineKind = TranslationEngineKind.DEEPLX,
-                customEndpointUrl = server.url("/translate").toString(),
-                customApiKey = "dlx-token",
-            )
-            val deepLxOut = translator.translateText("Frankfurt Storage VPS Unmetered €15/yr", deepLxConfig)
-            assertEquals(TranslationTier.CUSTOM_API, deepLxOut.tier)
-            assertTrue(deepLxOut.translatedText.contains("法兰克福"))
-            val deepLxReq = server.takeRequest()
-            assertEquals("/translate", deepLxReq.path)
-            assertEquals("Bearer dlx-token", deepLxReq.getHeader("Authorization"))
+            val out = translator.translateText(input)
+            assertEquals(TranslationTier.GOOGLE_GTX, out.tier)
+            assertFalse(out.fromCache)
+            assertTrue(out.translatedText.contains("法兰克福"))
         } finally {
             server.shutdown()
         }

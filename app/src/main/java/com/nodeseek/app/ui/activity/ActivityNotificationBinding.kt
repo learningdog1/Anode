@@ -260,12 +260,12 @@ fun ActivityNotificationHeaderCard(
     onToggleNotifications: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val badgeShape = RoundedCornerShape(12.dp)
+    val badgeShape = RoundedCornerShape(9.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .pulseCard(
-                shape = PulseArchitecturalShapes.HeroBento,
+                shape = PulseArchitecturalShapes.EditorialCard,
                 elevation = PulseElevation.Card,
                 accentColor = if (notificationsEnabled) {
                     MaterialTheme.colorScheme.primary
@@ -273,13 +273,13 @@ fun ActivityNotificationHeaderCard(
                     MaterialTheme.colorScheme.outlineVariant
                 },
             )
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .size(30.dp)
                 .clip(badgeShape)
                 .background(PulseBrushes.brandSoftWash(if (notificationsEnabled) 0.18f else 0.08f))
                 .border(
@@ -303,14 +303,14 @@ fun ActivityNotificationHeaderCard(
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                modifier = Modifier.size(19.dp),
+                modifier = Modifier.size(16.dp),
             )
         }
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = "新活动通知",
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
@@ -322,7 +322,7 @@ fun ActivityNotificationHeaderCard(
                 } else {
                     "默认关闭，开启后发现新社区活动自动推送通知"
                 },
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

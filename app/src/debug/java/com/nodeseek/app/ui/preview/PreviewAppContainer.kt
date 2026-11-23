@@ -118,6 +118,7 @@ import java.io.File
 import java.time.LocalDate
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.CheckInStatus
@@ -363,6 +364,9 @@ internal class PreviewAppContainer(
         override suspend fun setAutoCheckUpdates(enabled: Boolean) = Unit
         override suspend fun setIncludePrereleaseUpdates(enabled: Boolean) = Unit
         override suspend fun setIgnoredUpdateTag(tag: String) = Unit
+        override suspend fun setAwayDigestEnabled(enabled: Boolean) = Unit
+        override suspend fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) = Unit
+        override suspend fun setAwayDigestThresholdMinutes(minutes: Int) = Unit
         override suspend fun addRecentSearchQuery(query: String) = Unit
         override suspend fun removeRecentSearchQuery(query: String) = Unit
         override suspend fun clearRecentSearchQueries() = Unit
@@ -382,6 +386,9 @@ internal class PreviewAppContainer(
                 autoCheckUpdates = s.autoCheckUpdates,
                 includePrereleaseUpdates = s.includePrereleaseUpdates,
                 ignoredUpdateTag = s.ignoredUpdateTag,
+                awayDigestEnabled = s.awayDigestEnabled,
+                awayDigestTriggerMode = s.awayDigestTriggerMode,
+                awayDigestThresholdMinutes = s.awayDigestThresholdMinutes,
                 recentSearchQueries = recentSearchQueries.value,
             )
         }

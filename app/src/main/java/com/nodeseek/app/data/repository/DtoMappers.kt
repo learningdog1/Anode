@@ -86,6 +86,7 @@ internal fun FeedTopicDto.toDomainSummary(
     lastReadFloor = readEntry?.lastReadFloor,
     isLocked = false,
     isBookmarked = isBookmarked,
+    drumstickCount = likes,
 )
 
 internal fun PostCommentDto.toDomainFloorComment(topicOpUid: Long?): FloorComment {

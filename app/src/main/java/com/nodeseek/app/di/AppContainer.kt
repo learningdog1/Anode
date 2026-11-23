@@ -12,12 +12,16 @@ import com.nodeseek.app.domain.activity.NoOpActivityMonitorController
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.mail.NoOpVpsMailAutoIngestService
 import com.nodeseek.app.domain.mail.SeekMailRepository
+import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.overseas.NoOpOverseasPromoMonitorController
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.digest.AwayDigestRepository
+import com.nodeseek.app.domain.digest.NoOpAwayDigestRepository
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.CheckInRepository
 import com.nodeseek.app.domain.repository.DraftRepository
@@ -39,6 +43,8 @@ import com.nodeseek.app.notifications.PulseNotificationDispatcher
 interface AppContainer {
     val sessionRepository: SessionRepository
     val forumRepository: ForumRepository
+    val awayDigestRepository: AwayDigestRepository
+        get() = NoOpAwayDigestRepository
     val checkInRepository: CheckInRepository
     val inboxRepository: InboxRepository
     val userRepository: UserRepository
@@ -47,6 +53,8 @@ interface AppContainer {
     val draftRepository: DraftRepository
     val imageHostRepository: ImageHostRepository
     val seekMailRepository: SeekMailRepository
+    val vpsMailAutoIngestService: VpsMailAutoIngestService
+        get() = NoOpVpsMailAutoIngestService
     val radarRepository: RadarRepository
     val radarMonitorController: RadarMonitorController
     val contentFilterRepository: ContentFilterRepository

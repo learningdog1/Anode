@@ -55,15 +55,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ForwardToInbox
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.DoNotDisturbOn
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -76,11 +80,14 @@ import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.MarkEmailUnread
+import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -147,6 +154,9 @@ import com.nodeseek.app.domain.mail.SeekMailRateLimit
 import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.mail.VpsBillingMailParser
+import com.nodeseek.app.domain.mail.VpsMailSummaryHint
+import com.nodeseek.app.domain.mail.VpsMailType
 import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -417,6 +427,8 @@ fun SeekMailScreen(
                 onRetryRawEml = viewModel::retryRawEml,
                 onRetryAttachments = viewModel::retryAttachments,
                 onToggleRemoteImages = viewModel::toggleAllowRemoteImages,
+                onToggleVpsPasswordVisibility = viewModel::toggleVpsPasswordVisibility,
+                onIngestVpsMail = viewModel::ingestOpenedVpsMail,
                 onCopyCode = { code ->
                     copyWithFeedback("验证码", code, "已复制验证码：$code")
                 },
@@ -2027,13 +2039,20 @@ private fun SeekMailSummaryCard(
                 )
             }
 
-            // ── 3. Prominent 1-Tap OTP Verification Code Pill ──
+            // ── 3. Prominent 1-Tap OTP Verification Code Pill & Subtle VPS Mail Hint ──
             val otpCode = mail.verificationCode?.trim()?.takeIf { it.isNotEmpty() }
             if (otpCode != null) {
                 OtpQuickCopyPill(
                     code = otpCode,
                     onCopy = { onCopyCode(otpCode) },
                 )
+            }
+
+            val vpsHint = remember(mail.id, mail.subject, mail.snippet, mail.fromName, mail.fromAddress) {
+                VpsBillingMailParser.parseSummaryHint(mail)
+            }
+            if (vpsHint != null) {
+                VpsMailSummaryMicroBadge(hint = vpsHint)
             }
 
             // ── 4. Target Mailbox + Tag Pills ──
@@ -2361,6 +2380,8 @@ private fun SeekMailDetailReaderPane(
     onRetryRawEml: () -> Unit,
     onRetryAttachments: () -> Unit,
     onToggleRemoteImages: () -> Unit,
+    onToggleVpsPasswordVisibility: () -> Unit,
+    onIngestVpsMail: () -> Unit,
     onCopyCode: (String) -> Unit,
     onCopyText: (label: String, text: String, toast: String) -> Unit,
     onDownloadAttachment: (SeekMailAttachment) -> Unit,
@@ -2437,15 +2458,25 @@ private fun SeekMailDetailReaderPane(
                 )
             }
 
-            // ── Compact Metadata, OTP Card, Security Telemetry & Attachments ──
+            // ── Compact Metadata, VPS Insight Card, OTP Card, Security Telemetry & Attachments ──
+            val maxHeaderPaneHeight = if (uiState.openedVpsInsight != null) 340.dp else 260.dp
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 260.dp)
+                    .heightIn(max = maxHeaderPaneHeight)
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                uiState.openedVpsInsight?.let { vpsInsight ->
+                    DetailVpsMailInsightCard(
+                        insight = vpsInsight,
+                        onTogglePasswordVisibility = onToggleVpsPasswordVisibility,
+                        onIngest = onIngestVpsMail,
+                        onCopyText = onCopyText,
+                    )
+                }
+
                 val otpCode = summary?.verificationCode?.trim()?.takeIf { it.isNotEmpty() }
                 if (otpCode != null) {
                     DetailOtpHeroCard(
@@ -2736,6 +2767,432 @@ private fun DetailOtpHeroCard(
                 text = "复制",
                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                 color = Color.White,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VpsMailSummaryMicroBadge(
+    hint: VpsMailSummaryHint,
+    modifier: Modifier = Modifier,
+) {
+    val isDark = NodePulseThemeTokens.isDark
+    val (accentColor, icon) = when (hint.mailType) {
+        VpsMailType.PROVISIONING -> MaterialTheme.colorScheme.primary to Icons.Rounded.Dns
+        VpsMailType.RENEWAL -> MaterialTheme.colorScheme.tertiary to Icons.Rounded.CloudDone
+        VpsMailType.INVOICE -> MaterialTheme.colorScheme.secondary to Icons.Rounded.AccountBalanceWallet
+    }
+    val bgColor = accentColor.copy(alpha = if (isDark) 0.18f else 0.11f)
+    val borderColor = accentColor.copy(alpha = if (isDark) 0.42f else 0.26f)
+    val detailSuffix = hint.primaryIp ?: hint.formattedPrice
+
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .border(width = 0.8.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = accentColor,
+            modifier = Modifier.size(13.dp),
+        )
+        Text(
+            text = buildString {
+                append(hint.mailType.shortBadgeZh)
+                if (!detailSuffix.isNullOrBlank()) {
+                    append(" · ")
+                    append(detailSuffix)
+                }
+            },
+            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            fontWeight = FontWeight.SemiBold,
+            color = accentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DetailVpsMailInsightCard(
+    insight: VpsMailInsightUiState,
+    onTogglePasswordVisibility: () -> Unit,
+    onIngest: () -> Unit,
+    onCopyText: (label: String, text: String, toast: String) -> Unit,
+) {
+    val parsed = insight.parsed
+    val matchStatus = insight.matchStatus
+    val isDark = NodePulseThemeTokens.isDark
+    val extraType = NodePulseThemeTokens.extraTypography
+
+    val (accentColor, typeIcon) = when (parsed.mailType) {
+        VpsMailType.PROVISIONING -> MaterialTheme.colorScheme.primary to Icons.Rounded.Dns
+        VpsMailType.RENEWAL -> MaterialTheme.colorScheme.tertiary to Icons.Rounded.CloudDone
+        VpsMailType.INVOICE -> MaterialTheme.colorScheme.secondary to Icons.Rounded.AccountBalanceWallet
+    }
+
+    val titleText = buildString {
+        if (parsed.providerName.isNotBlank()) append(parsed.providerName)
+        val itemLabel = parsed.productName.ifBlank { parsed.hostname }
+        if (itemLabel.isNotBlank()) {
+            if (isNotEmpty()) append(" · ")
+            append(itemLabel)
+        }
+        if (isEmpty()) append(parsed.mailType.labelZh)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                accentColor = accentColor,
+                elevation = PulseElevation.None,
+            )
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        // ── 1. Type Pill + Provider/Product Title + Invoice Badge ──
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(accentColor.copy(alpha = if (isDark) 0.22f else 0.12f))
+                    .border(
+                        width = 0.8.dp,
+                        color = accentColor.copy(alpha = if (isDark) 0.45f else 0.28f),
+                        shape = CircleShape,
+                    )
+                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Icon(
+                    imageVector = typeIcon,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(13.dp),
+                )
+                Text(
+                    text = parsed.mailType.labelZh,
+                    style = extraType.microLabel,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+
+            Text(
+                text = titleText,
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+
+            parsed.invoiceNumber?.takeIf { it.isNotBlank() }?.let { invNo ->
+                Text(
+                    text = "#$invNo",
+                    style = extraType.microLabel.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                )
+            }
+        }
+
+        // ── 2. Matched Existing Asset Status & Auto-Renewal Banner ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(9.dp))
+                .background(
+                    if (matchStatus.isAssetMatched) {
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.34f else 0.48f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f)
+                    },
+                )
+                .padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = if (matchStatus.isAssetMatched) Icons.Rounded.CheckCircle else Icons.Rounded.Storage,
+                contentDescription = null,
+                tint = if (matchStatus.isAssetMatched) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(14.dp),
+            )
+            Text(
+                text = insight.matchedAssetStatusText,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                fontWeight = if (matchStatus.isAssetMatched) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (matchStatus.isAssetMatched) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        matchStatus.renewalAutoUpdate?.let { autoRec ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = if (isDark) 0.38f else 0.55f))
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.CloudDone,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    text = "已自动更新到期日：${autoRec.previousExpiryDateIso.ifBlank { "原日期" }} → ${autoRec.newExpiryDateIso}",
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        // ── 3. Extracted Telemetry Chips (IP / Port / Username / Price / Expiry) ──
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            parsed.mainIpv4?.takeIf { it.isNotBlank() }?.let { ipv4 ->
+                val endpointDisplay = if (parsed.sshPort != 22 || parsed.hasSshCredentials) {
+                    "$ipv4:${parsed.sshPort}"
+                } else {
+                    ipv4
+                }
+                VpsInsightFieldChip(
+                    label = "IPv4",
+                    value = endpointDisplay,
+                    monospace = true,
+                    onClick = { onCopyText("服务器 IPv4", ipv4, "已复制 IP：$ipv4") },
+                )
+            }
+
+            parsed.mainIpv6?.takeIf { it.isNotBlank() }?.let { ipv6 ->
+                VpsInsightFieldChip(
+                    label = "IPv6",
+                    value = ipv6,
+                    monospace = true,
+                    onClick = { onCopyText("服务器 IPv6", ipv6, "已复制 IPv6：$ipv6") },
+                )
+            }
+
+            if (parsed.hasSshCredentials || parsed.mailType == VpsMailType.PROVISIONING) {
+                VpsInsightFieldChip(
+                    label = "SSH 账号",
+                    value = "${parsed.sshUsername} · 端口 ${parsed.sshPort}",
+                    monospace = true,
+                    onClick = {
+                        onCopyText("SSH 用户名", parsed.sshUsername, "已复制用户名：${parsed.sshUsername}")
+                    },
+                )
+            }
+
+            parsed.formattedPriceAndCycle?.let { priceCycle ->
+                VpsInsightFieldChip(
+                    label = "账单周期",
+                    value = priceCycle,
+                )
+            }
+
+            parsed.nextDueDateIso?.takeIf { it.isNotBlank() }?.let { dueIso ->
+                val dateLabel = if (parsed.mailType == VpsMailType.INVOICE) "账单到期" else "到期日"
+                VpsInsightFieldChip(
+                    label = dateLabel,
+                    value = dueIso,
+                    monospace = true,
+                )
+            }
+        }
+
+        // ── 4. Masked Root / SSH Password Row (with Reveal Toggle & Copy) ──
+        parsed.sshPassword?.takeIf { it.isNotBlank() }?.let { password ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(
+                        width = 0.8.dp,
+                        color = NodePulseThemeTokens.extendedColors.cardBorder,
+                        shape = RoundedCornerShape(9.dp),
+                    )
+                    .padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Password,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = "SSH 密码",
+                    style = extraType.microLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = if (insight.isPasswordRevealed) password else "••••••••••••",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(
+                    onClick = onTogglePasswordVisibility,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        imageVector = if (insight.isPasswordRevealed) {
+                            Icons.Rounded.VisibilityOff
+                        } else {
+                            Icons.Rounded.Visibility
+                        },
+                        contentDescription = if (insight.isPasswordRevealed) "隐藏密码" else "显示密码",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                IconButton(
+                    onClick = { onCopyText("SSH 密码", password, "已复制 SSH 密码") },
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCopy,
+                        contentDescription = "复制密码",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+            }
+        }
+
+        // ── 5. One-Click Import / Update Action Button ──
+        Button(
+            onClick = onIngest,
+            enabled = !insight.isIngesting,
+            shape = CircleShape,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (insight.isIngesting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "正在入库…",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                )
+            } else {
+                Icon(
+                    imageVector = if (parsed.hasSshCredentials) Icons.Rounded.Terminal else Icons.Rounded.Storage,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = insight.actionButtonLabel,
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VpsInsightFieldChip(
+    label: String,
+    value: String,
+    monospace: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
+    val baseModifier = Modifier
+        .clip(RoundedCornerShape(8.dp))
+        .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.82f))
+        .border(
+            width = 0.75.dp,
+            color = NodePulseThemeTokens.extendedColors.cardBorder,
+            shape = RoundedCornerShape(8.dp),
+        )
+        .let { mod ->
+            if (onClick != null) mod.clickable(onClick = onClick) else mod
+        }
+        .padding(horizontal = 8.dp, vertical = 4.dp)
+
+    Row(
+        modifier = baseModifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            text = label,
+            style = NodePulseThemeTokens.extraTypography.microLabel,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+                fontWeight = FontWeight.SemiBold,
+            ).withTabularNumbers(),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (onClick != null) {
+            Icon(
+                imageVector = Icons.Rounded.ContentCopy,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(11.dp),
             )
         }
     }

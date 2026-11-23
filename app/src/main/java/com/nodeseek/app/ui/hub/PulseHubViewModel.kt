@@ -7,6 +7,7 @@ import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.CheckInStatus
 import com.nodeseek.app.domain.model.DailyQuotaProgress
@@ -363,6 +364,24 @@ class PulseHubViewModel(
     fun setPreferRandomCheckIn(preferRandom: Boolean) {
         viewModelScope.launch {
             container.settingsRepository.setPreferRandomCheckIn(preferRandom)
+        }
+    }
+
+    fun setAwayDigestEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setAwayDigestEnabled(enabled)
+        }
+    }
+
+    fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {
+        viewModelScope.launch {
+            container.settingsRepository.setAwayDigestTriggerMode(mode)
+        }
+    }
+
+    fun setAwayDigestThresholdMinutes(minutes: Int) {
+        viewModelScope.launch {
+            container.settingsRepository.setAwayDigestThresholdMinutes(minutes)
         }
     }
 

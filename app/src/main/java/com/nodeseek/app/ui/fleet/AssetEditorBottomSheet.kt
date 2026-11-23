@@ -82,6 +82,14 @@ import java.util.UUID
 
 private val ROUTE_TAG_PRESETS = listOf("CN2 GIA", "9929", "CMIN2", "BGP", "优化直连", "落地")
 private val REMIND_DAY_PRESETS = listOf(0 to "不提醒", 3 to "提前 3 天", 7 to "提前 7 天", 15 to "提前 15 天", 30 to "提前 30 天")
+private val TRAFFIC_RESET_DAY_PRESETS = listOf(
+    null to "跟随到期日",
+    1 to "每月 1 号",
+    10 to "每月 10 号",
+    15 to "每月 15 号",
+    20 to "每月 20 号",
+    31 to "月末 31 号",
+)
 
 /**
  * Add / Edit VPS Asset Ledger record modal bottom sheet.
@@ -112,6 +120,7 @@ internal fun AssetEditorBottomSheet(
     var expiryDateIso by remember(draft) { mutableStateOf(draft.expiryDateIso) }
     var remindDays by remember(draft) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
     var monthlyTrafficQuotaGb by remember(draft) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
+    var trafficResetDayText by remember(draft) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
     var linkedProbeKey by remember(draft) { mutableStateOf(draft.linkedProbeKey) }
     var purchaseUrl by remember(draft) { mutableStateOf(draft.purchaseUrl) }
     var panelManageUrl by remember(draft) { mutableStateOf(draft.panelManageUrl) }
@@ -393,7 +402,7 @@ internal fun AssetEditorBottomSheet(
                 }
 
                 // 4. Optional Links & Notes
-                PulseSectionHeader(title = "配额、链接与备注", icon = Icons.Rounded.Link)
+                PulseSectionHeader(title = "配额、重置日与备注", icon = Icons.Rounded.Link)
                 OutlinedTextField(
                     value = monthlyTrafficQuotaGb,
                     onValueChange = { monthlyTrafficQuotaGb = sanitizeAssetDecimal(it) },
@@ -405,6 +414,52 @@ internal fun AssetEditorBottomSheet(
                     colors = fleetTextFieldColors(),
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                val expiryFallbackDay = remember(expiryDateIso) {
+                    FleetPortfolioCalculator.parseExpiryDate(expiryDateIso)?.dayOfMonth
+                }
+                val currentResetDayInt = trafficResetDayText.trim().toIntOrNull()
+                val resetDaySupportingText = when {
+                    currentResetDayInt != null && currentResetDayInt in 1..31 ->
+                        "流量重置日：每月 $currentResetDayInt 号（短月自动对齐月末，用于流量耗尽预测与 80% 预警）"
+                    expiryFallbackDay != null ->
+                        "未单独指定 · 默认跟随到期日（每月 $expiryFallbackDay 号）"
+                    else ->
+                        "未单独指定 · 默认每月 1 号"
+                }
+                OutlinedTextField(
+                    value = trafficResetDayText,
+                    onValueChange = { trafficResetDayText = it.filter(Char::isDigit).take(2) },
+                    label = { Text("流量重置日：每月 X 号（1-31，选填）") },
+                    placeholder = {
+                        Text(expiryFallbackDay?.let { "留空默认每月 $it 号" } ?: "留空默认每月 1 号")
+                    },
+                    supportingText = { Text(resetDaySupportingText) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = PulseArchitecturalShapes.MediumBadge,
+                    colors = fleetTextFieldColors(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    TRAFFIC_RESET_DAY_PRESETS.forEach { (presetDay, label) ->
+                        val isSelected = if (presetDay == null) {
+                            trafficResetDayText.isBlank()
+                        } else {
+                            currentResetDayInt == presetDay
+                        }
+                        FleetChoiceChip(
+                            label = label,
+                            selected = isSelected,
+                            onClick = {
+                                trafficResetDayText = presetDay?.toString().orEmpty()
+                            },
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = purchaseUrl,
                     onValueChange = { purchaseUrl = it },
@@ -480,6 +535,10 @@ internal fun AssetEditorBottomSheet(
                     onClick = {
                         val parsedAmount = renewalAmount.trim().toBigDecimalOrNull()
                         val parsedDate = FleetPortfolioCalculator.parseExpiryDate(expiryDateIso)
+                        val trimmedResetDay = trafficResetDayText.trim()
+                        val parsedResetDay = trimmedResetDay.takeIf { it.isNotEmpty() }?.toIntOrNull()
+                        val hasInvalidResetDay = trimmedResetDay.isNotEmpty() &&
+                            (parsedResetDay == null || parsedResetDay !in 1..31)
                         when {
                             nickname.isBlank() && providerName.isBlank() -> {
                                 validationError = "请填写资产备注名称或商家名称"
@@ -489,6 +548,9 @@ internal fun AssetEditorBottomSheet(
                             }
                             parsedDate == null -> {
                                 validationError = "到期日期格式须为 yyyy-MM-dd"
+                            }
+                            hasInvalidResetDay -> {
+                                validationError = "流量重置日须填写 1～31 之间的日期"
                             }
                             else -> {
                                 validationError = null
@@ -514,6 +576,7 @@ internal fun AssetEditorBottomSheet(
                                         panelManageUrl = panelManageUrl.trim(),
                                         linkedProbeKey = linkedProbeKey,
                                         monthlyTrafficQuotaGb = monthlyTrafficQuotaGb.trim().toDoubleOrNull()?.takeIf { it > 0.0 },
+                                        trafficResetDay = parsedResetDay,
                                         remindDaysBeforeExpiry = remindDays,
                                         autoRenewNote = autoRenewNote.trim(),
                                         notes = notes.trim(),
@@ -529,7 +592,11 @@ internal fun AssetEditorBottomSheet(
                     Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (draft.editingId == null) "加入资产账本" else "保存修改",
+                        text = when {
+                            draft.openSalePostAfterSave -> "保存并生成出售帖"
+                            draft.editingId == null -> "加入资产账本"
+                            else -> "保存修改"
+                        },
                         maxLines = 1,
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis,

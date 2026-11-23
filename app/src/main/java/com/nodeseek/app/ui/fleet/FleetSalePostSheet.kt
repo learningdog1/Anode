@@ -67,6 +67,7 @@ import com.nodeseek.app.domain.fleet.FleetSalePostOutcome
 import com.nodeseek.app.domain.fleet.FleetSalePostRequest
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.PushFeeBearer
+import com.nodeseek.app.domain.fleet.ServerIdleAssessment
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.valuation.DealSpreadStatus
 import com.nodeseek.app.domain.valuation.FxRateSource
@@ -105,6 +106,7 @@ internal fun FleetSalePostSheet(
     onCreateSalePost: (title: String, markdownBody: String) -> Unit,
     onCopiedFeedback: (String) -> Unit,
     onDismiss: () -> Unit,
+    idleAssessment: ServerIdleAssessment? = null,
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -219,11 +221,23 @@ internal fun FleetSalePostSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "不想续了 · 一键估值出机",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = if (idleAssessment?.isIdle == true) "闲置回血 · 一键估值出机" else "不想续了 · 一键估值出机",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        if (idleAssessment?.isIdle == true) {
+                            PulseAccentPill(
+                                text = "闲置",
+                                containerColor = ext.drumstickContainer,
+                                contentColor = ext.onDrumstickContainer,
+                            )
+                        }
+                    }
                     Text(
                         text = "${asset.nickname} · 到期 ${asset.expiryDateIso}",
                         style = MaterialTheme.typography.labelSmall,
@@ -231,6 +245,15 @@ internal fun FleetSalePostSheet(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    idleAssessment?.takeIf { it.isIdle }?.recommendationText?.let { reason ->
+                        Text(
+                            text = reason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ext.onDrumstickContainer,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "关闭")

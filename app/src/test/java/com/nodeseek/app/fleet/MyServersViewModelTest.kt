@@ -245,4 +245,125 @@ class MyServersViewModelTest {
 
             collectorJob.cancel()
         }
+
+    @Test
+    fun `runForegroundProbeAutoRefresh updates online counts and telemetry automatically without manual refresh or snackbar spam`() =
+        runTest(testDispatcher) {
+            val mockServer = okhttp3.mockwebserver.MockWebServer()
+            mockServer.start()
+            try {
+                var tick = 0
+                mockServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse =
+                        when (request.path) {
+                            "/api/nodes" -> okhttp3.mockwebserver.MockResponse().setResponseCode(200).setBody(
+                                """
+                                {
+                                  "status": "success",
+                                  "data": [
+                                    { "uuid": "n-1", "name": "Node-1", "region": "JP", "mem_total": 1073741824, "disk_total": 10737418240 },
+                                    { "uuid": "n-2", "name": "Node-2", "region": "US", "mem_total": 1073741824, "disk_total": 10737418240 }
+                                  ]
+                                }
+                                """.trimIndent(),
+                            )
+                            "/api/rpc2" -> {
+                                tick++
+                                val secondOnline = tick >= 2
+                                val cpu1 = if (tick == 1) 12.0 else 48.5
+                                val speed1 = if (tick == 1) 10240L else 512000L
+                                okhttp3.mockwebserver.MockResponse().setResponseCode(200).setBody(
+                                    """
+                                    {
+                                      "jsonrpc": "2.0",
+                                      "id": 1,
+                                      "result": {
+                                        "n-1": { "client": "n-1", "online": true, "cpu": $cpu1, "ram": 536870912, "disk": 2147483648, "net_in": $speed1, "net_out": 20480, "uptime": 3600 },
+                                        "n-2": { "client": "n-2", "online": $secondOnline, "cpu": 15.0, "ram": 268435456, "disk": 1073741824, "net_in": 4096, "net_out": 4096, "uptime": 1800 }
+                                      }
+                                    }
+                                    """.trimIndent(),
+                                )
+                            }
+                            else -> okhttp3.mockwebserver.MockResponse().setResponseCode(404)
+                        }
+                }
+
+                var nowMs = 1_763_560_845_000L
+                val storeFile = File(tempDir, "auto_refresh_store.json")
+                val probeClient = com.nodeseek.app.data.fleet.ProbePanelClient(
+                    ioDispatcher = testDispatcher,
+                    nowMillisProvider = { nowMs },
+                    allowLoopbackHttpWithCredentials = true,
+                )
+                val fleetRepo = FleetRepositoryImpl(
+                    storeFile = storeFile,
+                    probeClient = probeClient,
+                    tokenCipher = cipher,
+                    ioDispatcher = testDispatcher,
+                    nowMillisProvider = { nowMs },
+                )
+                fleetRepo.upsertPanel(
+                    ProbePanelConfig(
+                        id = "komari-auto",
+                        name = "Komari Live",
+                        baseUrl = mockServer.url("/").toString(),
+                        panelType = ProbePanelType.KOMARI,
+                    ),
+                )
+                val fxRepo = ExchangeRateRepository(
+                    cacheFile = File(tempDir, "fx_cache_auto.json"),
+                    ioDispatcher = testDispatcher,
+                )
+                val vm = MyServersViewModel(
+                    fleetRepository = fleetRepo,
+                    exchangeRateRepository = fxRepo,
+                    todayProvider = { LocalDate.of(2026, 11, 20) },
+                    nowMillisProvider = { nowMs },
+                )
+
+                val snackbars = mutableListOf<String>()
+                val snackJob = backgroundScope.launch(testDispatcher) {
+                    vm.snackbarMessages.collect { snackbars += it }
+                }
+                suspend fun awaitCondition(predicate: () -> Boolean) {
+                    val deadline = System.nanoTime() + 3_000_000_000L
+                    while (!predicate() && System.nanoTime() < deadline) {
+                        testScheduler.runCurrent()
+                        Thread.sleep(10)
+                    }
+                    testScheduler.runCurrent()
+                }
+
+                awaitCondition { vm.uiState.value.snapshots.size == 2 }
+                snackbars.clear()
+
+                // Initial state after first sync: 1 online, 1 offline, cpu = 12.0
+                assertEquals(1, vm.uiState.value.portfolioSummary.onlineProbeCount)
+                assertEquals(1, vm.uiState.value.portfolioSummary.offlineProbeCount)
+                assertEquals(12.0, vm.uiState.value.snapshots.first { it.remoteServerId == "n-1" }.cpuPercent, 0.01)
+
+                // Start foreground auto-refresh loop and advance 5 seconds without manual refresh
+                val pollJob = backgroundScope.launch(testDispatcher) {
+                    vm.runForegroundProbeAutoRefresh(intervalMillis = 5_000L)
+                }
+                testScheduler.runCurrent()
+                nowMs += 5_000L
+                testScheduler.advanceTimeBy(5_100L)
+                awaitCondition { vm.uiState.value.portfolioSummary.onlineProbeCount == 2 }
+
+                assertEquals(2, vm.uiState.value.portfolioSummary.onlineProbeCount)
+                assertEquals(0, vm.uiState.value.portfolioSummary.offlineProbeCount)
+                val refreshedN1 = vm.uiState.value.snapshots.first { it.remoteServerId == "n-1" }
+                assertEquals(48.5, refreshedN1.cpuPercent, 0.01)
+                assertEquals(512000L, refreshedN1.netInSpeedBps)
+                assertFalse(vm.uiState.value.isRefreshing)
+                assertTrue("Silent foreground poll must not emit snackbars", snackbars.isEmpty())
+
+                pollJob.cancel()
+                snackJob.cancel()
+            } finally {
+                mockServer.shutdown()
+            }
+        }
 }

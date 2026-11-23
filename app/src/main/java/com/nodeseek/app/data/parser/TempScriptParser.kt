@@ -346,6 +346,9 @@ data class RotateTopicDto(
     val views: Int = 0,
     @Serializable(with = FlexibleIntSerializer::class)
     val comments: Int = 0,
+    @JsonNames("likeCount", "likes", "drumsticks")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val likeCount: Int = 0,
     val lastCommentDate: String = "",
     @Serializable(with = FlexibleNullableIntSerializer::class)
     val rank: Int? = null,

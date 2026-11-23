@@ -10,6 +10,7 @@ import java.time.temporal.ChronoUnit
  * Pure domain evaluator for:
  * 1. Probe node `ONLINE -> OFFLINE` transitions with per-outage deduplication & optional recovery alerts.
  * 2. VPS asset expiry renewal reminders within `remindDaysBeforeExpiry`, deduped per `(assetId, expiryDateIso)`.
+ * 3. Per-cycle >=80% traffic usage warnings (with exhaustion date forecast), deduped per `(probeKey, cycleStartDate)`.
  */
 object FleetAlertEvaluator {
 
@@ -34,10 +35,12 @@ object FleetAlertEvaluator {
         val nextOnlineMap = previousTracker.lastKnownOnlineByProbeKey.toMutableMap()
         val nextOutageKeys = previousTracker.activeOutageNotifiedKeys.toMutableSet()
         val nextRenewalKeys = previousTracker.notifiedRenewalKeys.toMutableSet()
+        val nextTrafficCycleKeys = previousTracker.notifiedTrafficCycleKeys.toMutableSet()
 
         val offlineAlerts = mutableListOf<FleetAlertTransition.OfflineDetected>()
         val recoveryAlerts = mutableListOf<FleetAlertTransition.RecoveredOnline>()
         val renewalReminders = mutableListOf<FleetAlertTransition.RenewalReminderDue>()
+        val trafficAlerts = mutableListOf<FleetAlertTransition.TrafficThresholdReached>()
 
         // Prune probe tracking entries whose panels were deleted
         val validPanelIds = panelsById.keys
@@ -49,8 +52,22 @@ object FleetAlertEvaluator {
             val panelId = key.substringBefore(':', "")
             panelId.isNotEmpty() && panelId !in validPanelIds
         }
+        nextTrafficCycleKeys.removeAll { key ->
+            val panelId = key.substringBefore(':', "")
+            panelId.isNotEmpty() && panelId !in validPanelIds
+        }
 
-        // 1. Evaluate probe ONLINE -> OFFLINE / OFFLINE -> ONLINE transitions
+        val assetsByProbeKey = LinkedHashMap<String, VpsAssetRecord>()
+        for (asset in assets) {
+            val key = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            assetsByProbeKey.putIfAbsent(key, asset)
+        }
+        val evalEpochMillis = FleetTrafficAndIdleAnalyzer.alignEpochMillisWithDate(
+            today = today,
+            nowEpochMillis = nowEpochMillis,
+        )
+
+        // 1. Evaluate probe ONLINE -> OFFLINE / OFFLINE -> ONLINE transitions & >=80% traffic alerts
         for (snapshot in snapshots) {
             val panel = panelsById[snapshot.panelId] ?: continue
             val probeKey = snapshot.probeKey
@@ -89,6 +106,49 @@ object FleetAlertEvaluator {
             }
 
             nextOnlineMap[probeKey] = snapshot.isOnline
+
+            if (panel.enabled) {
+                val linkedAsset = assetsByProbeKey[probeKey]
+                val forecast = FleetTrafficAndIdleAnalyzer.analyzeTraffic(
+                    snapshot = snapshot,
+                    linkedAsset = linkedAsset,
+                    nowEpochMillis = evalEpochMillis,
+                )
+                val limitBytes = forecast.limitBytes
+                val usageRatio = forecast.usageRatio
+                if (limitBytes != null && usageRatio != null) {
+                    val cycleKey = "$probeKey:${forecast.cycleStartDate}"
+                    // Prune stale keys from earlier reset cycles for this server
+                    nextTrafficCycleKeys.removeAll { key ->
+                        key.substringBeforeLast(':', "") == probeKey && key != cycleKey
+                    }
+
+                    when {
+                        usageRatio >= FleetTrafficAndIdleAnalyzer.TRAFFIC_ALERT_THRESHOLD_RATIO -> {
+                            if (nextTrafficCycleKeys.add(cycleKey)) {
+                                trafficAlerts += FleetAlertTransition.TrafficThresholdReached(
+                                    panelId = panel.id,
+                                    panelName = panel.name.ifBlank { panel.baseUrl },
+                                    server = snapshot,
+                                    linkedAsset = linkedAsset,
+                                    usedBytes = forecast.usedBytes,
+                                    limitBytes = limitBytes,
+                                    usageRatio = usageRatio,
+                                    cycleStartDateIso = forecast.cycleStartDate.toString(),
+                                    nextResetDateIso = forecast.nextResetDate.toString(),
+                                    predictedExhaustionDateIso = forecast.predictedExhaustionDate?.toString(),
+                                    exhaustionForecastText = forecast.exhaustionForecastText,
+                                )
+                            }
+                        }
+
+                        usageRatio < FleetTrafficAndIdleAnalyzer.TRAFFIC_ALERT_REARM_RATIO -> {
+                            // Usage dropped after reset / quota refill within the same cycle -> re-arm
+                            nextTrafficCycleKeys.remove(cycleKey)
+                        }
+                    }
+                }
+            }
         }
 
         // 2. Evaluate upcoming renewal reminders within `remindDaysBeforeExpiry`
@@ -121,6 +181,7 @@ object FleetAlertEvaluator {
                 lastKnownOnlineByProbeKey = nextOnlineMap,
                 activeOutageNotifiedKeys = nextOutageKeys,
                 notifiedRenewalKeys = nextRenewalKeys,
+                notifiedTrafficCycleKeys = nextTrafficCycleKeys,
             ),
             report = FleetMonitorCheckReport(
                 checkedPanels = checkedPanels,
@@ -130,6 +191,7 @@ object FleetAlertEvaluator {
                 offlineAlerts = offlineAlerts,
                 recoveryAlerts = recoveryAlerts,
                 renewalReminders = sortedRenewalReminders,
+                trafficAlerts = trafficAlerts,
                 checkedAtEpochMillis = nowEpochMillis,
             ),
         )

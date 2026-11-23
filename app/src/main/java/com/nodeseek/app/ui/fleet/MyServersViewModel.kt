@@ -9,6 +9,7 @@ import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.fleet.FleetIdleThresholdConfig
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
 import com.nodeseek.app.domain.fleet.FleetPortfolioSummary
@@ -16,18 +17,25 @@ import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.fleet.FleetSalePostBuilder
 import com.nodeseek.app.domain.fleet.FleetSalePostOutcome
 import com.nodeseek.app.domain.fleet.FleetSalePostRequest
+import com.nodeseek.app.domain.fleet.FleetTrafficAndIdleAnalyzer
 import com.nodeseek.app.domain.fleet.ProbeConnectivityResult
+import com.nodeseek.app.domain.fleet.ProbeDailyCpuBucket
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
+import com.nodeseek.app.domain.fleet.ServerIdleAssessment
+import com.nodeseek.app.domain.fleet.ServerTrafficForecast
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.fleet.formatBytesBinary
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
+import com.nodeseek.app.domain.valuation.FxRateSource
 import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -35,7 +43,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.math.BigDecimal
 import java.time.Clock
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -75,9 +85,11 @@ data class AssetEditorDraft(
     val panelManageUrl: String = "",
     val linkedProbeKey: String? = null,
     val monthlyTrafficQuotaGb: String = "",
+    val trafficResetDay: Int? = null,
     val remindDaysBeforeExpiry: Int = VpsAssetRecord.DEFAULT_REMIND_DAYS_BEFORE_EXPIRY,
     val autoRenewNote: String = "",
     val notes: String = "",
+    val openSalePostAfterSave: Boolean = false,
 ) {
     companion object {
         private val ISO_FORMAT: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
@@ -104,6 +116,7 @@ data class AssetEditorDraft(
             monthlyTrafficQuotaGb = record.monthlyTrafficQuotaGb?.let { gb ->
                 if (gb % 1.0 == 0.0) gb.toInt().toString() else gb.toString()
             }.orEmpty(),
+            trafficResetDay = record.trafficResetDay,
             remindDaysBeforeExpiry = record.remindDaysBeforeExpiry,
             autoRenewNote = record.autoRenewNote,
             notes = record.notes,
@@ -120,6 +133,11 @@ data class MyServersUiState(
     val snapshots: List<ProbeServerSnapshot> = emptyList(),
     val filteredSnapshots: List<ProbeServerSnapshot> = emptyList(),
     val assets: List<VpsAssetRecord> = emptyList(),
+    val cpuHistoryByProbeKey: Map<String, List<ProbeDailyCpuBucket>> = emptyMap(),
+    val trafficForecastsByProbeKey: Map<String, ServerTrafficForecast> = emptyMap(),
+    val highTrafficForecasts: List<ServerTrafficForecast> = emptyList(),
+    val idleAssessmentsByProbeKey: Map<String, ServerIdleAssessment> = emptyMap(),
+    val idleServers: List<ServerIdleAssessment> = emptyList(),
     val portfolioSummary: FleetPortfolioSummary = FleetPortfolioSummary(),
     val fxRatesState: FxRatesState? = null,
     val monitorSettings: FleetMonitorSettings = FleetMonitorSettings(),
@@ -142,6 +160,8 @@ class MyServersViewModel(
     private val todayProvider: () -> LocalDate = {
         VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID))
     },
+    private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
+    private val idleThresholdConfig: FleetIdleThresholdConfig = FleetIdleThresholdConfig(),
     initialTab: MyServersTab = MyServersTab.PROBES,
 ) : ViewModel() {
 
@@ -179,6 +199,7 @@ class MyServersViewModel(
         val panels: List<ProbePanelConfig>,
         val snapshots: List<ProbeServerSnapshot>,
         val assets: List<VpsAssetRecord>,
+        val cpuHistoryByProbeKey: Map<String, List<ProbeDailyCpuBucket>>,
         val settings: FleetMonitorSettings,
         val isRefreshing: Boolean,
         val lastSyncEpochMillis: Long,
@@ -227,17 +248,19 @@ class MyServersViewModel(
             Quad(panels, snapshots, assets, settings)
         },
         combine(
+            fleetRepository.cpuHistoryByProbeKeyFlow,
             fleetRepository.isRefreshingFlow,
             fleetRepository.lastSyncEpochMillisFlow,
             fleetRepository.panelErrorsFlow,
-        ) { refreshing, lastSync, errors ->
-            Triple(refreshing, lastSync, errors)
+        ) { cpuHistory, refreshing, lastSync, errors ->
+            Quad(cpuHistory, refreshing, lastSync, errors)
         },
-    ) { (panels, snapshots, assets, settings), (refreshing, lastSync, errors) ->
+    ) { (panels, snapshots, assets, settings), (cpuHistory, refreshing, lastSync, errors) ->
         RepoCollections(
             panels = panels,
             snapshots = snapshots,
             assets = assets,
+            cpuHistoryByProbeKey = cpuHistory,
             settings = settings,
             isRefreshing = refreshing,
             lastSyncEpochMillis = lastSync,
@@ -270,11 +293,56 @@ class MyServersViewModel(
             )
             .toList()
 
+        val today = todayProvider()
+        val evalEpochMillis = FleetTrafficAndIdleAnalyzer.alignEpochMillisWithDate(
+            today = today,
+            nowEpochMillis = nowMillisProvider(),
+        )
+        val assetsByProbeKey = LinkedHashMap<String, VpsAssetRecord>()
+        for (asset in repo.assets) {
+            val key = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            assetsByProbeKey.putIfAbsent(key, asset)
+        }
+
+        val forecastsByKey = LinkedHashMap<String, ServerTrafficForecast>(repo.snapshots.size)
+        val idleByKey = LinkedHashMap<String, ServerIdleAssessment>(repo.snapshots.size)
+        for (snapshot in repo.snapshots) {
+            val linkedAsset = assetsByProbeKey[snapshot.probeKey]
+            val forecast = FleetTrafficAndIdleAnalyzer.analyzeTraffic(
+                snapshot = snapshot,
+                linkedAsset = linkedAsset,
+                nowEpochMillis = evalEpochMillis,
+            )
+            forecastsByKey[snapshot.probeKey] = forecast
+
+            val cpuBuckets = repo.cpuHistoryByProbeKey[snapshot.probeKey].orEmpty()
+            idleByKey[snapshot.probeKey] = FleetTrafficAndIdleAnalyzer.assessIdle(
+                snapshot = snapshot,
+                linkedAsset = linkedAsset,
+                cpuBuckets = cpuBuckets,
+                trafficForecast = forecast,
+                nowEpochMillis = evalEpochMillis,
+                config = idleThresholdConfig,
+            )
+        }
+
+        val highTrafficForecasts = forecastsByKey.values
+            .filter { it.isAtOrAboveAlertThreshold }
+            .sortedByDescending { it.usageRatio ?: 0.0 }
+
+        val idleServers = idleByKey.values
+            .filter { it.isIdle }
+            .sortedWith(
+                compareBy<ServerIdleAssessment> { it.linkedAsset == null }
+                    .thenBy { it.avgCpu30dPercent ?: 100.0 }
+                    .thenBy { it.serverName.lowercase() },
+            )
+
         val summary = FleetPortfolioCalculator.summarize(
             assets = repo.assets,
             snapshots = repo.snapshots,
             fxRatesState = fxState,
-            today = todayProvider(),
+            today = today,
         )
 
         MyServersUiState(
@@ -285,6 +353,11 @@ class MyServersViewModel(
             snapshots = repo.snapshots,
             filteredSnapshots = filtered,
             assets = repo.assets,
+            cpuHistoryByProbeKey = repo.cpuHistoryByProbeKey,
+            trafficForecastsByProbeKey = forecastsByKey,
+            highTrafficForecasts = highTrafficForecasts,
+            idleAssessmentsByProbeKey = idleByKey,
+            idleServers = idleServers,
             portfolioSummary = summary,
             fxRatesState = fxState,
             monitorSettings = repo.settings,
@@ -430,7 +503,7 @@ class MyServersViewModel(
     fun refreshAllProbes() {
         viewModelScope.launch {
             try {
-                val summary = fleetRepository.refreshAllPanels()
+                val summary = fleetRepository.refreshAllPanels(silent = false)
                 if (summary.refreshedPanelCount == 0) {
                     _snackbarChannel.trySend("尚未添加启用的探针面板")
                 } else if (summary.failedPanelErrors.isEmpty()) {
@@ -445,6 +518,37 @@ class MyServersViewModel(
             } catch (t: Throwable) {
                 _snackbarChannel.trySend("同步探针数据失败：${formatPersistenceError(t)}")
             }
+        }
+    }
+
+    suspend fun refreshProbesSilently() {
+        if (!fleetRepository.isPersistedStateLoadedFlow.value) return
+        if (!fleetRepository.panelsFlow.value.any { it.enabled }) return
+        try {
+            fleetRepository.refreshAllPanels(silent = true)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            // Silent background/foreground tick keeps previous snapshots and panelErrorsFlow intact.
+        }
+    }
+
+    /**
+     * Runs a silent live telemetry refresh loop while `MyServersScreen` is visible in the foreground,
+     * so probe online/offline counts, CPU, memory, disk, and live network speeds update automatically
+     * without requiring manual pull-to-refresh.
+     */
+    suspend fun runForegroundProbeAutoRefresh(
+        intervalMillis: Long = DEFAULT_FOREGROUND_POLL_INTERVAL_MS,
+    ) {
+        val safeInterval = intervalMillis.coerceAtLeast(MIN_FOREGROUND_POLL_INTERVAL_MS)
+        val lastSync = fleetRepository.lastSyncEpochMillisFlow.value
+        if (lastSync > 0L && (nowMillisProvider() - lastSync) >= safeInterval) {
+            refreshProbesSilently()
+        }
+        while (currentCoroutineContext().isActive) {
+            delay(safeInterval)
+            refreshProbesSilently()
         }
     }
 
@@ -495,7 +599,10 @@ class MyServersViewModel(
         _assetEditorDraft.value = AssetEditorDraft.fromRecord(asset)
     }
 
-    fun openAddAssetFromProbe(snapshot: ProbeServerSnapshot) {
+    fun openAddAssetFromProbe(
+        snapshot: ProbeServerSnapshot,
+        openSalePostAfterSave: Boolean = false,
+    ) {
         val specsParts = buildList {
             if (snapshot.cpuCores > 0) add("${snapshot.cpuCores}C")
             if (snapshot.memTotalBytes > 0L) add(formatBytesBinary(snapshot.memTotalBytes))
@@ -514,6 +621,7 @@ class MyServersViewModel(
             expiryDateIso = AssetEditorDraft.defaultExpiryDateIso(todayProvider()),
             linkedProbeKey = snapshot.probeKey,
             monthlyTrafficQuotaGb = quotaGb,
+            openSalePostAfterSave = openSalePostAfterSave,
         )
     }
 
@@ -575,6 +683,7 @@ class MyServersViewModel(
             fleetRepository.assetsFlow.value.any { it.id == asset.id } -> asset.id
             else -> null
         }
+        val shouldOpenSalePost = previousDraft?.openSalePostAfterSave == true
         val draftFromSubmission = AssetEditorDraft.fromRecord(asset).copy(
             editingId = preservedEditingId,
             customCycleDays = (
@@ -582,6 +691,7 @@ class MyServersViewModel(
                     ?: previousDraft?.customCycleDays?.toIntOrNull()
                     ?: 365
                 ).toString(),
+            openSalePostAfterSave = shouldOpenSalePost,
         )
         _assetEditorDraft.value = draftFromSubmission
         _assetSaveError.value = null
@@ -591,8 +701,17 @@ class MyServersViewModel(
                 val saved = fleetRepository.upsertAsset(asset)
                 _assetSaveError.value = null
                 _assetEditorDraft.value = null
+                if (shouldOpenSalePost) {
+                    _salePostAsset.value = saved
+                }
                 syncBackgroundSchedule()
-                _snackbarChannel.trySend("已保存资产「${saved.nickname}」")
+                _snackbarChannel.trySend(
+                    if (shouldOpenSalePost) {
+                        "已保存资产「${saved.nickname}」，已自动打开出售帖生成器"
+                    } else {
+                        "已保存资产「${saved.nickname}」"
+                    },
+                )
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -640,10 +759,30 @@ class MyServersViewModel(
         }
     }
 
-    // ── One-Click Valuation & Sale Post ───────────────────────────────────────
+    // ── One-Click Valuation & Sale Post ("发现浪费 → 卖掉回血" 闭环) ─────────────
 
     fun openSalePostSheet(asset: VpsAssetRecord) {
         _salePostAsset.value = asset
+    }
+
+    /**
+     * One-tap closed-loop entry from an idle ("闲置") probe card or idle fleet banner:
+     * - Opens [FleetSalePostSheet] directly when the node is already linked to a [VpsAssetRecord].
+     * - Otherwise opens [AssetEditorBottomSheet] prefilled from the probe snapshot and automatically
+     *   transitions into [FleetSalePostSheet] once the user fills in renewal price & expiry.
+     */
+    fun openIdleSalePost(probeKey: String) {
+        val linkedAsset = fleetRepository.assetsFlow.value.firstOrNull { it.linkedProbeKey == probeKey }
+            ?: uiState.value.assets.firstOrNull { it.linkedProbeKey == probeKey }
+        if (linkedAsset != null) {
+            _salePostAsset.value = linkedAsset
+            return
+        }
+        val snapshot = fleetRepository.snapshotsFlow.value.firstOrNull { it.probeKey == probeKey }
+            ?: uiState.value.snapshots.firstOrNull { it.probeKey == probeKey }
+            ?: return
+        openAddAssetFromProbe(snapshot = snapshot, openSalePostAfterSave = true)
+        _snackbarChannel.trySend("请先补齐续费价格与到期日，保存后将自动生成出售帖")
     }
 
     fun closeSalePostSheet() {
@@ -652,6 +791,59 @@ class MyServersViewModel(
 
     fun buildSalePost(request: FleetSalePostRequest): FleetSalePostOutcome =
         FleetSalePostBuilder.build(request)
+
+    /**
+     * Builds a ready-to-publish NodeSeek `trade` sale post for [asset] using its live linked probe
+     * telemetry and current exchange rates via [FleetSalePostBuilder].
+     */
+    fun generateSalePostForAsset(
+        asset: VpsAssetRecord,
+        askingPriceCny: BigDecimal? = null,
+        extraNote: String? = null,
+    ): FleetSalePostOutcome {
+        val currentState = uiState.value
+        val linkedProbe = asset.linkedProbeKey?.let { key ->
+            currentState.snapshots.firstOrNull { it.probeKey == key }
+                ?: fleetRepository.snapshotsFlow.value.firstOrNull { it.probeKey == key }
+        }
+        val fxRates = currentState.fxRatesState
+        val fxQuote = fxRates?.quoteFor(asset.currency)
+        val fxRate = fxQuote?.rateToCny ?: asset.currency.defaultCnyRate
+        val fxSourceNote = when (fxQuote?.source) {
+            FxRateSource.ONLINE_FRESH -> fxRates.providerDate?.let { "在线汇率 $it" } ?: "在线实时汇率"
+            FxRateSource.ONLINE_CACHED -> "本地缓存汇率"
+            FxRateSource.MANUAL_OVERRIDE -> "手动校准汇率"
+            else -> "参考汇率"
+        }
+        return FleetSalePostBuilder.build(
+            FleetSalePostRequest(
+                asset = asset,
+                probeSnapshot = linkedProbe,
+                fxRateToCny = fxRate,
+                fxSourceNote = fxSourceNote,
+                askingPriceCny = askingPriceCny,
+                includeProbeTelemetry = linkedProbe != null,
+                extraNote = extraNote ?: asset.notes,
+                valuationDateTime = todayProvider().atStartOfDay(),
+            ),
+        )
+    }
+
+    /**
+     * Convenience closed-loop builder for an idle server identified by [probeKey].
+     */
+    fun generateIdleSalePost(
+        probeKey: String,
+        askingPriceCny: BigDecimal? = null,
+    ): FleetSalePostOutcome {
+        val linkedAsset = uiState.value.assets.firstOrNull { it.linkedProbeKey == probeKey }
+            ?: fleetRepository.assetsFlow.value.firstOrNull { it.linkedProbeKey == probeKey }
+            ?: return FleetSalePostOutcome.Invalid(listOf("该闲置节点尚未绑定资产账本，请先补齐续费价格与到期日"))
+        return generateSalePostForAsset(
+            asset = linkedAsset,
+            askingPriceCny = askingPriceCny,
+        )
+    }
 
     private fun syncBackgroundSchedule() {
         val scheduler = workScheduler ?: return
@@ -680,6 +872,9 @@ class MyServersViewModel(
     private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
 
     companion object {
+        const val DEFAULT_FOREGROUND_POLL_INTERVAL_MS = 5_000L
+        private const val MIN_FOREGROUND_POLL_INTERVAL_MS = 2_000L
+
         fun factory(
             fleetRepository: FleetRepository,
             exchangeRateRepository: ExchangeRateRepository,

@@ -1,8 +1,8 @@
 package com.nodeseek.app.domain.overseas
 
 /**
- * Always-available, zero-network offline VPS-domain English-to-Chinese terminology engine (Tier 3)
- * and post-processor for online machine translation output (Tier 2), used by one-click forum reposting.
+ * Always-available, zero-network offline VPS-domain English-to-Chinese terminology engine
+ * and post-processor for online machine translation output, used by one-click forum reposting.
  */
 object VpsGlossaryTranslator {
 

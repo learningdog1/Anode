@@ -468,8 +468,8 @@ class ForumWatchActivityRepositoryImpl(
                     if (a.pinned != b.pinned) {
                         return@Comparator if (a.pinned) -1 else 1
                     }
-                    val statusOrderA = statusSortWeight(a.resolveLiveStatus(nowEpochMillis))
-                    val statusOrderB = statusSortWeight(b.resolveLiveStatus(nowEpochMillis))
+                    val statusOrderA = statusSortWeight(a.resolveLotteryStatusOrNull(nowEpochMillis))
+                    val statusOrderB = statusSortWeight(b.resolveLotteryStatusOrNull(nowEpochMillis))
                     if (statusOrderA != statusOrderB) {
                         return@Comparator statusOrderA.compareTo(statusOrderB)
                     }
@@ -480,9 +480,9 @@ class ForumWatchActivityRepositoryImpl(
             )
         }
 
-        private fun statusSortWeight(status: ActivityTimeStatus): Int =
+        private fun statusSortWeight(status: ActivityTimeStatus?): Int =
             when (status) {
-                ActivityTimeStatus.ONGOING -> 0
+                ActivityTimeStatus.ONGOING, null -> 0
                 ActivityTimeStatus.UPCOMING -> 1
                 ActivityTimeStatus.ENDED -> 2
             }
@@ -595,7 +595,7 @@ class PreviewForumWatchActivityRepository(
     private val initialSnapshot = ActivityFeedSnapshot(
         activities = sampleItems,
         updatedAtEpochMillis = nowEpochMillis - 120_000L,
-        counts = ActivityCounts(all = 3, ongoing = 2, upcoming = 0, ended = 1),
+        counts = ActivityCounts(all = 3, ongoing = 1, upcoming = 0, ended = 0),
         lastSyncedEpochMillis = nowEpochMillis - 60_000L,
         totalCount = 3,
         hasMore = false,
