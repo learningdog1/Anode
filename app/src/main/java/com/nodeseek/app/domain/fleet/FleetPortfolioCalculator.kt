@@ -9,6 +9,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Clock
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 
 /**
@@ -67,6 +68,139 @@ object FleetPortfolioCalculator {
     }
 
     /**
+     * Advances [baseDate] by [cycleCount] billing cycles according to [cyclePreset] and optional
+     * [customCycleDays].
+     *
+     * Calendar-month cycles (`MONTHLY`, `QUARTERLY`, `SEMI_ANNUAL`, `ANNUAL`, `BIENNIAL`,
+     * `TRIENNIAL`, `CALENDAR_NATURAL`) advance directly from [baseDate] in whole months so
+     * month-end dates (e.g. Jan 31 -> Feb 28/29 -> Mar 31 -> Apr 30) clamp cleanly without
+     * cumulative day-of-month drift. `CUSTOM` advances by `customCycleDays` days (defaulting to
+     * 365 and floored at 1).
+     */
+    fun advanceDateByCycles(
+        baseDate: LocalDate,
+        cyclePreset: BillingCyclePreset,
+        customCycleDays: Int? = null,
+        cycleCount: Int = 1,
+    ): LocalDate {
+        val safeCycles = cycleCount.coerceAtLeast(1).toLong()
+        val monthsPerCycle = monthsForCyclePreset(cyclePreset)
+        return if (monthsPerCycle != null) {
+            baseDate.plusMonths(monthsPerCycle.toLong() * safeCycles)
+        } else {
+            val stepDays = (customCycleDays ?: 365).coerceAtLeast(1).toLong()
+            baseDate.plusDays(stepDays * safeCycles)
+        }
+    }
+
+    /**
+     * Computes the next expiry date and number of billing cycles advanced when confirming renewal
+     * on [today].
+     *
+     * - If [currentExpiryDate] is after [today], advances by exactly 1 cycle.
+     * - If [currentExpiryDate] is on or before [today], rolls forward the minimum number of cycles
+     *   (`>= 1`) so the new expiry date is strictly after [today], preserving the original anchor
+     *   day-of-month across month-end clamping.
+     * - If [currentExpiryDate] is `null`, starts from [today] and advances 1 cycle.
+     */
+    fun computeNextRenewalDate(
+        currentExpiryDate: LocalDate?,
+        cyclePreset: BillingCyclePreset,
+        customCycleDays: Int? = null,
+        today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+    ): Pair<LocalDate, Int> {
+        if (currentExpiryDate == null) {
+            return advanceDateByCycles(today, cyclePreset, customCycleDays, 1) to 1
+        }
+        if (currentExpiryDate.isAfter(today)) {
+            return advanceDateByCycles(currentExpiryDate, cyclePreset, customCycleDays, 1) to 1
+        }
+
+        val monthsPerCycle = monthsForCyclePreset(cyclePreset)
+        if (monthsPerCycle != null) {
+            val approxMonths = ((today.year - currentExpiryDate.year).toLong() * 12L) +
+                (today.monthValue - currentExpiryDate.monthValue).toLong()
+            var cycles = (approxMonths / monthsPerCycle.toLong()).coerceAtLeast(1L)
+            while (cycles > 1L && currentExpiryDate.plusMonths((cycles - 1L) * monthsPerCycle).isAfter(today)) {
+                cycles--
+            }
+            while (!currentExpiryDate.plusMonths(cycles * monthsPerCycle).isAfter(today)) {
+                cycles++
+            }
+            val nextDate = currentExpiryDate.plusMonths(cycles * monthsPerCycle)
+            return nextDate to cycles.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
+
+        val stepDays = (customCycleDays ?: 365).coerceAtLeast(1).toLong()
+        val overdueDays = ChronoUnit.DAYS.between(currentExpiryDate, today).coerceAtLeast(0L)
+        val cycles = (overdueDays / stepDays) + 1L
+        val nextDate = currentExpiryDate.plusDays(cycles * stepDays)
+        return nextDate to cycles.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /**
+     * Produces an [AssetRenewalResult] with [asset]'s expiry date advanced for a confirmed renewal.
+     */
+    fun applyAssetRenewal(
+        asset: VpsAssetRecord,
+        today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+        nowEpochMillis: Long = System.currentTimeMillis(),
+        isAutoRolled: Boolean = false,
+    ): AssetRenewalResult {
+        val currentExpiry = parseExpiryDate(asset.expiryDateIso)
+        val (nextExpiry, cyclesAdvanced) = computeNextRenewalDate(
+            currentExpiryDate = currentExpiry,
+            cyclePreset = asset.cyclePreset,
+            customCycleDays = asset.customCycleDays,
+            today = today,
+        )
+        val nextExpiryIso = DateTimeFormatter.ISO_LOCAL_DATE.format(nextExpiry)
+        val updated = asset.copy(
+            expiryDateIso = nextExpiryIso,
+            updatedAtEpochMillis = nowEpochMillis,
+        )
+        return AssetRenewalResult(
+            updatedAsset = updated,
+            previousExpiryDateIso = asset.expiryDateIso.trim(),
+            newExpiryDateIso = nextExpiryIso,
+            cyclesAdvanced = cyclesAdvanced,
+            isAutoRolled = isAutoRolled,
+        )
+    }
+
+    /**
+     * Auto-rolls [asset] iff [VpsAssetRecord.autoRenew] is enabled and its expiry date is strictly
+     * before [today]. Returns `null` when no auto-roll is due.
+     */
+    fun autoRollIfExpired(
+        asset: VpsAssetRecord,
+        today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+        nowEpochMillis: Long = System.currentTimeMillis(),
+    ): AssetRenewalResult? {
+        if (!asset.autoRenew) return null
+        val expiryDate = parseExpiryDate(asset.expiryDateIso) ?: return null
+        if (!expiryDate.isBefore(today)) return null
+        return applyAssetRenewal(
+            asset = asset,
+            today = today,
+            nowEpochMillis = nowEpochMillis,
+            isAutoRolled = true,
+        )
+    }
+
+    private fun monthsForCyclePreset(cyclePreset: BillingCyclePreset): Int? = when (cyclePreset) {
+        BillingCyclePreset.MONTHLY -> 1
+        BillingCyclePreset.QUARTERLY -> 3
+        BillingCyclePreset.SEMI_ANNUAL -> 6
+        BillingCyclePreset.ANNUAL,
+        BillingCyclePreset.CALENDAR_NATURAL,
+        -> 12
+        BillingCyclePreset.BIENNIAL -> 24
+        BillingCyclePreset.TRIENNIAL -> 36
+        BillingCyclePreset.CUSTOM -> null
+    }
+
+    /**
      * Classifies expiry urgency given [daysRemaining] and the asset's configured reminder window.
      */
     fun classifyUrgency(
@@ -108,6 +242,12 @@ object FleetPortfolioCalculator {
                 val urgency = classifyUrgency(daysRemaining, asset.remindDaysBeforeExpiry)
                 val withinWindow = asset.remindDaysBeforeExpiry > 0 &&
                     daysRemaining <= asset.remindDaysBeforeExpiry.toLong()
+                val (nextExpiryDate, cyclesToAdvance) = computeNextRenewalDate(
+                    currentExpiryDate = expiryDate,
+                    cyclePreset = asset.cyclePreset,
+                    customCycleDays = asset.customCycleDays,
+                    today = today,
+                )
                 renewals += UpcomingRenewalItem(
                     asset = asset,
                     daysRemaining = daysRemaining,
@@ -116,6 +256,8 @@ object FleetPortfolioCalculator {
                     monthlyCostCny = monthlyRaw.setScale(2, RoundingMode.HALF_UP),
                     annualizedCostCny = annualRaw.setScale(2, RoundingMode.HALF_UP),
                     isWithinReminderWindow = withinWindow,
+                    nextExpiryAfterRenewalIso = DateTimeFormatter.ISO_LOCAL_DATE.format(nextExpiryDate),
+                    cyclesToAdvanceOnRenewal = cyclesToAdvance,
                 )
             }
         }
@@ -127,10 +269,9 @@ object FleetPortfolioCalculator {
 
         val onlineCount = snapshots.count { it.isOnline }
         val offlineCount = (snapshots.size - onlineCount).coerceAtLeast(0)
-        val dueSoonCount = sortedRenewals.count { item ->
-            val window = item.asset.remindDaysBeforeExpiry.coerceAtLeast(7).toLong()
-            item.daysRemaining <= window
-        }
+        val dueRenewals = sortedRenewals.filter { it.isRenewalDue }
+        val expiredCount = sortedRenewals.count { it.urgency == AssetExpiryUrgency.EXPIRED }
+        val dueSoonCount = dueRenewals.size
 
         return FleetPortfolioSummary(
             totalMachineCount = assets.size,
@@ -141,6 +282,8 @@ object FleetPortfolioCalculator {
             totalAnnualizedCostCny = totalAnnualRaw.setScale(2, RoundingMode.HALF_UP),
             upcomingRenewals = sortedRenewals,
             dueSoonRenewalCount = dueSoonCount,
+            dueRenewals = dueRenewals,
+            expiredRenewalCount = expiredCount,
         )
     }
 
