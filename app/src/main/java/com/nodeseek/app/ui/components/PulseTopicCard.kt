@@ -194,61 +194,64 @@ fun PulseTopicCard(
                 val resolvedAuthorId = topic.authorId ?: 0L
 
                 Row(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .then(
-                            if (canClickAuthor) {
-                                Modifier
-                                    .heightIn(min = 32.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable(
-                                        role = Role.Button,
-                                        onClickLabel = "查看用户主页",
-                                        onClick = { onAuthorClick?.invoke(resolvedAuthorId) },
-                                    )
-                                    .padding(end = 4.dp)
-                            } else {
-                                Modifier
-                            },
-                        ),
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    PulseAvatar(
-                        avatarUrl = topic.authorAvatarUrl,
-                        username = topic.authorName,
-                        size = 24.dp,
-                        rankLevel = topic.authorLevel,
-                        ringWidth = if (topic.authorLevel != null) 1.4.dp else 0.85.dp,
-                        onClick = null,
-                    )
+                    Row(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .then(
+                                if (canClickAuthor) {
+                                    Modifier
+                                        .heightIn(min = 32.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(
+                                            role = Role.Button,
+                                            onClickLabel = "查看用户主页",
+                                            onClick = { onAuthorClick?.invoke(resolvedAuthorId) },
+                                        )
+                                        .padding(end = 4.dp)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PulseAvatar(
+                            avatarUrl = topic.authorAvatarUrl,
+                            username = topic.authorName,
+                            size = 24.dp,
+                            rankLevel = topic.authorLevel,
+                            ringWidth = if (topic.authorLevel != null) 1.4.dp else 0.85.dp,
+                            onClick = null,
+                        )
 
-                    Spacer(modifier = Modifier.width(7.dp))
+                        Spacer(modifier = Modifier.width(7.dp))
 
-                    Text(
-                        text = topic.authorName.ifBlank { "匿名用户" },
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontSize = (13f * fontScale).sp,
-                            lineHeight = (17f * fontScale).sp,
-                        ),
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                        Text(
+                            text = topic.authorName.ifBlank { "匿名用户" },
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontSize = (13f * fontScale).sp,
+                                lineHeight = (17f * fontScale).sp,
+                            ),
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    if (topic.lastActivityIso.isNotBlank()) {
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "·",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        RelativeTimeText(isoTimestamp = topic.lastActivityIso)
+                    }
                 }
-
-                if (topic.lastActivityIso.isNotBlank()) {
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = "·",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    RelativeTimeText(isoTimestamp = topic.lastActivityIso)
-                }
-
-                Spacer(modifier = Modifier.weight(1f))
 
                 if (onBookmarkToggle != null) {
                     // Reserve horizontal clearance for the 48dp sibling IconButton at TopEnd
