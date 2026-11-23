@@ -67,8 +67,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -103,6 +101,7 @@ import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.domain.trust.TrustTag
 import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.PulseAvatar
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.components.formatCompactCount
@@ -1619,26 +1618,16 @@ private fun LocalSellerNoteCard(
         }
 
         // Compact Note TextField + explicit Save Button
-        OutlinedTextField(
+        PulseTextField(
             value = noteText,
             onValueChange = onNoteTextChange,
             modifier = Modifier.fillMaxWidth(),
             enabled = enabled,
+            singleLine = false,
             minLines = 2,
             maxLines = 3,
-            placeholder = {
-                Text(
-                    text = "记录交易经历、联系方式、走中介情况或避雷原因...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                )
-            },
+            placeholder = "记录交易经历、联系方式、走中介情况或避雷原因...",
             textStyle = MaterialTheme.typography.bodySmall,
-            shape = PulseArchitecturalShapes.MediumBadge,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f),
-            ),
         )
 
         Row(
