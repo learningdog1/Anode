@@ -1,4 +1,6 @@
 import java.util.Properties
+import org.gradle.api.GradleException
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
@@ -29,10 +31,25 @@ val releaseStoreFile = signingProp("storeFile", "KEYSTORE_FILE")
 val releaseStorePassword = signingProp("storePassword", "KEYSTORE_PASSWORD")
 val releaseKeyAlias = signingProp("keyAlias", "KEY_ALIAS")
 val releaseKeyPassword = signingProp("keyPassword", "KEY_PASSWORD")
-val hasReleaseSigningConfig = releaseStoreFile != null &&
+val releaseStoreFileObj = releaseStoreFile?.let { rootProject.file(it) }
+val hasAllReleaseSigningProps = releaseStoreFile != null &&
     releaseStorePassword != null &&
     releaseKeyAlias != null &&
     releaseKeyPassword != null
+val hasReleaseSigningConfig = hasAllReleaseSigningProps && releaseStoreFileObj?.isFile == true
+
+if (hasAllReleaseSigningProps && !hasReleaseSigningConfig) {
+    val missingMsg =
+        "Release signing properties are set, but keystore file does not exist: ${releaseStoreFileObj?.absolutePath}"
+    val isReleaseTaskRequested = gradle.startParameter.taskNames.any {
+        it.contains("release", ignoreCase = true) || it.contains("bundle", ignoreCase = true)
+    }
+    if (isReleaseTaskRequested) {
+        throw GradleException(missingMsg)
+    } else {
+        logger.warn("WARNING: $missingMsg")
+    }
+}
 
 android {
     namespace = "com.nodeseek.app"
@@ -54,7 +71,7 @@ android {
     signingConfigs {
         if (hasReleaseSigningConfig) {
             create("release") {
-                storeFile = rootProject.file(releaseStoreFile!!)
+                storeFile = releaseStoreFileObj!!
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
@@ -81,10 +98,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -100,6 +113,16 @@ android {
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 composeCompiler {
@@ -136,7 +159,6 @@ dependencies {
 
     // Networking, Parsing & Coroutines
     implementation(libs.okhttp)
-    implementation(libs.okhttp.logging.interceptor)
     implementation(libs.jsoup)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
