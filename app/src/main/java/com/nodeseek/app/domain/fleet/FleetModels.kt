@@ -36,6 +36,7 @@ data class ProbePanelConfig(
     val createdAtEpochMillis: Long = 0L,
     val lastSyncedEpochMillis: Long = 0L,
     val lastError: String? = null,
+    val tokenDecryptionFailed: Boolean = false,
 ) {
     /**
      * Effective panel protocol to use when polling: respects explicit choice, otherwise uses
@@ -161,6 +162,7 @@ data class VpsAssetRecord(
     val updatedAtEpochMillis: Long = 0L,
     val tags: List<String> = emptyList(),
     val autoRenew: Boolean = false,
+    val billingAnchorDay: Int? = null,
 ) {
     val parsedRenewalAmount: BigDecimal?
         get() = renewalAmount.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }

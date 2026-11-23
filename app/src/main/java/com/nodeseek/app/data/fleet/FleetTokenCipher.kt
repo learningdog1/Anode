@@ -3,6 +3,11 @@ package com.nodeseek.app.data.fleet
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.util.Base64
@@ -13,9 +18,24 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
+ * Thrown when encrypting or decrypting a probe panel API token fails.
+ */
+class FleetTokenCipherException(
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+/**
  * Abstraction for encrypting/decrypting probe panel API tokens at rest in `fleet_store.json`.
  */
 interface FleetTokenCipher {
+    /**
+     * Whether newly encrypted tokens are protected by Android Keystore rather than a local
+     * software fallback key file.
+     */
+    val isHardwareBacked: Boolean
+        get() = false
+
     fun encrypt(plainText: String): String
     fun decrypt(cipherText: String): String
 }
@@ -28,6 +48,9 @@ interface FleetTokenCipher {
 class AndroidKeystoreTokenCipher(
     private val keyAlias: String = DEFAULT_KEY_ALIAS,
 ) : FleetTokenCipher {
+
+    override val isHardwareBacked: Boolean
+        get() = true
 
     override fun encrypt(plainText: String): String {
         if (plainText.isEmpty()) return ""
@@ -42,10 +65,15 @@ class AndroidKeystoreTokenCipher(
 
     override fun decrypt(cipherText: String): String {
         if (cipherText.isEmpty()) return ""
+        if (cipherText.startsWith(SoftwareAesGcmTokenCipher.PREFIX_SW)) {
+            throw FleetTokenCipherException("探针 Token 使用软件密钥加密，无法通过 Android Keystore 解密")
+        }
         if (!cipherText.startsWith(PREFIX_AKS)) return cipherText
         val payload = cipherText.removePrefix(PREFIX_AKS)
         val sep = payload.indexOf(':')
-        if (sep <= 0 || sep >= payload.lastIndex) return ""
+        if (sep <= 0 || sep >= payload.lastIndex) {
+            throw FleetTokenCipherException("Android Keystore 探针 Token 密文格式损坏")
+        }
         val decoder = Base64.getDecoder()
         val iv = decoder.decode(payload.substring(0, sep))
         val encrypted = decoder.decode(payload.substring(sep + 1))
@@ -59,6 +87,7 @@ class AndroidKeystoreTokenCipher(
         true
     }.getOrDefault(false)
 
+    @Synchronized
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val existing = keyStore.getKey(keyAlias, null) as? SecretKey
@@ -97,6 +126,9 @@ class SoftwareAesGcmTokenCipher(
     keyBytes: ByteArray,
 ) : FleetTokenCipher {
 
+    override val isHardwareBacked: Boolean
+        get() = false
+
     private val secretKey: SecretKey
     private val secureRandom = SecureRandom()
 
@@ -119,10 +151,15 @@ class SoftwareAesGcmTokenCipher(
 
     override fun decrypt(cipherText: String): String {
         if (cipherText.isEmpty()) return ""
+        if (cipherText.startsWith(AndroidKeystoreTokenCipher.PREFIX_AKS)) {
+            throw FleetTokenCipherException("探针 Token 使用 Android Keystore 加密，无法通过软件降级密钥解密")
+        }
         if (!cipherText.startsWith(PREFIX_SW)) return cipherText
         val payload = cipherText.removePrefix(PREFIX_SW)
         val sep = payload.indexOf(':')
-        if (sep <= 0 || sep >= payload.lastIndex) return ""
+        if (sep <= 0 || sep >= payload.lastIndex) {
+            throw FleetTokenCipherException("软件加密探针 Token 密文格式损坏")
+        }
         val decoder = Base64.getDecoder()
         val iv = decoder.decode(payload.substring(0, sep))
         val encrypted = decoder.decode(payload.substring(sep + 1))
@@ -139,22 +176,124 @@ class SoftwareAesGcmTokenCipher(
 
         fun randomKey(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
+        @Throws(IOException::class)
         fun loadOrCreateFromFile(keyFile: File): SoftwareAesGcmTokenCipher {
-            val bytes = runCatching {
-                if (keyFile.isFile) {
-                    val decoded = Base64.getDecoder().decode(keyFile.readText(Charsets.UTF_8).trim())
-                    if (decoded.size == 32) decoded else null
-                } else {
-                    null
+            val existingBytes = if (keyFile.exists()) {
+                if (!keyFile.isFile) {
+                    throw FleetTokenCipherException("本地软件密钥路径异常: ${keyFile.path}")
                 }
-            }.getOrNull() ?: randomKey().also { fresh ->
-                runCatching {
-                    keyFile.parentFile?.mkdirs()
-                    keyFile.writeText(Base64.getEncoder().encodeToString(fresh), Charsets.UTF_8)
+                val decoded = runCatching {
+                    Base64.getDecoder().decode(keyFile.readText(Charsets.UTF_8).trim())
+                }.getOrElse { err ->
+                    throw FleetTokenCipherException("读取本地软件密钥失败: ${keyFile.path}", err)
                 }
+                if (decoded.size != 32) {
+                    throw FleetTokenCipherException("本地软件密钥文件长度异常，已拒绝覆盖: ${keyFile.path}")
+                }
+                decoded
+            } else {
+                null
             }
-            return SoftwareAesGcmTokenCipher(bytes)
+            if (existingBytes != null) {
+                return SoftwareAesGcmTokenCipher(existingBytes)
+            }
+
+            val fresh = randomKey()
+            val targetFile = keyFile.absoluteFile
+            val parentDir = targetFile.parentFile
+                ?: throw FleetTokenCipherException("无法解析本地软件密钥存储目录: ${targetFile.path}")
+            if (!parentDir.exists() && !parentDir.mkdirs() && !parentDir.isDirectory) {
+                throw FleetTokenCipherException("无法创建本地软件密钥存储目录: ${parentDir.path}")
+            }
+            val tmpFile = File(parentDir, "${targetFile.name}.tmp")
+            val encoded = Base64.getEncoder().encodeToString(fresh).toByteArray(Charsets.UTF_8)
+            try {
+                FileOutputStream(tmpFile).use { fos ->
+                    fos.write(encoded)
+                    fos.flush()
+                    runCatching { fos.fd.sync() }
+                }
+                applyOwnerOnlyPermissions(tmpFile)
+                try {
+                    Files.move(
+                        tmpFile.toPath(),
+                        targetFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(
+                        tmpFile.toPath(),
+                        targetFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                }
+                applyOwnerOnlyPermissions(targetFile)
+            } catch (t: Throwable) {
+                runCatching { tmpFile.delete() }
+                if (t is IOException) throw t
+                throw FleetTokenCipherException("持久化本地软件密钥失败: ${targetFile.path}", t)
+            }
+            return SoftwareAesGcmTokenCipher(fresh)
         }
+
+        private fun applyOwnerOnlyPermissions(file: File) {
+            runCatching {
+                file.setReadable(false, false)
+                file.setReadable(true, true)
+                file.setWritable(false, false)
+                file.setWritable(true, true)
+                file.setExecutable(false, false)
+            }
+        }
+    }
+}
+
+/**
+ * Composite [FleetTokenCipher] that encrypts with the preferred primary backend (Android Keystore
+ * when available, otherwise software AES-GCM) and strictly routes decryption by ciphertext prefix
+ * so encrypted tokens are NEVER returned raw as plaintext.
+ */
+internal class RoutingFleetTokenCipher(
+    private val primary: FleetTokenCipher,
+    private val keystoreCipher: AndroidKeystoreTokenCipher?,
+    private val fallbackKeyFile: File?,
+) : FleetTokenCipher {
+
+    @Volatile
+    private var cachedSoftwareCipher: SoftwareAesGcmTokenCipher? =
+        primary as? SoftwareAesGcmTokenCipher
+
+    override val isHardwareBacked: Boolean
+        get() = primary.isHardwareBacked
+
+    override fun encrypt(plainText: String): String = primary.encrypt(plainText)
+
+    override fun decrypt(cipherText: String): String {
+        if (cipherText.isEmpty()) return ""
+        return when {
+            cipherText.startsWith(AndroidKeystoreTokenCipher.PREFIX_AKS) -> {
+                val aks = keystoreCipher
+                    ?: throw FleetTokenCipherException("当前设备 Android Keystore 不可用，无法解密探针 Token")
+                aks.decrypt(cipherText)
+            }
+            cipherText.startsWith(SoftwareAesGcmTokenCipher.PREFIX_SW) -> {
+                val sw = resolveSoftwareCipherForDecrypt()
+                    ?: throw FleetTokenCipherException("未找到本地软件降级密钥，无法解密探针 Token")
+                sw.decrypt(cipherText)
+            }
+            else -> cipherText
+        }
+    }
+
+    @Synchronized
+    private fun resolveSoftwareCipherForDecrypt(): SoftwareAesGcmTokenCipher? {
+        cachedSoftwareCipher?.let { return it }
+        val file = fallbackKeyFile ?: return null
+        if (!file.isFile) return null
+        val loaded = SoftwareAesGcmTokenCipher.loadOrCreateFromFile(file)
+        cachedSoftwareCipher = loaded
+        return loaded
     }
 }
 
@@ -167,12 +306,21 @@ object FleetTokenCipherFactory {
     fun createDefault(fallbackKeyFile: File? = null): FleetTokenCipher {
         val keystoreCipher = AndroidKeystoreTokenCipher()
         if (keystoreCipher.isAvailable()) {
-            return keystoreCipher
+            return RoutingFleetTokenCipher(
+                primary = keystoreCipher,
+                keystoreCipher = keystoreCipher,
+                fallbackKeyFile = fallbackKeyFile,
+            )
         }
-        return if (fallbackKeyFile != null) {
+        val softwareCipher = if (fallbackKeyFile != null) {
             SoftwareAesGcmTokenCipher.loadOrCreateFromFile(fallbackKeyFile)
         } else {
             SoftwareAesGcmTokenCipher(SoftwareAesGcmTokenCipher.randomKey())
         }
+        return RoutingFleetTokenCipher(
+            primary = softwareCipher,
+            keystoreCipher = null,
+            fallbackKeyFile = fallbackKeyFile,
+        )
     }
 }
