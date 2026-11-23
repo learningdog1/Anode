@@ -2,10 +2,12 @@ package com.nodeseek.app.data.fleet
 
 import android.content.Context
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.fleet.AssetRenewalResult
 import com.nodeseek.app.domain.fleet.FleetAlertEvaluator
 import com.nodeseek.app.domain.fleet.FleetAlertTrackerState
 import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
+import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
 import com.nodeseek.app.domain.fleet.FleetRefreshSummary
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.fleet.FleetTrafficAndIdleAnalyzer
@@ -113,6 +115,7 @@ private data class StoredVpsAssetRecord(
     val specsSummary: String,
     val region: String,
     val routeTag: String = "",
+    val tags: List<String> = emptyList(),
     val renewalAmount: String,
     val currency: String = ValuationCurrency.USD.name,
     val cyclePreset: String = BillingCyclePreset.ANNUAL.name,
@@ -124,6 +127,7 @@ private data class StoredVpsAssetRecord(
     val monthlyTrafficQuotaGb: Double? = null,
     val trafficResetDay: Int? = null,
     val remindDaysBeforeExpiry: Int = VpsAssetRecord.DEFAULT_REMIND_DAYS_BEFORE_EXPIRY,
+    val autoRenew: Boolean = false,
     val autoRenewNote: String = "",
     val notes: String = "",
     val createdAtEpochMillis: Long = 0L,
@@ -500,20 +504,30 @@ class FleetRepositoryImpl(
                 val now = nowMillisProvider()
                 val cleanId = asset.id.trim().ifBlank { UUID.randomUUID().toString() }
                 val existing = cachedPayload.assets.firstOrNull { it.id == cleanId }
+                val preservedExistingTags = existing?.takeIf { stored ->
+                    asset.tags.isEmpty() &&
+                        stored.tags.isNotEmpty() &&
+                        asset.routeTag.trim() == stored.routeTag.trim()
+                }?.let { VpsAssetRecord.normalizeTags(it.tags) }
+                val normalizedTags = preservedExistingTags ?: asset.resolvedTags
+                val normalizedRouteTag = VpsAssetRecord.formatRouteTag(normalizedTags)
+                val normalizedExpiryIso = asset.expiryDateIso.trim()
                 val normalized = asset.copy(
                     id = cleanId,
                     nickname = asset.nickname.trim().ifBlank { asset.providerName.trim().ifBlank { "未命名 VPS" } },
                     providerName = asset.providerName.trim(),
                     specsSummary = asset.specsSummary.trim(),
                     region = asset.region.trim(),
-                    routeTag = asset.routeTag.trim(),
+                    routeTag = normalizedRouteTag,
+                    tags = normalizedTags,
                     renewalAmount = asset.renewalAmount.trim(),
-                    expiryDateIso = asset.expiryDateIso.trim(),
+                    expiryDateIso = normalizedExpiryIso,
                     purchaseUrl = asset.purchaseUrl.trim(),
                     panelManageUrl = asset.panelManageUrl.trim(),
                     linkedProbeKey = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() },
                     trafficResetDay = asset.trafficResetDay?.coerceIn(1, 31),
                     remindDaysBeforeExpiry = asset.remindDaysBeforeExpiry.coerceIn(0, 365),
+                    autoRenew = asset.autoRenew,
                     autoRenewNote = asset.autoRenewNote.trim(),
                     notes = asset.notes.trim(),
                     createdAtEpochMillis = existing?.createdAtEpochMillis?.takeIf { it > 0L }
@@ -527,7 +541,22 @@ class FleetRepositoryImpl(
                     .plus(normalized.toStored())
                     .sortedBy { it.createdAtEpochMillis }
 
-                val nextPayload = cachedPayload.copy(assets = updatedAssets)
+                val expiryChanged = existing != null && existing.expiryDateIso.trim() != normalizedExpiryIso
+                val updatedTracker = if (expiryChanged) {
+                    val prefix = "$cleanId:"
+                    cachedPayload.alertTracker.copy(
+                        notifiedRenewalKeys = cachedPayload.alertTracker.notifiedRenewalKeys
+                            .filterNot { it.startsWith(prefix) }
+                            .toSet(),
+                    )
+                } else {
+                    cachedPayload.alertTracker
+                }
+
+                val nextPayload = cachedPayload.copy(
+                    assets = updatedAssets,
+                    alertTracker = updatedTracker,
+                )
                 writeStoreToDiskLocked(nextPayload)
                 cachedPayload = nextPayload
                 publishStateLocked()
@@ -578,6 +607,85 @@ class FleetRepositoryImpl(
         }
     }
 
+    override suspend fun markAssetRenewed(
+        assetId: String,
+        today: LocalDate,
+    ): AssetRenewalResult? = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            val cleanId = assetId.trim()
+            if (cleanId.isEmpty()) return@withLock null
+            val existingStored = cachedPayload.assets.firstOrNull { it.id == cleanId }
+                ?: return@withLock null
+            val now = nowMillisProvider()
+            val renewalResult = FleetPortfolioCalculator.applyAssetRenewal(
+                asset = existingStored.toDomain(),
+                today = today,
+                nowEpochMillis = now,
+                isAutoRolled = false,
+            )
+            val updatedStored = renewalResult.updatedAsset.toStored()
+            val updatedAssets = cachedPayload.assets.map { stored ->
+                if (stored.id == cleanId) updatedStored else stored
+            }
+            val prefix = "$cleanId:"
+            val updatedTracker = cachedPayload.alertTracker.copy(
+                notifiedRenewalKeys = cachedPayload.alertTracker.notifiedRenewalKeys
+                    .filterNot { it.startsWith(prefix) }
+                    .toSet(),
+            )
+            val nextPayload = cachedPayload.copy(
+                assets = updatedAssets,
+                alertTracker = updatedTracker,
+            )
+            writeStoreToDiskLocked(nextPayload)
+            cachedPayload = nextPayload
+            publishStateLocked()
+            renewalResult
+        }
+    }
+
+    override suspend fun autoRollExpiredAutoRenewAssets(
+        today: LocalDate,
+    ): List<AssetRenewalResult> = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            val now = nowMillisProvider()
+            val rolledResults = mutableListOf<AssetRenewalResult>()
+            val rolledAssetIds = HashSet<String>()
+            val updatedAssets = cachedPayload.assets.map { stored ->
+                val rolled = FleetPortfolioCalculator.autoRollIfExpired(
+                    asset = stored.toDomain(),
+                    today = today,
+                    nowEpochMillis = now,
+                )
+                if (rolled != null) {
+                    rolledResults += rolled
+                    rolledAssetIds += stored.id
+                    rolled.updatedAsset.toStored()
+                } else {
+                    stored
+                }
+            }
+            if (rolledResults.isEmpty()) {
+                return@withLock emptyList()
+            }
+            val updatedTracker = cachedPayload.alertTracker.copy(
+                notifiedRenewalKeys = cachedPayload.alertTracker.notifiedRenewalKeys
+                    .filterNot { key -> rolledAssetIds.any { id -> key.startsWith("$id:") } }
+                    .toSet(),
+            )
+            val nextPayload = cachedPayload.copy(
+                assets = updatedAssets,
+                alertTracker = updatedTracker,
+            )
+            writeStoreToDiskLocked(nextPayload)
+            cachedPayload = nextPayload
+            publishStateLocked()
+            rolledResults
+        }
+    }
+
     override suspend fun updateMonitorSettings(settings: FleetMonitorSettings) {
         withContext(ioDispatcher) {
             mutex.withLock {
@@ -621,7 +729,13 @@ class FleetRepositoryImpl(
                 failedPanels = failedPanels,
             )
 
+            val updatedStoredAssets = if (evaluation.report.autoRolledRenewals.isNotEmpty()) {
+                evaluation.updatedAssets.map { it.toStored() }
+            } else {
+                cachedPayload.assets
+            }
             val nextPayload = cachedPayload.copy(
+                assets = updatedStoredAssets,
                 alertTracker = evaluation.updatedTracker.toStored(),
             )
             writeStoreToDiskLocked(nextPayload)
@@ -846,53 +960,67 @@ class FleetRepositoryImpl(
         lastActiveEpochMillis = lastActiveEpochMillis,
     )
 
-    private fun VpsAssetRecord.toStored() = StoredVpsAssetRecord(
-        id = id,
-        nickname = nickname,
-        providerName = providerName,
-        specsSummary = specsSummary,
-        region = region,
-        routeTag = routeTag,
-        renewalAmount = renewalAmount,
-        currency = currency.name,
-        cyclePreset = cyclePreset.name,
-        customCycleDays = customCycleDays,
-        expiryDateIso = expiryDateIso,
-        purchaseUrl = purchaseUrl,
-        panelManageUrl = panelManageUrl,
-        linkedProbeKey = linkedProbeKey,
-        monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
-        trafficResetDay = trafficResetDay?.coerceIn(1, 31),
-        remindDaysBeforeExpiry = remindDaysBeforeExpiry,
-        autoRenewNote = autoRenewNote,
-        notes = notes,
-        createdAtEpochMillis = createdAtEpochMillis,
-        updatedAtEpochMillis = updatedAtEpochMillis,
-    )
+    private fun VpsAssetRecord.toStored(): StoredVpsAssetRecord {
+        val normalizedTags = resolvedTags
+        return StoredVpsAssetRecord(
+            id = id,
+            nickname = nickname,
+            providerName = providerName,
+            specsSummary = specsSummary,
+            region = region,
+            routeTag = VpsAssetRecord.formatRouteTag(normalizedTags),
+            tags = normalizedTags,
+            renewalAmount = renewalAmount,
+            currency = currency.name,
+            cyclePreset = cyclePreset.name,
+            customCycleDays = customCycleDays,
+            expiryDateIso = expiryDateIso,
+            purchaseUrl = purchaseUrl,
+            panelManageUrl = panelManageUrl,
+            linkedProbeKey = linkedProbeKey,
+            monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
+            trafficResetDay = trafficResetDay?.coerceIn(1, 31),
+            remindDaysBeforeExpiry = remindDaysBeforeExpiry,
+            autoRenew = autoRenew,
+            autoRenewNote = autoRenewNote,
+            notes = notes,
+            createdAtEpochMillis = createdAtEpochMillis,
+            updatedAtEpochMillis = updatedAtEpochMillis,
+        )
+    }
 
-    private fun StoredVpsAssetRecord.toDomain() = VpsAssetRecord(
-        id = id,
-        nickname = nickname,
-        providerName = providerName,
-        specsSummary = specsSummary,
-        region = region,
-        routeTag = routeTag,
-        renewalAmount = renewalAmount,
-        currency = runCatching { ValuationCurrency.valueOf(currency) }.getOrDefault(ValuationCurrency.USD),
-        cyclePreset = runCatching { BillingCyclePreset.valueOf(cyclePreset) }.getOrDefault(BillingCyclePreset.ANNUAL),
-        customCycleDays = customCycleDays,
-        expiryDateIso = expiryDateIso,
-        purchaseUrl = purchaseUrl,
-        panelManageUrl = panelManageUrl,
-        linkedProbeKey = linkedProbeKey,
-        monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
-        trafficResetDay = trafficResetDay?.takeIf { it in 1..31 },
-        remindDaysBeforeExpiry = remindDaysBeforeExpiry,
-        autoRenewNote = autoRenewNote,
-        notes = notes,
-        createdAtEpochMillis = createdAtEpochMillis,
-        updatedAtEpochMillis = updatedAtEpochMillis,
-    )
+    private fun StoredVpsAssetRecord.toDomain(): VpsAssetRecord {
+        val migratedTags = if (tags.isNotEmpty()) {
+            VpsAssetRecord.normalizeTags(tags)
+        } else {
+            VpsAssetRecord.parseLegacyTags(routeTag)
+        }
+        return VpsAssetRecord(
+            id = id,
+            nickname = nickname,
+            providerName = providerName,
+            specsSummary = specsSummary,
+            region = region,
+            routeTag = VpsAssetRecord.formatRouteTag(migratedTags),
+            renewalAmount = renewalAmount,
+            currency = runCatching { ValuationCurrency.valueOf(currency) }.getOrDefault(ValuationCurrency.USD),
+            cyclePreset = runCatching { BillingCyclePreset.valueOf(cyclePreset) }.getOrDefault(BillingCyclePreset.ANNUAL),
+            customCycleDays = customCycleDays,
+            expiryDateIso = expiryDateIso,
+            purchaseUrl = purchaseUrl,
+            panelManageUrl = panelManageUrl,
+            linkedProbeKey = linkedProbeKey,
+            monthlyTrafficQuotaGb = monthlyTrafficQuotaGb,
+            trafficResetDay = trafficResetDay?.takeIf { it in 1..31 },
+            remindDaysBeforeExpiry = remindDaysBeforeExpiry,
+            autoRenewNote = autoRenewNote,
+            notes = notes,
+            createdAtEpochMillis = createdAtEpochMillis,
+            updatedAtEpochMillis = updatedAtEpochMillis,
+            tags = migratedTags,
+            autoRenew = autoRenew,
+        )
+    }
 
     private fun Map<String, List<StoredProbeDailyCpuBucket>>.toDomainCpuHistory():
         Map<String, List<ProbeDailyCpuBucket>> =

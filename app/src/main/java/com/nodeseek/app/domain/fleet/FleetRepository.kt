@@ -1,9 +1,12 @@
 package com.nodeseek.app.domain.fleet
 
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
+import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.time.Clock
 import java.time.LocalDate
 
 /**
@@ -43,6 +46,29 @@ interface FleetRepository {
     suspend fun upsertAsset(asset: VpsAssetRecord): VpsAssetRecord
     suspend fun deleteAsset(assetId: String)
     suspend fun linkAssetToProbe(assetId: String, probeKey: String?)
+
+    /**
+     * Marks the asset identified by [assetId] as renewed, advancing its `expiryDateIso` by its
+     * configured billing cycle (clamping month-ends and rolling forward multiple cycles if already
+     * long overdue so the new expiry date is strictly after [today]), clearing stale renewal-alert
+     * deduplication keys for the previous cycle, and persisting atomically.
+     *
+     * Returns `null` if no asset with [assetId] exists.
+     */
+    suspend fun markAssetRenewed(
+        assetId: String,
+        today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+    ): AssetRenewalResult? = null
+
+    /**
+     * Advances any asset flagged with [VpsAssetRecord.autoRenew] whose `expiryDateIso` is strictly
+     * before [today], persisting all rolled assets atomically in a single write.
+     *
+     * Returns the list of auto-rolled outcomes (empty when nothing needed rolling).
+     */
+    suspend fun autoRollExpiredAutoRenewAssets(
+        today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+    ): List<AssetRenewalResult> = emptyList()
 
     suspend fun updateMonitorSettings(settings: FleetMonitorSettings)
 

@@ -159,14 +159,122 @@ data class VpsAssetRecord(
     val notes: String = "",
     val createdAtEpochMillis: Long = 0L,
     val updatedAtEpochMillis: Long = 0L,
+    val tags: List<String> = emptyList(),
+    val autoRenew: Boolean = false,
 ) {
     val parsedRenewalAmount: BigDecimal?
         get() = renewalAmount.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }
 
+    /**
+     * Canonical deduplicated list of asset tags.
+     *
+     * Prefers explicit [tags] when populated; otherwise migrates legacy single-string [routeTag]
+     * values into a normalized tag list.
+     */
+    val resolvedTags: List<String>
+        get() = if (tags.isNotEmpty()) {
+            normalizeTags(tags)
+        } else {
+            parseLegacyTags(routeTag)
+        }
+
+    /**
+     * Compact single-line summary of [resolvedTags] for legacy single-string consumers.
+     */
+    val resolvedRouteTagSummary: String
+        get() = formatRouteTag(resolvedTags)
+
     companion object {
         const val DEFAULT_REMIND_DAYS_BEFORE_EXPIRY = 7
+        const val ROUTE_TAG_DISPLAY_SEPARATOR = " · "
+        private const val MAX_TAG_LENGTH = 32
+        private val CONTROL_WHITESPACE_REGEX = Regex("""[\r\n\t]+""")
+        private val LEGACY_TAG_SPLIT_REGEX = Regex("""[,，、/|·;；]+""")
+
+        val DEFAULT_TAG_PRESETS: List<String> = listOf(
+            "CN2 GIA",
+            "9929",
+            "CMIN2",
+            "BGP",
+            "优化直连",
+            "落地",
+        )
+
+        /**
+         * Normalizes a single user-entered tag token, preserving internal spaces (e.g. `"CN2 GIA"`).
+         */
+        fun normalizeTag(raw: String): String =
+            raw.replace(CONTROL_WHITESPACE_REGEX, " ")
+                .trim()
+                .take(MAX_TAG_LENGTH)
+                .trim()
+
+        /**
+         * Normalizes and deduplicates a tag collection case-insensitively while preserving order.
+         */
+        fun normalizeTags(rawTags: Iterable<String>): List<String> {
+            val seen = LinkedHashSet<String>()
+            val result = ArrayList<String>()
+            for (raw in rawTags) {
+                val clean = normalizeTag(raw)
+                if (clean.isEmpty()) continue
+                if (seen.add(clean.lowercase(Locale.ROOT))) {
+                    result.add(clean)
+                }
+            }
+            return result
+        }
+
+        /**
+         * Migrates a legacy single-string `routeTag` (e.g. `"CN2 GIA"` or `"CN2 GIA / 9929"`)
+         * into a normalized multi-tag list without splitting internal spaces.
+         */
+        fun parseLegacyTags(rawRouteTag: String?): List<String> {
+            val trimmed = rawRouteTag?.trim().orEmpty()
+            if (trimmed.isEmpty()) return emptyList()
+            return normalizeTags(trimmed.split(LEGACY_TAG_SPLIT_REGEX))
+        }
+
+        /**
+         * Parses user input from the custom tag entry field (splits only on newlines so tags like
+         * `"CN2 GIA"` or `"IPv4/IPv6"` stay intact).
+         */
+        fun parseCustomTagInput(rawInput: String): List<String> {
+            if (rawInput.isBlank()) return emptyList()
+            return normalizeTags(rawInput.split('\n', '\r'))
+        }
+
+        /**
+         * Merges [incoming] tags into [existing], deduplicating case-insensitively while preserving
+         * the existing order and casing.
+         */
+        fun mergeTags(existing: List<String>, incoming: Iterable<String>): List<String> =
+            normalizeTags(existing + incoming)
+
+        /**
+         * Collects all distinct tags currently used across [assets], preserving first-seen order.
+         */
+        fun collectDistinctTags(assets: Iterable<VpsAssetRecord>): List<String> =
+            normalizeTags(assets.flatMap { it.resolvedTags })
+
+        /**
+         * Formats [tags] into a single-string representation compatible with legacy `routeTag`.
+         */
+        fun formatRouteTag(tags: Iterable<String>): String =
+            normalizeTags(tags).joinToString(ROUTE_TAG_DISPLAY_SEPARATOR)
     }
 }
+
+/**
+ * Outcome of confirming a renewal or auto-rolling an expired auto-renew [VpsAssetRecord].
+ */
+data class AssetRenewalResult(
+    val updatedAsset: VpsAssetRecord,
+    val previousExpiryDateIso: String,
+    val newExpiryDateIso: String,
+    val cyclesAdvanced: Int,
+    val isAutoRolled: Boolean = false,
+)
 
 /**
  * Semantic urgency classification for VPS expiry countdown badges.
@@ -190,7 +298,15 @@ data class UpcomingRenewalItem(
     val monthlyCostCny: BigDecimal,
     val annualizedCostCny: BigDecimal,
     val isWithinReminderWindow: Boolean,
-)
+    val nextExpiryAfterRenewalIso: String? = null,
+    val cyclesToAdvanceOnRenewal: Int = 1,
+) {
+    /**
+     * Whether this asset should surface an in-app renewal-due reminder / prompt.
+     */
+    val isRenewalDue: Boolean
+        get() = isWithinReminderWindow || urgency == AssetExpiryUrgency.EXPIRED
+}
 
 /**
  * Portfolio-level KPI summary across all registered VPS assets and synced probe nodes.
@@ -204,6 +320,8 @@ data class FleetPortfolioSummary(
     val totalAnnualizedCostCny: BigDecimal = BigDecimal.ZERO.setScale(2),
     val upcomingRenewals: List<UpcomingRenewalItem> = emptyList(),
     val dueSoonRenewalCount: Int = 0,
+    val dueRenewals: List<UpcomingRenewalItem> = emptyList(),
+    val expiredRenewalCount: Int = 0,
 )
 
 /**
@@ -420,6 +538,7 @@ data class FleetMonitorCheckReport(
     val renewalReminders: List<FleetAlertTransition.RenewalReminderDue> = emptyList(),
     val trafficAlerts: List<FleetAlertTransition.TrafficThresholdReached> = emptyList(),
     val checkedAtEpochMillis: Long = 0L,
+    val autoRolledRenewals: List<AssetRenewalResult> = emptyList(),
 )
 
 /**
