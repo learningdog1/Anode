@@ -103,6 +103,40 @@ class SeekMailSanitizerAndOtpTest {
                 bodyText = "Order 99887 updated. Your verification code is 445566.",
             ),
         )
+
+        // Direct-labeled segmented OTPs (hyphen, space, or single-letter prefix) are preserved & normalized.
+        assertEquals(
+            "482910",
+            VerificationCodeExtractor.resolveCode(
+                serverCode = null,
+                subject = "GitHub Login",
+                bodyText = "Your verification code: 482-910",
+            ),
+        )
+        assertEquals(
+            "482910",
+            VerificationCodeExtractor.resolveCode(
+                serverCode = null,
+                subject = "Apple ID",
+                bodyText = "您的验证码为：482 910，请勿泄露",
+            ),
+        )
+        assertEquals(
+            "48291038",
+            VerificationCodeExtractor.resolveCode(
+                serverCode = null,
+                subject = "Security",
+                bodyText = "One-time passcode: 4829-1038",
+            ),
+        )
+        assertEquals(
+            "123456",
+            VerificationCodeExtractor.resolveCode(
+                serverCode = null,
+                subject = "Google",
+                bodyText = "Verification code is G-123456",
+            ),
+        )
     }
 
     @Test
@@ -260,40 +294,38 @@ class SeekMailSanitizerAndOtpTest {
     }
 
     @Test
-    fun `wrapInThemedDocument applies theme tokens and extractPlainTextFallback strips markup`() {
-        val themedLight = SeekMailHtmlSanitizer.wrapInThemedDocument(
-            sanitizedFragmentHtml = "<p>Light Paper</p>",
-            isDark = false,
-            purePitchAmoled = false,
-            fontScale = 1.0f,
-            backgroundHex = "#FAF7F2",
-            onSurfaceHex = "#1A1B1E",
-            primaryHex = "#1E5EFF",
-            outlineHex = "#DDD7CC",
-            surfaceContainerHex = "#F2EDE3",
-        )
-        assertTrue(themedLight.contains("<!DOCTYPE html>", ignoreCase = true))
-        assertTrue(themedLight.contains("color-scheme: light"))
-        assertTrue(themedLight.contains("#FAF7F2"))
-        assertTrue(themedLight.contains("15.00px"))
+    fun `sanitize enforces Jsoup Safelist whitelist, blocks CSS escapes and fixed positioning, and extractPlainTextFallback strips markup`() {
+        val trickyHtml = """
+            <svg onload="alert(1)"><foreignObject><script>evil()</script></foreignObject></svg>
+            <style>@import url('https://evil.example/leak.css'); body { display: none; }</style>
+            <audio src="https://tracker.example/ping.mp3" autoplay></audio>
+            <video poster="https://tracker.example/poster.png"></video>
+            <dialog open>Phishing modal</dialog>
+            <div style="position: fixed; top: 0; left: 0;">Overlay</div>
+            <div style="background: u\72l('javascript:alert(1)')">Escaped JS CSS</div>
+            <div style="background-image: content://com.android.contacts/data">Content URI</div>
+            <p style="color: #222; content: '';">Safe paragraph</p>
+        """.trimIndent()
 
-        val themedAmoled = SeekMailHtmlSanitizer.wrapInThemedDocument(
-            sanitizedFragmentHtml = "<p>Welcome to <strong>Seek</strong></p>",
-            isDark = true,
-            purePitchAmoled = true,
-            fontScale = 1.20f,
-            backgroundHex = "#07080C",
-            onSurfaceHex = "#E6E8EE",
-            primaryHex = "#5BB98C",
-            outlineHex = "#242A36",
-            surfaceContainerHex = "#0B0E14",
+        val sanitized = SeekMailHtmlSanitizer.sanitize(trickyHtml)
+        val lower = sanitized.bodyFragmentHtml.lowercase()
+
+        assertFalse(lower.contains("<svg"))
+        assertFalse(lower.contains("<style"))
+        assertFalse(lower.contains("<audio"))
+        assertFalse(lower.contains("<video"))
+        assertFalse(lower.contains("<dialog"))
+        assertFalse(lower.contains("position: fixed"))
+        assertFalse(lower.contains("javascript:"))
+        assertFalse(lower.contains("content://"))
+        assertTrue(lower.contains("safe paragraph"))
+        assertTrue(lower.contains("color: #222"))
+
+        // Escaped remote url() is decoded and flagged as hasRemoteImages = true
+        val escapedRemote = SeekMailHtmlSanitizer.sanitize(
+            """<div style="background: u\72l('https://tracker.example/escaped.png')">Track</div>""",
         )
-        assertTrue(themedAmoled.contains("color-scheme: dark"))
-        assertTrue(themedAmoled.contains("background-color: #000000"))
-        assertTrue(themedAmoled.contains("#E6E8EE"))
-        assertTrue(themedAmoled.contains("#5BB98C"))
-        assertTrue(themedAmoled.contains("18.00px"))
-        assertTrue(themedAmoled.contains("<p>Welcome to <strong>Seek</strong></p>"))
+        assertTrue(escapedRemote.hasRemoteImages)
 
         val plain = SeekMailHtmlSanitizer.extractPlainTextFallback(
             "<html><head><style>body{color:red}</style><script>evil()</script></head><body><p>Line 1</p><p>Line 2</p></body></html>",

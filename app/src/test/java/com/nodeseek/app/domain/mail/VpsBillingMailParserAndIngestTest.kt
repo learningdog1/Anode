@@ -689,7 +689,10 @@ class VpsBillingMailParserAndIngestTest {
             val page = mailRepo.getMails(forceRefresh = true).getOrThrow()
             assertFalse("Peeking detail for auto-ingest must not mark unread mail as read", page.items.single().isRead)
             assertTrue(901L !in mailRepo.locallyReadMailIds.value)
-            assertEquals("2027-08-01", fleetRepo.assetsFlow.value.single().expiryDateIso)
+            val updated = withTimeout(5_000L) {
+                fleetRepo.assetsFlow.first { it.singleOrNull()?.expiryDateIso == "2027-08-01" }
+            }
+            assertEquals("2027-08-01", updated.single().expiryDateIso)
         } finally {
             scope.cancel()
             mockServer.shutdown()
@@ -1033,4 +1036,212 @@ class VpsBillingMailParserAndIngestTest {
             assertEquals(listOf("CN2 GIA", "IPv4/IPv6"), persisted.tags)
             assertTrue(persisted.autoRenew)
         }
+
+    @Test
+    fun `parser rejects non-VPS payment receipts, prefers explicit annual cycle over Monthly Bandwidth, and rejects MAC as IPv6`() {
+        // Non-VPS receipts (Stripe / OpenAI / App Store / Alipay) must NOT match VPS billing
+        val stripeReceipt = VpsBillingMailParser.parse(
+            subject = "Your receipt from OpenAI #2044-8821",
+            bodyText = "Payment Received: $20.00 USD\nReceipt #2044-8821\nChatGPT Plus Subscription\nThank you for your payment.",
+            fromName = "OpenAI",
+            fromAddress = "invoice+statements@openai.com",
+        )
+        assertNull("OpenAI receipt must not be parsed as VPS billing", stripeReceipt)
+
+        val alipayReceipt = VpsBillingMailParser.parse(
+            subject = "续费成功通知",
+            bodyText = "您的会员自动续费账单已支付成功，金额 ¥18.00。",
+            fromName = "影音会员",
+            fromAddress = "noreply@music-app.example.com",
+        )
+        assertNull("Generic membership renewal without VPS context must be ignored", alipayReceipt)
+
+        // WHMCS email containing "Monthly Bandwidth: 3000 GB" and annual period + MAC address
+        val annualWithBandwidthAndMac = VpsBillingMailParser.parse(
+            subject = "[RackNerd] New VPS Provisioned",
+            bodyText = """
+                Product/Service: KVM-2G-Special (2026-06-01 - 2027-06-01)
+                Monthly Bandwidth: 3000 GB
+                IP Address: 198.51.100.55
+                MAC Address: 00:1a:2b:3c:4d:5e
+                SSH Port: 22
+                Root Password: MacTest#Pass1
+                Amount: $19.99 USD
+            """.trimIndent(),
+            fromName = "RackNerd",
+            fromAddress = "billing@racknerd.com",
+        )
+        assertNotNull(annualWithBandwidthAndMac)
+        assertEquals(BillingCyclePreset.ANNUAL, annualWithBandwidthAndMac!!.billingCycle)
+        assertNull("6-group MAC address must not be parsed as IPv6", annualWithBandwidthAndMac.mainIpv6)
+    }
+
+    @Test
+    fun `auto-renewal skips ambiguous multi-asset matches, respects peeked non-renewal, preserves metadata notes, and rolls back on SSH failure`() = runTest {
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val fleetRepo = FleetRepositoryImpl(
+            storeFile = File(tempDir, "guard_fleet.json"),
+            tokenCipher = fleetCipher,
+            ioDispatcher = dispatcher,
+        )
+        val sshVault = SshServerVault(
+            vaultFile = File(tempDir, "guard_ssh.json"),
+            cipher = sshCipher,
+            ioDispatcher = dispatcher,
+        )
+        // Two machines sharing the same provider + plan name
+        fleetRepo.upsertAsset(
+            VpsAssetRecord(
+                id = "rn-1",
+                nickname = "RackNerd KVM-2G #1",
+                providerName = "RackNerd",
+                specsSummary = "KVM-2G",
+                region = "洛杉矶",
+                renewalAmount = "12.00",
+                cyclePreset = BillingCyclePreset.ANNUAL,
+                expiryDateIso = "2026-08-01",
+                notes = "[SeekMail] IP: 198.51.100.11 | Hostname: rn1.local\nUser custom memo",
+            ),
+        )
+        fleetRepo.upsertAsset(
+            VpsAssetRecord(
+                id = "rn-2",
+                nickname = "RackNerd KVM-2G #2",
+                providerName = "RackNerd",
+                specsSummary = "KVM-2G",
+                region = "洛杉矶",
+                renewalAmount = "12.00",
+                cyclePreset = BillingCyclePreset.ANNUAL,
+                expiryDateIso = "2026-09-01",
+                notes = "[SeekMail] IP: 198.51.100.12 | Hostname: rn2.local",
+            ),
+        )
+
+        var peekedDetail: SeekMailDetail? = null
+        val service = VpsMailAutoIngestServiceImpl(
+            fleetRepository = fleetRepo,
+            sshVaultRepository = sshVault,
+            stateFile = File(tempDir, "guard_state.json"),
+            mailDetailPeeker = { peekedDetail },
+            ioDispatcher = dispatcher,
+            todayProvider = { LocalDate.of(2026, 7, 1) },
+        )
+
+        // 1. Ambiguous renewal matching 2 assets must NOT advance either machine
+        val ambiguousRenewal = VpsBillingMailParser.parse(
+            subject = "Invoice Payment Confirmation #8801",
+            bodyText = "Provider: RackNerd\nProduct/Service: KVM-2G\nPayment received: $12.00 USD\nStatus: Paid",
+            fromName = "RackNerd",
+            fromAddress = "billing@racknerd.com",
+        )!!
+        val appliedAmbiguous = service.processMailDetail(
+            SeekMailDetail(
+                summary = SeekMailSummary(
+                    id = 5001L,
+                    mailboxId = 1L,
+                    fromAddress = "billing@racknerd.com",
+                    fromName = "RackNerd",
+                    toAddress = "me@seek.li",
+                    subject = "Invoice Payment Confirmation #8801",
+                    snippet = "Payment received for KVM-2G",
+                ),
+                bodyText = "Provider: RackNerd\nProduct/Service: KVM-2G\nPayment received: $12.00 USD\nStatus: Paid",
+            ),
+        )
+        assertTrue("Ambiguous multi-asset renewal must be skipped", appliedAmbiguous.isEmpty())
+        assertEquals("2026-08-01", fleetRepo.assetsFlow.value.first { it.id == "rn-1" }.expiryDateIso)
+        assertEquals("2026-09-01", fleetRepo.assetsFlow.value.first { it.id == "rn-2" }.expiryDateIso)
+        assertNotNull(ambiguousRenewal)
+
+        // 2. When full detail disproves RENEWAL (e.g. actually unpaid invoice), summary must NOT fall through
+        val misleadingSummary = SeekMailSummary(
+            id = 5002L,
+            mailboxId = 1L,
+            fromAddress = "billing@racknerd.com",
+            fromName = "RackNerd",
+            toAddress = "me@seek.li",
+            subject = "Renewal Invoice #8802 Paid",
+            snippet = "VPS renewal confirmation for 198.51.100.11",
+        )
+        peekedDetail = SeekMailDetail(
+            summary = misleadingSummary.copy(subject = "Customer Invoice #8802 Generated"),
+            bodyText = "Invoice #8802\nStatus: Unpaid\nAmount Due: $12.00 USD\nMain IP: 198.51.100.11\nDue Date: 2026-08-01",
+        )
+        val disprovedResult = service.processIncomingSummaries(listOf(misleadingSummary))
+        assertTrue("Peeked non-renewal detail must not fall back to snippet", disprovedResult.isEmpty())
+        assertEquals("2026-08-01", fleetRepo.assetsFlow.value.first { it.id == "rn-1" }.expiryDateIso)
+
+        // 3. Re-importing renewal without IP/Hostname preserves prior [SeekMail] IP/Hostname & user notes
+        val renewalWithoutIp = VpsBillingMailParser.parse(
+            subject = "Invoice Payment Confirmation #8803",
+            bodyText = "Invoice #8803\nProduct/Service: rn1.local\nAmount Paid: $12.00 USD\nStatus: Paid\nNext Due Date: 2027-08-01",
+            fromName = "RackNerd",
+            fromAddress = "billing@racknerd.com",
+        )!!
+        val mergedOutcome = service.ingestMail(summary = null, parsed = renewalWithoutIp).getOrThrow()
+        assertEquals("rn-1", mergedOutcome.asset.id)
+        assertTrue("Prior IP must be preserved in managed notes", mergedOutcome.asset.notes.contains("IP: 198.51.100.11"))
+        assertTrue("Prior Hostname must be preserved in managed notes", mergedOutcome.asset.notes.contains("Hostname: rn1.local"))
+        assertTrue("User custom memo must be preserved", mergedOutcome.asset.notes.contains("User custom memo"))
+
+        // 4. Existing PRIVATE_KEY SSH profile is preserved when overwriteExistingSshCredentials = false
+        sshVault.saveServer(
+            com.nodeseek.app.domain.ssh.SshServerDraft(
+                alias = "RN-1 Key",
+                host = "198.51.100.11",
+                port = 22,
+                username = "root",
+                authMethod = SshAuthMethod.PRIVATE_KEY,
+                secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nDUMMY\n-----END OPENSSH PRIVATE KEY-----",
+            ),
+        )
+        val provWithPassword = VpsBillingMailParser.parse(
+            subject = "[RackNerd] Root Password Reset",
+            bodyText = "Product/Service: KVM-2G\nIP Address: 198.51.100.11\nSSH Port: 22\nRoot Password: ResetPass#123",
+            fromName = "RackNerd",
+            fromAddress = "billing@racknerd.com",
+        )!!
+        val keepKeyOutcome = service.ingestMail(
+            summary = null,
+            parsed = provWithPassword,
+            overwriteExistingSshCredentials = false,
+        ).getOrThrow()
+        assertEquals(SshAuthMethod.PRIVATE_KEY, sshVault.serversFlow.value.single().authMethod)
+        assertTrue(keepKeyOutcome.summaryMessage.contains("保留现有 SSH"))
+
+        // 5. SSH vault write failure rolls back Fleet write so both stores remain consistent
+        val failingSshVault = object : com.nodeseek.app.domain.ssh.SshVaultRepository by sshVault {
+            override suspend fun saveServer(draft: com.nodeseek.app.domain.ssh.SshServerDraft): com.nodeseek.app.domain.ssh.SshServerProfile {
+                throw IllegalStateException("Simulated SSH vault failure")
+            }
+        }
+        val rollbackService = VpsMailAutoIngestServiceImpl(
+            fleetRepository = fleetRepo,
+            sshVaultRepository = failingSshVault,
+            stateFile = File(tempDir, "rollback_state.json"),
+            ioDispatcher = dispatcher,
+            todayProvider = { LocalDate.of(2026, 7, 1) },
+        )
+        val countBeforeRollback = fleetRepo.assetsFlow.value.size
+        val brandNewProv = VpsBillingMailParser.parse(
+            subject = "[ClawCloud] New Server Provisioned",
+            bodyText = "Product/Service: HK-Tiny\nIP Address: 198.51.100.240\nSSH Port: 22\nRoot Password: FailPass#1\nAmount: $9.99 USD",
+            fromName = "ClawCloud",
+            fromAddress = "billing@claw.cloud",
+        )!!
+        val rollbackResult = rollbackService.ingestMail(summary = null, parsed = brandNewProv)
+        assertTrue("Ingest must fail when SSH vault write fails", rollbackResult.isFailure)
+        assertEquals(
+            "Newly inserted Fleet asset must be rolled back on SSH failure",
+            countBeforeRollback,
+            fleetRepo.assetsFlow.value.size,
+        )
+
+        // 6. Pure-Kotlin IPv6 canonicalizer handles valid/compressed/IPv4-mapped & rejects MAC/hostnames
+        assertEquals("2001:0db8:0000:0000:0000:0000:0000:0001", service.canonicalizeIpv6("2001:db8::1"))
+        assertEquals("2001:0db8:0000:0000:0000:0000:0000:0001", service.canonicalizeIpv6("[2001:0DB8:0:0:0:0:0:1]/64"))
+        assertEquals("0000:0000:0000:0000:0000:ffff:c000:0280", service.canonicalizeIpv6("::ffff:192.0.2.128"))
+        assertNull(service.canonicalizeIpv6("00:1a:2b:3c:4d:5e"))
+        assertNull(service.canonicalizeIpv6("not-an-ipv6.example.com"))
+    }
 }

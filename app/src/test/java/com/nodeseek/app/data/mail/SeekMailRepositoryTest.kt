@@ -541,4 +541,75 @@ class SeekMailRepositoryTest {
             coldScope.cancel()
         }
     }
+
+    @Test
+    fun `clearCacheForCurrentKey preserves other keys, sensitive SSH mail skips disk detail cache, and delete purges detail file`(): Unit = runBlocking {
+        val repo = createRepository()
+        settingsRepository.setSeekMailApiKey(dummyKeyA)
+
+        // Seed Key A mailboxes, normal detail (601), and sensitive SSH-password detail (602)
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"data":[{"id":1,"address":"a@seek.li","status":1}]}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"data":{"mail":{"id":601,"mailboxId":1,"fromAddress":"news@example.com","fromName":"News","toAddress":"a@seek.li","subject":"Normal Notice","bodyText":"Hello world","bodyHtml":"<p>Hello</p>","isRead":false},"tags":[]}}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"data":{"mail":{"id":602,"mailboxId":1,"fromAddress":"billing@racknerd.com","fromName":"RackNerd","toAddress":"a@seek.li","subject":"[RackNerd] New Server Information","bodyText":"Product/Service: KVM-1G\nIP Address: 198.51.100.88\nSSH Port: 22\nRoot Password: SuperSecret#Pass99\nBilling Cycle: Annually","bodyHtml":"","isRead":false},"tags":[]}}""",
+            ),
+        )
+        repo.getMailboxes(forceRefresh = true).getOrThrow()
+        repo.getMailDetail(601L, forceRefresh = true).getOrThrow()
+        repo.getMailDetail(602L, forceRefresh = true).getOrThrow()
+
+        val diskCheck = SeekMailDiskCache(cacheDir = cacheDir, ioScope = repoScope)
+        assertNotNull("Normal mail detail should be persisted on disk", diskCheck.getMailDetail(dummyKeyA, 601L))
+        assertNull("VPS provisioning mail with plaintext SSH password must NOT persist to disk", diskCheck.getMailDetail(dummyKeyA, 602L))
+
+        // Locally deleting mail 601 must also purge its cached detail file from disk
+        repo.deleteMailLocally(601L)
+        val diskAfterDelete = SeekMailDiskCache(cacheDir = cacheDir, ioScope = repoScope)
+        assertNull("Deleting mail locally must purge disk detail cache", diskAfterDelete.getMailDetail(dummyKeyA, 601L))
+
+        // Seed Key B mailbox cache
+        settingsRepository.setSeekMailApiKey(dummyKeyB)
+        withTimeout(5_000L) { repo.localArchiveStore.first { it.deletedMailIds.isEmpty() } }
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"data":[{"id":2,"address":"b@seek.li","status":1}]}"""),
+        )
+        repo.getMailboxes(forceRefresh = true).getOrThrow()
+
+        // Switch back to Key A and call clearCacheForCurrentKey() -> Key A wiped, Key B intact!
+        settingsRepository.setSeekMailApiKey(dummyKeyA)
+        withTimeout(5_000L) { repo.localArchiveStore.first { 601L in it.deletedMailIds } }
+        repo.clearCacheForCurrentKey()
+
+        val diskAfterKeyAClear = SeekMailDiskCache(cacheDir = cacheDir, ioScope = repoScope)
+        assertNull(diskAfterKeyAClear.getMailboxes(dummyKeyA))
+        assertNotNull("Key B cache must stay intact after clearing Key A", diskAfterKeyAClear.getMailboxes(dummyKeyB))
+    }
+
+    @Test
+    fun `corrupt durable archive store is backed up instead of silently deleted`() = runBlocking {
+        val diskCache = SeekMailDiskCache(cacheDir = cacheDir, ioScope = repoScope)
+        diskCache.saveLocalArchiveStore(dummyKeyA, com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore())
+        val archiveFile = cacheDir.listFiles()
+            ?.singleOrNull { it.isFile && it.name.endsWith("_local_archive.json") }
+        assertNotNull("Expected persisted local archive store file", archiveFile)
+        archiveFile!!.writeText("{corrupted-json", Charsets.UTF_8)
+
+        // Use a fresh SeekMailDiskCache instance to bypass in-memory cache and read corrupt file from disk.
+        val coldDiskCache = SeekMailDiskCache(cacheDir = cacheDir, ioScope = repoScope)
+        assertEquals(
+            com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore(),
+            coldDiskCache.getLocalArchiveStore(dummyKeyA),
+        )
+        val backupFiles = cacheDir.listFiles()
+            ?.filter { it.name.startsWith("${archiveFile.name}.corrupt.") }
+            .orEmpty()
+        assertTrue("Corrupt durable store must be backed up for recovery", backupFiles.isNotEmpty())
+    }
 }
