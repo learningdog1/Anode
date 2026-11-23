@@ -105,17 +105,21 @@ fun NodePulseTheme(
     val context = LocalContext.current
     val dynamicSupported = dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
-    val baseScheme: ColorScheme = when {
-        dynamicSupported && useDark -> dynamicDarkColorScheme(context)
-        dynamicSupported && !useDark -> dynamicLightColorScheme(context)
-        useDark -> ObsidianDarkColorScheme
-        else -> PaperLightColorScheme
+    val baseScheme: ColorScheme = remember(context, useDark, dynamicSupported) {
+        when {
+            dynamicSupported && useDark -> dynamicDarkColorScheme(context)
+            dynamicSupported && !useDark -> dynamicLightColorScheme(context)
+            useDark -> ObsidianDarkColorScheme
+            else -> PaperLightColorScheme
+        }
     }
 
-    val colorScheme = if (useDark && purePitchAmoled) {
-        baseScheme.withPurePitchAmoled()
-    } else {
-        baseScheme
+    val colorScheme = remember(baseScheme, useDark, purePitchAmoled) {
+        if (useDark && purePitchAmoled) {
+            baseScheme.withPurePitchAmoled()
+        } else {
+            baseScheme
+        }
     }
 
     val extendedColors = remember(
@@ -185,7 +189,7 @@ fun NodePulseTheme(
         }
     }
 
-    val clampedScale = fontScale.coerceIn(0.85f, 1.35f)
+    val clampedScale = fontScale.coerceIn(0.85f, 1.30f)
     val typography = remember(clampedScale) { buildNodePulseTypography(clampedScale) }
     val extraTypography = remember(clampedScale) { buildNodePulseExtraTypography(clampedScale) }
 

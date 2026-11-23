@@ -39,16 +39,18 @@ data class CategoryVisualSpec(
     val postCoinCost: Int = 0,
     val gradientEndColor: Color = spineColor,
 ) {
-    val heroBrush: Brush
-        get() = Brush.linearGradient(colors = listOf(spineColor, gradientEndColor))
+    val heroBrush: Brush by lazy(LazyThreadSafetyMode.NONE) {
+        Brush.linearGradient(colors = listOf(spineColor, gradientEndColor))
+    }
 
-    val softTonalBrush: Brush
-        get() = Brush.linearGradient(
+    val softTonalBrush: Brush by lazy(LazyThreadSafetyMode.NONE) {
+        Brush.linearGradient(
             colors = listOf(
                 containerColor,
                 blendColor(containerColor, gradientEndColor, 0.20f),
-            )
+            ),
         )
+    }
 
     fun harmonizeWith(primary: Color, fraction: Float = 0.12f): CategoryVisualSpec = copy(
         containerColor = blendColor(containerColor, primary, fraction),
@@ -81,11 +83,11 @@ private val AllBoardSpecs = listOf(
         title = "全部",
         description = "聚合全站各版块最新帖子与讨论",
         icon = Icons.Rounded.GridView,
-        lightContainer = Color(0xFFDDE3FF),
-        lightContent = Color(0xFF0B1D6E),
-        darkContainer = Color(0xFF213C9E),
-        darkContent = Color(0xFFDDE3FF),
-        spine = Color(0xFF3655D6),
+        lightContainer = PaperPrimaryContainer,
+        lightContent = PaperOnPrimaryContainer,
+        darkContainer = ObsidianPrimaryContainer,
+        darkContent = ObsidianOnPrimaryContainer,
+        spine = PaperPrimary,
         gradientEnd = Color(0xFF0EA5E9),
     ),
     RawBoardSpec(
@@ -268,11 +270,29 @@ private val AllBoardSpecs = listOf(
 object CategoryPalette {
     val defaultOrderedSlugs: List<String> = AllBoardSpecs.map { it.slug }
 
+    private val lightStaticSpecs: List<CategoryVisualSpec> by lazy {
+        AllBoardSpecs.map { it.toVisualSpec(isDark = false, dynamicPrimaryToHarmonize = null) }
+    }
+    private val darkStaticSpecs: List<CategoryVisualSpec> by lazy {
+        AllBoardSpecs.map { it.toVisualSpec(isDark = true, dynamicPrimaryToHarmonize = null) }
+    }
+    private val lightStaticBySlug: Map<String, CategoryVisualSpec> by lazy {
+        lightStaticSpecs.associateBy { it.slug }
+    }
+    private val darkStaticBySlug: Map<String, CategoryVisualSpec> by lazy {
+        darkStaticSpecs.associateBy { it.slug }
+    }
+
     fun allSpecs(
         isDark: Boolean,
         dynamicPrimaryToHarmonize: Color? = null,
-    ): List<CategoryVisualSpec> = AllBoardSpecs.map { raw ->
-        raw.toVisualSpec(isDark, dynamicPrimaryToHarmonize)
+    ): List<CategoryVisualSpec> {
+        val base = if (isDark) darkStaticSpecs else lightStaticSpecs
+        return if (dynamicPrimaryToHarmonize != null) {
+            base.map { it.harmonizeWith(dynamicPrimaryToHarmonize, fraction = 0.12f) }
+        } else {
+            base
+        }
     }
 
     fun resolve(
@@ -280,10 +300,29 @@ object CategoryPalette {
         isDark: Boolean,
         dynamicPrimaryToHarmonize: Color? = null,
     ): CategoryVisualSpec {
-        val normalized = slug.trim().lowercase()
-        val raw = AllBoardSpecs.firstOrNull { it.slug == normalized }
-            ?: AllBoardSpecs.last() // fallback to sandbox neutral graphite
-        return raw.toVisualSpec(isDark, dynamicPrimaryToHarmonize)
+        val normalized = slug.trim().lowercase(java.util.Locale.US)
+        val staticMap = if (isDark) darkStaticBySlug else lightStaticBySlug
+        val matched = staticMap[normalized]
+        val base = if (matched != null) {
+            matched
+        } else {
+            // Reuse neutral graphite styling for unknown board slugs without mislabeling them as "沙盒".
+            val fallbackPalette = if (isDark) darkStaticSpecs.last() else lightStaticSpecs.last()
+            fallbackPalette.copy(
+                slug = normalized,
+                defaultTitle = normalized.ifBlank { "其他" },
+                editorialDescription = "",
+                isFeaturedHero = false,
+                isFeaturedMedium = false,
+                requiresWebAuth = false,
+                postCoinCost = 0,
+            )
+        }
+        return if (dynamicPrimaryToHarmonize != null) {
+            base.harmonizeWith(dynamicPrimaryToHarmonize, fraction = 0.12f)
+        } else {
+            base
+        }
     }
 
     private fun RawBoardSpec.toVisualSpec(

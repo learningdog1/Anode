@@ -20,16 +20,18 @@ data class RankVisualSpec(
     val contentColor: Color,
     val glowColor: Color = gradientColors.firstOrNull() ?: contentColor,
 ) {
-    val ringBrush: Brush
-        get() = Brush.linearGradient(colors = gradientColors)
+    val ringBrush: Brush by lazy(LazyThreadSafetyMode.NONE) {
+        Brush.linearGradient(colors = gradientColors)
+    }
 
-    val softContainerBrush: Brush
-        get() = Brush.linearGradient(
+    val softContainerBrush: Brush by lazy(LazyThreadSafetyMode.NONE) {
+        Brush.linearGradient(
             colors = listOf(
                 containerColor,
                 blendColor(containerColor, gradientColors.firstOrNull() ?: containerColor, 0.16f),
-            )
+            ),
         )
+    }
 
     fun harmonizeWith(primary: Color, fraction: Float = 0.10f): RankVisualSpec = copy(
         gradientColors = gradientColors.map { blendColor(it, primary, fraction) },
@@ -84,13 +86,31 @@ object RankPalette {
         )
     }
 
+    private val lightStaticRanks: Array<RankVisualSpec> by lazy {
+        Array(7) { lv -> buildSpecForLevel(lv, isDark = false) }
+    }
+    private val darkStaticRanks: Array<RankVisualSpec> by lazy {
+        Array(7) { lv -> buildSpecForLevel(lv, isDark = true) }
+    }
+
     fun forLevel(
         level: Int,
         isDark: Boolean,
         dynamicPrimaryToHarmonize: Color? = null,
     ): RankVisualSpec {
         val lv = level.coerceIn(0, 6)
-        val base = when (lv) {
+        val base = if (isDark) darkStaticRanks[lv] else lightStaticRanks[lv]
+        return if (dynamicPrimaryToHarmonize != null) {
+            base.harmonizeWith(dynamicPrimaryToHarmonize)
+        } else {
+            base
+        }
+    }
+
+    private fun buildSpecForLevel(
+        lv: Int,
+        isDark: Boolean,
+    ): RankVisualSpec = when (lv) {
             0 -> RankVisualSpec(
                 level = 0,
                 minCoins = 0,
@@ -162,10 +182,4 @@ object RankPalette {
                 glowColor = Color(0xFFF59E0B),
             )
         }
-        return if (dynamicPrimaryToHarmonize != null) {
-            base.harmonizeWith(dynamicPrimaryToHarmonize)
-        } else {
-            base
-        }
-    }
 }
