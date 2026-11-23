@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -68,6 +69,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -1283,8 +1285,8 @@ fun OfficialTradeSettingsCardContent(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
-    var keyDraft by rememberSaveable { mutableStateOf("") }
-    var showKey by rememberSaveable { mutableStateOf(false) }
+    var keyDraft by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
     var isReplacingKey by rememberSaveable { mutableStateOf(false) }
     var showRemoveConfirm by remember { mutableStateOf(false) }
 
@@ -1947,6 +1949,10 @@ private fun OfficialTradeApiKeyInputField(
         } else {
             PasswordVisualTransformation()
         },
+        keyboardOptions = KeyboardOptions(
+            autoCorrectEnabled = false,
+            keyboardType = KeyboardType.Password,
+        ),
         trailingIcon = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -2015,8 +2021,8 @@ private fun OfficialTradeQuickKeyDialog(
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var keyDraft by rememberSaveable { mutableStateOf("") }
-    var showKey by rememberSaveable { mutableStateOf(false) }
+    var keyDraft by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
     var isVerifying by remember { mutableStateOf(false) }
     var feedbackMessage by remember { mutableStateOf<String?>(null) }

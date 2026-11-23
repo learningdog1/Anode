@@ -13,13 +13,15 @@ import com.nodeseek.app.domain.activity.ForumWatchActivityDetail
 import com.nodeseek.app.domain.activity.ForumWatchActivityItem
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -69,6 +71,8 @@ data class ActivityDetailSheetState(
 data class ActivityUiState(
     val isInitialLoading: Boolean = true,
     val isRefreshing: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val hasMore: Boolean = false,
     val activities: List<ForumWatchActivityItem> = emptyList(),
     val filteredActivities: List<ForumWatchActivityItem> = emptyList(),
     val selectedCategory: ActivityCategoryFilter = ActivityCategoryFilter.ALL,
@@ -100,11 +104,25 @@ class ActivityViewModel(
     private val localControls = MutableStateFlow(LocalControls(nowEpochMillis = clockMillis()))
     private var detailLoadJob: Job? = null
 
+    private val liveClockFlow: Flow<Long> = if (enableClockTicker) {
+        flow {
+            emit(clockMillis())
+            while (true) {
+                delay(LIVE_CLOCK_TICK_MS)
+                emit(clockMillis())
+            }
+        }
+    } else {
+        flowOf(clockMillis())
+    }
+
     val uiState: StateFlow<ActivityUiState> = combine(
         repository.snapshot,
         localControls,
-    ) { snap, controls ->
-        buildUiState(snap = snap, controls = controls)
+        liveClockFlow,
+    ) { snap, controls, tickMillis ->
+        val effectiveNow = maxOf(controls.nowEpochMillis, tickMillis)
+        buildUiState(snap = snap, controls = controls.copy(nowEpochMillis = effectiveNow))
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
@@ -126,21 +144,21 @@ class ActivityViewModel(
                 repository.refreshActivities(force = false)
             }
         }
-
-        if (enableClockTicker) {
-            viewModelScope.launch {
-                while (isActive) {
-                    delay(LIVE_CLOCK_TICK_MS)
-                    localControls.update { it.copy(nowEpochMillis = clockMillis()) }
-                }
-            }
-        }
     }
 
     fun refresh() {
         viewModelScope.launch {
             localControls.update { it.copy(nowEpochMillis = clockMillis()) }
             repository.refreshActivities(force = true)
+        }
+    }
+
+    fun loadNextPage() {
+        val current = repository.snapshot.value
+        if (current.isRefreshing || current.isLoadingMore || !current.hasMore) return
+        viewModelScope.launch {
+            localControls.update { it.copy(nowEpochMillis = clockMillis()) }
+            repository.loadNextPage()
         }
     }
 
@@ -297,6 +315,8 @@ class ActivityViewModel(
         return ActivityUiState(
             isInitialLoading = initialLoading,
             isRefreshing = snap.isRefreshing,
+            isLoadingMore = snap.isLoadingMore,
+            hasMore = snap.hasMore,
             activities = normalizedActivities,
             filteredActivities = filtered,
             selectedCategory = controls.selectedCategory,

@@ -164,13 +164,16 @@ class SellerTrustRepositoryImpl internal constructor(
     )
 
     private val singleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
-    private val exposeBoardSingleFlight = KeyedSingleFlight<String, Result<FeedPageResult>>(ioDispatcher)
+    private val exposeBoardSingleFlight = KeyedSingleFlight<String, Result<ExposeBoardResolution>>(ioDispatcher)
     private val deepSearchSingleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
     private val topicScanSingleFlight = KeyedSingleFlight<String, SellerTrustReport>(ioDispatcher)
     private val backgroundScope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     private val attemptMutex = Mutex()
     private val lastRemoteAttemptByKey = HashMap<String, Long>()
+    private val scannedTopicsMutex = Mutex()
+    private val scannedTopicIdsByUid = HashMap<Long, MutableSet<Long>>()
+    private val scannedTradeTopicIdsByUid = HashMap<Long, MutableSet<Long>>()
 
     private val deepSearchGateMutex = Mutex()
     private var lastDeepSearchAttemptAtMillis: Long = 0L
@@ -606,7 +609,7 @@ class SellerTrustRepositoryImpl internal constructor(
                 !(userExplicitlyNotFound && cleanHint.isEmpty()) &&
                 !abortedByRateLimit
 
-            val exposeBoardDeferred: Deferred<Result<FeedPageResult>>? = if (canRunExposureCheck) {
+            val exposeBoardDeferred: Deferred<Result<ExposeBoardResolution>>? = if (canRunExposureCheck) {
                 async {
                     resolveExposeBoardPage(
                         siteHost = siteHost,
@@ -637,6 +640,14 @@ class SellerTrustRepositoryImpl internal constructor(
             fallbackUsername = fallbackDisplayName(aggregated.targetUid, rawUsernameHint),
             nowEpochMillis = finishedNow,
         )
+        if (baseReport.uid > 0L && baseReport.topicsSucceeded) {
+            val initialTopics = aggregated.topicsResult.getOrNull()?.topics.orEmpty()
+            recordInitialScannedTopicIds(
+                uid = baseReport.uid,
+                allTopicIds = initialTopics.mapNotNull { it.id.takeIf { id -> id > 0L } },
+                tradeTopicIds = initialTopics.filter(TrustRiskEvaluator::isTradeTopic).mapNotNull { it.id.takeIf { id -> id > 0L } },
+            )
+        }
 
         val allKeys = buildList {
             add(initialCacheKey)
@@ -722,24 +733,26 @@ class SellerTrustRepositoryImpl internal constructor(
         siteHost: String,
         forceRefresh: Boolean,
         governedCall: suspend () -> Result<FeedPageResult>,
-    ): Result<FeedPageResult> {
+    ): Result<ExposeBoardResolution> {
         val now = clockMillis()
 
         // 1. Reuse ForumRepository's fresh `/categories/expose` feed cache if already browsed by user.
         if (!forceRefresh) {
             remoteDataSource.getCachedExposeBoardPage1()?.let { feedCached ->
-                exposeBoardStore.put(feedCached, now)
-                return Result.success(feedCached)
+                if (!feedCached.isFromRssFallback) {
+                    exposeBoardStore.put(feedCached, now)
+                }
+                return Result.success(ExposeBoardResolution(page = feedCached, isStaleFallback = false))
             }
             exposeBoardStore.getFresh(now)?.let { snapshot ->
-                return Result.success(snapshot.page)
+                return Result.success(ExposeBoardResolution(page = snapshot.page, isStaleFallback = false))
             }
         } else {
             // Even during manual refresh, avoid hammering `/categories/expose` more than once per minute.
             val lastFetched = exposeBoardStore.getLastFetchedAtMillis()
             if (lastFetched > 0L && now >= lastFetched && (now - lastFetched) < exposeBoardRefreshMinIntervalMillis) {
                 exposeBoardStore.getFresh(now)?.let { snapshot ->
-                    return Result.success(snapshot.page)
+                    return Result.success(ExposeBoardResolution(page = snapshot.page, isStaleFallback = false))
                 }
             }
         }
@@ -747,13 +760,30 @@ class SellerTrustRepositoryImpl internal constructor(
         val fetchedResult = exposeBoardSingleFlight.execute("expose_board:$siteHost") {
             val innerNow = clockMillis()
             if (!forceRefresh) {
-                exposeBoardStore.getFresh(innerNow)?.let { return@execute Result.success(it.page) }
+                exposeBoardStore.getFresh(innerNow)?.let {
+                    return@execute Result.success(ExposeBoardResolution(page = it.page, isStaleFallback = false))
+                }
             }
             val result = governedCall()
-            result.getOrNull()?.let { page ->
-                exposeBoardStore.put(page, clockMillis())
+            val fetchedPage = result.getOrNull()
+            if (fetchedPage != null) {
+                if (!fetchedPage.isFromRssFallback) {
+                    exposeBoardStore.put(fetchedPage, clockMillis())
+                    return@execute Result.success(ExposeBoardResolution(page = fetchedPage, isStaleFallback = false))
+                }
+                // Never cache RSS fallback as a 30-minute `/categories/expose` snapshot; if a real
+                // stale snapshot exists within retention, prefer it unless RSS has newer expose items.
+                val staleReal = exposeBoardStore.getStaleFallback(clockMillis())
+                if (staleReal != null && fetchedPage.pinnedTopics.isEmpty() && fetchedPage.topics.isEmpty()) {
+                    return@execute Result.success(ExposeBoardResolution(page = staleReal.page, isStaleFallback = true))
+                }
+                return@execute Result.success(ExposeBoardResolution(page = fetchedPage, isStaleFallback = false))
             }
-            result
+            // Remote failure: fall back to a retained stale `/categories/expose` snapshot if available.
+            exposeBoardStore.getStaleFallback(clockMillis())?.let { stale ->
+                return@execute Result.success(ExposeBoardResolution(page = stale.page, isStaleFallback = true))
+            }
+            Result.failure(result.exceptionOrNull() ?: IllegalStateException("Expose board fetch failed"))
         }
         return fetchedResult
     }
@@ -829,6 +859,7 @@ class SellerTrustRepositoryImpl internal constructor(
             exposureCheckScope = ExposureCheckScope.DEEP_SEARCH,
             scannedTopicsCount = baseReport.scannedTopicsCount,
             hasMoreTopicPages = baseReport.hasMoreTopicPages,
+            topicsSucceeded = baseReport.topicsSucceeded,
         )
 
         val updatedReport = baseReport.copy(
@@ -957,6 +988,7 @@ class SellerTrustRepositoryImpl internal constructor(
             exposureCheckScope = mergedScope,
             scannedTopicsCount = mergedScannedCount,
             hasMoreTopicPages = mergedHasMoreTopicPages,
+            topicsSucceeded = freshReport.topicsSucceeded,
         )
         return freshReport.copy(
             historicalTradeTopicCount = mergedTradeCount,
@@ -1111,6 +1143,7 @@ class SellerTrustRepositoryImpl internal constructor(
             profileSucceeded = false,
             registrationDurationLabel = "注册时间未知",
             exposureCheckScope = ExposureCheckScope.UNVERIFIED,
+            topicsSucceeded = false,
         )
         return SellerTrustReport(
             uid = uid,
@@ -1150,8 +1183,11 @@ class SellerTrustRepositoryImpl internal constructor(
         val hasMoreTopicPages = topicsOutcome?.hasMorePages == true
         val tradeTopics = allUserTopics.filter(TrustRiskEvaluator::isTradeTopic)
 
+        val exposeResolution = aggregated.exposeBoardResult?.getOrNull()
+        val exposePage = exposeResolution?.page
+        val exposeBoardUsedStaleFallback = exposeResolution?.isStaleFallback == true
         val candidates = mutableListOf<ExposureCandidate>()
-        aggregated.exposeBoardResult?.getOrNull()?.let { page ->
+        exposePage?.let { page ->
             (page.pinnedTopics + page.topics).forEach { topic ->
                 candidates += ExposureCandidate(
                     topic = topic,
@@ -1160,7 +1196,8 @@ class SellerTrustRepositoryImpl internal constructor(
             }
         }
 
-        val exposeBoardSucceeded = aggregated.exposeBoardResult?.isSuccess == true
+        val exposeBoardIsRssFallback = exposePage?.isFromRssFallback == true
+        val exposeBoardSucceeded = aggregated.exposeBoardResult?.isSuccess == true && !exposeBoardIsRssFallback
         val searchSucceeded = aggregated.canonicalUsername.isNotBlank() && exposeBoardSucceeded
         val exposureCheckScope = if (searchSucceeded) {
             ExposureCheckScope.BOARD_SNAPSHOT
@@ -1171,6 +1208,7 @@ class SellerTrustRepositoryImpl internal constructor(
         val searchFailureReason = when {
             searchSucceeded -> null
             aggregated.canonicalUsername.isBlank() -> "未获取到卖家用户名，无法执行站内曝光检索"
+            exposeBoardIsRssFallback -> "曝光版需登录或完成人机验证，仅从 RSS 兜底排查，未完成完整曝光核验"
             else -> formatBoardCheckFailureReason(aggregated.exposeBoardResult?.exceptionOrNull())
         }
 
@@ -1194,7 +1232,7 @@ class SellerTrustRepositoryImpl internal constructor(
         val resolvedAvatar = profile?.avatarUrl?.trim()?.takeIf { it.isNotEmpty() }
             ?: if (resolvedUid > 0L) "$NODESEEK_ORIGIN/avatar/$resolvedUid.png" else ""
 
-        val riskAssessment = TrustRiskEvaluator.evaluate(
+        val rawRiskAssessment = TrustRiskEvaluator.evaluate(
             rankLevel = rankLevel,
             registrationDays = tenure.registrationDays,
             historicalTradeTopicCount = tradeTopics.size,
@@ -1206,7 +1244,16 @@ class SellerTrustRepositoryImpl internal constructor(
             exposureCheckScope = exposureCheckScope,
             scannedTopicsCount = allUserTopics.size,
             hasMoreTopicPages = hasMoreTopicPages,
+            topicsSucceeded = topicsSucceeded,
         )
+        val riskAssessment = if (exposeBoardUsedStaleFallback && searchSucceeded) {
+            val staleHint = "曝光版实时拉取失败，当前基于 6 小时内历史曝光快照排查，建议稍后刷新复核"
+            rawRiskAssessment.copy(
+                reasons = (rawRiskAssessment.reasons + staleHint).distinct(),
+            )
+        } else {
+            rawRiskAssessment
+        }
 
         return SellerTrustReport(
             uid = resolvedUid,
@@ -1255,6 +1302,7 @@ class SellerTrustRepositoryImpl internal constructor(
             exposureCheckScope = report.exposureCheckScope,
             scannedTopicsCount = report.scannedTopicsCount,
             hasMoreTopicPages = report.hasMoreTopicPages,
+            topicsSucceeded = report.topicsSucceeded,
         )
         return report.copy(
             localNote = note,
@@ -1421,19 +1469,24 @@ class SellerTrustRepositoryImpl internal constructor(
             )
         }
 
-        val existingRecentIds = latestBase.recentTradeTopics.map { it.id }.toSet()
-        val newTradeTopics = newlyFetched.values
-            .filter(TrustRiskEvaluator::isTradeTopic)
-            .filterNot { it.id in existingRecentIds }
+        val (newUniqueTopicsCount, newTradeTopics) = deduplicateNewlyScannedTopics(
+            uid = targetUid,
+            fallbackRecentTradeIds = latestBase.recentTradeTopics.map { it.id },
+            newlyFetched = newlyFetched.values,
+        )
 
         val mergedTradeCount = latestBase.historicalTradeTopicCount + newTradeTopics.size
         val mergedRecentTrades = (latestBase.recentTradeTopics + newTradeTopics)
             .distinctBy { it.id }
             .take(MAX_RECENT_TRADE_TOPICS)
-        val mergedScannedCount = maxOf(
-            latestBase.scannedTopicsCount + newlyFetched.size,
+        val rawMergedScanned = maxOf(
+            latestBase.scannedTopicsCount + newUniqueTopicsCount,
             mergedTradeCount,
         )
+        val mergedScannedCount = latestBase.totalTopicsCount
+            ?.takeIf { it > 0 }
+            ?.let { total -> rawMergedScanned.coerceAtMost(maxOf(total, mergedTradeCount)) }
+            ?: rawMergedScanned
         val latestNote = if (targetUid > 0L) noteStore.getNote(targetUid) else latestBase.localNote
         val updatedAssessment = TrustRiskEvaluator.evaluate(
             rankLevel = latestBase.rankLevel,
@@ -1447,6 +1500,7 @@ class SellerTrustRepositoryImpl internal constructor(
             exposureCheckScope = latestBase.exposureCheckScope,
             scannedTopicsCount = mergedScannedCount,
             hasMoreTopicPages = stillHasMore,
+            topicsSucceeded = latestBase.topicsSucceeded,
         )
 
         val partialNotice = if (stopError != null) {
@@ -1472,6 +1526,49 @@ class SellerTrustRepositoryImpl internal constructor(
 
         persistUpdatedTopicsReport(updatedReport, finishedNow)
         return updatedReport
+    }
+
+    private suspend fun recordInitialScannedTopicIds(
+        uid: Long,
+        allTopicIds: Collection<Long>,
+        tradeTopicIds: Collection<Long>,
+    ) {
+        if (uid <= 0L) return
+        scannedTopicsMutex.withLock {
+            scannedTopicIdsByUid[uid] = LinkedHashSet(allTopicIds)
+            scannedTradeTopicIdsByUid[uid] = LinkedHashSet(tradeTopicIds)
+        }
+    }
+
+    private suspend fun deduplicateNewlyScannedTopics(
+        uid: Long,
+        fallbackRecentTradeIds: Collection<Long>,
+        newlyFetched: Collection<TopicSummary>,
+    ): Pair<Int, List<TopicSummary>> = scannedTopicsMutex.withLock {
+        val seenAll = if (uid > 0L) {
+            scannedTopicIdsByUid.getOrPut(uid) { LinkedHashSet(fallbackRecentTradeIds) }
+        } else {
+            LinkedHashSet(fallbackRecentTradeIds)
+        }
+        val seenTrades = if (uid > 0L) {
+            scannedTradeTopicIdsByUid.getOrPut(uid) { LinkedHashSet(fallbackRecentTradeIds) }
+        } else {
+            LinkedHashSet(fallbackRecentTradeIds)
+        }
+
+        var newlySeenCount = 0
+        val newTradeTopics = ArrayList<TopicSummary>()
+        for (topic in newlyFetched) {
+            val id = topic.id
+            if (id <= 0L) continue
+            if (seenAll.add(id)) {
+                newlySeenCount++
+            }
+            if (TrustRiskEvaluator.isTradeTopic(topic) && seenTrades.add(id)) {
+                newTradeTopics += topic
+            }
+        }
+        newlySeenCount to newTradeTopics
     }
 
     private suspend fun persistUpdatedTopicsReport(
@@ -1647,12 +1744,17 @@ class SellerTrustRepositoryImpl internal constructor(
         val hasMorePages: Boolean,
     )
 
+    private data class ExposeBoardResolution(
+        val page: FeedPageResult,
+        val isStaleFallback: Boolean = false,
+    )
+
     private data class AggregationResult(
         val targetUid: Long,
         val canonicalUsername: String,
         val profileResult: Result<UserProfile>,
         val topicsResult: Result<TopicsScanOutcome>,
-        val exposeBoardResult: Result<FeedPageResult>?,
+        val exposeBoardResult: Result<ExposeBoardResolution>?,
         val localNote: LocalSellerNote?,
     )
 
@@ -1803,8 +1905,20 @@ internal class ExposeBoardSnapshotStore(
             mutex.withLock {
                 ensureLoadedLocked(nowMillis)
                 val current = snapshot ?: return@withLock null
+                if (current.page.isFromRssFallback) return@withLock null
                 val age = nowMillis - current.fetchedAtEpochMillis
                 if (age in 0L until freshTtlMillis) current else null
+            }
+        }
+
+    suspend fun getStaleFallback(nowMillis: Long = clockMillis()): PersistedExposeBoardSnapshot? =
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked(nowMillis)
+                val current = snapshot ?: return@withLock null
+                if (current.page.isFromRssFallback) return@withLock null
+                val age = nowMillis - current.fetchedAtEpochMillis
+                if (age in 0L until staleRetentionMillis) current else null
             }
         }
 

@@ -9,28 +9,6 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.NotificationsActive
-import androidx.compose.material.icons.rounded.NotificationsOff
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Stable
@@ -40,14 +18,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -58,10 +30,6 @@ import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorSettings
 import com.nodeseek.app.domain.overseas.OverseasPromoRuntimeStatus
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
-import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
-import com.nodeseek.app.ui.theme.PulseBrushes
-import com.nodeseek.app.ui.theme.PulseElevation
-import com.nodeseek.app.ui.theme.pulseCard
 import kotlinx.coroutines.launch
 
 /**
@@ -281,111 +249,6 @@ fun rememberOverseasPromoNotificationBinding(
             onToggleNotifications = toggleAction,
             onOpenMonitorTelegramChannel = openTgChannelAction,
             onOpenSystemNotificationSettings = openSettingsAction,
-        )
-    }
-}
-
-/**
- * Standalone reusable header bar for Overseas Intel combining:
- * 1. Proactive promotion push notification switch (with Android 13+ permission handling),
- * 2. One-click button to follow the monitored LowEndTalk Offer channel (`https://t.me/colmidad_lowendtalk_offer`).
- */
-@Composable
-fun OverseasPromoHeaderBar(
-    promoNotificationsEnabled: Boolean,
-    onTogglePromoNotifications: (Boolean) -> Unit,
-    onOpenMonitorTelegramChannel: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val badgeShape = RoundedCornerShape(12.dp)
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.HeroBento,
-                elevation = PulseElevation.Card,
-                accentColor = if (promoNotificationsEnabled) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant
-                },
-            )
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(badgeShape)
-                .background(PulseBrushes.brandSoftWash(if (promoNotificationsEnabled) 0.18f else 0.08f))
-                .border(
-                    width = 0.8.dp,
-                    color = MaterialTheme.colorScheme.primary.copy(
-                        alpha = if (promoNotificationsEnabled) 0.28f else 0.12f,
-                    ),
-                    shape = badgeShape,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = if (promoNotificationsEnabled) {
-                    Icons.Rounded.NotificationsActive
-                } else {
-                    Icons.Rounded.NotificationsOff
-                },
-                contentDescription = null,
-                tint = if (promoNotificationsEnabled) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                modifier = Modifier.size(18.dp),
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "新促销主动通知",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = if (promoNotificationsEnabled) {
-                    "后台自动巡检，发现新促销即刻推送"
-                } else {
-                    "开启后无需进入本页即可收到促销通知"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-
-        FilledTonalButton(
-            onClick = onOpenMonitorTelegramChannel,
-            shape = CircleShape,
-        ) {
-            Text(
-                text = "关注监控 TG 频道",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Icon(
-                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-            )
-        }
-
-        Switch(
-            checked = promoNotificationsEnabled,
-            onCheckedChange = onTogglePromoNotifications,
         )
     }
 }

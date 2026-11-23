@@ -165,6 +165,22 @@ internal class OfficialTradeCacheStore(
         )
     }
 
+    suspend fun clear() {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                loadedFromDisk = true
+                memoryLru.clear()
+                diskEntries.clear()
+                positiveSnapshotState.value = emptyMap()
+                runCatching {
+                    val tmpFile = File(cacheFile.parentFile, "${cacheFile.name}.tmp")
+                    if (tmpFile.exists()) tmpFile.delete()
+                    if (cacheFile.exists()) cacheFile.delete()
+                }
+            }
+        }
+    }
+
     private suspend fun putEntry(
         entry: PersistedOfficialTradeCacheEntry,
         nowMillis: Long,

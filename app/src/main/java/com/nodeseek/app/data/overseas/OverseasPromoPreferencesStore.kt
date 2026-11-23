@@ -14,6 +14,43 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.lang.ref.WeakReference
+
+internal class OverseasPromoSettingsLoadGate(
+    val isLoaded: () -> Boolean,
+    val awaitLoaded: suspend () -> Unit,
+)
+
+internal object OverseasPromoSettingsLoadRegistry {
+    private val lock = Any()
+    private val entries = ArrayList<Pair<WeakReference<StateFlow<OverseasPromoMonitorSettings>>, OverseasPromoSettingsLoadGate>>()
+
+    fun register(
+        flow: StateFlow<OverseasPromoMonitorSettings>,
+        gate: OverseasPromoSettingsLoadGate,
+    ) {
+        synchronized(lock) {
+            entries.removeAll { it.first.get() == null || it.first.get() === flow }
+            entries.add(WeakReference(flow) to gate)
+        }
+    }
+
+    fun find(flow: Any): OverseasPromoSettingsLoadGate? {
+        synchronized(lock) {
+            val iterator = entries.iterator()
+            while (iterator.hasNext()) {
+                val (ref, gate) = iterator.next()
+                val target = ref.get()
+                if (target == null) {
+                    iterator.remove()
+                } else if (target === flow) {
+                    return gate
+                }
+            }
+            return null
+        }
+    }
+}
 
 @Serializable
 internal data class OverseasPromoStoreSnapshot(
@@ -57,10 +94,22 @@ class OverseasPromoPreferencesStore(
 
     private val mutex = Mutex()
 
-    private var state: OverseasPromoStoreSnapshot = readSnapshotSync()
+    @Volatile
+    private var loaded: Boolean = false
+
+    @Volatile
+    private var state: OverseasPromoStoreSnapshot = OverseasPromoStoreSnapshot()
 
     private val _settingsFlow = MutableStateFlow(state.settings.normalized())
-    val settingsFlow: StateFlow<OverseasPromoMonitorSettings> = _settingsFlow.asStateFlow()
+    val settingsFlow: StateFlow<OverseasPromoMonitorSettings> = _settingsFlow.asStateFlow().also { flow ->
+        OverseasPromoSettingsLoadRegistry.register(
+            flow = flow,
+            gate = OverseasPromoSettingsLoadGate(
+                isLoaded = { loaded },
+                awaitLoaded = { ensureLoaded() },
+            ),
+        )
+    }
 
     val currentBaselineInitialized: Boolean
         get() = state.baselineInitialized
@@ -71,18 +120,34 @@ class OverseasPromoPreferencesStore(
     val currentLastNotifiedEpochMillis: Long
         get() = state.lastNotifiedEpochMillis
 
+    suspend fun ensureLoaded() {
+        mutex.withLock {
+            ensureLoadedLocked()
+        }
+    }
+
     suspend fun getSettings(): OverseasPromoMonitorSettings =
-        mutex.withLock { _settingsFlow.value }
+        mutex.withLock {
+            ensureLoadedLocked()
+            _settingsFlow.value
+        }
 
     suspend fun isBaselineInitialized(): Boolean =
-        mutex.withLock { state.baselineInitialized }
+        mutex.withLock {
+            ensureLoadedLocked()
+            state.baselineInitialized
+        }
 
     suspend fun getSeenOfferIds(): Set<String> =
-        mutex.withLock { LinkedHashSet(state.seenOfferIds) }
+        mutex.withLock {
+            ensureLoadedLocked()
+            LinkedHashSet(state.seenOfferIds)
+        }
 
     suspend fun updateSettings(
         transform: (OverseasPromoMonitorSettings) -> OverseasPromoMonitorSettings,
     ): OverseasPromoMonitorSettings = mutex.withLock {
+        ensureLoadedLocked()
         val nextSettings = transform(_settingsFlow.value).normalized()
         val nextSnapshot = state.copy(settings = nextSettings)
         persistSnapshotLocked(nextSnapshot)
@@ -92,15 +157,17 @@ class OverseasPromoPreferencesStore(
     /**
      * Updates [OverseasPromoMonitorSettings.notificationsEnabled].
      *
-     * When re-enabling notifications (`false -> true`) while [seedBaselineIds] are already loaded
-     * in memory (for example, offers currently displayed in the Overseas Intel screen), those IDs
-     * are merged into `seenOfferIds` and mark the baseline initialized so existing offers on screen
-     * are not immediately pushed as new alerts.
+     * Disabling notifications clears [OverseasPromoStoreSnapshot.baselineInitialized] so that when
+     * re-enabled later, historical promotions accumulated while paused never flood notifications.
+     * When re-enabling (`false -> true`) with fresh online [seedBaselineIds] already displayed on
+     * screen, those IDs are merged into `seenOfferIds` and re-establish the baseline immediately;
+     * otherwise the next online poll silently re-establishes the baseline.
      */
     suspend fun setNotificationsEnabled(
         enabled: Boolean,
         seedBaselineIds: Collection<String> = emptyList(),
     ): OverseasPromoMonitorSettings = mutex.withLock {
+        ensureLoadedLocked()
         val previousEnabled = _settingsFlow.value.notificationsEnabled
         val nextSettings = _settingsFlow.value.copy(notificationsEnabled = enabled).normalized()
         val cleanedSeeds = sanitizeIds(seedBaselineIds)
@@ -110,10 +177,10 @@ class OverseasPromoPreferencesStore(
         } else {
             state.seenOfferIds
         }
-        val nextBaselineInitialized = if (enabled && !previousEnabled && cleanedSeeds.isNotEmpty()) {
-            true
-        } else {
-            state.baselineInitialized
+        val nextBaselineInitialized = when {
+            !enabled -> false
+            !previousEnabled -> cleanedSeeds.isNotEmpty()
+            else -> state.baselineInitialized
         }
 
         val nextSnapshot = state.copy(
@@ -132,6 +199,7 @@ class OverseasPromoPreferencesStore(
         offerIds: Collection<String>,
         checkedAtEpochMillis: Long,
     ) = mutex.withLock {
+        ensureLoadedLocked()
         val mergedIds = mergeAndTrimIds(state.seenOfferIds, sanitizeIds(offerIds))
         val nextSnapshot = state.copy(
             baselineInitialized = true,
@@ -152,6 +220,7 @@ class OverseasPromoPreferencesStore(
         newlyNotifiedIds: Collection<String>,
         checkedAtEpochMillis: Long,
     ) = mutex.withLock {
+        ensureLoadedLocked()
         val cleanCurrent = sanitizeIds(currentFeedIds)
         val cleanNotified = sanitizeIds(newlyNotifiedIds)
         val mergedIds = mergeAndTrimIds(state.seenOfferIds, cleanCurrent + cleanNotified)
@@ -166,6 +235,14 @@ class OverseasPromoPreferencesStore(
             },
         )
         persistSnapshotLocked(nextSnapshot)
+    }
+
+    private suspend fun ensureLoadedLocked() {
+        if (loaded) return
+        val diskSnapshot = withContext(ioDispatcher) { readSnapshotSync() }
+        loaded = true
+        state = diskSnapshot
+        _settingsFlow.value = diskSnapshot.settings.normalized()
     }
 
     private fun sanitizeIds(rawIds: Collection<String>): List<String> {

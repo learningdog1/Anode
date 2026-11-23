@@ -425,6 +425,31 @@ object TrustRiskEvaluator {
         return pattern.containsMatchIn(text)
     }
 
+    /**
+     * Stricter username reference check for exposure matching:
+     * - For distinct usernames, uses standard boundary matching ([referencesTargetUsername]).
+     * - For broad/ambiguous short ASCII or generic VPS terms (e.g., `vps`, `dmit`, `hk`, `push`),
+     *   requires explicit `@mention` or immediate accusation/user-label context so unrelated expose
+     *   titles like `"曝光骗子 @badguy 出 DMIT HK VPS 跑路"` never falsely flag a seller named `vps`.
+     */
+    internal fun referencesTargetUsernameForExposure(text: String, targetUsername: String): Boolean {
+        val cleanTarget = targetUsername.trim().removePrefix("@")
+        if (cleanTarget.isEmpty() || text.isBlank()) return false
+        if (!isBroadAmbiguousUsername(cleanTarget)) {
+            return referencesTargetUsername(text, cleanTarget)
+        }
+
+        val escaped = Regex.escape(cleanTarget)
+        val explicitMention = Regex("""(?<![A-Za-z0-9_])@$escaped(?![A-Za-z0-9_])""", RegexOption.IGNORE_CASE)
+        if (explicitMention.containsMatchIn(text)) return true
+
+        val contextualPattern = Regex(
+            pattern = """(?:曝光|挂人|挂|骗子|避雷|避坑|实锤|拉黑|举报|用户|卖家|买家|坛友|老哥|\bid\b|\buid\b|账号|用户名)\s*(?:[:：是为叫]\s*)?@?$escaped(?![A-Za-z0-9_])(?!\s*(?:商家|主机|服务器|小鸡|母鸡|线路|机房|套餐|节点|独服|年付|月付|优惠|促销|面板))""",
+            option = RegexOption.IGNORE_CASE,
+        )
+        return contextualPattern.containsMatchIn(text)
+    }
+
     private fun isAsciiIdentifierChar(ch: Char): Boolean =
         ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '_'
 
@@ -508,9 +533,9 @@ object TrustRiskEvaluator {
                 (topic.authorName.isNotBlank() && topic.authorName.equals(cleanTarget, ignoreCase = true))
             if (isAuthoredByTarget) continue
 
-            val mentionsTargetInTitle = referencesTargetUsername(topic.title, cleanTarget)
+            val mentionsTargetInTitle = referencesTargetUsernameForExposure(topic.title, cleanTarget)
             val mentionsTargetInSnippet = !candidate.snippet.isNullOrBlank() &&
-                referencesTargetUsername(candidate.snippet, cleanTarget)
+                referencesTargetUsernameForExposure(candidate.snippet, cleanTarget)
             if (!mentionsTargetInTitle && !mentionsTargetInSnippet) continue
 
             val matchedTerm = detectMatchedExposureTerm(
@@ -572,6 +597,7 @@ object TrustRiskEvaluator {
         exposureCheckScope: ExposureCheckScope = ExposureCheckScope.BOARD_SNAPSHOT,
         scannedTopicsCount: Int = 0,
         hasMoreTopicPages: Boolean = false,
+        topicsSucceeded: Boolean = true,
     ): TrustRiskAssessment {
         val reasons = mutableListOf<String>()
         var isHighRisk = false
@@ -615,7 +641,7 @@ object TrustRiskEvaluator {
         }
 
         val clampedRank = rankLevel.coerceIn(0, 6)
-        if (clampedRank <= LOW_RANK_THRESHOLD && historicalTradeTopicCount <= 0) {
+        if (profileSucceeded && topicsSucceeded && clampedRank <= LOW_RANK_THRESHOLD && historicalTradeTopicCount <= 0) {
             isCaution = true
             reasons += "会员等级较低（Lv.${clampedRank}）且${scopeLabel}暂无历史交易帖记录"
         }
@@ -628,6 +654,11 @@ object TrustRiskEvaluator {
         if (!profileSucceeded) {
             isCaution = true
             reasons += "卖家档案接口加载失败，部分等级与注册信息暂缺"
+        }
+
+        if (!topicsSucceeded) {
+            isCaution = true
+            reasons += "卖家历史主题列表加载失败，历史交易帖统计暂缺"
         }
 
         val level = when {

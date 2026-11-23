@@ -119,6 +119,20 @@ class OverseasPromoMonitorControllerImpl(
             isStarted = true
             if (settingsObserverJob?.isActive != true) {
                 val observer = scope.launch(start = CoroutineStart.LAZY) {
+                    preferencesStore.ensureLoaded()
+                    _runtimeStatus.update {
+                        it.copy(
+                            baselineInitialized = preferencesStore.currentBaselineInitialized,
+                            lastCheckEpochMillis = maxOf(
+                                it.lastCheckEpochMillis,
+                                preferencesStore.currentLastCheckedEpochMillis,
+                            ),
+                            lastNotifiedEpochMillis = maxOf(
+                                it.lastNotifiedEpochMillis,
+                                preferencesStore.currentLastNotifiedEpochMillis,
+                            ),
+                        )
+                    }
                     preferencesStore.settingsFlow
                         .drop(1)
                         .collect {
@@ -184,9 +198,17 @@ class OverseasPromoMonitorControllerImpl(
         if (enabled) {
             backoffUntilEpochMillis = 0L
             consecutiveFailures = 0
-            val currentLoadedIds = repository.snapshot.value.offers
-                .map { it.id }
-                .filter { it.isNotBlank() }
+            val snap = repository.snapshot.value
+            val now = clockMillis()
+            val isFreshOnlineSnapshot = !snap.syncStatus.loadedFromCache &&
+                snap.offers.isNotEmpty() &&
+                (snap.syncStatus.lastSyncedEpochMillis <= 0L ||
+                    (now - snap.syncStatus.lastSyncedEpochMillis) <= REENABLE_SEED_FRESHNESS_MS)
+            val currentLoadedIds = if (isFreshOnlineSnapshot) {
+                snap.offers.map { it.id }.filter { it.isNotBlank() }
+            } else {
+                emptyList()
+            }
             preferencesStore.setNotificationsEnabled(
                 enabled = true,
                 seedBaselineIds = currentLoadedIds,
@@ -202,7 +224,10 @@ class OverseasPromoMonitorControllerImpl(
             pendingManualTrigger.set(false)
             preferencesStore.setNotificationsEnabled(enabled = false)
             _runtimeStatus.update {
-                it.copy(isPollingNow = false)
+                it.copy(
+                    isPollingNow = false,
+                    baselineInitialized = preferencesStore.currentBaselineInitialized,
+                )
             }
             wakeSignal.trySend(Unit)
         }
@@ -500,6 +525,7 @@ class OverseasPromoMonitorControllerImpl(
         const val DEFAULT_STARTUP_DELAY_MS = 2_500L
         private const val MIN_WAIT_SLICE_MS = 2_000L
         private const val MIN_FOREGROUND_DEBOUNCE_MS = 8_000L
+        private const val REENABLE_SEED_FRESHNESS_MS = 10L * 60_000L
         private const val BASE_ERROR_BACKOFF_MS = 30_000L
         private const val MAX_ERROR_BACKOFF_MS = 300_000L
         private const val MAX_BACKOFF_EXPONENT = 4
@@ -540,6 +566,8 @@ class OverseasPromoWorker internal constructor(
             runner()
         } catch (c: CancellationException) {
             throw c
+        } catch (_: UninitializedPropertyAccessException) {
+            return Result.retry()
         } catch (_: IOException) {
             return Result.retry()
         } catch (_: Throwable) {
@@ -639,6 +667,9 @@ class OverseasPromoWorkScheduler internal constructor(
     private val observerLock = Any()
     private var observerJob: Job? = null
 
+    @Volatile
+    private var observedLoadGate: OverseasPromoSettingsLoadGate? = null
+
     private data class ScheduleSignature(
         val shouldSchedule: Boolean,
         val intervalMinutes: Long,
@@ -652,7 +683,10 @@ class OverseasPromoWorkScheduler internal constructor(
     ) {
         synchronized(observerLock) {
             observerJob?.cancel()
+            val loadGate = OverseasPromoSettingsLoadRegistry.find(settingsFlow)
+            observedLoadGate = loadGate
             observerJob = scope.launch {
+                loadGate?.awaitLoaded?.invoke()
                 settingsFlow
                     .map { settings -> settings to toSignature(settings) }
                     .distinctUntilChanged { old, new -> old.second == new.second }
@@ -667,6 +701,7 @@ class OverseasPromoWorkScheduler internal constructor(
         synchronized(observerLock) {
             observerJob?.cancel()
             observerJob = null
+            observedLoadGate = null
         }
     }
 
@@ -688,6 +723,12 @@ class OverseasPromoWorkScheduler internal constructor(
      * if notifications were disabled.
      */
     fun onAppEnteredBackground(settings: OverseasPromoMonitorSettings) {
+        val loadGate = observedLoadGate
+        if (loadGate != null && !loadGate.isLoaded()) {
+            // Avoid cancelling or overwriting WorkManager state with unloaded default settings;
+            // observe() will immediately sync once disk loading finishes.
+            return
+        }
         if (shouldSchedule(settings)) {
             val request = buildPeriodicWorkRequest(settings)
             workManagerGateway.enqueueUniquePeriodicWork(

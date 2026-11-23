@@ -185,20 +185,20 @@ object VpsGlossaryTranslator {
         rule("""\bfrance\b""", "法国"),
         rule("""\beurope\b""", "欧洲"),
         rule("""\bsoftbank\b""", "软银线路"),
-        rule("""\bUSA\b""", "美国"),
-        rule("""\bUS\b""", "美国"),
-        rule("""\bUK\b""", "英国"),
-        rule("""\bEU\b""", "欧洲"),
-        rule("""\bNL\b""", "荷兰"),
-        rule("""\bDE\b""", "德国"),
-        rule("""\bJP\b""", "日本"),
-        rule("""\bSG\b""", "新加坡"),
-        rule("""\bHK\b""", "香港"),
-        rule("""\bLAX\b""", "洛杉矶"),
-        rule("""\bSJC\b""", "圣何塞"),
-        rule("""\bFRA\b""", "法兰克福"),
-        rule("""\bAMS\b""", "阿姆斯特丹"),
-        rule("""\bNYC\b""", "纽约"),
+        exactCaseRule("""\bUSA\b""", "美国"),
+        exactCaseRule("""\bUS\b""", "美国"),
+        exactCaseRule("""\bUK\b""", "英国"),
+        exactCaseRule("""\bEU\b""", "欧洲"),
+        exactCaseRule("""\bNL\b""", "荷兰"),
+        exactCaseRule("""\bDE\b""", "德国"),
+        exactCaseRule("""\bJP\b""", "日本"),
+        exactCaseRule("""\bSG\b""", "新加坡"),
+        exactCaseRule("""\bHK\b""", "香港"),
+        exactCaseRule("""\bLAX\b""", "洛杉矶"),
+        exactCaseRule("""\bSJC\b""", "圣何塞"),
+        exactCaseRule("""\bFRA\b""", "法兰克福"),
+        exactCaseRule("""\bAMS\b""", "阿姆斯特丹"),
+        exactCaseRule("""\bNYC\b""", "纽约"),
 
         // Remaining order action prefix (e.g. "Order LA" / "Order洛杉矶" -> "立即下单 洛杉矶")
         rule("""\border\s+(?=[A-Za-z\u4E00-\u9FFF])""", "立即下单 "),
@@ -227,6 +227,9 @@ object VpsGlossaryTranslator {
 
     private fun rule(pattern: String, replacement: String): TermRule =
         TermRule(Regex(pattern, RegexOption.IGNORE_CASE), replacement)
+
+    private fun exactCaseRule(pattern: String, replacement: String): TermRule =
+        TermRule(Regex(pattern), replacement)
 
     fun containsCjk(text: String): Boolean {
         for (i in text.indices) {

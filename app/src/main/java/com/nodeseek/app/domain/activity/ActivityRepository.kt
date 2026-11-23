@@ -194,6 +194,25 @@ data class ForumWatchActivityItem(
         return null
     }
 
+    /**
+     * Canonical source deduplication key shared by repository merging and notification dedup so
+     * that upgrading an auto-collected item (`nodeseek-123`) to a manually curated item (`manual-1`)
+     * pointing to the same NodeSeek topic or URL never triggers duplicate notifications.
+     */
+    fun canonicalDedupKey(): String {
+        resolvedNodeSeekTopicId()?.let { resolvedTopicId ->
+            return "ns_topic:$resolvedTopicId"
+        }
+        val trimmedUrl = sourceUrl.trim()
+        if (trimmedUrl.isNotEmpty()) {
+            val normalizedUrl = trimmedUrl.substringBefore('#').trimEnd('/').lowercase(Locale.ROOT)
+            if (normalizedUrl.isNotEmpty()) {
+                return "url:$normalizedUrl"
+            }
+        }
+        return "id:${id.trim()}"
+    }
+
     companion object {
         private val NODESEEK_POST_ID_REGEX = Regex(
             pattern = """nodeseek\.com/post-(\d+)""",
@@ -222,10 +241,12 @@ data class ActivityFeedSnapshot(
     val updatedAtEpochMillis: Long = 0L,
     val counts: ActivityCounts = ActivityCounts(),
     val isRefreshing: Boolean = false,
+    val isLoadingMore: Boolean = false,
     val errorMessage: String? = null,
     val loadedFromCache: Boolean = false,
     val lastSyncedEpochMillis: Long = 0L,
     val totalCount: Int = 0,
+    val currentPage: Int = 1,
     val hasMore: Boolean = false,
 ) {
     fun liveCounts(nowEpochMillis: Long = System.currentTimeMillis()): ActivityCounts {
@@ -263,6 +284,8 @@ interface ActivityRepository {
     suspend fun loadCachedActivities(): ActivityFeedSnapshot
 
     suspend fun refreshActivities(force: Boolean = false): Result<ActivityFeedSnapshot>
+
+    suspend fun loadNextPage(): Result<ActivityFeedSnapshot> = Result.success(snapshot.value)
 
     suspend fun getActivityDetail(
         id: String,

@@ -5,12 +5,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
@@ -453,9 +455,11 @@ internal class KeyedSingleFlight<K, V>(
                     try {
                         block()
                     } finally {
-                        mutex.withLock {
-                            if (flights[key] === created) {
-                                flights.remove(key)
+                        withContext(NonCancellable) {
+                            mutex.withLock {
+                                if (flights[key] === created) {
+                                    flights.remove(key)
+                                }
                             }
                         }
                     }
@@ -470,12 +474,14 @@ internal class KeyedSingleFlight<K, V>(
             flight.deferred.await()
         } catch (c: CancellationException) {
             var shouldCancelShared = false
-            mutex.withLock {
-                if (flights[key] === flight) {
-                    flight.waiters--
-                    if (flight.waiters <= 0) {
-                        flights.remove(key)
-                        shouldCancelShared = true
+            withContext(NonCancellable) {
+                mutex.withLock {
+                    if (flights[key] === flight) {
+                        flight.waiters--
+                        if (flight.waiters <= 0) {
+                            flights.remove(key)
+                            shouldCancelShared = true
+                        }
                     }
                 }
             }

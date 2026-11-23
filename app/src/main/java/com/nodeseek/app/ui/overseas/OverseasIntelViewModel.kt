@@ -9,6 +9,7 @@ import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.domain.overseas.OverseasDealOffer
 import com.nodeseek.app.domain.overseas.OverseasForumPostFormatter
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
+import com.nodeseek.app.domain.overseas.OverseasOfferFilterConfig
 import com.nodeseek.app.domain.overseas.OverseasSyncStatus
 import com.nodeseek.app.domain.overseas.SuggestedForumPost
 import kotlinx.coroutines.CancellationException
@@ -30,11 +31,14 @@ data class OverseasIntelUiState(
     val searchQuery: String = "",
     val syncStatus: OverseasSyncStatus = OverseasSyncStatus(),
     val repostingOfferIds: Set<String> = emptySet(),
+    val filterConfig: OverseasOfferFilterConfig = OverseasOfferFilterConfig(),
+    val filteredOutCount: Int = 0,
 )
 
 private data class OverseasUiControls(
     val searchQuery: String = "",
     val repostingOfferIds: Set<String> = emptySet(),
+    val clockEpochMillis: Long = System.currentTimeMillis(),
 )
 
 private data class CardParseCacheKey(
@@ -44,15 +48,17 @@ private data class CardParseCacheKey(
     val summary: String,
     val merchant: String,
     val publishedAtEpochMillis: Long,
+    val timeBucketMinute: Long,
 )
 
 class OverseasIntelViewModel(
     private val repository: OverseasIntelRepository,
     autoLoadOnInit: Boolean = true,
     private val translator: OverseasTranslator? = null,
+    private val clockMillis: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
 
-    private val controls = MutableStateFlow(OverseasUiControls())
+    private val controls = MutableStateFlow(OverseasUiControls(clockEpochMillis = clockMillis()))
     private val parsedCardCache = HashMap<CardParseCacheKey, OverseasOfferCardUiModel>()
 
     private val _snackbarMessages = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -69,7 +75,8 @@ class OverseasIntelViewModel(
             offers = snapshot.offers,
             query = ctrl.searchQuery,
         )
-        val cards = buildCardModels(filtered)
+        val nowMillis = maxOf(ctrl.clockEpochMillis, clockMillis())
+        val cards = buildCardModels(filtered, nowMillis)
         OverseasIntelUiState(
             allOffers = snapshot.offers,
             filteredOffers = filtered,
@@ -77,6 +84,8 @@ class OverseasIntelViewModel(
             searchQuery = ctrl.searchQuery,
             syncStatus = snapshot.syncStatus,
             repostingOfferIds = ctrl.repostingOfferIds,
+            filterConfig = snapshot.filterConfig,
+            filteredOutCount = snapshot.filteredOutCount,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -92,7 +101,7 @@ class OverseasIntelViewModel(
                     repository.refresh()
                 } else {
                     val lastSynced = repository.snapshot.value.syncStatus.lastSyncedEpochMillis
-                    if (System.currentTimeMillis() - lastSynced > STALE_REFRESH_THRESHOLD_MS) {
+                    if (clockMillis() - lastSynced > STALE_REFRESH_THRESHOLD_MS) {
                         repository.refresh()
                     }
                 }
@@ -102,22 +111,26 @@ class OverseasIntelViewModel(
 
     private fun buildInitialUiState(): OverseasIntelUiState {
         val snap = repository.snapshot.value
-        val cards = buildCardModels(snap.offers)
+        val cards = buildCardModels(snap.offers, clockMillis())
         return OverseasIntelUiState(
             allOffers = snap.offers,
             filteredOffers = snap.offers,
             offerCards = cards,
             syncStatus = snap.syncStatus,
+            filterConfig = snap.filterConfig,
+            filteredOutCount = snap.filteredOutCount,
         )
     }
 
     private fun buildCardModels(
         offers: List<OverseasDealOffer>,
+        nowEpochMillis: Long,
     ): List<OverseasOfferCardUiModel> {
         if (offers.isEmpty()) return emptyList()
         if (parsedCardCache.size > MAX_PARSE_CACHE_ENTRIES) {
             parsedCardCache.clear()
         }
+        val bucketMinute = nowEpochMillis / 60_000L
         return offers.map { offer ->
             val cacheKey = CardParseCacheKey(
                 id = offer.id,
@@ -126,10 +139,31 @@ class OverseasIntelViewModel(
                 summary = offer.summary,
                 merchant = offer.merchant,
                 publishedAtEpochMillis = offer.publishedAtEpochMillis,
+                timeBucketMinute = bucketMinute,
             )
             parsedCardCache.getOrPut(cacheKey) {
-                OverseasOfferVisualParser.parseCardModel(offer = offer)
+                OverseasOfferVisualParser.parseCardModel(
+                    offer = offer,
+                    nowEpochMillis = nowEpochMillis,
+                )
             }
+        }
+    }
+
+    fun refreshRelativeTime() {
+        val now = clockMillis()
+        controls.update { current ->
+            if (current.clockEpochMillis / 60_000L == now / 60_000L) current
+            else current.copy(clockEpochMillis = now)
+        }
+    }
+
+    fun updateFilterConfig(config: OverseasOfferFilterConfig) {
+        viewModelScope.launch {
+            repository.updateFilterConfig(config)
+            emitSnackbar(
+                if (config.enabled) "已更新海外情报质量过滤规则" else "已关闭质量过滤，显示全部情报",
+            )
         }
     }
 
