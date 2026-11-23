@@ -48,6 +48,7 @@ import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -99,6 +100,16 @@ class ProbePanelClient(
             networkInterceptors().clear()
         }
         .build()
+
+    private enum class KomariTelemetryMode {
+        RPC_LATEST_STATUS,
+        HTTP_RECENT,
+        HTTP_CLIENT,
+        WS_CLIENTS,
+        PER_NODE_RECENT,
+    }
+
+    private val komariTelemetryModeByOrigin = ConcurrentHashMap<String, KomariTelemetryMode>()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -501,7 +512,7 @@ class ProbePanelClient(
             val memTotal = host?.getFirstLong("MemTotal", "mem_total") ?: 0L
             val diskTotal = host?.getFirstLong("DiskTotal", "disk_total") ?: 0L
 
-            val cpuPercent = (status?.getFirstDouble("CPU", "cpu") ?: 0.0).coerceIn(0.0, 100.0)
+            val cpuPercent = sanitizeCpuPercent(status?.getFirstDouble("CPU", "cpu"))
             val memUsed = status?.getFirstLong("MemUsed", "mem_used") ?: 0L
             val diskUsed = status?.getFirstLong("DiskUsed", "disk_used") ?: 0L
             val netInSpeed = status?.getFirstLong("NetInSpeed", "net_in_speed") ?: 0L
@@ -509,7 +520,7 @@ class ProbePanelClient(
             val netInTransfer = status?.getFirstLong("NetInTransfer", "net_in_transfer") ?: 0L
             val netOutTransfer = status?.getFirstLong("NetOutTransfer", "net_out_transfer") ?: 0L
             val uptime = status?.getFirstLong("Uptime", "uptime") ?: 0L
-            val load1 = status?.getFirstDouble("Load1", "load_1", "load1")
+            val load1 = sanitizeFiniteDouble(status?.getFirstDouble("Load1", "load_1", "load1"))
 
             val lastActiveMillis = parseEpochMillis(obj["last_active"]) ?: 0L
             val explicitOnline = obj["online"]?.booleanOrNull() ?: obj["is_online"]?.booleanOrNull()
@@ -588,7 +599,8 @@ class ProbePanelClient(
         if ((first.code == 401 || first.code == 403) &&
             trimmedToken.isNotEmpty() &&
             !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
-            !trimmedToken.contains('=')
+            !trimmedToken.startsWith("Basic ", ignoreCase = true) &&
+            !looksLikeCookieHeader(trimmedToken)
         ) {
             val cookieHeaders = buildNezhaV1Headers(trimmedToken, asCookie = true)
             val second = executeGet(initialUrl = url, headers = cookieHeaders, expectedOrigin = expectedOrigin)
@@ -644,7 +656,7 @@ class ProbePanelClient(
             val memTotal = host?.getFirstLong("mem_total", "MemTotal") ?: 0L
             val diskTotal = host?.getFirstLong("disk_total", "DiskTotal") ?: 0L
 
-            val cpuPercent = (state?.getFirstDouble("cpu", "CPU") ?: 0.0).coerceIn(0.0, 100.0)
+            val cpuPercent = sanitizeCpuPercent(state?.getFirstDouble("cpu", "CPU"))
             val memUsed = state?.getFirstLong("mem_used", "MemUsed") ?: 0L
             val diskUsed = state?.getFirstLong("disk_used", "DiskUsed") ?: 0L
             val netInSpeed = state?.getFirstLong("net_in_speed", "NetInSpeed") ?: 0L
@@ -652,7 +664,7 @@ class ProbePanelClient(
             val netInTransfer = state?.getFirstLong("net_in_transfer", "NetInTransfer") ?: 0L
             val netOutTransfer = state?.getFirstLong("net_out_transfer", "NetOutTransfer") ?: 0L
             val uptime = state?.getFirstLong("uptime", "Uptime") ?: 0L
-            val load1 = state?.getFirstDouble("load_1", "load1", "Load1")
+            val load1 = sanitizeFiniteDouble(state?.getFirstDouble("load_1", "load1", "Load1"))
 
             val lastActiveMillis = parseEpochMillis(obj["last_active"]) ?: 0L
             val explicitOnline = obj["online"]?.booleanOrNull() ?: obj["is_online"]?.booleanOrNull()
@@ -738,6 +750,12 @@ class ProbePanelClient(
             if (rpcResp.isSuccessful) {
                 val rpcRoot = parseJsonOrNull(rpcResp.body)
                     ?: throw IOException("Komari /api/rpc2 返回数据非有效 JSON")
+                if (rpcRoot is JsonObject && rpcRoot["error"] != null && rpcRoot["error"] !is JsonNull) {
+                    val errMsg = (rpcRoot["error"] as? JsonObject)?.getFirstString("message")
+                        ?: rpcRoot["error"]?.stringOrNull()
+                        ?: "RPC 错误"
+                    throw IOException("Komari /api/rpc2 返回错误：$errMsg")
+                }
                 val baseNodes = parseKomariNodesList(panelId, rpcRoot)
                 return enrichKomariWithLiveTelemetry(originUrl, rpcHeaders, baseNodes)
             }
@@ -758,7 +776,7 @@ class ProbePanelClient(
             trimmedToken.isNotEmpty() &&
             !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
             !trimmedToken.startsWith("Basic ", ignoreCase = true) &&
-            !trimmedToken.contains('=')
+            !looksLikeCookieHeader(trimmedToken)
         ) {
             val cookieHeaders = buildKomariHeaders(trimmedToken, asCookie = true)
             val second = executeGet(initialUrl = url, headers = cookieHeaders, expectedOrigin = expectedOrigin)
@@ -785,7 +803,7 @@ class ProbePanelClient(
             trimmedToken.isNotEmpty() &&
             !trimmedToken.startsWith("Bearer ", ignoreCase = true) &&
             !trimmedToken.startsWith("Basic ", ignoreCase = true) &&
-            !trimmedToken.contains('=')
+            !looksLikeCookieHeader(trimmedToken)
         ) {
             val cookieHeaders = buildKomariHeaders(trimmedToken, asCookie = true)
             val second = executePostJson(
@@ -857,12 +875,17 @@ class ProbePanelClient(
         // 2. Legacy/custom bulk HTTP endpoints (`/api/recent`, `/api/client`)
         // 3. Komari WebSocket `/api/clients` (`"get"` frame -> online list + latest reports)
         // 4. Per-node whitelisted ring-buffer endpoint (`GET /api/recent/{uuid}`)
-        val batch = fetchKomariRpcLatestStatus(originUrl, headers)
-            ?: fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "recent"), headers, originUrl)
-            ?: fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "client"), headers, originUrl)
-            ?: fetchKomariTelemetryWebSocketBatch(originUrl, headers)
-            ?: fetchKomariPerNodeRecentBatch(originUrl, headers, baseNodes)
-            ?: return baseNodes
+        val originCacheKey = "${formatOrigin(originUrl)}${originUrl.encodedPath}"
+        val cachedMode = komariTelemetryModeByOrigin[originCacheKey]
+        val batch = if (cachedMode != null) {
+            fetchKomariBatchByMode(cachedMode, originUrl, headers, baseNodes)
+                ?: run {
+                    komariTelemetryModeByOrigin.remove(originCacheKey, cachedMode)
+                    discoverKomariTelemetryBatch(originCacheKey, originUrl, headers, baseNodes, skipMode = cachedMode)
+                }
+        } else {
+            discoverKomariTelemetryBatch(originCacheKey, originUrl, headers, baseNodes, skipMode = null)
+        } ?: return baseNodes
 
         val now = nowMillisProvider()
         return baseNodes.map { node ->
@@ -894,7 +917,7 @@ class ProbePanelClient(
                 nowEpochMillis = now,
             )
             node.copy(
-                cpuPercent = if (isOnline) live.cpuPercent.coerceIn(0.0, 100.0) else 0.0,
+                cpuPercent = if (isOnline) sanitizeCpuPercent(live.cpuPercent) else 0.0,
                 memUsedBytes = if (isOnline || live.memUsedBytes > 0L) live.memUsedBytes.coerceAtLeast(0L) else 0L,
                 memTotalBytes = mergedMemTotal.coerceAtLeast(0L),
                 diskUsedBytes = live.diskUsedBytes.coerceAtLeast(0L),
@@ -904,11 +927,44 @@ class ProbePanelClient(
                 monthlyTransferInBytes = live.monthlyTransferInBytes.coerceAtLeast(0L),
                 monthlyTransferOutBytes = live.monthlyTransferOutBytes.coerceAtLeast(0L),
                 uptimeSeconds = if (isOnline) live.uptimeSeconds.coerceAtLeast(0L) else 0L,
-                load1 = if (isOnline) (live.load1 ?: node.load1) else null,
+                load1 = if (isOnline) sanitizeFiniteDouble(live.load1 ?: node.load1) else null,
                 isOnline = isOnline,
                 lastActiveEpochMillis = mergedLastActive,
             )
         }
+    }
+
+    private suspend fun discoverKomariTelemetryBatch(
+        originCacheKey: String,
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+        baseNodes: List<ProbeServerSnapshot>,
+        skipMode: KomariTelemetryMode?,
+    ): KomariTelemetryBatch? {
+        for (mode in KomariTelemetryMode.entries) {
+            if (mode == skipMode) continue
+            val batch = fetchKomariBatchByMode(mode, originUrl, headers, baseNodes)
+            if (batch != null) {
+                komariTelemetryModeByOrigin[originCacheKey] = mode
+                return batch
+            }
+        }
+        return null
+    }
+
+    private suspend fun fetchKomariBatchByMode(
+        mode: KomariTelemetryMode,
+        originUrl: HttpUrl,
+        headers: Map<String, String>,
+        baseNodes: List<ProbeServerSnapshot>,
+    ): KomariTelemetryBatch? = when (mode) {
+        KomariTelemetryMode.RPC_LATEST_STATUS -> fetchKomariRpcLatestStatus(originUrl, headers)
+        KomariTelemetryMode.HTTP_RECENT ->
+            fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "recent"), headers, originUrl)
+        KomariTelemetryMode.HTTP_CLIENT ->
+            fetchKomariTelemetryHttpBatch(buildEndpointUrl(originUrl, "api", "client"), headers, originUrl)
+        KomariTelemetryMode.WS_CLIENTS -> fetchKomariTelemetryWebSocketBatch(originUrl, headers)
+        KomariTelemetryMode.PER_NODE_RECENT -> fetchKomariPerNodeRecentBatch(originUrl, headers, baseNodes)
     }
 
     private data class KomariLiveTelemetry(
@@ -1276,12 +1332,13 @@ class ProbePanelClient(
             ?: rawObj
 
         val cpuElem = obj.getIgnoreCase("cpu")
-        val cpuPercent = when (cpuElem) {
-            is JsonObject -> cpuElem.getFirstDoubleIgnoreCase("usage", "percent", "value") ?: 0.0
-            else -> cpuElem?.doubleOrNull()
-                ?: obj.getFirstDoubleIgnoreCase("cpu_usage", "cpu_percent")
-                ?: 0.0
-        }
+        val cpuPercent = sanitizeCpuPercent(
+            when (cpuElem) {
+                is JsonObject -> cpuElem.getFirstDoubleIgnoreCase("usage", "percent", "value")
+                else -> cpuElem?.doubleOrNull()
+                    ?: obj.getFirstDoubleIgnoreCase("cpu_usage", "cpu_percent")
+            },
+        )
 
         val ramElem = obj.getIgnoreCase("ram") ?: obj.getIgnoreCase("mem")
         val ramObj = ramElem as? JsonObject
@@ -1323,9 +1380,11 @@ class ProbePanelClient(
 
         val loadElem = obj.getIgnoreCase("load")
         val loadObj = loadElem as? JsonObject
-        val load1 = loadObj?.getFirstDoubleIgnoreCase("load1", "load_1", "1")
-            ?: (loadElem as? JsonPrimitive)?.doubleOrNull()
-            ?: obj.getFirstDoubleIgnoreCase("load1", "load_1")
+        val load1 = sanitizeFiniteDouble(
+            loadObj?.getFirstDoubleIgnoreCase("load1", "load_1", "1")
+                ?: (loadElem as? JsonPrimitive)?.doubleOrNull()
+                ?: obj.getFirstDoubleIgnoreCase("load1", "load_1"),
+        )
 
         val uptime = obj.getFirstLongIgnoreCase("uptime")
             ?: rawObj.getFirstLongIgnoreCase("uptime")
@@ -1377,9 +1436,9 @@ class ProbePanelClient(
         if (token.isNotEmpty()) {
             when {
                 asCookie -> put("Cookie", "nz-jwt=$token")
-                token.contains('=') -> put("Cookie", token)
                 token.startsWith("Bearer ", ignoreCase = true) ||
                     token.startsWith("Basic ", ignoreCase = true) -> put("Authorization", token)
+                looksLikeCookieHeader(token) -> put("Cookie", token)
                 else -> put("Authorization", "Bearer $token")
             }
         }
@@ -1391,15 +1450,18 @@ class ProbePanelClient(
         if (token.isNotEmpty()) {
             when {
                 asCookie -> put("Cookie", "session_token=$token; temp_key=$token")
-                token.contains('=') -> put("Cookie", token)
-                else -> {
-                    val hasBearerPrefix = token.startsWith("Bearer ", ignoreCase = true)
-                    val bearer = if (hasBearerPrefix) token else "Bearer $token"
-                    val rawKey = if (hasBearerPrefix) token.substring("Bearer ".length).trim() else token
-                    put("Authorization", bearer)
+                token.startsWith("Basic ", ignoreCase = true) -> put("Authorization", token)
+                token.startsWith("Bearer ", ignoreCase = true) -> {
+                    put("Authorization", token)
+                    val rawKey = token.substring("Bearer ".length).trim()
                     if (rawKey.isNotEmpty()) {
                         put("X-API-Key", rawKey)
                     }
+                }
+                looksLikeCookieHeader(token) -> put("Cookie", token)
+                else -> {
+                    put("Authorization", "Bearer $token")
+                    put("X-API-Key", token)
                 }
             }
         }
@@ -1696,7 +1758,14 @@ class ProbePanelClient(
                         val bodyStr = if (resp.code in REDIRECT_STATUS_CODES) {
                             ""
                         } else {
-                            runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                            try {
+                                readBoundedBodyString(resp)
+                            } catch (e: IOException) {
+                                if (continuation.isActive) {
+                                    continuation.resumeWithException(e)
+                                }
+                                return
+                            }
                         }
                         if (continuation.isActive) {
                             continuation.resume(
@@ -1907,13 +1976,74 @@ class ProbePanelClient(
             return cleaned
         }
 
-        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
-            .callTimeout(18, TimeUnit.SECONDS)
-            .build()
+        private const val MAX_RESPONSE_BODY_BYTES = 8L * 1024L * 1024L
+        private const val COOKIE_NAME_EXTRA_CHARS = "!#$%&'*+-.^_`|~"
+
+        private val sharedDefaultHttpClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .cookieJar(CookieJar.NO_COOKIES)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(12, TimeUnit.SECONDS)
+                .callTimeout(18, TimeUnit.SECONDS)
+                .build()
+        }
+
+        private fun sanitizeCpuPercent(raw: Double?): Double =
+            raw?.takeIf { it.isFinite() }?.coerceIn(0.0, 100.0) ?: 0.0
+
+        private fun sanitizeFiniteDouble(raw: Double?): Double? =
+            raw?.takeIf { it.isFinite() }
+
+        /**
+         * Returns `true` only when [token] represents an explicit `name=value` Cookie header rather
+         * than `Bearer ...` / `Basic ...` headers or Base64-padded tokens ending in `=` / `==`.
+         */
+        internal fun looksLikeCookieHeader(token: String): Boolean {
+            val trimmed = token.trim()
+            if (trimmed.isEmpty()) return false
+            if (trimmed.startsWith("Bearer ", ignoreCase = true) ||
+                trimmed.startsWith("Basic ", ignoreCase = true)
+            ) {
+                return false
+            }
+            val firstPair = trimmed.substringBefore(';').trim()
+            val eqIdx = firstPair.indexOf('=')
+            if (eqIdx <= 0) return false
+            val name = firstPair.substring(0, eqIdx).trim()
+            val value = firstPair.substring(eqIdx + 1).trim()
+            if (name.isEmpty() || value.isEmpty()) return false
+            if (value.all { it == '=' }) return false
+            return name.all { ch -> ch.isLetterOrDigit() || ch in COOKIE_NAME_EXTRA_CHARS }
+        }
+
+        @Throws(IOException::class)
+        internal fun readBoundedBodyString(
+            response: Response,
+            maxBytes: Long = MAX_RESPONSE_BODY_BYTES,
+        ): String {
+            val body = response.body ?: return ""
+            val contentLength = body.contentLength()
+            if (contentLength > maxBytes) {
+                throw IOException("探针接口响应体积过大 (${contentLength / (1024L * 1024L)} MB)，已拒绝读取")
+            }
+            val source = body.source()
+            val buffer = okio.Buffer()
+            var totalRead = 0L
+            while (true) {
+                val chunk = minOf(8192L, maxBytes - totalRead + 1L)
+                val read = source.read(buffer, chunk)
+                if (read == -1L) break
+                totalRead += read
+                if (totalRead > maxBytes) {
+                    throw IOException("探针接口响应体积超过上限 (${maxBytes / (1024L * 1024L)} MB)，已中止读取")
+                }
+            }
+            val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+            return buffer.readString(charset)
+        }
+
+        fun defaultHttpClient(): OkHttpClient = sharedDefaultHttpClient
     }
 }

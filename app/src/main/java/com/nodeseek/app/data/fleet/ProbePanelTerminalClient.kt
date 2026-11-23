@@ -86,7 +86,7 @@ internal class PanelTerminalCommandFraming(
     fun wrapCommand(command: String): String {
         val cleanCmd = command.replace("\r\n", "\n").replace('\r', '\n').trimEnd('\n')
         val body = if (cleanCmd.isBlank()) ":" else cleanCmd
-        return "printf '\\n%s%s\\n' '$START_PREFIX' '$nonce'; {\n$body\n}; __anode_rc=\$?; " +
+        return "printf '\\n%s%s\\n' '$START_PREFIX' '$nonce'; (\n$body\n); __anode_rc=\$?; " +
             "printf '\\n%s%s:%d__\\n' '$EXIT_PREFIX' '$nonce' \"\$__anode_rc\"; exit \"\$__anode_rc\"\n"
     }
 
@@ -274,13 +274,17 @@ class ProbePanelTerminalTransport(
         command: String,
     ): Flow<SshStreamEvent> = callbackFlow {
         val closedFlag = AtomicBoolean(false)
+        val terminateSentFlag = AtomicBoolean(false)
         val activeSocketRef = AtomicReference<WebSocket?>(null)
         val panelTypeRef = AtomicReference<ProbePanelType?>(null)
 
         fun closeSocketQuietly(sendKomariTerminate: Boolean = false) {
-            if (!closedFlag.compareAndSet(false, true)) return
+            closedFlag.set(true)
             val ws = activeSocketRef.getAndSet(null) ?: return
-            if (sendKomariTerminate && panelTypeRef.get() == ProbePanelType.KOMARI) {
+            if (sendKomariTerminate &&
+                panelTypeRef.get() == ProbePanelType.KOMARI &&
+                terminateSentFlag.compareAndSet(false, true)
+            ) {
                 runCatching { ws.send(KOMARI_TERMINATE_FRAME) }
             }
             runCatching { ws.close(1000, "closed") }
@@ -421,7 +425,18 @@ class ProbePanelTerminalTransport(
             wsReqBuilder.build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    if (closedFlag.get()) {
+                        runCatching { webSocket.cancel() }
+                        wsOpened.completeExceptionally(CancellationException("哪吒 v1 探针终端会话已关闭"))
+                        return
+                    }
                     activeSocketRef.set(webSocket)
+                    if (closedFlag.get()) {
+                        activeSocketRef.compareAndSet(webSocket, null)
+                        runCatching { webSocket.cancel() }
+                        wsOpened.completeExceptionally(CancellationException("哪吒 v1 探针终端会话已关闭"))
+                        return
+                    }
                     sendNezhaResizeFrame(webSocket, initialPty)
                     wsOpened.complete(webSocket)
                 }
@@ -497,12 +512,25 @@ class ProbePanelTerminalTransport(
                         if (remaining.isNotEmpty()) {
                             emitFromWebSocketCallback(SshStreamEvent.OutputChunk(remaining), closedFlag)
                         }
+                        if (closedFlag.get()) {
+                            sessionFinished.complete(0)
+                        } else {
+                            sessionFinished.completeExceptionally(
+                                IOException("哪吒 v1 探针终端连接意外断开，未收到命令退出状态"),
+                            )
+                        }
+                        return
                     }
                     sessionFinished.complete(0)
                 }
             },
         )
         activeSocketRef.set(socket)
+        if (closedFlag.get()) {
+            activeSocketRef.compareAndSet(socket, null)
+            runCatching { socket.cancel() }
+            return
+        }
 
         val openedSocket = withTimeoutOrNull(request.connectTimeoutMillis.toLong().coerceAtLeast(3_000L)) {
             wsOpened.await()
@@ -567,7 +595,7 @@ class ProbePanelTerminalTransport(
         if ((outcome.code == 401 || outcome.code == 403) &&
             !apiToken.startsWith("Bearer ", ignoreCase = true) &&
             !apiToken.startsWith("Basic ", ignoreCase = true) &&
-            !apiToken.contains('=')
+            !ProbePanelClient.looksLikeCookieHeader(apiToken)
         ) {
             val cookieHeaders = buildNezhaV1TerminalHeaders(apiToken, asCookie = true)
             val retry = executePostJsonSameOrigin(url, bodyJson, cookieHeaders, originUrl)
@@ -619,7 +647,7 @@ class ProbePanelTerminalTransport(
         val primaryHeaders = buildKomariTerminalHeaders(apiToken, asCookie = false)
         val allowCookieRetry = !apiToken.startsWith("Bearer ", ignoreCase = true) &&
             !apiToken.startsWith("Basic ", ignoreCase = true) &&
-            !apiToken.contains('=')
+            !ProbePanelClient.looksLikeCookieHeader(apiToken)
 
         val firstAttempt = connectKomariWebSocketAttempt(
             originUrl = originUrl,
@@ -691,7 +719,18 @@ class ProbePanelTerminalTransport(
             wsReqBuilder.build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    if (closedFlag.get()) {
+                        runCatching { webSocket.cancel() }
+                        wsOpened.completeExceptionally(CancellationException("Komari 探针终端会话已关闭"))
+                        return
+                    }
                     activeSocketRef.set(webSocket)
+                    if (closedFlag.get()) {
+                        activeSocketRef.compareAndSet(webSocket, null)
+                        runCatching { webSocket.cancel() }
+                        wsOpened.completeExceptionally(CancellationException("Komari 探针终端会话已关闭"))
+                        return
+                    }
                     wsOpened.complete(webSocket)
                 }
 
@@ -800,6 +839,11 @@ class ProbePanelTerminalTransport(
                 private fun finishOnClose() {
                     val tailUtf8 = synchronized(decodeLock) { utf8Decoder.decode(ByteArray(0), endOfInput = true) }
                     if (tailUtf8.isNotEmpty()) handlePtyOutput(tailUtf8)
+                    if (!agentReady.isCompleted) {
+                        agentReady.completeExceptionally(
+                            IOException("Komari 探针终端在被控端就绪前已关闭（节点可能离线或未开启终端权限）"),
+                        )
+                    }
                     if (framing != null && !sessionFinished.isCompleted) {
                         val remaining = synchronized(decodeLock) {
                             framing.flushFallbackWithoutStartMarker() + framing.flushRemainingOnClose()
@@ -807,17 +851,25 @@ class ProbePanelTerminalTransport(
                         if (remaining.isNotEmpty()) {
                             emitFromWebSocketCallback(SshStreamEvent.OutputChunk(remaining), closedFlag)
                         }
-                    }
-                    if (!agentReady.isCompleted) {
-                        agentReady.completeExceptionally(
-                            IOException("Komari 探针终端在被控端就绪前已关闭（节点可能离线或未开启终端权限）"),
-                        )
+                        if (closedFlag.get()) {
+                            sessionFinished.complete(0)
+                        } else {
+                            sessionFinished.completeExceptionally(
+                                IOException("Komari 探针终端连接意外断开，未收到命令退出状态"),
+                            )
+                        }
+                        return
                     }
                     sessionFinished.complete(0)
                 }
             },
         )
         activeSocketRef.set(socket)
+        if (closedFlag.get()) {
+            activeSocketRef.compareAndSet(socket, null)
+            runCatching { socket.cancel() }
+            return KomariAttemptOutcome()
+        }
 
         val openedSocket = try {
             withTimeoutOrNull(request.connectTimeoutMillis.toLong().coerceAtLeast(3_000L)) {
@@ -969,14 +1021,14 @@ class ProbePanelTerminalTransport(
         put("Accept", "application/json")
         when {
             asCookie -> put("Cookie", "nz-jwt=$apiToken")
-            apiToken.contains('=') -> {
+            apiToken.startsWith("Bearer ", ignoreCase = true) ||
+                apiToken.startsWith("Basic ", ignoreCase = true) -> put("Authorization", apiToken)
+            ProbePanelClient.looksLikeCookieHeader(apiToken) -> {
                 put("Cookie", apiToken)
                 extractCookieValue(apiToken, "nz-csrf")?.let { csrf ->
                     put("X-CSRF-Token", csrf)
                 }
             }
-            apiToken.startsWith("Bearer ", ignoreCase = true) ||
-                apiToken.startsWith("Basic ", ignoreCase = true) -> put("Authorization", apiToken)
             else -> put("Authorization", "Bearer $apiToken")
         }
     }
@@ -985,13 +1037,16 @@ class ProbePanelTerminalTransport(
         put("Accept", "application/json")
         when {
             asCookie -> put("Cookie", "session_token=$apiToken; temp_key=$apiToken")
-            apiToken.contains('=') -> put("Cookie", apiToken)
-            else -> {
-                val hasBearer = apiToken.startsWith("Bearer ", ignoreCase = true)
-                val bearer = if (hasBearer) apiToken else "Bearer $apiToken"
-                val rawKey = if (hasBearer) apiToken.substring("Bearer ".length).trim() else apiToken
-                put("Authorization", bearer)
+            apiToken.startsWith("Basic ", ignoreCase = true) -> put("Authorization", apiToken)
+            apiToken.startsWith("Bearer ", ignoreCase = true) -> {
+                put("Authorization", apiToken)
+                val rawKey = apiToken.substring("Bearer ".length).trim()
                 if (rawKey.isNotEmpty()) put("X-API-Key", rawKey)
+            }
+            ProbePanelClient.looksLikeCookieHeader(apiToken) -> put("Cookie", apiToken)
+            else -> {
+                put("Authorization", "Bearer $apiToken")
+                put("X-API-Key", apiToken)
             }
         }
     }
@@ -1027,7 +1082,12 @@ class ProbePanelTerminalTransport(
 
                 override fun onResponse(call: Call, response: Response) {
                     response.use { resp ->
-                        val bodyStr = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                        val bodyStr = try {
+                            ProbePanelClient.readBoundedBodyString(resp)
+                        } catch (e: IOException) {
+                            if (continuation.isActive) continuation.resumeWithException(e)
+                            return
+                        }
                         if (continuation.isActive) {
                             continuation.resume(HttpOutcome(code = resp.code, body = bodyStr))
                         }
@@ -1143,13 +1203,15 @@ class ProbePanelTerminalTransport(
             fleetRepository.panelsFlow.value.firstOrNull { it.id == panelId }
         }
 
-        fun defaultWebSocketClient(): OkHttpClient = OkHttpClient.Builder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS) // Required for persistent WebSockets
-            .pingInterval(20, TimeUnit.SECONDS)
-            .build()
+        private val sharedDefaultWebSocketClient: OkHttpClient by lazy {
+            ProbePanelClient.defaultHttpClient().newBuilder()
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS) // Required for persistent WebSockets
+                .callTimeout(0, TimeUnit.MILLISECONDS)
+                .pingInterval(20, TimeUnit.SECONDS)
+                .build()
+        }
+
+        fun defaultWebSocketClient(): OkHttpClient = sharedDefaultWebSocketClient
     }
 }
