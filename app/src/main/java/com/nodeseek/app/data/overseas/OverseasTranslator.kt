@@ -588,16 +588,22 @@ class OverseasTranslator(
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    response.use { resp ->
-                        if (!resp.isSuccessful) {
-                            if (continuation.isActive) {
-                                continuation.resumeWithException(IOException("HTTP ${resp.code}"))
+                    try {
+                        response.use { resp ->
+                            if (!resp.isSuccessful) {
+                                if (continuation.isActive) {
+                                    continuation.resumeWithException(IOException("HTTP ${resp.code}"))
+                                }
+                                return
                             }
-                            return
+                            val responseText = resp.body?.string().orEmpty()
+                            if (continuation.isActive) {
+                                continuation.resume(responseText)
+                            }
                         }
-                        val responseText = resp.body?.string().orEmpty()
+                    } catch (t: Throwable) {
                         if (continuation.isActive) {
-                            continuation.resume(responseText)
+                            continuation.resumeWithException(t)
                         }
                     }
                 }

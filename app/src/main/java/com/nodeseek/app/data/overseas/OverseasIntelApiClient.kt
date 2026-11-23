@@ -490,23 +490,29 @@ class OverseasIntelApiClient(
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    response.use { resp ->
-                        val bodyText = resp.body?.string().orEmpty()
-                        val retryAfter = resp.header("Retry-After")?.trim()?.toLongOrNull()
-                        val serverSec = resp.header("Date")?.let(::parseHttpDateSeconds)
-                        val etag = resp.header("ETag")?.trim()?.takeIf { it.isNotEmpty() }
-                        val lastModified = resp.header("Last-Modified")?.trim()?.takeIf { it.isNotEmpty() }
+                    try {
+                        response.use { resp ->
+                            val bodyText = resp.body?.string().orEmpty()
+                            val retryAfter = resp.header("Retry-After")?.trim()?.toLongOrNull()
+                            val serverSec = resp.header("Date")?.let(::parseHttpDateSeconds)
+                            val etag = resp.header("ETag")?.trim()?.takeIf { it.isNotEmpty() }
+                            val lastModified = resp.header("Last-Modified")?.trim()?.takeIf { it.isNotEmpty() }
+                            if (continuation.isActive) {
+                                continuation.resume(
+                                    RawHttpResponse(
+                                        code = resp.code,
+                                        body = bodyText,
+                                        retryAfterSeconds = retryAfter,
+                                        serverEpochSeconds = serverSec,
+                                        etag = etag,
+                                        lastModified = lastModified,
+                                    ),
+                                )
+                            }
+                        }
+                    } catch (t: Throwable) {
                         if (continuation.isActive) {
-                            continuation.resume(
-                                RawHttpResponse(
-                                    code = resp.code,
-                                    body = bodyText,
-                                    retryAfterSeconds = retryAfter,
-                                    serverEpochSeconds = serverSec,
-                                    etag = etag,
-                                    lastModified = lastModified,
-                                ),
-                            )
+                            continuation.resumeWithException(t)
                         }
                     }
                 }

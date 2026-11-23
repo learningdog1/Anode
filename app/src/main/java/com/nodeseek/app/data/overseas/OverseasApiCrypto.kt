@@ -106,6 +106,7 @@ object OverseasApiCrypto {
     fun decryptEnvelope(
         aesKey: ByteArray,
         rawEnvelopeJson: String,
+        aad: ByteArray? = null,
     ): String {
         if (rawEnvelopeJson.isBlank()) {
             throw GeneralSecurityException("Encrypted response envelope is empty")
@@ -145,6 +146,9 @@ object OverseasApiCrypto {
         val keySpec = SecretKeySpec(aesKey, "AES")
         val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
         cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
+        if (aad != null && aad.isNotEmpty()) {
+            cipher.updateAAD(aad)
+        }
         val plainBytes = cipher.doFinal(cipherWithTag)
         return plainBytes.toString(Charsets.UTF_8)
     }
@@ -153,6 +157,7 @@ object OverseasApiCrypto {
         aesKey: ByteArray,
         plaintextUtf8: String,
         ivBytes: ByteArray = ByteArray(GCM_IV_LENGTH_BYTES).also(secureRandom::nextBytes),
+        aad: ByteArray? = null,
     ): String {
         require(ivBytes.size == GCM_IV_LENGTH_BYTES) { "IV must be 12 bytes" }
         val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
@@ -161,6 +166,9 @@ object OverseasApiCrypto {
             SecretKeySpec(aesKey, "AES"),
             GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes),
         )
+        if (aad != null && aad.isNotEmpty()) {
+            cipher.updateAAD(aad)
+        }
         val cipherWithTag = cipher.doFinal(plaintextUtf8.toByteArray(Charsets.UTF_8))
         val envelope = EncryptedApiEnvelope(
             v = EXPECTED_ENVELOPE_VERSION,

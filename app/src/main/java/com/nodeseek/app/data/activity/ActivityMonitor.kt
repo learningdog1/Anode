@@ -547,6 +547,8 @@ class ActivityMonitorWorker internal constructor(
             runner()
         } catch (c: CancellationException) {
             throw c
+        } catch (_: UninitializedPropertyAccessException) {
+            return Result.retry()
         } catch (_: IOException) {
             return Result.retry()
         } catch (_: Throwable) {

@@ -2,6 +2,7 @@ package com.nodeseek.app.data.activity
 
 import okhttp3.CertificatePinner
 import okhttp3.ConnectionPool
+import okhttp3.CookieJar
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import java.io.ByteArrayInputStream
@@ -161,19 +162,36 @@ object ForumWatchActivitySecretVault {
 
     /**
      * Builds an [OkHttpClient] exclusively trusting the pinned X.509 v3 server certificate
-     * plus SPKI [CertificatePinner] verification.
+     * (plus optional backup certificates/SPKI pins for zero-downtime rotation) with redirects
+     * disabled so signed headers can never leak cross-origin.
      */
     fun buildPinnedHttpClient(
         connectTimeoutSec: Long = 10L,
         readTimeoutSec: Long = 15L,
         callTimeoutSec: Long = 20L,
+        backupSpkiPins: List<String> = emptyList(),
+        backupLeafSha256Fingerprints: List<ByteArray> = emptyList(),
+        backupCertificates: List<X509Certificate> = emptyList(),
     ): OkHttpClient {
         val pinnedCert = resolvePinnedCertificate()
         val expectedLeafSha256 = resolveExpectedCertSha256()
+        val trustedCerts = buildList {
+            add(pinnedCert)
+            addAll(backupCertificates)
+        }
+        val acceptedFingerprints = buildList {
+            add(expectedLeafSha256)
+            backupLeafSha256Fingerprints.forEach { if (it.size == 32) add(it.copyOf()) }
+            backupCertificates.forEach { cert ->
+                add(MessageDigest.getInstance("SHA-256").digest(cert.encoded))
+            }
+        }
 
         val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
             load(null, null)
-            setCertificateEntry("forumwatch_activity_server", pinnedCert)
+            trustedCerts.forEachIndexed { index, cert ->
+                setCertificateEntry("forumwatch_activity_server_$index", cert)
+            }
         }
         val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
             init(keyStore)
@@ -194,12 +212,15 @@ object ForumWatchActivitySecretVault {
                 }
                 delegateTrustManager.checkServerTrusted(chain, authType)
                 val leafSha256 = MessageDigest.getInstance("SHA-256").digest(chain[0].encoded)
-                if (!MessageDigest.isEqual(leafSha256, expectedLeafSha256)) {
+                val matched = acceptedFingerprints.any { expected ->
+                    MessageDigest.isEqual(leafSha256, expected)
+                }
+                if (!matched) {
                     throw CertificateException("ForumWatch server certificate SHA-256 fingerprint mismatch")
                 }
             }
 
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf(pinnedCert)
+            override fun getAcceptedIssuers(): Array<X509Certificate> = trustedCerts.toTypedArray()
         }
 
         val sslContext = SSLContext.getInstance("TLS").apply {
@@ -207,13 +228,21 @@ object ForumWatchActivitySecretVault {
         }
 
         val targetHost = resolveBaseUrl().toHttpUrl().host
-        val pinner = CertificatePinner.Builder()
+        val pinnerBuilder = CertificatePinner.Builder()
             .add(targetHost, resolveSpkiPin())
-            .build()
+        backupSpkiPins
+            .map { it.trim() }
+            .filter { it.startsWith("sha256/") || it.startsWith("sha1/") }
+            .distinct()
+            .forEach { backupPin -> pinnerBuilder.add(targetHost, backupPin) }
+        val pinner = pinnerBuilder.build()
 
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, strictPinnedTrustManager)
             .certificatePinner(pinner)
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectionPool(ConnectionPool(5, 5L, TimeUnit.MINUTES))
             .connectTimeout(connectTimeoutSec, TimeUnit.SECONDS)
             .readTimeout(readTimeoutSec, TimeUnit.SECONDS)
