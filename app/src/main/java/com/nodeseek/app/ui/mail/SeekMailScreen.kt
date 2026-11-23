@@ -57,6 +57,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ForwardToInbox
+import androidx.compose.material.icons.automirrored.rounded.Label
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
@@ -79,7 +80,6 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.HideImage
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Key
-import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mail
@@ -106,7 +106,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -171,7 +170,9 @@ import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -876,16 +877,16 @@ private fun SeekMailOnboardingView(
 
             PulseGradientDivider()
 
-            OutlinedTextField(
+            PulseTextField(
                 value = draftKey,
                 onValueChange = {
                     draftKey = it
                     onClearError()
                 },
-                label = { Text("Seek 邮箱 API Key") },
-                placeholder = { Text("粘贴 sk_live_... 密钥") },
+                label = "Seek 邮箱 API Key",
+                placeholder = "粘贴 sk_live_... 密钥",
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                isError = !errorMessage.isNullOrBlank(),
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Rounded.Key,
@@ -899,20 +900,31 @@ private fun SeekMailOnboardingView(
                     PasswordVisualTransformation()
                 },
                 trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = {
-                                val pasted = readClipboardText(context)
-                                if (!pasted.isNullOrBlank()) {
-                                    draftKey = pasted.trim()
-                                    onClearError()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "粘贴",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable(role = Role.Button) {
+                                    val pasted = readClipboardText(context)
+                                    if (!pasted.isNullOrBlank()) {
+                                        draftKey = pasted.trim()
+                                        onClearError()
+                                    }
                                 }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                        IconButton(
+                            onClick = { showKey = !showKey },
+                            modifier = Modifier.size(34.dp),
                         ) {
-                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { showKey = !showKey }) {
                             Icon(
                                 imageVector = if (showKey) {
                                     Icons.Rounded.VisibilityOff
@@ -920,6 +932,7 @@ private fun SeekMailOnboardingView(
                                     Icons.Rounded.Visibility
                                 },
                                 contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                                modifier = Modifier.size(19.dp),
                             )
                         }
                     }
@@ -1091,36 +1104,54 @@ private fun SeekMailApiKeyDialog(
         },
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            PulseTextField(
                 value = draftKey,
                 onValueChange = {
                     draftKey = it
                     onClearError()
                 },
-                label = { Text("输入新的 API Key") },
-                placeholder = { Text("粘贴 sk_live_... 密钥") },
+                label = "输入新的 API Key",
+                placeholder = "粘贴 sk_live_... 密钥",
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                isError = !errorMessage.isNullOrBlank(),
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
                 visualTransformation = if (showKey) {
                     VisualTransformation.None
                 } else {
                     PasswordVisualTransformation()
                 },
                 trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = {
-                                val pasted = readClipboardText(context)
-                                if (!pasted.isNullOrBlank()) {
-                                    draftKey = pasted.trim()
-                                    onClearError()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "粘贴",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable(role = Role.Button) {
+                                    val pasted = readClipboardText(context)
+                                    if (!pasted.isNullOrBlank()) {
+                                        draftKey = pasted.trim()
+                                        onClearError()
+                                    }
                                 }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                        IconButton(
+                            onClick = { showKey = !showKey },
+                            modifier = Modifier.size(34.dp),
                         ) {
-                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { showKey = !showKey }) {
                             Icon(
                                 imageVector = if (showKey) {
                                     Icons.Rounded.VisibilityOff
@@ -1128,10 +1159,20 @@ private fun SeekMailApiKeyDialog(
                                     Icons.Rounded.Visibility
                                 },
                                 contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                                modifier = Modifier.size(19.dp),
                             )
                         }
                     }
                 },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (!isVerifying && draftKey.isNotBlank()) {
+                            submittedReplacement = true
+                            onVerifyAndSave(draftKey)
+                        }
+                    },
+                ),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -1206,40 +1247,21 @@ private fun SeekMailSearchBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedTextField(
+        PulseSearchField(
             value = draft,
             onValueChange = onDraftChange,
-            placeholder = { Text("搜索发件人、主题或收件邮箱…") },
-            singleLine = true,
-            shape = CircleShape,
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Rounded.Search,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp),
-                )
-            },
-            trailingIcon = {
-                if (draft.isNotEmpty() || activeQuery.isNotEmpty()) {
-                    IconButton(onClick = onClear) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "清除搜索",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-            },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
+            placeholder = "搜索发件人、主题或收件邮箱…",
+            showClearButton = draft.isNotEmpty() || activeQuery.isNotEmpty(),
+            onClear = onClear,
+            onSearch = onSubmit,
             modifier = Modifier.weight(1f),
         )
 
         FilledTonalButton(
             onClick = onSubmit,
             shape = CircleShape,
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+            modifier = Modifier.height(44.dp),
         ) {
             Text(
                 text = "搜索",
@@ -1885,7 +1907,7 @@ private fun SeekMailListPane(
                     icon = if (uiState.activeSearchQuery.isNotBlank()) {
                         Icons.Rounded.SearchOff
                     } else if (uiState.selectedLocalTag != null) {
-                        Icons.Rounded.Label
+                        Icons.AutoMirrored.Rounded.Label
                     } else {
                         Icons.Rounded.Mail
                     },
@@ -2565,7 +2587,7 @@ private fun SeekMailDetailReaderPane(
                     }
                     if (summary != null) {
                         MailTopCircleButton(
-                            icon = Icons.Rounded.Label,
+                            icon = Icons.AutoMirrored.Rounded.Label,
                             contentDescription = "管理邮件标签",
                             onClick = { onManageMailTags(summary) },
                             tint = if (localTagsForOpened.isNotEmpty()) {
@@ -3877,22 +3899,24 @@ private fun CreateMailboxBottomSheet(
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
             )
 
-            OutlinedTextField(
+            PulseTextField(
                 value = uiState.createLocalPart,
                 onValueChange = onLocalPartChange,
-                label = { Text("邮箱前缀") },
-                placeholder = { Text("例如：nodeseek-vip") },
+                label = "邮箱前缀",
+                placeholder = "例如：nodeseek-vip",
+                isError = !uiState.createMailboxError.isNullOrBlank(),
                 suffix = {
                     if (activeDomain.isNotBlank()) {
                         Text(
                             text = "@$activeDomain",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -3921,13 +3945,12 @@ private fun CreateMailboxBottomSheet(
             }
 
             AnimatedVisibility(visible = uiState.useCustomDomain) {
-                OutlinedTextField(
+                PulseTextField(
                     value = uiState.customDomain,
                     onValueChange = onCustomDomainChange,
-                    label = { Text("自定义域名") },
-                    placeholder = { Text("例如：mail.example.com") },
+                    label = "自定义域名",
+                    placeholder = "例如：mail.example.com",
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

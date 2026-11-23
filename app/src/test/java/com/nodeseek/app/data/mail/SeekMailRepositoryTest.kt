@@ -337,7 +337,7 @@ class SeekMailRepositoryTest {
     }
 
     @Test
-    fun `local tags persist per mail id across restarts and stay isolated per API key`() = runBlocking {
+    fun `local tags persist per mail id across restarts and stay isolated per API key`(): Unit = runBlocking {
         val repo = createRepository()
         settingsRepository.setSeekMailApiKey(dummyKeyA)
 
