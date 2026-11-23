@@ -202,6 +202,7 @@ import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -259,25 +260,43 @@ fun SeekMailScreen(
         contract = ActivityResultContracts.CreateDocument("*/*"),
     ) { destinationUri ->
         val target = viewModel.consumePendingExportTarget()
-        if (destinationUri != null && target != null) {
-            coroutineScope.launch {
-                val streamResult = withContext(Dispatchers.IO) {
-                    val output = context.contentResolver.openOutputStream(destinationUri)
-                        ?: return@withContext Result.failure<Long>(IllegalStateException("无法打开文件输出流"))
-                    output.use { stream ->
-                        viewModel.exportToOutputStream(target, stream)
+        when {
+            destinationUri != null && target != null -> {
+                coroutineScope.launch {
+                    val streamResult = withContext(Dispatchers.IO) {
+                        try {
+                            val output = context.contentResolver.openOutputStream(destinationUri)
+                                ?: return@withContext Result.failure<Long>(IllegalStateException("无法打开文件输出流"))
+                            output.use { stream ->
+                                viewModel.exportToOutputStream(target, stream)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            Result.failure(t)
+                        }
+                    }
+                    streamResult.onSuccess {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        snackbarHostState.showSnackbar("已保存：${target.suggestedFileName}")
+                    }.onFailure { err ->
+                        withContext(Dispatchers.IO) {
+                            runCatching {
+                                DocumentsContract.deleteDocument(context.contentResolver, destinationUri)
+                            }
+                        }
+                        snackbarHostState.showSnackbar("导出失败：${err.message ?: "请稍后重试"}")
                     }
                 }
-                streamResult.onSuccess {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    snackbarHostState.showSnackbar("已保存：${target.suggestedFileName}")
-                }.onFailure { err ->
+            }
+            destinationUri != null -> {
+                coroutineScope.launch {
                     withContext(Dispatchers.IO) {
                         runCatching {
                             DocumentsContract.deleteDocument(context.contentResolver, destinationUri)
                         }
                     }
-                    snackbarHostState.showSnackbar("导出失败：${err.message ?: "请稍后重试"}")
+                    snackbarHostState.showSnackbar("导出目标已失效，请重新点击附件导出")
                 }
             }
         }
