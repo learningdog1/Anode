@@ -4014,6 +4014,51 @@ private fun MarkdownImageActionSheetRow(
 
 // ── Rich Inline Parser & Composable (`@username`, `#floor`, `:sticker:`, links, code) ─────
 
+/**
+ * Renders a NodeSeek official sticker (`ac` / `yct` / `xhj` / Fluent `emoji`).
+ *
+ * For Fluent video stickers (`isVideoEmoji == true`):
+ * - Inline rendering (`preferStaticPreview = false`) loads the animated `.webm` first (decoded
+ *   with alpha transparency via [WebmStickerDecoder]) and seamlessly falls back to the static
+ *   transparent `.png` if WebM decoding fails on a device.
+ * - Picker grids (`preferStaticPreview = true`) load the lightweight transparent `.png` preview
+ *   first and fall back to `.webm` if `.png` is unavailable.
+ */
+@Composable
+internal fun NodeSeekStickerAsyncImage(
+    sticker: NodeSeekSticker,
+    modifier: Modifier = Modifier,
+    preferStaticPreview: Boolean = false,
+    enableCrossfade: Boolean = true,
+) {
+    val context = LocalContext.current
+    var useFallbackUrl by remember(sticker.code, preferStaticPreview) { mutableStateOf(false) }
+
+    val primaryUrl = if (preferStaticPreview) sticker.staticPreviewUrl else sticker.imageUrl
+    val fallbackUrl = if (preferStaticPreview) sticker.imageUrl else sticker.staticPreviewUrl
+    val activeUrl = if (useFallbackUrl && fallbackUrl != primaryUrl) fallbackUrl else primaryUrl
+
+    val request = remember(context, activeUrl, enableCrossfade, useFallbackUrl, sticker.code) {
+        buildMarkdownCoilRequest(
+            context = context,
+            resolvedUrl = normalizeMarkdownImageUrl(activeUrl),
+            enableCrossfade = enableCrossfade,
+            onError = if (!useFallbackUrl && fallbackUrl != primaryUrl) {
+                { useFallbackUrl = true }
+            } else {
+                null
+            },
+        )
+    }
+
+    AsyncImage(
+        model = request,
+        contentDescription = ":${sticker.code}:",
+        contentScale = ContentScale.Fit,
+        modifier = modifier,
+    )
+}
+
 @Composable
 private fun RichInlineText(
     rawText: String,
@@ -4109,14 +4154,10 @@ private fun RichInlineTextTokens(
                             placeholderVerticalAlign = PlaceholderVerticalAlign.Center,
                         )
                     ) {
-                        AsyncImage(
-                            model = buildMarkdownCoilRequest(
-                                context = context,
-                                resolvedUrl = normalizeMarkdownImageUrl(sticker.imageUrl),
-                                enableCrossfade = !insideTabs,
-                            ),
-                            contentDescription = ":${sticker.code}:",
-                            contentScale = ContentScale.Fit,
+                        NodeSeekStickerAsyncImage(
+                            sticker = sticker,
+                            preferStaticPreview = false,
+                            enableCrossfade = !insideTabs,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -4425,6 +4466,14 @@ private const val ESCAPABLE_PUNCTUATION = """!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
 private val INLINE_BR_REGEX = Regex("""^<br\s*/?>""", RegexOption.IGNORE_CASE)
 private val INLINE_AUTOLINK_REGEX = Regex("""^<(https?://[^>\s]+)>""", RegexOption.IGNORE_CASE)
 private val INLINE_HTML_IMG_REGEX = Regex("""^<img\b([^>]*?)/?>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+private val INLINE_HTML_VIDEO_REGEX = Regex(
+    """^<video\b([^>]*)>(.*?)</video>""",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+)
+private val INLINE_HTML_SOURCE_SRC_REGEX = Regex(
+    """<source\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'=<>`]+))""",
+    RegexOption.IGNORE_CASE,
+)
 private val INLINE_HTML_ANCHOR_OPEN_REGEX = Regex("""^<a\b([^>]*?)>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
 private val INLINE_HTML_PAIRED_TAG_REGEX = Regex(
     """^<(strong|b|em|i|del|s|strike|u|ins|kbd|code|h[1-6]|span|font|small|mark|sub|sup)\b[^>]*>(.*?)</\1>""",
@@ -4649,6 +4698,26 @@ internal fun tokenizeMarkdownInline(
                 }
             }
 
+            val videoMatch = INLINE_HTML_VIDEO_REGEX.find(remaining)
+            if (videoMatch != null) {
+                val videoAttrs = parseHtmlAttributes(videoMatch.groupValues[1])
+                val videoInner = videoMatch.groupValues[2]
+                val candidateSources = buildList {
+                    videoAttrs["src"]?.let(::decodeHtmlEntitiesMinimal)?.let(::add)
+                    INLINE_HTML_SOURCE_SRC_REGEX.findAll(videoInner).forEach { m ->
+                        val rawSrc = m.groupValues[1].ifEmpty { m.groupValues[2].ifEmpty { m.groupValues[3] } }
+                        if (rawSrc.isNotBlank()) add(decodeHtmlEntitiesMinimal(rawSrc))
+                    }
+                }
+                val resolvedSticker = candidateSources.firstNotNullOfOrNull(NodeSeekStickerCatalog::resolveFromAssetUrl)
+                if (resolvedSticker != null) {
+                    flushPlain()
+                    tokens += MdInlineToken.Sticker(resolvedSticker)
+                    i += videoMatch.value.length
+                    continue
+                }
+            }
+
             val anchorOpen = INLINE_HTML_ANCHOR_OPEN_REGEX.find(remaining)
             if (anchorOpen != null) {
                 val closeTagIdx = remaining.indexOf("</a>", startIndex = anchorOpen.value.length, ignoreCase = true)
@@ -4747,14 +4816,14 @@ internal fun tokenizeMarkdownInline(
             }
         }
 
-        // 6. NodeSeek Sticker :ac01: / :yct001: / :xhj001:
+        // 6. NodeSeek Sticker :ac01: / :yct001: / :xhj001: / :emoji00:
         if (c == ':') {
             val closeColon = text.indexOf(':', startIndex = i + 1)
             if (closeColon in (i + 3)..(i + 12)) {
                 val candidate = text.substring(i + 1, closeColon)
                 if (STICKER_CODE_REGEX.matches(candidate)) {
                     val sticker = NodeSeekStickerCatalog.resolve(candidate)
-                    if (sticker != null && !sticker.isVideoEmoji) {
+                    if (sticker != null) {
                         flushPlain()
                         tokens += MdInlineToken.Sticker(sticker)
                         i = closeColon + 1

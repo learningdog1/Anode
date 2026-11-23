@@ -91,7 +91,7 @@ object NodeSeekHtmlParser {
     private val MULTI_NEWLINE_REGEX = Regex("""\n{3,}""")
     private val FLOOR_HASH_REGEX = Regex("""#(\d+)""")
     private val HTML_TAG_PRESENCE_REGEX = Regex(
-        """</?(?:h[1-6]|a|img|br|p|div|span|strong|b|em|i|del|s|strike|u|ins|kbd|code|pre|hr|details|summary|center|ul|ol|li|blockquote|font|small|mark|sub|sup|section|article)\b[^>]*>""",
+        """</?(?:h[1-6]|a|img|video|br|p|div|span|strong|b|em|i|del|s|strike|u|ins|kbd|code|pre|hr|details|summary|center|ul|ol|li|blockquote|font|small|mark|sub|sup|section|article)\b[^>]*>""",
         RegexOption.IGNORE_CASE,
     )
     private val STRAY_HEADING_TAG_REGEX = Regex("""</?h[1-6]\b[^>]*>""", RegexOption.IGNORE_CASE)
@@ -99,6 +99,10 @@ object NodeSeekHtmlParser {
     private val PREVIEW_IMAGE_REGEX = Regex("""!\[([^\]]*)]\([^)\n]+\)""")
     private val PREVIEW_LINK_REGEX = Regex("""\[([^\]]+)]\([^)\n]+\)""")
     private val PREVIEW_STICKER_REGEX = Regex(""":([a-zA-Z]{2,5}\d{2,4}):""")
+    private val STICKER_VIDEO_SOURCE_REGEX = Regex(
+        """/static/image/sticker/(ac|yct|xhj|emoji)/(\d{2,4})\.(?:webm|mov|mp4|png|gif|webp)(?:[?#].*)?$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val PREVIEW_HTML_TAG_REGEX = Regex("""<[^>]+>""")
     private val PREVIEW_DECORATION_REGEX = Regex("""[`*~>#]+""")
 
@@ -430,6 +434,10 @@ object NodeSeekHtmlParser {
             val altText = img.attr("alt").trim().ifEmpty { "[图片]" }
             img.replaceWith(TextNode(altText))
         }
+        for (video in doc.select("video")) {
+            val isSticker = video.hasClass("sticker") || extractStickerCodeFromVideoElement(video) != null
+            video.replaceWith(TextNode(if (isSticker) "[表情]" else "[视频]"))
+        }
         for (block in doc.select("br, p, div, li")) {
             block.appendText(" ")
         }
@@ -614,6 +622,12 @@ object NodeSeekHtmlParser {
                             out.append(alt)
                         }
                     }
+                    "video" -> {
+                        val stickerCode = extractStickerCodeFromVideoElement(node)
+                        if (stickerCode != null) {
+                            out.append(':').append(stickerCode).append(':')
+                        }
+                    }
                     "a" -> {
                         val href = resolveElementUrl(node, "href")
                         val imgs = node.select("img")
@@ -756,6 +770,22 @@ object NodeSeekHtmlParser {
         for (c in element.childNodes()) {
             appendMarkdownFromNode(c, this)
         }
+    }
+
+    private fun extractStickerCodeFromVideoElement(video: Element): String? {
+        val candidateUrls = buildList {
+            video.attr("src").trim().takeIf { it.isNotEmpty() }?.let(::add)
+            for (source in video.select("source")) {
+                source.attr("src").trim().takeIf { it.isNotEmpty() }?.let(::add)
+            }
+        }
+        for (url in candidateUrls) {
+            val match = STICKER_VIDEO_SOURCE_REGEX.find(url) ?: continue
+            val group = match.groupValues[1].lowercase()
+            val num = match.groupValues[2]
+            return "$group$num"
+        }
+        return null
     }
 
     private fun resolveElementUrl(element: Element, attrName: String): String {

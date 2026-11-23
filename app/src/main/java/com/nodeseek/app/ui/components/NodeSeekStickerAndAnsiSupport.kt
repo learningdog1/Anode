@@ -25,13 +25,36 @@ data class NodeSeekSticker(
         } else {
             "$STICKER_BASE_URL/$group/$filename"
         }
+
+    /**
+     * Static transparent PNG preview URL for Fluent video emojis (`emoji/{stem}.png`), used in
+     * sticker picker grids and as an automatic fallback if animated WebM decoding fails.
+     */
+    val staticPreviewUrl: String
+        get() = if (isVideoEmoji) {
+            "$STICKER_BASE_URL/$group/$filename.png"
+        } else {
+            imageUrl
+        }
 }
 
 /**
  * Official NodeSeek sticker catalog (`:ac01:`, `:yct001:`, `:xhj001:`, `:emoji00:`),
- * usable both inline in `MarkdownRenderer` and inside future reply/topic sticker pickers.
+ * usable both inline in `MarkdownRenderer` and inside reply/topic sticker pickers.
  */
 object NodeSeekStickerCatalog {
+    val groups: List<Pair<String, String>> = listOf(
+        "ac" to "AC娘",
+        "yct" to "洋葱头",
+        "xhj" to "小黄鸡",
+        "emoji" to "Fluent",
+    )
+
+    private val STICKER_ASSET_PATH_REGEX = Regex(
+        """/static/image/sticker/(ac|yct|xhj|emoji)/(\d{2,4})\.(?:png|gif|webm|mov|mp4|webp)(?:[?#].*)?$""",
+        RegexOption.IGNORE_CASE,
+    )
+
     private val acFiles: List<String> = buildList {
         for (i in 1..54) add("%02d.png".format(i))
         for (i in 1001..1040) add("$i.png")
@@ -75,6 +98,15 @@ object NodeSeekStickerCatalog {
 
     fun resolve(codeWithoutColons: String): NodeSeekSticker? =
         lookupMap[codeWithoutColons.trim().lowercase()]
+
+    fun resolveFromAssetUrl(rawUrl: String): NodeSeekSticker? {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return null
+        val match = STICKER_ASSET_PATH_REGEX.find(trimmed) ?: return null
+        val group = match.groupValues[1].lowercase()
+        val num = match.groupValues[2]
+        return resolve("$group$num")
+    }
 
     fun stickersForGroup(group: String): List<NodeSeekSticker> =
         lookupMap.values.filter { it.group == group }

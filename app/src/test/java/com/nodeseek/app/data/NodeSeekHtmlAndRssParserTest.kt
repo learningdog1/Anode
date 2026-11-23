@@ -494,4 +494,18 @@ class NodeSeekHtmlAndRssParserTest {
         assertEquals("交易", domainPage.categoryName)
         assertEquals(7788L, domainPage.replies.first { it.floorNumber == 11 }.author.uid)
     }
+
+    @Test
+    fun `htmlFragmentToMarkdown and cleanCommentHtmlToExcerpt preserve Fluent video stickers`() {
+        val rawHtml = """
+            <p>太强了 <video autoplay="" loop="" muted="" playsinline="" class="sticker" width="100" height="100">
+                <source src="/static/image/sticker/emoji/02.webm" type="video/webm">
+                <source src="/static/image/sticker/emoji/02.mov" type="video/mp4">
+            </video> 确实</p>
+        """.trimIndent()
+
+        assertEquals("太强了 :emoji02: 确实", NodeSeekHtmlParser.htmlFragmentToMarkdown(rawHtml))
+        assertEquals("太强了 [表情] 确实", NodeSeekHtmlParser.cleanCommentHtmlToExcerpt(rawHtml))
+        assertEquals("太强了 [表情] [表情] [表情]", NodeSeekHtmlParser.stripMarkdownToPlainPreview("太强了 :emoji02:  :emoji00:  :emoji05:"))
+    }
 }

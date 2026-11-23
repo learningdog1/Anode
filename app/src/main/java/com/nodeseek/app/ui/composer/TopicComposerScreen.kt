@@ -106,7 +106,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -117,13 +116,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil3.compose.AsyncImage
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
 import com.nodeseek.app.ui.components.AccessLockChip
 import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.MarkdownRenderer
+import com.nodeseek.app.ui.components.NodeSeekStickerAsyncImage
 import com.nodeseek.app.ui.components.NodeSeekStickerCatalog
 import com.nodeseek.app.ui.components.OpHighlightChip
 import com.nodeseek.app.ui.components.PulseAlertDialog
@@ -1912,16 +1911,11 @@ private fun StickerPickerModalSheet(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val groups = remember {
-        listOf(
-            "ac" to "AC娘",
-            "yct" to "洋葱头",
-            "xhj" to "小黄鸡",
-        )
-    }
+    val groups = NodeSeekStickerCatalog.groups
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val stickers = remember(selectedTab) {
-        NodeSeekStickerCatalog.stickersForGroup(groups[selectedTab].first)
+    val safeTab = selectedTab.coerceIn(0, groups.lastIndex)
+    val stickers = remember(safeTab) {
+        NodeSeekStickerCatalog.stickersForGroup(groups[safeTab].first)
     }
 
     ModalBottomSheet(
@@ -1973,7 +1967,7 @@ private fun StickerPickerModalSheet(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 groups.forEachIndexed { idx, (_, name) ->
-                    val selected = selectedTab == idx
+                    val selected = safeTab == idx
                     val pillBg by animateColorAsState(
                         targetValue = if (selected) {
                             MaterialTheme.colorScheme.primaryContainer
@@ -2010,6 +2004,8 @@ private fun StickerPickerModalSheet(
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                             color = pillFg,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
@@ -2042,10 +2038,9 @@ private fun StickerPickerModalSheet(
                             .padding(6.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        AsyncImage(
-                            model = sticker.imageUrl,
-                            contentDescription = ":${sticker.code}:",
-                            contentScale = ContentScale.Fit,
+                        NodeSeekStickerAsyncImage(
+                            sticker = sticker,
+                            preferStaticPreview = true,
                             modifier = Modifier.size(36.dp),
                         )
                     }

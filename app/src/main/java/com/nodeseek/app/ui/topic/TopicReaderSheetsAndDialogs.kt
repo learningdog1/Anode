@@ -106,7 +106,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
@@ -116,12 +115,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil3.compose.AsyncImage
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.NodeSeekDrumstickIcon
+import com.nodeseek.app.ui.components.NodeSeekStickerAsyncImage
 import com.nodeseek.app.ui.components.NodeSeekStickerCatalog
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -325,7 +324,7 @@ private fun normalizeImageMimeType(rawMime: String?): String? {
  * - Segmented `编辑 / 预览` switcher
  * - Replying-to quote context chip (`@user #floor`)
  * - Markdown formatting toolbar
- * - Inline `NodeSeekStickerCatalog` picker (`ac` / `yct` / `xhj`)
+ * - Inline `NodeSeekStickerCatalog` picker (`ac` / `yct` / `xhj` / `emoji`)
  * - Multi-format photo upload via `PickVisualMedia` / `OpenDocument` + `imageHostRepository`
  */
 @Composable
@@ -1110,15 +1109,10 @@ internal fun InlineNodeSeekStickerPicker(
     modifier: Modifier = Modifier,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val groups = remember {
-        listOf(
-            "ac" to "AC娘",
-            "yct" to "洋葱头",
-            "xhj" to "小黄鸡",
-        )
-    }
+    val groups = NodeSeekStickerCatalog.groups
     var selectedGroupIndex by rememberSaveable { mutableIntStateOf(0) }
-    val activeGroupKey = groups[selectedGroupIndex].first
+    val safeGroupIndex = selectedGroupIndex.coerceIn(0, groups.lastIndex)
+    val activeGroupKey = groups[safeGroupIndex].first
     val stickers = remember(activeGroupKey) {
         NodeSeekStickerCatalog.stickersForGroup(activeGroupKey)
     }
@@ -1140,7 +1134,7 @@ internal fun InlineNodeSeekStickerPicker(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             groups.forEachIndexed { index, (_, title) ->
-                val selected = selectedGroupIndex == index
+                val selected = safeGroupIndex == index
                 val pillBg by animateColorAsState(
                     targetValue = if (selected) {
                         MaterialTheme.colorScheme.primaryContainer
@@ -1186,6 +1180,8 @@ internal fun InlineNodeSeekStickerPicker(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         color = pillFg,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -1219,10 +1215,9 @@ internal fun InlineNodeSeekStickerPicker(
                         .padding(6.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    AsyncImage(
-                        model = sticker.imageUrl,
-                        contentDescription = ":${sticker.code}:",
-                        contentScale = ContentScale.Fit,
+                    NodeSeekStickerAsyncImage(
+                        sticker = sticker,
+                        preferStaticPreview = true,
                         modifier = Modifier.size(34.dp),
                     )
                 }

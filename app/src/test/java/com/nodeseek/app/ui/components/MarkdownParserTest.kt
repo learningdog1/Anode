@@ -643,4 +643,39 @@ class MarkdownParserTest {
         )
         assertEquals(listOf(120, 150, 180, 200), scrollable.toList())
     }
+
+    @Test
+    fun `Fluent emoji shortcodes and video tags tokenize into official NodeSeek stickers`() {
+        val tokens = tokenizeMarkdownInline("哈哈 :emoji02:  :emoji00:  :emoji05: :EMOJI48: :emoji49:")
+        val stickers = tokens.filterIsInstance<MdInlineToken.Sticker>().map { it.sticker }
+
+        assertEquals(listOf("emoji02", "emoji00", "emoji05", "emoji48"), stickers.map { it.code })
+        assertTrue(stickers.all { it.isVideoEmoji })
+        assertEquals("https://www.nodeseek.com/static/image/sticker/emoji/02.webm", stickers[0].imageUrl)
+        assertEquals("https://www.nodeseek.com/static/image/sticker/emoji/02.png", stickers[0].staticPreviewUrl)
+
+        // Out-of-range :emoji49: remains untouched plain text
+        val plainText = tokens.filterIsInstance<MdInlineToken.PlainText>().joinToString("") { it.text }
+        assertTrue(plainText.contains(":emoji49:"))
+
+        // Adjacent Fluent shortcodes with no space still tokenize cleanly
+        val adjacent = tokenizeMarkdownInline(":emoji02::emoji00::emoji05:")
+            .filterIsInstance<MdInlineToken.Sticker>()
+            .map { it.sticker.code }
+        assertEquals(listOf("emoji02", "emoji00", "emoji05"), adjacent)
+
+        // Inline HTML <video class="sticker"> from server HTML also resolves to a Fluent sticker
+        val videoHtml = """前文 <video autoplay="" loop="" muted="" playsinline="" class="sticker" width="100" height="100"><source src="/static/image/sticker/emoji/02.webm" type="video/webm"><source src="/static/image/sticker/emoji/02.mov" type="video/mp4"></video> 后文"""
+        val videoTokens = tokenizeMarkdownInline(videoHtml)
+        val videoSticker = videoTokens.filterIsInstance<MdInlineToken.Sticker>().single().sticker
+        assertEquals("emoji02", videoSticker.code)
+
+        // Catalog exposes Fluent pack as 4th picker group with 49 items (00..48)
+        assertEquals(listOf("ac", "yct", "xhj", "emoji"), NodeSeekStickerCatalog.groups.map { it.first })
+        assertEquals(49, NodeSeekStickerCatalog.stickersForGroup("emoji").size)
+        assertEquals(
+            "emoji05",
+            NodeSeekStickerCatalog.resolveFromAssetUrl("https://www.nodeseek.com/static/image/sticker/emoji/05.mov")?.code,
+        )
+    }
 }

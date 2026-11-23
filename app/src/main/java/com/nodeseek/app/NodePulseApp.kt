@@ -23,6 +23,7 @@ import com.nodeseek.app.di.DefaultAppContainer
 import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.overseas.OverseasPromoMonitorController
 import com.nodeseek.app.domain.restock.RestockMonitorController
+import com.nodeseek.app.ui.components.WebmStickerDecoder
 
 class NodePulseApp :
     Application(),
@@ -126,6 +127,7 @@ class NodePulseApp :
                     ),
                 )
                 add(SvgDecoder.Factory())
+                add(WebmStickerDecoder.Factory())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     add(AnimatedImageDecoder.Factory())
                 } else {
