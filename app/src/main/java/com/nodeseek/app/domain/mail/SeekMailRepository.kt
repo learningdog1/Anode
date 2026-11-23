@@ -3,6 +3,7 @@ package com.nodeseek.app.domain.mail
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.OutputStream
 
 private val EMPTY_LOCAL_TAG_STORE_FLOW: StateFlow<SeekMailLocalTagStore> =
     MutableStateFlow(SeekMailLocalTagStore()).asStateFlow()
@@ -26,7 +27,9 @@ interface SeekMailRepository {
 
     suspend fun getMailboxes(forceRefresh: Boolean = false): Result<List<SeekMailbox>>
 
-    suspend fun getMailbox(id: Long): Result<SeekMailbox>
+    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
+    suspend fun getMailbox(id: Long): Result<SeekMailbox> =
+        Result.failure(UnsupportedOperationException("Unused endpoint"))
 
     suspend fun checkMailboxAvailable(address: String): Result<Boolean>
 
@@ -52,7 +55,9 @@ interface SeekMailRepository {
         forceRefresh: Boolean = false,
     ): Result<SeekMailDetail>
 
-    suspend fun getRawMailEml(mailId: Long): Result<String>
+    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
+    suspend fun getRawMailEml(mailId: Long): Result<String> =
+        Result.failure(UnsupportedOperationException("Unused endpoint"))
 
     suspend fun getAttachments(mailId: Long): Result<List<SeekMailAttachment>>
 
@@ -60,6 +65,16 @@ interface SeekMailRepository {
         mailId: Long,
         attachmentId: String,
     ): Result<ByteArray>
+
+    suspend fun downloadAttachmentToStream(
+        mailId: Long,
+        attachmentId: String,
+        outputStream: OutputStream,
+    ): Result<Long> = downloadAttachmentBytes(mailId, attachmentId).mapCatching { bytes ->
+        outputStream.write(bytes)
+        outputStream.flush()
+        bytes.size.toLong()
+    }
 
     suspend fun getTags(forceRefresh: Boolean = false): Result<List<SeekMailTag>>
 
@@ -81,15 +96,19 @@ interface SeekMailRepository {
 
     suspend fun deleteLocalTag(tagId: String) = Unit
 
-    suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) = Unit
+    suspend fun toggleLocalTagForMail(mailId: Long, tagId: String, mailboxId: Long? = null) = Unit
 
-    suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) = Unit
+    suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>, mailboxId: Long? = null) = Unit
 
-    suspend fun addLocalTagToMails(mailIds: Collection<Long>, tagId: String) {
+    suspend fun addLocalTagToMails(
+        mailIds: Collection<Long>,
+        tagId: String,
+        mailboxIdsByMailId: Map<Long, Long> = emptyMap(),
+    ) {
         mailIds.forEach { mailId ->
             val current = localTagStore.value.mailTagIds[mailId].orEmpty()
             if (tagId !in current) {
-                toggleLocalTagForMail(mailId, tagId)
+                toggleLocalTagForMail(mailId, tagId, mailboxIdsByMailId[mailId])
             }
         }
     }
@@ -139,6 +158,8 @@ interface SeekMailRepository {
             restoreDeletedMailLocally(id, archiveById[id])
         }
     }
+
+    suspend fun clearCacheForCurrentKey() = clearCache()
 
     suspend fun clearCache()
 }

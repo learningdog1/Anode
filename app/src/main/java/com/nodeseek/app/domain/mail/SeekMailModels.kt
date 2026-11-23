@@ -52,6 +52,7 @@ data class SeekMailLocalTag(
 data class SeekMailLocalTagStore(
     val tags: List<SeekMailLocalTag> = emptyList(),
     val mailTagIds: Map<Long, List<String>> = emptyMap(),
+    val mailMailboxIds: Map<Long, Long> = emptyMap(),
 ) {
     fun tagsForMail(mailId: Long): List<SeekMailLocalTag> {
         val ids = mailTagIds[mailId] ?: return emptyList()
@@ -60,8 +61,10 @@ data class SeekMailLocalTagStore(
         return ids.mapNotNull { tagById[it] }
     }
 
-    fun mailCountForTag(tagId: String): Int =
-        mailTagIds.values.count { tagId in it }
+    fun mailCountForTag(tagId: String, mailboxId: Long? = null): Int =
+        mailTagIds.entries.count { (mailId, ids) ->
+            tagId in ids && (mailboxId == null || mailMailboxIds[mailId] == mailboxId)
+        }
 }
 
 @Serializable

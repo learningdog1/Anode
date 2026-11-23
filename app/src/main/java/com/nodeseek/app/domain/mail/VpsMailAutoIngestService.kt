@@ -101,6 +101,7 @@ interface VpsMailAutoIngestService {
     suspend fun ingestMail(
         summary: SeekMailSummary?,
         parsed: ParsedVpsBillingMail,
+        overwriteExistingSshCredentials: Boolean = true,
     ): Result<VpsMailIngestOutcome>
 }
 
@@ -135,6 +136,7 @@ object NoOpVpsMailAutoIngestService : VpsMailAutoIngestService {
     override suspend fun ingestMail(
         summary: SeekMailSummary?,
         parsed: ParsedVpsBillingMail,
+        overwriteExistingSshCredentials: Boolean,
     ): Result<VpsMailIngestOutcome> = Result.failure(
         UnsupportedOperationException("VPS 邮件入库服务未初始化"),
     )
