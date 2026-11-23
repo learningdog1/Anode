@@ -41,9 +41,12 @@ object AwayDigestEngine {
     private val SLASH_DATE_MINUTE_FORMATTER: DateTimeFormatter =
         DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm", Locale.US)
 
-    private const val CLOCK_SKEW_TOLERANCE_MILLIS = 10L * 60_000L
+    internal const val CLOCK_SKEW_TOLERANCE_MILLIS = 10L * 60_000L
     private const val MINUTE_SKEW_TOLERANCE_MILLIS = 60_000L
-    private const val MAX_ACTIVE_OLD_TOPIC_AGE_MILLIS = 36L * 3_600_000L
+    internal const val REAL_NODESEEK_ID_FLOOR = 10_000L
+    private const val MIN_PLAUSIBLE_WINDOW_ID_SPAN = 600L
+    private const val MAX_ESTIMATED_TOPICS_PER_HOUR = 450L
+    private const val MAX_PLAUSIBLE_WINDOW_ID_SPAN = 40_000L
 
     /**
      * Evaluates whether returning to the app should create an [AwaySession] under [settings].
@@ -173,8 +176,34 @@ object AwayDigestEngine {
     }
 
     /**
+     * Computes a conservative lower bound on `topic.id` for real NodeSeek monotonically increasing
+     * post IDs (`>= 10,000`), blocking ancient bumped threads even before/without detail enrichment
+     * while leaving small synthetic unit-test IDs untouched.
+     */
+    fun computeMinPlausibleTopicId(
+        maxInWindowTopicId: Long,
+        maxConfirmedPreWindowTopicId: Long?,
+        awayDurationMillis: Long,
+    ): Long? {
+        if (maxInWindowTopicId < REAL_NODESEEK_ID_FLOOR) return null
+        val awayHours = (awayDurationMillis.coerceAtLeast(0L) / 3_600_000.0).coerceAtLeast(1.0)
+        val spanLimit = (awayHours * MAX_ESTIMATED_TOPICS_PER_HOUR)
+            .toLong()
+            .coerceIn(MIN_PLAUSIBLE_WINDOW_ID_SPAN, MAX_PLAUSIBLE_WINDOW_ID_SPAN)
+        val spanFloor = (maxInWindowTopicId - spanLimit).coerceAtLeast(1L)
+
+        return if (maxConfirmedPreWindowTopicId != null &&
+            maxConfirmedPreWindowTopicId in 1L until maxInWindowTopicId
+        ) {
+            maxOf(spanFloor, (maxConfirmedPreWindowTopicId - 2L).coerceAtLeast(1L))
+        } else {
+            spanFloor
+        }
+    }
+
+    /**
      * Returns `true` when multi-page chronological scanning (`FeedSort.NEWEST_TOPIC`) can stop early
-     * because every parseable topic timestamp on [pageTopics] has fallen older than [awayStartMillis].
+     * because the page's chronological cursor has fallen older than [awayStartMillis].
      */
     fun shouldStopMultiPageScan(
         pageTopics: List<TopicSummary>,
@@ -184,47 +213,54 @@ object AwayDigestEngine {
         val parsedTimestamps = pageTopics.mapNotNull { parseTopicTimestampMillis(it.lastActivityIso) }
         if (parsedTimestamps.isEmpty()) return false
         val lowerBound = resolveEffectiveLowerBound(awayStartMillis)
-        return parsedTimestamps.all { it < lowerBound }
+        if (parsedTimestamps.all { it < lowerBound }) return true
+
+        // On real 20–50-row `NEWEST_TOPIC` pages, an older page often has a few bumped threads whose
+        // `lastActivityIso` is recent even though every post on the page was created before `awayStartMillis`.
+        // Stop once the tail of a full page clearly precedes `lowerBound`.
+        if (parsedTimestamps.size >= 10) {
+            val tailWindow = parsedTimestamps.takeLast(minOf(8, parsedTimestamps.size / 2))
+            val olderInTail = tailWindow.count { it < lowerBound }
+            if (olderInTail >= 3 && olderInTail * 2 >= tailWindow.size) {
+                return true
+            }
+        }
+        return false
     }
 
     /**
-     * Checks whether [topic] belongs to the away window `[awayStartMillis, reopenedAtMillis]`.
-     * Prefers topics created within the window, while also allowing high-heat active discussions
-     * from the recent 36h that surged during the away window.
+     * Checks whether [topic] genuinely belongs to the away window `[awayStartMillis, reopenedAtMillis]`.
+     *
+     * - Rejects topics below [minAllowedTopicId] (when real NodeSeek monotonic IDs are observed).
+     * - Strictly requires `createdMillis in lowerBound..upperBound` whenever [enrichedMeta]'s
+     *   `createdAtIso` is present (never admitting pre-existing/ancient bumped threads).
+     * - Rejects candidates with `requireVerifiedCreatedAt == true` if `createdAtIso` is absent.
+     * - Rejects candidates whose timestamps are missing or unparseable.
      */
     fun isWithinAwayWindow(
         topic: TopicSummary,
         enrichedMeta: CachedTopicDrumstickMeta?,
         awayStartMillis: Long,
         reopenedAtMillis: Long,
+        minAllowedTopicId: Long? = null,
+        requireVerifiedCreatedAt: Boolean = false,
     ): Boolean {
+        if (minAllowedTopicId != null && topic.id in 1L until minAllowedTopicId) {
+            return false
+        }
         val lowerBound = resolveEffectiveLowerBound(awayStartMillis)
         val upperBound = reopenedAtMillis + CLOCK_SKEW_TOLERANCE_MILLIS
-        val activityMillis = parseTopicTimestampMillis(topic.lastActivityIso)
         val createdMillis = parseTopicTimestampMillis(enrichedMeta?.createdAtIso)
 
         if (createdMillis != null) {
-            if (createdMillis in lowerBound..upperBound) {
-                return true
-            }
-            if (createdMillis > upperBound) {
-                return false
-            }
-            // Topic was created before user left: allow only if it had active replies during the away window
-            // AND is a genuinely hot/high-drumstick discussion (not an ancient thread bumped once).
-            val activeDuringAway = activityMillis != null && activityMillis in lowerBound..upperBound
-            val effectiveDrumsticks = maxOf(topic.drumstickCount, enrichedMeta?.drumstickCount ?: 0)
-            val effectiveReplies = maxOf(topic.replyCount, enrichedMeta?.replyCount ?: 0)
-            val notAncient = createdMillis >= (awayStartMillis - MAX_ACTIVE_OLD_TOPIC_AGE_MILLIS)
-            return activeDuringAway && notAncient && (effectiveReplies >= 25 || effectiveDrumsticks >= 4)
+            return createdMillis in lowerBound..upperBound
+        }
+        if (requireVerifiedCreatedAt) {
+            return false
         }
 
-        if (activityMillis != null) {
-            return activityMillis in lowerBound..upperBound
-        }
-
-        // Fallback when timestamp is absent in synthetic/offline data
-        return true
+        val activityMillis = parseTopicTimestampMillis(topic.lastActivityIso) ?: return false
+        return activityMillis in lowerBound..upperBound
     }
 
     /**
@@ -319,6 +355,7 @@ object AwayDigestEngine {
         awayStartMillis: Long,
         reopenedAtMillis: Long,
         limit: Int,
+        minAllowedTopicId: Long? = null,
     ): List<TopicSummary> {
         if (candidates.isEmpty() || limit <= 0) return emptyList()
         val contentFiltered = ContentFilterEngine.filterTopics(
@@ -337,6 +374,8 @@ object AwayDigestEngine {
                         enrichedMeta = enrichedMetaById[topic.id],
                         awayStartMillis = awayStartMillis,
                         reopenedAtMillis = reopenedAtMillis,
+                        minAllowedTopicId = minAllowedTopicId,
+                        requireVerifiedCreatedAt = false,
                     )
             }
             .sortedByDescending { topic ->
@@ -375,6 +414,8 @@ object AwayDigestEngine {
         awayStartMillis: Long,
         reopenedAtMillis: Long,
         maxDigestItems: Int = 10,
+        minAllowedTopicId: Long? = null,
+        unverifiedCreationTopicIds: Set<Long> = emptySet(),
     ): RankedAwayDigestResult {
         if (candidates.isEmpty()) {
             return RankedAwayDigestResult(
@@ -416,7 +457,15 @@ object AwayDigestEngine {
 
         for (topic in visibleTopics) {
             val meta = enrichedMetaById[topic.id]
-            if (!isWithinAwayWindow(topic, meta, awayStartMillis, reopenedAtMillis)) {
+            val isWithinWindow = isWithinAwayWindow(
+                topic = topic,
+                enrichedMeta = meta,
+                awayStartMillis = awayStartMillis,
+                reopenedAtMillis = reopenedAtMillis,
+                minAllowedTopicId = minAllowedTopicId,
+                requireVerifiedCreatedAt = topic.id in unverifiedCreationTopicIds,
+            )
+            if (!isWithinWindow) {
                 continue
             }
 

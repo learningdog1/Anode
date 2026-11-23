@@ -73,6 +73,8 @@ private data class InternalAwayDigestRawState(
     val enrichedMetaById: Map<Long, CachedTopicDrumstickMeta> = emptyMap(),
     val curatedAwardIds: Set<Long> = emptySet(),
     val localVisitedIds: Set<Long> = emptySet(),
+    val minAllowedTopicId: Long? = null,
+    val unverifiedCreationTopicIds: Set<Long> = emptySet(),
     val pagesScanned: Int = 0,
     val errorMessage: String? = null,
 )
@@ -101,16 +103,22 @@ class AwayDigestRepositoryImpl(
     private var loadedSessionId: String? = null
     private var scanJob: Job? = null
 
+    private fun isSessionExpired(session: AwaySession, nowMillis: Long = clockMillis()): Boolean =
+        !session.isDismissed && (nowMillis - session.reopenedAtMillis) > STALE_ACTIVE_SESSION_TTL_MILLIS
+
+    private fun isPersistedSessionFresh(session: AwaySession?, nowMillis: Long = clockMillis()): Boolean =
+        session != null && !session.isDismissed && !isSessionExpired(session, nowMillis)
+
     private val _rawState = MutableStateFlow(
         InternalAwayDigestRawState(
-            activeSession = store.getActiveSession()?.takeIf { !it.isDismissed },
+            activeSession = store.getActiveSession()?.takeIf { isPersistedSessionFresh(it) },
         ),
     )
 
     private val _state = MutableStateFlow(
         AwayDigestState(
             activeSession = store.getActiveSession()?.takeIf {
-                !it.isDismissed && settingsRepository.settings.value.awayDigestEnabled
+                isPersistedSessionFresh(it) && settingsRepository.settings.value.awayDigestEnabled
             },
         ),
     )
@@ -157,6 +165,8 @@ class AwayDigestRepositoryImpl(
                     awayStartMillis = session.awayStartMillis,
                     reopenedAtMillis = session.reopenedAtMillis,
                     maxDigestItems = maxDigestItems,
+                    minAllowedTopicId = raw.minAllowedTopicId,
+                    unverifiedCreationTopicIds = raw.unverifiedCreationTopicIds,
                 )
 
                 AwayDigestState(
@@ -227,8 +237,8 @@ class AwayDigestRepositoryImpl(
             }
 
             val transition = lastForegroundTransition
-            val persisted = store.getActiveSession()
-            val currentSession = _rawState.value.activeSession ?: persisted
+            val persisted = store.getActiveSession()?.takeUnless { isSessionExpired(it) }
+            val currentSession = _rawState.value.activeSession?.takeUnless { isSessionExpired(it) } ?: persisted
 
             if (isInForeground && transition != null) {
                 val qualifies = AwayDigestEngine.shouldTriggerSession(
@@ -322,7 +332,16 @@ class AwayDigestRepositoryImpl(
             store.setAppClosed(false)
 
             val previousLastActive = store.getLastActiveTimestampMillis()
-            val persistedSession = store.getActiveSession()
+            val rawPersistedSession = store.getActiveSession()
+            val persistedSession = if (rawPersistedSession != null &&
+                !rawPersistedSession.isDismissed &&
+                !isPersistedSessionFresh(rawPersistedSession, nowMillis)
+            ) {
+                store.setActiveSession(rawPersistedSession.copy(isDismissed = true))
+                null
+            } else {
+                rawPersistedSession
+            }
             val currentSettings = settingsRepository.settings.value
 
             if (previousLastActive <= 0L) {
@@ -365,6 +384,16 @@ class AwayDigestRepositoryImpl(
                 } else if (currentSettings.awayDigestEnabled && persistedSession != null && !persistedSession.isDismissed) {
                     sessionToLoad = persistedSession
                     forceReload = false
+                } else if (persistedSession == null && _rawState.value.activeSession != null) {
+                    _rawState.update {
+                        it.copy(
+                            activeSession = null,
+                            isLoading = false,
+                            rawCandidates = emptyList(),
+                            errorMessage = null,
+                        )
+                    }
+                    _state.value = AwayDigestState()
                 }
             }
         }
@@ -422,7 +451,7 @@ class AwayDigestRepositoryImpl(
         if (!settingsRepository.settings.value.awayDigestEnabled) return
         val session = synchronized(lifecycleLock) {
             val s = _rawState.value.activeSession ?: store.getActiveSession()
-            if (s == null || s.isDismissed) null else s
+            if (!isPersistedSessionFresh(s)) null else s
         } ?: return
 
         if (forceReload || loadedSessionId != session.sessionId) {
@@ -465,6 +494,8 @@ class AwayDigestRepositoryImpl(
                     enrichedMetaById = prev.enrichedMetaById,
                     curatedAwardIds = if (sameSession && !forceReload) prev.curatedAwardIds else emptySet(),
                     localVisitedIds = if (sameSession) prev.localVisitedIds else emptySet(),
+                    minAllowedTopicId = if (sameSession && !forceReload) prev.minAllowedTopicId else null,
+                    unverifiedCreationTopicIds = if (sameSession && !forceReload) prev.unverifiedCreationTopicIds else emptySet(),
                     pagesScanned = 0,
                     errorMessage = null,
                 )
@@ -488,30 +519,56 @@ class AwayDigestRepositoryImpl(
             val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
             val collectedById = LinkedHashMap<Long, TopicSummary>()
             val cachedMetaMap = LinkedHashMap<Long, CachedTopicDrumstickMeta>()
+            val unverifiedOriginIds = HashSet<Long>()
+            val lowerBound = AwayDigestEngine.resolveEffectiveLowerBound(session.awayStartMillis)
+            val upperBound = session.reopenedAtMillis + AwayDigestEngine.CLOCK_SKEW_TOLERANCE_MILLIS
+            var maxInWindowNewestId = 0L
+            var maxConfirmedPreWindowId: Long? = null
+            var consecutivePreWindowInNewest = 0
+            var crossedNewestCreationBoundary = false
             var pagesScanned = 0
             var lastError: String? = null
 
-            fun mergeTopics(topics: List<TopicSummary>) {
+            fun upsertCandidate(topic: TopicSummary) {
+                if (topic.id <= 0L || topic.isPinned) return
+                val prev = collectedById[topic.id]
+                collectedById[topic.id] = if (prev == null) {
+                    topic
+                } else {
+                    prev.copy(
+                        viewCount = maxOf(prev.viewCount, topic.viewCount),
+                        replyCount = maxOf(prev.replyCount, topic.replyCount),
+                        drumstickCount = maxOf(prev.drumstickCount, topic.drumstickCount),
+                        isRead = prev.isRead || topic.isRead,
+                        isBookmarked = prev.isBookmarked || topic.isBookmarked,
+                        categorySlug = prev.categorySlug.ifBlank { topic.categorySlug },
+                        categoryName = prev.categoryName.ifBlank { topic.categoryName },
+                        lastActivityIso = prev.lastActivityIso.ifBlank { topic.lastActivityIso },
+                    )
+                }
+                if (!cachedMetaMap.containsKey(topic.id)) {
+                    store.getCachedTopicMeta(topic.id)?.let { cachedMetaMap[topic.id] = it }
+                }
+            }
+
+            /**
+             * Enriches view/reply/drumstick counts for candidates ALREADY discovered in the
+             * chronological `NEWEST_TOPIC` away window, without injecting old bumped threads from
+             * `LATEST_REPLY` or historical `/award` archives into [collectedById].
+             */
+            fun enrichExistingCandidatesOnly(topics: List<TopicSummary>) {
                 for (topic in topics) {
                     if (topic.id <= 0L || topic.isPinned) continue
-                    val prev = collectedById[topic.id]
-                    collectedById[topic.id] = if (prev == null) {
-                        topic
-                    } else {
-                        prev.copy(
-                            viewCount = maxOf(prev.viewCount, topic.viewCount),
-                            replyCount = maxOf(prev.replyCount, topic.replyCount),
-                            drumstickCount = maxOf(prev.drumstickCount, topic.drumstickCount),
-                            isRead = prev.isRead || topic.isRead,
-                            isBookmarked = prev.isBookmarked || topic.isBookmarked,
-                            categorySlug = prev.categorySlug.ifBlank { topic.categorySlug },
-                            categoryName = prev.categoryName.ifBlank { topic.categoryName },
-                            lastActivityIso = prev.lastActivityIso.ifBlank { topic.lastActivityIso },
-                        )
-                    }
-                    if (!cachedMetaMap.containsKey(topic.id)) {
-                        store.getCachedTopicMeta(topic.id)?.let { cachedMetaMap[topic.id] = it }
-                    }
+                    val prev = collectedById[topic.id] ?: continue
+                    collectedById[topic.id] = prev.copy(
+                        viewCount = maxOf(prev.viewCount, topic.viewCount),
+                        replyCount = maxOf(prev.replyCount, topic.replyCount),
+                        drumstickCount = maxOf(prev.drumstickCount, topic.drumstickCount),
+                        isRead = prev.isRead || topic.isRead,
+                        isBookmarked = prev.isBookmarked || topic.isBookmarked,
+                        categorySlug = prev.categorySlug.ifBlank { topic.categorySlug },
+                        categoryName = prev.categoryName.ifBlank { topic.categoryName },
+                    )
                 }
             }
 
@@ -539,7 +596,41 @@ class AwayDigestRepositoryImpl(
                     usedFallbackSort = true
                     break
                 }
-                mergeTopics(pageData.topics)
+
+                for (topic in pageData.topics) {
+                    if (topic.id <= 0L || topic.isPinned) continue
+                    val cachedMeta = cachedMetaMap[topic.id] ?: store.getCachedTopicMeta(topic.id)?.also {
+                        cachedMetaMap[topic.id] = it
+                    }
+                    val createdMillis = AwayDigestEngine.parseTopicTimestampMillis(cachedMeta?.createdAtIso)
+                    val activityMillis = AwayDigestEngine.parseTopicTimestampMillis(topic.lastActivityIso)
+
+                    // `createdAt <= lastActivity` always holds, so `activityMillis < lowerBound` proves
+                    // the topic was created before `lowerBound`.
+                    val confirmedPreWindow = (createdMillis != null && createdMillis < lowerBound) ||
+                        (activityMillis != null && activityMillis < lowerBound)
+                    if (confirmedPreWindow) {
+                        consecutivePreWindowInNewest += 1
+                        if (!pageData.isFromRssFallback && consecutivePreWindowInNewest >= 2) {
+                            crossedNewestCreationBoundary = true
+                        }
+                        maxConfirmedPreWindowId = maxOf(maxConfirmedPreWindowId ?: topic.id, topic.id)
+                        continue
+                    }
+
+                    val inWindow = if (createdMillis != null) {
+                        createdMillis in lowerBound..upperBound
+                    } else {
+                        activityMillis != null && activityMillis in lowerBound..upperBound
+                    }
+                    if (!inWindow) continue
+
+                    if (!crossedNewestCreationBoundary) {
+                        consecutivePreWindowInNewest = 0
+                        upsertCandidate(topic)
+                        maxInWindowNewestId = maxOf(maxInWindowNewestId, topic.id)
+                    }
+                }
 
                 val stopEarly = !pageData.hasNextPage ||
                     pageData.isFromRssFallback ||
@@ -552,8 +643,8 @@ class AwayDigestRepositoryImpl(
                 }
             }
 
-            // Fallback to `FeedSort.LATEST_REPLY` multi-page scan if `NEWEST_TOPIC` returned empty
-            // (or supplement with page 1 of `LATEST_REPLY` to catch surging active discussions).
+            // Fallback to `FeedSort.LATEST_REPLY` multi-page scan ONLY if `NEWEST_TOPIC` returned empty;
+            // every fallback candidate requires `getTopicDetail` `createdAtIso` verification before display.
             if (usedFallbackSort) {
                 pagesScanned = 0
                 for (page in 1..effectiveMaxPages) {
@@ -570,7 +661,14 @@ class AwayDigestRepositoryImpl(
                         break
                     }
                     pagesScanned += 1
-                    mergeTopics(pageData.topics)
+                    for (topic in pageData.topics) {
+                        if (topic.id <= 0L || topic.isPinned) continue
+                        val activityMillis = AwayDigestEngine.parseTopicTimestampMillis(topic.lastActivityIso)
+                        if (activityMillis != null && activityMillis in lowerBound..upperBound) {
+                            upsertCandidate(topic)
+                            unverifiedOriginIds.add(topic.id)
+                        }
+                    }
                     val stopEarly = !pageData.hasNextPage ||
                         pageData.isFromRssFallback ||
                         AwayDigestEngine.shouldStopMultiPageScan(
@@ -582,14 +680,15 @@ class AwayDigestRepositoryImpl(
                     }
                 }
             } else {
-                // Supplement with cached or page-1 `LATEST_REPLY` active feed without extra page sweeps
+                // Only enrich stats for candidates ALREADY found in `NEWEST_TOPIC` (never inject old bumped threads)
                 val cachedLatest = forumRepository.getCachedFeed("", FeedSort.LATEST_REPLY)
                 if (cachedLatest != null) {
-                    mergeTopics(cachedLatest.topics)
+                    enrichExistingCandidatesOnly(cachedLatest.topics)
                 }
             }
 
-            // 2. Best-effort check of Curated (`/award` 推荐阅读) page 1 for drumstick-awarded gems
+            // 2. Best-effort check of Curated (`/award` 推荐阅读) page 1 to tag award badges on in-window topics
+            //    without polluting the away digest with historical/ancient `/award` threads.
             val curatedIds = HashSet<Long>()
             if (!sessionRepository.challengeRequired.value) {
                 forumRepository.getCuratedFeed(page = 1, forceRefresh = false)
@@ -600,11 +699,18 @@ class AwayDigestRepositoryImpl(
                                 curatedIds.add(topic.id)
                             }
                         }
-                        mergeTopics(curatedPage.topics)
+                        enrichExistingCandidatesOnly(curatedPage.topics)
                     }
             }
 
-            val candidatesList = collectedById.values.toList()
+            val minAllowedTopicId = AwayDigestEngine.computeMinPlausibleTopicId(
+                maxInWindowTopicId = maxInWindowNewestId,
+                maxConfirmedPreWindowTopicId = maxConfirmedPreWindowId,
+                awayDurationMillis = session.awayDurationMillis,
+            )
+
+            val candidatesList = collectedById.values
+                .filter { minAllowedTopicId == null || it.id >= minAllowedTopicId }
             if (candidatesList.isEmpty()) {
                 _rawState.update { state ->
                     if (state.activeSession?.sessionId != session.sessionId) {
@@ -613,6 +719,8 @@ class AwayDigestRepositoryImpl(
                         state.copy(
                             isLoading = false,
                             rawCandidates = emptyList(),
+                            minAllowedTopicId = minAllowedTopicId,
+                            unverifiedCreationTopicIds = unverifiedOriginIds,
                             pagesScanned = pagesScanned,
                             errorMessage = lastError,
                         )
@@ -630,6 +738,8 @@ class AwayDigestRepositoryImpl(
                         rawCandidates = candidatesList,
                         enrichedMetaById = state.enrichedMetaById + cachedMetaMap,
                         curatedAwardIds = curatedIds,
+                        minAllowedTopicId = minAllowedTopicId,
+                        unverifiedCreationTopicIds = unverifiedOriginIds,
                         pagesScanned = pagesScanned,
                     )
                 }
@@ -654,9 +764,12 @@ class AwayDigestRepositoryImpl(
                     awayStartMillis = session.awayStartMillis,
                     reopenedAtMillis = session.reopenedAtMillis,
                     limit = maxDetailEnrichCandidates,
+                    minAllowedTopicId = minAllowedTopicId,
                 ).filter { candidate ->
                     val cached = cachedMetaMap[candidate.id]
-                    cached == null || (clockMillis() - cached.cachedAtMillis) > DETAIL_META_TTL_MILLIS
+                    cached == null ||
+                        cached.createdAtIso.isNullOrBlank() ||
+                        (clockMillis() - cached.cachedAtMillis) > DETAIL_META_TTL_MILLIS
                 }
             } else {
                 emptyList()
@@ -678,13 +791,15 @@ class AwayDigestRepositoryImpl(
                                     val opDrumsticks = detail.openingFloor?.drumstickCount
                                         ?: detail.replies.sumOf { it.drumstickCount.coerceAtLeast(0) }
                                     val resolvedDrumsticks = maxOf(candidate.drumstickCount, opDrumsticks)
+                                    val resolvedCreatedAtIso = detail.createdAtIso?.takeIf { it.isNotBlank() }
+                                        ?: detail.openingFloor?.createdAtIso?.takeIf { it.isNotBlank() }
                                     CachedTopicDrumstickMeta(
                                         topicId = candidate.id,
                                         drumstickCount = resolvedDrumsticks,
                                         viewCount = maxOf(candidate.viewCount, detail.viewCount),
                                         replyCount = maxOf(candidate.replyCount, detail.estimatedTotalFloors),
                                         isCuratedAward = detail.isCuratedAward || candidate.id in curatedIds,
-                                        createdAtIso = detail.createdAtIso,
+                                        createdAtIso = resolvedCreatedAtIso,
                                         cachedAtMillis = clockMillis(),
                                     ).also { meta ->
                                         store.putCachedTopicMeta(meta)
@@ -712,6 +827,8 @@ class AwayDigestRepositoryImpl(
                         rawCandidates = candidatesList,
                         enrichedMetaById = state.enrichedMetaById + mergedMeta,
                         curatedAwardIds = curatedIds,
+                        minAllowedTopicId = minAllowedTopicId,
+                        unverifiedCreationTopicIds = unverifiedOriginIds,
                         pagesScanned = pagesScanned,
                         errorMessage = null,
                     )
@@ -736,9 +853,10 @@ class AwayDigestRepositoryImpl(
     companion object {
         const val DEFAULT_MAX_PAGES_TO_SCAN = 6
         const val DEFAULT_MAX_DIGEST_ITEMS = 10
-        const val DEFAULT_MAX_DETAIL_ENRICH_CANDIDATES = 16
+        const val DEFAULT_MAX_DETAIL_ENRICH_CANDIDATES = 20
         const val DEFAULT_DETAIL_CONCURRENCY = 4
         private const val DETAIL_ENRICH_TIMEOUT_MILLIS = 4_500L
         private const val DETAIL_META_TTL_MILLIS = 10L * 60_000L
+        internal const val STALE_ACTIVE_SESSION_TTL_MILLIS = 3L * 3_600_000L
     }
 }

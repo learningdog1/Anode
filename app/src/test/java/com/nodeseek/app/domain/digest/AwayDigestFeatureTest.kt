@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.digest
 
+import com.nodeseek.app.data.local.CachedTopicDrumstickMeta
 import com.nodeseek.app.data.local.InMemoryAwayDigestStore
 import com.nodeseek.app.data.parser.NodeSeekHtmlParser
 import com.nodeseek.app.data.repository.FakeSettingsRepository
@@ -946,6 +947,273 @@ class AwayDigestFeatureTest {
         val afterWarmLongStay = repo.state.first { !it.isLoading && it.items.isNotEmpty() }
         assertTrue(afterWarmLongStay.isVisible)
         assertEquals("你离开了 2 小时 30 分钟", afterWarmLongStay.headlineText)
+    }
+
+    @Test
+    fun `ancient bumped threads from curated award, latest reply, missing timestamps, and past-boundary pages never leak into digest`() = runTest {
+        val awayStart = Instant.parse("2026-11-22T14:00:00Z").toEpochMilli()
+        val reopenedAt = awayStart + 2L * 3_600_000L // 16:00Z (2-hour away window)
+
+        val genuineFreshGem = buildTopic(
+            id = 625_410L,
+            title = "黑五 DMIT 美西直连新品首发",
+            slug = "info",
+            replies = 26,
+            views = 1400,
+            iso = "2026-11-22T15:20:00Z",
+            drumsticks = 9,
+        )
+        // Borderline pre-window thread bumped during away window (created 3h before awayStart, replied at 15:40Z)
+        val preWindowBumpedNearBoundary = buildTopic(
+            id = 625_392L,
+            title = "午间水贴被顶上来",
+            slug = "daily",
+            replies = 80,
+            views = 3200,
+            iso = "2026-11-22T15:40:00Z",
+            drumsticks = 12,
+        )
+        val preWindowMarker1 = buildTopic(
+            id = 625_380L,
+            title = "离开前旧帖 1",
+            slug = "tech",
+            replies = 4,
+            views = 120,
+            iso = "2026-11-22T13:45:00Z",
+        )
+        val preWindowMarker2 = buildTopic(
+            id = 625_379L,
+            title = "离开前旧帖 2",
+            slug = "tech",
+            replies = 2,
+            views = 95,
+            iso = "2026-11-22T13:30:00Z",
+        )
+        // Old thread appearing AFTER the chronological boundary on NEWEST_TOPIC that got a recent reply
+        val postBoundaryBumpedOldThread = buildTopic(
+            id = 624_900L,
+            title = "两天前的抽奖帖刚刚有人回复",
+            slug = "daily",
+            replies = 420,
+            views = 18_000,
+            iso = "2026-11-22T15:55:00Z",
+            drumsticks = 35,
+        )
+        // 1-year-old curated `/award` classic bumped during the away window + one with missing timestamp
+        val ancientCuratedBumped = buildTopic(
+            id = 180_000L,
+            title = "2025 年度 VPS 线路百科全书",
+            slug = "review",
+            replies = 680,
+            views = 95_000,
+            iso = "2026-11-22T15:50:00Z",
+            drumsticks = 120,
+        )
+        val ancientCuratedBlankTime = buildTopic(
+            id = 175_000L,
+            title = "无时间戳历史精华帖",
+            slug = "tech",
+            replies = 500,
+            views = 80_000,
+            iso = "",
+            drumsticks = 95,
+        )
+        // 6-month-old `LATEST_REPLY` thread bumped 2 minutes ago
+        val ancientLatestReplyBumped = buildTopic(
+            id = 350_000L,
+            title = "半年老商家长期顶帖促销",
+            slug = "promotion",
+            replies = 390,
+            views = 42_000,
+            iso = "2026-11-22T15:58:00Z",
+            drumsticks = 50,
+        )
+
+        val baseForum = FakeDigestForumRepository(
+            pagesByNumber = mapOf(
+                1 to listOf(
+                    genuineFreshGem,
+                    preWindowBumpedNearBoundary,
+                    preWindowMarker1,
+                    preWindowMarker2,
+                    postBoundaryBumpedOldThread,
+                ),
+            ),
+            hasNextUpToPage = 1,
+        )
+
+        val realisticForum = object : ForumRepository by baseForum {
+            override fun getCachedFeed(categorySlug: String, sort: FeedSort): FeedPageResult? {
+                if (sort == FeedSort.LATEST_REPLY) {
+                    return FeedPageResult(
+                        topics = listOf(ancientLatestReplyBumped, genuineFreshGem.copy(viewCount = 1900)),
+                        currentPage = 1,
+                        hasNextPage = true,
+                    )
+                }
+                return null
+            }
+
+            override suspend fun getCuratedFeed(page: Int, forceRefresh: Boolean): Result<FeedPageResult> =
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            ancientCuratedBumped,
+                            ancientCuratedBlankTime,
+                            genuineFreshGem.copy(drumstickCount = 15),
+                        ),
+                        currentPage = 1,
+                        hasNextPage = true,
+                    ),
+                )
+
+            override suspend fun getTopicDetail(topicId: Long, page: Int, includeBlocked: Boolean): Result<TopicDetailPage> {
+                val createdIso = when (topicId) {
+                    625_410L -> "2026-11-22T15:20:00Z" // Genuinely created in away window
+                    625_392L -> "2026-11-22T11:00:00Z" // Created 3h BEFORE awayStart -> must be rejected!
+                    else -> return Result.failure(IOException("detail timeout on old post"))
+                }
+                val match = listOf(genuineFreshGem, preWindowBumpedNearBoundary).first { it.id == topicId }
+                return Result.success(
+                    TopicDetailPage(
+                        topicId = topicId,
+                        title = match.title,
+                        categorySlug = match.categorySlug,
+                        categoryName = match.categoryName,
+                        author = FloorAuthor(uid = 1L, username = match.authorName),
+                        viewCount = match.viewCount,
+                        currentPage = 1,
+                        totalPages = 1,
+                        isCuratedAward = topicId == 625_410L,
+                        openingFloor = FloorComment(
+                            commentId = topicId * 10L,
+                            floorNumber = 0,
+                            author = FloorAuthor(uid = 1L, username = match.authorName, isTopicAuthor = true),
+                            createdAtIso = createdIso,
+                            markdownBody = match.title,
+                            drumstickCount = match.drumstickCount,
+                        ),
+                        replies = emptyList(),
+                        createdAtIso = createdIso,
+                    ),
+                )
+            }
+        }
+
+        val store = InMemoryAwayDigestStore(initialLastActiveTimestampMillis = awayStart)
+        val repo = AwayDigestRepositoryImpl(
+            store = store,
+            forumRepository = realisticForum,
+            bookmarkAndHistoryRepository = FakeDigestHistoryRepository(),
+            sessionRepository = FakeDigestSessionRepository(),
+            settingsRepository = FakeSettingsRepository(),
+            contentFilterRepository = FakeDigestFilterRepository(),
+            scope = backgroundScope,
+            clockMillis = { reopenedAt },
+        )
+
+        repo.onAppForegrounded(reopenedAt)
+        val digest = repo.state.first { !it.isLoading }
+
+        // Only the genuinely in-window topic 625_410 survives; all ancient/pre-window threads are blocked!
+        assertEquals(listOf(625_410L), digest.items.map { it.topic.id })
+        val item = digest.items.single()
+        assertTrue(item.isCuratedAward)
+        assertEquals(15, item.drumstickCount) // Enriched from `/award` without admitting `/award` old posts
+        assertEquals(1900, item.viewCount) // Enriched from `LATEST_REPLY` without admitting old bumped posts
+
+        // Blank timestamp topics are strictly rejected by `isWithinAwayWindow`
+        assertFalse(
+            AwayDigestEngine.isWithinAwayWindow(
+                topic = ancientCuratedBlankTime,
+                enrichedMeta = null,
+                awayStartMillis = awayStart,
+                reopenedAtMillis = reopenedAt,
+            ),
+        )
+        // Pre-existing topics (<36h old) bumped during away window are also rejected once `createdAtIso` is known
+        assertFalse(
+            AwayDigestEngine.isWithinAwayWindow(
+                topic = preWindowBumpedNearBoundary,
+                enrichedMeta = CachedTopicDrumstickMeta(
+                    topicId = 625_392L,
+                    createdAtIso = "2026-11-22T11:00:00Z",
+                ),
+                awayStartMillis = awayStart,
+                reopenedAtMillis = reopenedAt,
+            ),
+        )
+    }
+
+    @Test
+    fun `stale undismissed away session expires automatically after TTL and parser extracts time title fallback`() = runTest {
+        val baseTime = Instant.parse("2026-11-22T08:00:00Z").toEpochMilli()
+        var now = baseTime
+        val settingsRepo = FakeSettingsRepository()
+        settingsRepo.setAwayDigestTriggerMode(AwayDigestTriggerMode.CUSTOM_DURATION)
+        settingsRepo.setAwayDigestThresholdMinutes(240) // 4-hour threshold
+
+        val store = InMemoryAwayDigestStore(initialLastActiveTimestampMillis = baseTime)
+        val forum = FakeDigestForumRepository(
+            pagesByNumber = mapOf(
+                1 to listOf(
+                    buildTopic(
+                        id = 501L,
+                        title = "昨日离开期间好帖",
+                        slug = "tech",
+                        replies = 20,
+                        views = 800,
+                        iso = Instant.ofEpochMilli(baseTime + 2L * 3_600_000L).toString(),
+                        drumsticks = 6,
+                    ),
+                ),
+            ),
+            drumsticksByTopicId = mapOf(501L to 6),
+        )
+        val repo = AwayDigestRepositoryImpl(
+            store = store,
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeDigestHistoryRepository(),
+            sessionRepository = FakeDigestSessionRepository(),
+            settingsRepository = settingsRepo,
+            contentFilterRepository = FakeDigestFilterRepository(),
+            scope = backgroundScope,
+            clockMillis = { now },
+        )
+
+        // User reopens after 5 hours (>= 4h threshold) and does NOT dismiss the card
+        now = baseTime + 5L * 3_600_000L
+        repo.onAppForegrounded(now)
+        val activeDigest = repo.state.first { !it.isLoading && it.items.isNotEmpty() }
+        assertTrue(activeDigest.isVisible)
+
+        // User uses app periodically (< 4h gaps) until next day (> 3h stale session TTL since reopenedAt)
+        repo.onAppBackgrounded(now + 2L * 3_600_000L)
+        now += 4L * 3_600_000L // 2h away (< 4h threshold), but 4h since original session reopenedAt (> 3h TTL)
+        repo.onAppForegrounded(now)
+
+        // Yesterday's undismissed session has expired instead of continuing to show old posts!
+        assertFalse(repo.state.value.isVisible)
+        assertTrue(store.getActiveSession()?.isDismissed == true)
+
+        // Verify HTML parser falls back to `<time title="...">` when `datetime` attribute is absent
+        val configB64 = Base64.getEncoder().encodeToString(
+            """{"allCategory":[{"key":"tech","cn_text":"技术"}]}""".toByteArray(Charsets.UTF_8),
+        )
+        val htmlWithTitleTime = """
+            <html><body>
+              <div id="nsk-body">
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-888-1">标题属性时间测试</a></div>
+                  <a class="post-category" href="/categories/tech">技术</a>
+                  <time title="2026-11-23 16:20:00">5分钟前</time>
+                </div>
+              </div>
+              <script id="temp-script" type="application/json">$configB64</script>
+            </body></html>
+        """.trimIndent()
+        val parsed = NodeSeekHtmlParser.parseFeedPage(htmlWithTitleTime, "https://www.nodeseek.com/")
+        assertEquals("2026-11-23 16:20:00", parsed.topics.single().activityDate)
     }
 
     private fun buildTopic(

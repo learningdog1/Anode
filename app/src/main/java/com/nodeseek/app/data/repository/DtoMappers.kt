@@ -110,7 +110,8 @@ internal fun PostCommentDto.toDomainFloorComment(topicOpUid: Long?): FloorCommen
             isTopicAuthor = isOp,
             roleBadges = poster.roles.map { AuthorBadge(code = it.name, label = it.displayText) },
         ),
-        createdAtIso = time?.createdDate.orEmpty(),
+        createdAtIso = time?.createdDate?.takeIf { it.isNotBlank() }
+            ?: time?.createdDateFormated.orEmpty(),
         editedAtIso = time?.editedDate?.takeIf { it.isNotBlank() },
         markdownBody = markdown,
         signatureMarkdown = resolvedSignature,

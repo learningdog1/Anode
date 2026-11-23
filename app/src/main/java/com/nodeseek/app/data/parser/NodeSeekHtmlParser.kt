@@ -236,7 +236,11 @@ object NodeSeekHtmlParser {
                 item.selectFirst(".info-likes span, .info-likes-count span, .info-drumsticks span")?.text()
                     ?: item.attr("data-likes").takeIf { it.isNotBlank() },
             )
-            val activityDate = item.selectFirst("time")?.attr("datetime")?.trim().orEmpty()
+            val timeEl = item.selectFirst("time")
+            val activityDate = timeEl?.attr("datetime")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: timeEl?.attr("title")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: timeEl?.attr("data-time")?.trim()?.takeIf { it.isNotEmpty() }
+                .orEmpty()
             val isPinned = item.selectFirst("[title=置顶]") != null
 
             FeedTopicDto(
