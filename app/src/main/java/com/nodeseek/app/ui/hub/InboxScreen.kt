@@ -678,6 +678,7 @@ fun InboxScreen(
         NewDirectMessageDialog(
             results = uiState.userSearchResults,
             isSearching = uiState.isSearchingUsers,
+            searchError = uiState.userSearchError,
             onSearchChange = viewModel::searchUsers,
             onSelectUser = { user ->
                 viewModel.dismissNewMessageDialog()
@@ -1279,6 +1280,7 @@ private fun InboxRowSkeletonCard() {
 private fun NewDirectMessageDialog(
     results: List<FloorAuthor>,
     isSearching: Boolean,
+    searchError: String?,
     onSearchChange: (String) -> Unit,
     onSelectUser: (FloorAuthor) -> Unit,
     onDismiss: () -> Unit,
@@ -1362,6 +1364,13 @@ private fun NewDirectMessageDialog(
                         }
                     }
                 }
+            } else if (!searchError.isNullOrBlank()) {
+                Text(
+                    text = searchError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
             } else if (query.isNotBlank()) {
                 Text(
                     text = "未找到匹配的社区成员",

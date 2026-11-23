@@ -8,10 +8,12 @@ import com.nodeseek.app.domain.model.DirectMessageSummary
 import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.domain.model.NotificationItem
 import com.nodeseek.app.domain.model.NotificationKind
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +45,7 @@ data class InboxUiState(
     val showNewMessageDialog: Boolean = false,
     val userSearchResults: List<FloorAuthor> = emptyList(),
     val isSearchingUsers: Boolean = false,
+    val userSearchError: String? = null,
     val serverUnreadTotalCount: Int = 0,
 ) {
     val unreadRepliesCount: Int get() = replies.count { !it.isRead }
@@ -71,7 +74,10 @@ class InboxViewModel(
         val showNewMessageDialog: Boolean = false,
         val userSearchResults: List<FloorAuthor> = emptyList(),
         val isSearchingUsers: Boolean = false,
+        val userSearchError: String? = null,
     )
+
+    private var searchUsersJob: Job? = null
 
     private val localState = MutableStateFlow(
         InboxLocalState(
@@ -98,6 +104,7 @@ class InboxViewModel(
             showNewMessageDialog = local.showNewMessageDialog,
             userSearchResults = local.userSearchResults,
             isSearchingUsers = local.isSearchingUsers,
+            userSearchError = local.userSearchError,
             serverUnreadTotalCount = unreadTotal,
         )
     }.stateIn(
@@ -222,41 +229,77 @@ class InboxViewModel(
     }
 
     fun openNewMessageDialog() {
+        searchUsersJob?.cancel()
+        searchUsersJob = null
         localState.update {
             it.copy(
                 showNewMessageDialog = true,
                 userSearchResults = emptyList(),
                 isSearchingUsers = false,
+                userSearchError = null,
             )
         }
     }
 
     fun dismissNewMessageDialog() {
-        localState.update { it.copy(showNewMessageDialog = false) }
+        searchUsersJob?.cancel()
+        searchUsersJob = null
+        localState.update {
+            it.copy(
+                showNewMessageDialog = false,
+                isSearchingUsers = false,
+                userSearchError = null,
+            )
+        }
     }
 
     fun searchUsers(keyword: String) {
+        searchUsersJob?.cancel()
+        searchUsersJob = null
         val trimmed = keyword.trim().removePrefix("@")
         if (trimmed.isEmpty()) {
-            localState.update { it.copy(userSearchResults = emptyList(), isSearchingUsers = false) }
+            localState.update {
+                it.copy(
+                    userSearchResults = emptyList(),
+                    isSearchingUsers = false,
+                    userSearchError = null,
+                )
+            }
             return
         }
-        viewModelScope.launch {
-            localState.update { it.copy(isSearchingUsers = true) }
-            container.userRepository.searchUsers(trimmed)
-                .onSuccess { users ->
-                    localState.update {
-                        it.copy(userSearchResults = users, isSearchingUsers = false)
+        searchUsersJob = viewModelScope.launch {
+            localState.update { it.copy(isSearchingUsers = true, userSearchError = null) }
+            try {
+                delay(USER_SEARCH_DEBOUNCE_MS)
+                container.userRepository.searchUsers(trimmed)
+                    .onSuccess { users ->
+                        localState.update {
+                            it.copy(
+                                userSearchResults = users,
+                                isSearchingUsers = false,
+                                userSearchError = null,
+                            )
+                        }
                     }
-                }
-                .onFailure {
-                    localState.update { it.copy(isSearchingUsers = false) }
-                }
+                    .onFailure { error ->
+                        localState.update {
+                            it.copy(
+                                userSearchResults = emptyList(),
+                                isSearchingUsers = false,
+                                userSearchError = error.message?.takeIf { msg -> msg.isNotBlank() }
+                                    ?: "搜索成员失败，请检查网络或重试",
+                            )
+                        }
+                    }
+            } catch (ce: CancellationException) {
+                throw ce
+            }
         }
     }
 
     companion object {
         private const val RESUME_REFRESH_THROTTLE_MS = 1_200L
+        internal const val USER_SEARCH_DEBOUNCE_MS = 300L
 
         fun factory(
             container: AppContainer,

@@ -147,6 +147,7 @@ class DirectMessageViewModel(
     val events = _events.receiveAsFlow()
 
     private var draftSaveJob: Job? = null
+    private var refreshJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -204,13 +205,17 @@ class DirectMessageViewModel(
     }
 
     fun refreshConversation(silent: Boolean = false) {
-        viewModelScope.launch {
+        if (silent && refreshJob?.isActive == true) return
+        if (!silent) {
+            refreshJob?.cancel()
+        }
+        refreshJob = viewModelScope.launch {
             if (!silent) {
                 _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             }
             container.inboxRepository.getConversation(peerUid)
                 .onSuccess { list ->
-                    val sorted = list.sortedBy { it.id }
+                    val sorted = normalizeDirectMessages(list)
                     val detectedSystemThread = peerUid <= 0L ||
                         (sorted.isNotEmpty() && sorted.all { it.isSystem })
                     _uiState.update {
@@ -330,7 +335,16 @@ fun DirectMessageScreen(
     val displayPeerName = uiState.peerName.ifBlank {
         if (isSystemThread) "系统通知" else "用户 #$peerUid"
     }
+    val peerAvatarUrl = remember(isSystemThread, peerUid) {
+        if (!isSystemThread && peerUid > 0L) {
+            "${NodeSeekUrlNormalizer.ORIGIN}/avatar/$peerUid.png"
+        } else {
+            null
+        }
+    }
     var showSellerTrustSheet by rememberSaveable { mutableStateOf(false) }
+    var hasPerformedInitialScroll by remember(peerUid) { mutableStateOf(false) }
+    var lastObservedMessageCount by remember(peerUid) { mutableStateOf(0) }
 
     val handleMarkdownMentionClick: (String) -> Unit = remember(onOpenUserProfile) {
         { username ->
@@ -365,9 +379,28 @@ fun DirectMessageScreen(
         }
     }
 
-    LaunchedEffect(uiState.messages.size) {
-        if (uiState.messages.isNotEmpty()) {
-            listState.animateScrollToItem(uiState.messages.lastIndex + 1)
+    val lastMessageId = uiState.messages.lastOrNull()?.id
+    LaunchedEffect(uiState.messages.size, lastMessageId) {
+        val messages = uiState.messages
+        if (messages.isEmpty()) return@LaunchedEffect
+        val targetIndex = messages.lastIndex + 1
+        if (!hasPerformedInitialScroll) {
+            hasPerformedInitialScroll = true
+            lastObservedMessageCount = messages.size
+            listState.scrollToItem(targetIndex)
+            return@LaunchedEffect
+        }
+        val appended = messages.size > lastObservedMessageCount
+        lastObservedMessageCount = messages.size
+        if (!appended) return@LaunchedEffect
+        val lastMsg = messages.last()
+        val isOwnMessage = uiState.currentUid != 0L && lastMsg.senderUid == uiState.currentUid
+        val layoutInfo = listState.layoutInfo
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        val isNearBottom = layoutInfo.totalItemsCount <= 1 ||
+            lastVisibleIndex >= layoutInfo.totalItemsCount - 3
+        if (isOwnMessage || isNearBottom) {
+            listState.animateScrollToItem(targetIndex)
         }
     }
 
@@ -425,7 +458,7 @@ fun DirectMessageScreen(
                                 }
                             } else {
                                 PulseAvatar(
-                                    avatarUrl = null,
+                                    avatarUrl = peerAvatarUrl,
                                     username = displayPeerName,
                                     size = 36.dp,
                                     ringWidth = 1.6.dp,
@@ -634,6 +667,7 @@ fun DirectMessageScreen(
                             DirectMessageBubble(
                                 message = message,
                                 peerName = displayPeerName,
+                                peerAvatarUrl = peerAvatarUrl,
                                 isSystemThread = isSystemThread,
                                 isOutgoing = isOutgoing,
                                 isFirstInGroup = isFirstInGroup,
@@ -672,6 +706,7 @@ fun DirectMessageScreen(
 private fun DirectMessageBubble(
     message: DirectMessage,
     peerName: String,
+    peerAvatarUrl: String?,
     isSystemThread: Boolean,
     isOutgoing: Boolean,
     isFirstInGroup: Boolean,
@@ -785,7 +820,7 @@ private fun DirectMessageBubble(
                     }
                 } else {
                     PulseAvatar(
-                        avatarUrl = null,
+                        avatarUrl = peerAvatarUrl,
                         username = peerName,
                         size = 28.dp,
                     )
@@ -1199,4 +1234,17 @@ private fun DirectMessageComposerBar(
             }
         }
     }
+}
+
+internal fun normalizeDirectMessages(list: List<DirectMessage>): List<DirectMessage> {
+    val byId = LinkedHashMap<Long, DirectMessage>()
+    val unindexed = mutableListOf<DirectMessage>()
+    for (msg in list) {
+        if (msg.id > 0L) {
+            byId[msg.id] = msg
+        } else {
+            unindexed += msg
+        }
+    }
+    return (byId.values + unindexed).sortedBy { it.id }
 }
