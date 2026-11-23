@@ -59,6 +59,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -143,6 +144,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -151,7 +153,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -173,6 +176,8 @@ import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.model.AuthorBadge
 import com.nodeseek.app.domain.model.FloorComment
 import com.nodeseek.app.domain.model.TopicDetailPage
+import com.nodeseek.app.navigation.isSafeExternalHttpUrl
+import com.nodeseek.app.navigation.normalizeNodeSeekUrl
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
 import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
 import com.nodeseek.app.ui.trust.SellerTrustCardSheet
@@ -210,6 +215,7 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -250,13 +256,14 @@ fun TopicDetailScreen(
     onStartDirectMessage: ((peerUid: Long, peerName: String) -> Unit)? = null,
     onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
     onOpenFullLiteSsh: (() -> Unit)? = null,
+    onPublishSshToComposer: ((suggestedTitle: String, markdownContent: String) -> Unit)? = null,
     isEmbeddedInDualPane: Boolean = false,
     isDetailPaneMaximized: Boolean = false,
     onCloseDetailPane: (() -> Unit)? = null,
     onToggleMaximizePane: (() -> Unit)? = null,
     previewUiState: TopicDetailUiState? = null,
     viewModel: TopicDetailViewModel = viewModel(
-        key = "topic_detail_${topicId}_$initialFloor",
+        key = "topic_detail_$topicId",
         factory = TopicDetailViewModel.factory(
             container = LocalAppContainer.current,
             topicId = topicId,
@@ -318,6 +325,14 @@ fun TopicDetailScreen(
         }
     }
 
+    var lastAppliedInitialFloor by remember(topicId) { mutableIntStateOf(initialFloor) }
+    LaunchedEffect(topicId, initialFloor) {
+        if (initialFloor > 0 && initialFloor != lastAppliedInitialFloor) {
+            lastAppliedInitialFloor = initialFloor
+            viewModel.jumpToFloor(initialFloor)
+        }
+    }
+
     LaunchedEffect(refreshTrigger) {
         if (refreshTrigger > 0L) {
             viewModel.onExternalRefreshTriggered(refreshTrigger)
@@ -328,17 +343,20 @@ fun TopicDetailScreen(
         viewModel.events.collect { event ->
             when (event) {
                 is TopicDetailUiEvent.ShowMessage -> {
-                    val result = snackbarHostState.showSnackbar(
-                        message = event.message,
-                        actionLabel = event.actionLabel,
-                        duration = if (event.actionLabel != null) {
-                            SnackbarDuration.Long
-                        } else {
-                            SnackbarDuration.Short
-                        },
-                    )
-                    if (result == SnackbarResult.ActionPerformed && !event.webViewUrl.isNullOrBlank()) {
-                        triggerWebViewAuth(event.webViewUrl)
+                    launch {
+                        snackbarHostState.currentSnackbarData?.dismiss()
+                        val result = snackbarHostState.showSnackbar(
+                            message = event.message,
+                            actionLabel = event.actionLabel,
+                            duration = if (event.actionLabel != null) {
+                                SnackbarDuration.Long
+                            } else {
+                                SnackbarDuration.Short
+                            },
+                        )
+                        if (result == SnackbarResult.ActionPerformed && !event.webViewUrl.isNullOrBlank()) {
+                            triggerWebViewAuth(event.webViewUrl)
+                        }
                     }
                 }
                 is TopicDetailUiEvent.NavigateToUser -> {
@@ -934,6 +952,7 @@ fun TopicDetailScreen(
             onUrlClickInPreview = handleMarkdownUrlClick,
             onOpenFullNetBench = onOpenFullNetBench,
             onOpenFullLiteSsh = onOpenFullLiteSsh,
+            onPublishSshToComposer = onPublishSshToComposer,
         )
     }
 
@@ -953,8 +972,11 @@ fun TopicDetailScreen(
             },
             onOpenInBrowser = {
                 linkActionUrl = null
-                runCatching { uriHandler.openUri(targetUrl) }.onFailure {
-                    handleMarkdownUrlClick(targetUrl)
+                val normalized = normalizeNodeSeekUrl(targetUrl)
+                if (isSafeExternalHttpUrl(normalized)) {
+                    runCatching { uriHandler.openUri(normalized) }.onFailure {
+                        handleMarkdownUrlClick(targetUrl)
+                    }
                 }
             },
         )
@@ -2291,7 +2313,6 @@ private fun AuthorSignatureBlock(
     val dashColor = ext.cardBorder.copy(alpha = 0.65f)
 
     var expanded by rememberSaveable(signatureMarkdown) { mutableStateOf(false) }
-    var isOverflowing by remember(signatureMarkdown) { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -2310,32 +2331,10 @@ private fun AuthorSignatureBlock(
             }
             .padding(top = 6.dp),
     ) {
-        Layout(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clipToBounds()
-                .then(
-                    if (isOverflowing && !expanded) {
-                        Modifier.drawWithContent {
-                            drawContent()
-                            val fadeHeight = 18.dp.toPx().coerceAtMost(size.height * 0.45f)
-                            if (fadeHeight > 0f) {
-                                drawRect(
-                                    brush = Brush.verticalGradient(
-                                        colors = listOf(Color.Transparent, fadeSurfaceColor),
-                                        startY = size.height - fadeHeight,
-                                        endY = size.height,
-                                    ),
-                                    topLeft = Offset(0f, size.height - fadeHeight),
-                                    size = Size(size.width, fadeHeight),
-                                )
-                            }
-                        }
-                    } else {
-                        Modifier
-                    },
-                ),
-            content = {
+        SubcomposeLayout(
+            modifier = Modifier.fillMaxWidth(),
+        ) { constraints ->
+            val contentMeasurables = subcompose("signature_content") {
                 MarkdownRenderer(
                     markdown = signatureMarkdown,
                     bodyStyle = sigStyle,
@@ -2348,32 +2347,67 @@ private fun AuthorSignatureBlock(
                     onUrlClick = onUrlClick,
                     onUrlLongClick = onUrlLongClick,
                 )
-            },
-        ) { measurables, constraints ->
-            val placeable = measurables.first().measure(constraints)
-            val overflows = placeable.height > thresholdHeightPx
-            if (isOverflowing != overflows) {
-                isOverflowing = overflows
             }
-            val displayHeight = if (overflows && !expanded) {
-                collapseHeightPx.coerceAtMost(placeable.height)
+            val contentPlaceable = contentMeasurables.first().measure(constraints)
+            val overflows = contentPlaceable.height > thresholdHeightPx
+            val collapsed = overflows && !expanded
+            val displayHeight = if (collapsed) {
+                collapseHeightPx.coerceAtMost(contentPlaceable.height)
             } else {
-                placeable.height
+                contentPlaceable.height
             }
-            layout(placeable.width, displayHeight) {
-                placeable.placeRelative(0, 0)
-            }
-        }
 
-        if (isOverflowing) {
-            Text(
-                text = if (expanded) "收起 ▴" else "展开签名 ▾",
-                style = NodePulseThemeTokens.extraTypography.microLabel,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier
-                    .padding(top = 3.dp)
-                    .clickable(role = Role.Button) { expanded = !expanded },
-            )
+            val fadePlaceable = if (collapsed && displayHeight > 0) {
+                val fadeHeightPx = with(density) { 18.dp.roundToPx() }
+                    .coerceAtMost((displayHeight * 0.45f).toInt())
+                if (fadeHeightPx > 0) {
+                    subcompose("signature_fade") {
+                        Box(
+                            modifier = Modifier.background(
+                                Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, fadeSurfaceColor),
+                                ),
+                            ),
+                        )
+                    }.first().measure(Constraints.fixed(contentPlaceable.width, fadeHeightPx))
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+
+            val togglePlaceable = if (overflows) {
+                subcompose("signature_toggle") {
+                    Text(
+                        text = if (expanded) "收起 ▴" else "展开签名 ▾",
+                        style = NodePulseThemeTokens.extraTypography.microLabel,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .padding(top = 3.dp)
+                            .clickable(role = Role.Button) { expanded = !expanded },
+                    )
+                }.first().measure(constraints.copy(minWidth = 0, minHeight = 0))
+            } else {
+                null
+            }
+
+            val totalHeight = displayHeight + (togglePlaceable?.height ?: 0)
+            layout(contentPlaceable.width, totalHeight) {
+                if (collapsed) {
+                    val clipBottom = displayHeight.toFloat()
+                    contentPlaceable.placeRelativeWithLayer(0, 0) {
+                        shape = GenericShape { size, _ ->
+                            addRect(Rect(0f, 0f, size.width, clipBottom))
+                        }
+                        clip = true
+                    }
+                } else {
+                    contentPlaceable.placeRelative(0, 0)
+                }
+                fadePlaceable?.placeRelative(0, displayHeight - fadePlaceable.height)
+                togglePlaceable?.placeRelative(0, displayHeight)
+            }
         }
     }
 }
@@ -2881,12 +2915,15 @@ private fun RightEdgeFloorScrubber(
     modifier: Modifier = Modifier,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
+    val density = LocalDensity.current
+    val trackPx = remember(density) { with(density) { 240.dp.toPx() }.coerceAtLeast(1f) }
     val haptics = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     var isDragging by remember { mutableStateOf(false) }
     var visibleRecently by remember { mutableStateOf(false) }
     var dragFraction by remember { mutableFloatStateOf(0f) }
     var lastHapticIndex by remember { mutableIntStateOf(-1) }
+    var scrubberScrollJob by remember { mutableStateOf<Job?>(null) }
 
     val isScrolling = lazyListState.isScrollInProgress
 
@@ -2933,12 +2970,13 @@ private fun RightEdgeFloorScrubber(
                     shape = RoundedCornerShape(18.dp),
                 )
                 .clickable(onClick = onOpenFloorJumpSheet)
-                .pointerInput(Unit) {
+                .pointerInput(trackPx) {
                     detectVerticalDragGestures(
                         onDragStart = {
                             isDragging = true
-                            val totalItems = lazyListState.layoutInfo.totalItemsCount.coerceAtLeast(1)
-                            dragFraction = lazyListState.firstVisibleItemIndex.toFloat() / totalItems.toFloat()
+                            val maxIndex = (lazyListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(1)
+                            dragFraction = (lazyListState.firstVisibleItemIndex.toFloat() / maxIndex.toFloat())
+                                .coerceIn(0f, 1f)
                         },
                         onDragEnd = {
                             isDragging = false
@@ -2950,7 +2988,6 @@ private fun RightEdgeFloorScrubber(
                         },
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
-                            val trackPx = 280f
                             dragFraction = (dragFraction + dragAmount / trackPx).coerceIn(0f, 1f)
                             val totalItems = lazyListState.layoutInfo.totalItemsCount
                             if (totalItems > 1) {
@@ -2958,7 +2995,8 @@ private fun RightEdgeFloorScrubber(
                                 if (targetIndex != lastHapticIndex) {
                                     lastHapticIndex = targetIndex
                                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    coroutineScope.launch {
+                                    scrubberScrollJob?.cancel()
+                                    scrubberScrollJob = coroutineScope.launch {
                                         lazyListState.scrollToItem(targetIndex)
                                     }
                                 }
