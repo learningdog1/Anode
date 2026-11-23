@@ -495,6 +495,17 @@ class BackupManagerTest {
         assertFalse(redactedJson.contains("ni_source_key"))
         assertFalse(redactedJson.contains("sm_source_key"))
 
+        // Default export methods must exclude plaintext API keys unless explicitly opted in
+        val defaultJson = source.backupManager.exportBackupJson().getOrThrow()
+        assertFalse(defaultJson.contains("ni_source_key"))
+        assertFalse(defaultJson.contains("sm_source_key"))
+        val defaultBundle = source.backupManager.exportBundle().getOrThrow()
+        assertEquals("", defaultBundle.settings.nodeImageApiKey)
+        assertEquals("", defaultBundle.settings.seekMailApiKey)
+        val defaultPayload = source.backupManager.exportBackupPayload().getOrThrow()
+        assertFalse(defaultPayload.rawJson.contains("ni_source_key"))
+        assertFalse(defaultPayload.rawJson.contains("sm_source_key"))
+
         val preview = source.backupManager.inspectBackup(redactedJson).getOrThrow()
         assertFalse(preview.containsApiKeys)
 

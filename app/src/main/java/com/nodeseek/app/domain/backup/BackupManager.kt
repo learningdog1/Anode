@@ -16,11 +16,11 @@ interface BackupManager {
     val currentSyncTargetAccountFlow: Flow<BackupSyncTargetAccount?>
         get() = flowOf(null)
 
-    suspend fun exportBackupJson(includeApiKeys: Boolean = true): Result<String>
+    suspend fun exportBackupJson(includeApiKeys: Boolean = false): Result<String>
 
-    suspend fun exportBundle(includeApiKeys: Boolean = true): Result<NodePulseBackupBundle>
+    suspend fun exportBundle(includeApiKeys: Boolean = false): Result<NodePulseBackupBundle>
 
-    suspend fun exportBackupPayload(includeApiKeys: Boolean = true): Result<BackupExportPayload>
+    suspend fun exportBackupPayload(includeApiKeys: Boolean = false): Result<BackupExportPayload>
 
     suspend fun inspectBackup(rawJson: String): Result<BackupPreviewSummary>
 
