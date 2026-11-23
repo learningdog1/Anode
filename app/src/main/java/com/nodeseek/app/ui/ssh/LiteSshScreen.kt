@@ -133,6 +133,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.ssh.CustomSshPreset
+import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshConnectionMode
@@ -225,8 +226,12 @@ fun LiteSshScreen(
 
     val copyToClipboard: (String, String) -> Unit = remember(context, scope, snackbarHostState) {
         { text, toastMsg ->
-            copyTextToClipboard(context, text)
-            scope.launch { snackbarHostState.showSnackbar(toastMsg) }
+            val finalMsg = when (copyTextToClipboard(context, text)) {
+                ClipboardCopyResult.COPIED -> toastMsg
+                ClipboardCopyResult.TRUNCATED -> "$toastMsg（输出较长，已截取末尾部分）"
+                ClipboardCopyResult.FAILED -> "复制失败：文本超出系统剪贴板上限或剪贴板不可用"
+            }
+            scope.launch { snackbarHostState.showSnackbar(finalMsg) }
         }
     }
 
@@ -464,10 +469,25 @@ fun LiteSshScreen(
                     },
                     onCopyOutput = {
                         val currentState = previewUiState ?: viewModel.uiState.value
-                        val raw = currentState.displayedConsoleOutput
+                        val raw = currentState.rawConsoleOutput
                         if (raw.isNotBlank()) {
-                            val plain = AnsiAndCodeFormatter.stripAnsiEscapes(raw)
-                            copyToClipboard(plain, "已复制终端纯文本输出")
+                            val shouldMaskIp = currentState.maskServerIp
+                            val hostToMask = currentState.viewingRun?.serverHost
+                                ?: currentState.activeServerHost
+                                ?: currentState.selectedServer?.host
+                            scope.launch {
+                                val plain = withContext(Dispatchers.Default) {
+                                    val masked = if (shouldMaskIp) {
+                                        IpPrivacyMasker.mask(raw, knownServerHost = hostToMask)
+                                    } else {
+                                        raw
+                                    }
+                                    AnsiAndCodeFormatter.stripAnsiEscapes(masked)
+                                }
+                                if (plain.isNotBlank()) {
+                                    copyToClipboard(plain, "已复制终端纯文本输出")
+                                }
+                            }
                         }
                     },
                 )
@@ -3409,9 +3429,28 @@ private fun LiteSshExportDock(
     }
 }
 
-internal fun copyTextToClipboard(context: Context, text: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", text))
+internal enum class ClipboardCopyResult {
+    COPIED,
+    TRUNCATED,
+    FAILED,
+}
+
+private const val MAX_CLIPBOARD_CHARS: Int = 240_000
+
+internal fun copyTextToClipboard(context: Context, text: String): ClipboardCopyResult {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        ?: return ClipboardCopyResult.FAILED
+    val truncated = text.length > MAX_CLIPBOARD_CHARS
+    val payload = if (truncated) {
+        "... [内容过长，已自动截取末尾 ${MAX_CLIPBOARD_CHARS} 字符以符合系统剪贴板上限] ...\n" +
+            text.takeLast(MAX_CLIPBOARD_CHARS)
+    } else {
+        text
+    }
+    return runCatching {
+        clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", payload))
+        if (truncated) ClipboardCopyResult.TRUNCATED else ClipboardCopyResult.COPIED
+    }.getOrDefault(ClipboardCopyResult.FAILED)
 }
 
 private val CLOCK_TIME_FORMATTER: DateTimeFormatter =

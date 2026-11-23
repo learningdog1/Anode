@@ -762,7 +762,7 @@ class JSchSshTransport internal constructor(
         override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
     }
 
-    private class PasswordAndInteractiveUserInfo(
+    internal class PasswordAndInteractiveUserInfo(
         private val password: String,
     ) : UserInfo, UIKeyboardInteractive {
         override fun getPassphrase(): String? = null
@@ -779,8 +779,38 @@ class JSchSshTransport internal constructor(
             prompt: Array<out String>?,
             echo: BooleanArray?,
         ): Array<String>? {
-            val count = prompt?.size ?: return emptyArray()
-            return Array(count) { password }
+            val prompts = prompt ?: return emptyArray()
+            if (prompts.isEmpty()) return emptyArray()
+            // Only answer a single hidden password challenge; refuse multi-prompt flows,
+            // echoed inputs, or 2FA/OTP/verification challenges to prevent leaking the password.
+            if (prompts.size != 1) return null
+            if (echo?.getOrNull(0) == true) return null
+            if (isNonPasswordInteractivePrompt(prompts[0])) return null
+            return arrayOf(password)
+        }
+
+        private fun isNonPasswordInteractivePrompt(promptText: String): Boolean {
+            val lower = promptText.lowercase()
+            return NON_PASSWORD_PROMPT_KEYWORDS.any { keyword -> lower.contains(keyword) }
+        }
+
+        private companion object {
+            val NON_PASSWORD_PROMPT_KEYWORDS: List<String> = listOf(
+                "verification",
+                "authenticator",
+                "one-time",
+                "otp",
+                "totp",
+                "2fa",
+                "mfa",
+                "token",
+                "passcode",
+                "duo",
+                "验证码",
+                "动态码",
+                "二次验证",
+                "口令码",
+            )
         }
     }
 

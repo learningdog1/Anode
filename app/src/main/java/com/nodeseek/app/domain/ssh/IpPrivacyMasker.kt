@@ -84,10 +84,52 @@ object IpPrivacyMasker {
                 }
             }
 
-            // 3. Try matching IPv6 token `[0-9A-Fa-f:]{2,39}` when not preceded by `[A-Za-z0-9:]`
+            // 3. Try matching IPv6 token `[0-9A-Fa-f:]{2,39}` (including IPv4-mapped/embedded IPv6
+            // like `::ffff:203.0.113.42`) when not preceded by `[A-Za-z0-9:]`
             if ((isHexChar(ch) || ch == ':') && !isIpv6BoundaryBlocked(prevPlainChar)) {
                 val ipv6End = scanIpv6CandidateEnd(text, i, n)
                 val tokenLen = ipv6End - i
+
+                // 3a. Check IPv4-embedded IPv6 (e.g. `::ffff:203.0.113.42`, `0:0:0:0:0:ffff:203.0.113.42`)
+                if (ipv6End < n && text[ipv6End] == '.' && tokenLen >= 3) {
+                    val lastColon = findLastColon(text, i, ipv6End)
+                    if (lastColon >= i && lastColon + 1 < ipv6End) {
+                        val embeddedV4End = tryScanIpv4End(text, lastColon + 1, n)
+                        if (embeddedV4End > lastColon + 1) {
+                            val nextAfterV4 = peekNextNonSgrChar(text, embeddedV4End, n)
+                            if (!isIpv4BoundaryBlocked(nextAfterV4) &&
+                                isValidIpv6PrefixForEmbeddedIpv4(text, i, lastColon)
+                            ) {
+                                val fullLower = text.substring(i, embeddedV4End).lowercase()
+                                val isExplicitServerHost = normalizedHost != null && fullLower == normalizedHost
+                                val embeddedHostOverride = if (isExplicitServerHost) {
+                                    text.substring(lastColon + 1, embeddedV4End)
+                                } else {
+                                    normalizedHost
+                                }
+                                val maskedEmbeddedV4 = evaluateIpv4Candidate(
+                                    text = text,
+                                    start = lastColon + 1,
+                                    end = embeddedV4End,
+                                    normalizedHost = embeddedHostOverride,
+                                )
+                                if (maskedEmbeddedV4 != null) {
+                                    val sb = out ?: StringBuilder(n).also { out = it }
+                                    if (i > flushCursor) {
+                                        sb.append(text, flushCursor, i)
+                                    }
+                                    sb.append(text, i, lastColon + 1)
+                                    sb.append(maskedEmbeddedV4)
+                                    flushCursor = embeddedV4End
+                                }
+                                prevPlainChar = text[embeddedV4End - 1]
+                                i = embeddedV4End
+                                continue
+                            }
+                        }
+                    }
+                }
+
                 if (tokenLen in 2..39) {
                     val nextPlainChar = peekNextNonSgrChar(text, ipv6End, n)
                     if (!isIpv6BoundaryBlocked(nextPlainChar) && hasAtLeastTwoColons(text, i, ipv6End)) {
@@ -117,7 +159,9 @@ object IpPrivacyMasker {
                 }
             }
 
-            prevPlainChar = ch
+            // Treat a single unconsumed label colon (e.g. `IPv6:2a01:4f8::1`, `IP:2001:db8::1`,
+            // `addr:::ffff:203.0.113.42`) as a boundary separator rather than blocking IPv6 matching.
+            prevPlainChar = if (ch == ':' && prevPlainChar != ':') '\u0000' else ch
             i++
         }
 
@@ -244,6 +288,45 @@ object IpPrivacyMasker {
             }
         }
         return false
+    }
+
+    private fun findLastColon(text: String, start: Int, end: Int): Int {
+        for (idx in end - 1 downTo start) {
+            if (text[idx] == ':') return idx
+        }
+        return -1
+    }
+
+    /**
+     * Validates the 96-bit IPv6 prefix (ending at [lastColon], inclusive) preceding an embedded
+     * dotted-quad IPv4 address (RFC 4291), such as `::`, `::ffff:`, `64:ff9b::`, or
+     * `0:0:0:0:0:ffff:`.
+     */
+    private fun isValidIpv6PrefixForEmbeddedIpv4(text: String, start: Int, lastColon: Int): Boolean {
+        val prefixToken = text.substring(start, lastColon + 1)
+        if (prefixToken.length < 2 || prefixToken.contains(":::")) return false
+        if (prefixToken.endsWith("::")) {
+            val leftPart = prefixToken.substring(0, prefixToken.length - 2)
+            if (leftPart.contains("::")) return false
+            val leftGroups = countAndValidateHextetGroups(leftPart, 0, leftPart.length)
+            return leftGroups in 0..5
+        }
+        val withoutLastColon = prefixToken.substring(0, prefixToken.length - 1)
+        val doubleColonIndex = withoutLastColon.indexOf("::")
+        return if (doubleColonIndex >= 0) {
+            if (withoutLastColon.indexOf("::", startIndex = doubleColonIndex + 2) >= 0) return false
+            val leftGroups = countAndValidateHextetGroups(withoutLastColon, 0, doubleColonIndex)
+            if (leftGroups < 0) return false
+            val rightGroups = countAndValidateHextetGroups(
+                withoutLastColon,
+                doubleColonIndex + 2,
+                withoutLastColon.length,
+            )
+            if (rightGroups < 0) return false
+            (leftGroups + rightGroups) in 1..5
+        } else {
+            countAndValidateHextetGroups(withoutLastColon, 0, withoutLastColon.length) == 6
+        }
     }
 
     private fun containsDotNear(text: String, start: Int, end: Int, n: Int): Boolean =

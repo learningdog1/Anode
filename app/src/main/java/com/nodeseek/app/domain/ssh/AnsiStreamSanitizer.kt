@@ -246,6 +246,7 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
     private val maxLines: Int = DEFAULT_MAX_LINES,
     private val maxLineChars: Int = DEFAULT_MAX_LINE_CHARS,
     private val maxTotalChars: Int = DEFAULT_MAX_TOTAL_CHARS,
+    private val handleFullScreenClear: Boolean = false,
 ) {
     private enum class ParserState {
         NORMAL,
@@ -518,9 +519,24 @@ class AnsiStreamSanitizer @JvmOverloads constructor(
                 }
             }
             'J' -> {
-                // Erase-in-display from cursor to end (`\u001B[J` / `\u001B[0J`) after cursor-up rewind
+                // Erase-in-display:
+                // - In interactive shells (`handleFullScreenClear = true`), honor `CSI 2J`/`3J`
+                //   (`clear`, Ctrl+L) by resetting the visible screen buffer.
+                // - In all modes, honor `\u001B[J` / `\u001B[0J` after cursor-up rewind.
                 val eraseMode = parseEraseModeParam(params)
-                if ((eraseMode == -1 || eraseMode == 0) && cursorRewindLines > 0) {
+                if (handleFullScreenClear && (eraseMode == 2 || eraseMode == 3)) {
+                    completedLines.clear()
+                    completedTotalChars = 0
+                    cachedCompletedSnapshot = emptyList()
+                    currentLine.clear()
+                    currentLineVisibleChars = 0
+                    pendingSgrAfterCr.clear()
+                    pendingCarriageReturn = false
+                    cursorRewindLines = 0
+                    droppedLineCount = 0
+                    hasTrailingNewline = false
+                    mutationVersion++
+                } else if ((eraseMode == -1 || eraseMode == 0) && cursorRewindLines > 0) {
                     repeat(cursorRewindLines.coerceAtMost(completedLines.size)) {
                         removeLastCompletedLine()
                     }

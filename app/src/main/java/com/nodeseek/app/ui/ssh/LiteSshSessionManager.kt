@@ -47,6 +47,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +63,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
 import java.util.UUID
 
 /**
@@ -90,6 +92,7 @@ class LiteSshSessionManager(
     fleetRepository: FleetRepository? = null,
     private val probeSyncClientOverride: ProbeVaultSyncClient? = null,
     private val panelTerminalExecutorOverride: LiteSshExecutor? = null,
+    private val baseHttpClient: OkHttpClient? = null,
 ) {
     private val _consoleStreamState = MutableStateFlow(SshConsoleStreamState())
     val consoleStreamState: StateFlow<SshConsoleStreamState> = _consoleStreamState.asStateFlow()
@@ -142,8 +145,14 @@ class LiteSshSessionManager(
     private var activeStdinWriter: SshStdinWriter? = null
     @Volatile
     private var activeStdinWriterGeneration: Long = 0L
+    private val stdinWriteChannel = Channel<Pair<SshStdinWriter, String>>(Channel.UNLIMITED)
 
     init {
+        externalScope.launch(Dispatchers.IO) {
+            for ((writer, payload) in stdinWriteChannel) {
+                runCatching { writer.write(payload) }
+            }
+        }
         externalScope.launch {
             vaultRepository.serversFlow.collect { servers ->
                 _uiState.update { state ->
@@ -204,9 +213,20 @@ class LiteSshSessionManager(
         synchronized(fleetAttachLock) {
             if (attachedFleetRepository === fleetRepository) return
             attachedFleetRepository = fleetRepository
-            defaultProbeSyncClient = probeSyncClientOverride ?: ProbeVaultSyncClient()
+            defaultProbeSyncClient = probeSyncClientOverride ?: if (baseHttpClient != null) {
+                ProbeVaultSyncClient(httpClient = baseHttpClient)
+            } else {
+                ProbeVaultSyncClient()
+            }
             defaultPanelTerminalExecutor = panelTerminalExecutorOverride ?: LiteSshExecutor(
-                transport = ProbePanelTerminalTransport(fleetRepository = fleetRepository),
+                transport = if (baseHttpClient != null) {
+                    ProbePanelTerminalTransport(
+                        fleetRepository = fleetRepository,
+                        httpClient = baseHttpClient,
+                    )
+                } else {
+                    ProbePanelTerminalTransport(fleetRepository = fleetRepository)
+                },
                 processingDispatcher = Dispatchers.Default,
             )
             fleetPanelsObserveJob?.cancel()
@@ -327,7 +347,13 @@ class LiteSshSessionManager(
                     }
                     return@launch
                 }
-                val syncClient = probeSyncClientOverride ?: defaultProbeSyncClient ?: ProbeVaultSyncClient()
+                val syncClient = probeSyncClientOverride
+                    ?: defaultProbeSyncClient
+                    ?: if (baseHttpClient != null) {
+                        ProbeVaultSyncClient(httpClient = baseHttpClient)
+                    } else {
+                        ProbeVaultSyncClient()
+                    }
                 val fetched = syncClient.fetchAllPanels(
                     panels = panels,
                     fallbackSnapshots = fleetRepo.snapshotsFlow.value,
@@ -441,15 +467,14 @@ class LiteSshSessionManager(
     }
 
     /**
-     * Sends raw text or control sequences (`Ctrl+C`, `Tab`, `Esc`, arrows) to the active PTY stdin.
+     * Sends raw text or control sequences (`Ctrl+C`, `Tab`, `Esc`, arrows) to the active PTY stdin
+     * through a strictly serialized FIFO channel to preserve keystroke ordering.
      */
     fun sendTerminalInput(text: String, appendNewline: Boolean = false) {
         val writer = activeStdinWriter ?: return
         val payload = if (appendNewline) "$text\r" else text
         if (payload.isEmpty()) return
-        externalScope.launch(Dispatchers.IO) {
-            runCatching { writer.write(payload) }
-        }
+        stdinWriteChannel.trySend(writer to payload)
     }
 
     fun openServerQuickPickerSheet() {
@@ -798,12 +823,12 @@ class LiteSshSessionManager(
             val server = state.selectedServer
             val cancelledRecord = SshExecutionRecord(
                 id = idGenerator(),
-                serverId = server?.id.orEmpty(),
+                serverId = state.activeServerId ?: server?.id.orEmpty(),
                 serverAlias = state.activeServerAlias ?: server?.displayName ?: "VPS",
                 serverHost = state.activeServerHost ?: server?.host.orEmpty(),
                 presetId = state.activePresetId ?: state.selectedPreset.id,
                 presetName = state.activePresetName ?: state.selectedPreset.name,
-                tabTitle = state.selectedPreset.tabTitle,
+                tabTitle = state.activeTabTitle ?: state.selectedPreset.tabTitle,
                 command = state.activeCommand,
                 sanitizedAnsiOutput = partialOutput,
                 exitCode = null,
@@ -1556,6 +1581,7 @@ class LiteSshSessionManager(
         iperf3ServiceJob?.cancel()
         fleetPanelsObserveJob?.cancel()
         probeSyncJob?.cancel()
+        stdinWriteChannel.close()
         externalScope.cancel()
     }
 
@@ -1605,10 +1631,12 @@ class LiteSshSessionManager(
                 isInteractiveSession = interactiveShell,
                 activeConnectionMode = effectiveMode,
                 connectionPhase = SshConnectionPhase.CONNECTING,
+                activeServerId = server.id,
                 activeServerAlias = server.displayName,
                 activeServerHost = server.host,
                 activePresetId = preset.id,
                 activePresetName = preset.name,
+                activeTabTitle = preset.tabTitle,
                 activeCommand = command,
                 liveAnsiOutput = "",
                 hasLiveOutputFlag = false,

@@ -99,6 +99,7 @@ class LiteSshExecutor @JvmOverloads constructor(
             val sanitizer = AnsiStreamSanitizer(
                 maxLines = maxOutputLines,
                 maxLineChars = maxLineChars,
+                handleFullScreenClear = request.interactiveShell || command.isBlank(),
             )
             val sanitizerLock = Any()
             var hasPendingOutput = false
