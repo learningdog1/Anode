@@ -215,6 +215,123 @@ class SeekMailArchiveDeleteViewModelTest {
         }
     }
 
+    @Test
+    fun `multi-select supports avatar toggle, select all, batch archive, batch read, batch tag, and batch delete with undo`() = runTest {
+        val mail1 = sampleMail(id = 21L, mailboxId = 10L, subject = "Batch One", isRead = false, receivedAt = "2026-11-23T10:01:00Z")
+        val mail2 = sampleMail(id = 22L, mailboxId = 10L, subject = "Batch Two", isRead = false, receivedAt = "2026-11-23T10:02:00Z")
+        val mail3 = sampleMail(id = 23L, mailboxId = 10L, subject = "Batch Three", isRead = true, receivedAt = "2026-11-23T10:03:00Z")
+
+        val repo = FakeSeekMailRepository(
+            mailboxes = listOf(SeekMailbox(id = 10L, address = "ops@seek.li")),
+            allMails = listOf(mail3, mail2, mail1),
+        )
+        val settings = FakeSettingsRepository().apply {
+            setSeekMailApiKey("sk_live_test_key_1234567890")
+        }
+
+        val vm = SeekMailViewModel(
+            seekMailRepository = repo,
+            settingsRepository = settings,
+        )
+        val snackbars = mutableListOf<SeekMailSnackbarEvent>()
+        val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
+        val snackbarJob = launch(testDispatcher) { vm.snackbarEvents.collect { snackbars += it } }
+
+        try {
+            // Tapping avatar (toggleMailSelection) enters selection mode directly
+            vm.toggleMailSelection(21L)
+            assertTrue(vm.uiState.value.isSelectionMode)
+            assertEquals(setOf(21L), vm.uiState.value.selectedMailIds)
+            assertFalse(vm.uiState.value.isAllVisibleSelected)
+            assertTrue(vm.uiState.value.hasUnreadSelected)
+
+            // Select all visible & toggle off
+            vm.toggleSelectAllVisible()
+            assertEquals(setOf(23L, 22L, 21L), vm.uiState.value.selectedMailIds)
+            assertTrue(vm.uiState.value.isAllVisibleSelected)
+
+            // Batch tag all 3 selected mails
+            vm.openBatchTagSheet()
+            assertEquals(3, vm.uiState.value.batchTaggingMails.size)
+            vm.createAndAttachLocalTagForBatch(name = "批量处理", colorHex = "#2563EB")
+            val tagId = vm.uiState.value.localTags.single().id
+            assertEquals(3, vm.uiState.value.localTagCounts[tagId])
+            // Toggling a tag already on all 3 removes it from all 3
+            vm.toggleLocalTagForBatch(tagId)
+            assertNull(vm.uiState.value.localTagCounts[tagId])
+            // Toggling again adds it back to all 3
+            vm.toggleLocalTagForBatch(tagId)
+            assertEquals(3, vm.uiState.value.localTagCounts[tagId])
+            vm.dismissBatchTagSheet()
+
+            // Batch mark read marks the 2 unread mails read & exits selection mode
+            vm.markSelectedMailsRead()
+            assertFalse(vm.uiState.value.isSelectionMode)
+            assertEquals(0, vm.uiState.value.unreadLoadedCount)
+            assertEquals("已将 2 封邮件标为已读", snackbars.last().message)
+
+            // Enter selection mode from long-press action sheet and select a second mail
+            vm.openMailActionSheet(mail1)
+            vm.enterSelectionModeFromActionSheet()
+            assertTrue(vm.uiState.value.isSelectionMode)
+            assertEquals(setOf(21L), vm.uiState.value.selectedMailIds)
+            vm.toggleMailSelection(22L)
+            assertEquals(setOf(21L, 22L), vm.uiState.value.selectedMailIds)
+
+            // Batch archive 2 mails + undo
+            vm.archiveSelectedMails()
+            assertFalse(vm.uiState.value.isSelectionMode)
+            assertEquals(listOf(23L), vm.uiState.value.mails.map { it.id })
+            assertEquals(2, vm.uiState.value.archivedMailCount)
+            assertEquals("已存档 2 封邮件", snackbars.last().message)
+            assertEquals("撤销", snackbars.last().actionLabel)
+
+            snackbars.last().onAction!!.invoke()
+            assertEquals(listOf(23L, 22L, 21L), vm.uiState.value.mails.map { it.id })
+            assertEquals(0, vm.uiState.value.archivedMailCount)
+
+            // Archive mail1 & mail2 again, switch to ARCHIVED, select both and batch delete + undo
+            vm.toggleMailSelection(21L)
+            vm.toggleMailSelection(22L)
+            vm.archiveSelectedMails()
+            vm.selectFilterMode(SeekMailFilterMode.ARCHIVED)
+            assertEquals(listOf(22L, 21L), vm.uiState.value.mails.map { it.id })
+
+            vm.enterSelectionMode()
+            vm.toggleSelectAllVisible()
+            assertTrue(vm.uiState.value.allSelectedAreArchived)
+
+            // Switching filter clears selection mode cleanly
+            vm.selectFilterMode(SeekMailFilterMode.ALL)
+            assertFalse(vm.uiState.value.isSelectionMode)
+            assertTrue(vm.uiState.value.selectedMailIds.isEmpty())
+
+            // Back to ARCHIVED, select both and batch delete with confirmation + undo
+            vm.selectFilterMode(SeekMailFilterMode.ARCHIVED)
+            vm.toggleSelectAllVisible()
+            vm.requestDeleteSelectedMails()
+            assertEquals(2, vm.uiState.value.pendingBatchDeleteMails.size)
+
+            vm.confirmDeleteSelectedMails()
+            assertFalse(vm.uiState.value.isSelectionMode)
+            assertTrue(vm.uiState.value.pendingBatchDeleteMails.isEmpty())
+            assertTrue(vm.uiState.value.mails.isEmpty())
+            assertEquals(0, vm.uiState.value.archivedMailCount)
+            assertEquals(1, vm.uiState.value.localTagCounts[tagId])
+            assertEquals("已从本地删除 2 封邮件", snackbars.last().message)
+            assertEquals("撤销", snackbars.last().actionLabel)
+
+            // Undo restores both archived mails & their local tag counts
+            snackbars.last().onAction!!.invoke()
+            assertEquals(2, vm.uiState.value.archivedMailCount)
+            assertEquals(listOf(22L, 21L), vm.uiState.value.mails.map { it.id })
+            assertEquals(3, vm.uiState.value.localTagCounts[tagId])
+        } finally {
+            stateJob.cancel()
+            snackbarJob.cancel()
+        }
+    }
+
     private class FakeSeekMailRepository(
         private val mailboxes: List<SeekMailbox>,
         private val allMails: List<SeekMailSummary>,

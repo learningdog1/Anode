@@ -151,6 +151,10 @@ data class SeekMailUiState(
     val archivedMailCount: Int = 0,
     val actionTargetMail: SeekMailSummary? = null,
     val pendingDeleteMail: SeekMailSummary? = null,
+    val isSelectionMode: Boolean = false,
+    val selectedMailIds: Set<Long> = emptySet(),
+    val pendingBatchDeleteMails: List<SeekMailSummary> = emptyList(),
+    val batchTaggingMails: List<SeekMailSummary> = emptyList(),
     val activeInboxUnreadCount: Int? = null,
     val isSearchExpanded: Boolean = false,
     val searchDraft: String = "",
@@ -195,6 +199,18 @@ data class SeekMailUiState(
     val unreadLoadedCount: Int
         get() = activeInboxUnreadCount ?: mails.count { !it.isRead && it.id !in archivedMailIds }
 
+    val selectedMailCount: Int
+        get() = selectedMailIds.size
+
+    val isAllVisibleSelected: Boolean
+        get() = mails.isNotEmpty() && selectedMailIds.size == mails.size
+
+    val allSelectedAreArchived: Boolean
+        get() = selectedMailIds.isNotEmpty() && selectedMailIds.all { it in archivedMailIds }
+
+    val hasUnreadSelected: Boolean
+        get() = mails.any { it.id in selectedMailIds && !it.isRead }
+
     companion object {
         val DEFAULT_DOMAINS: List<String> = listOf("seek.li", "nodeseek.org")
     }
@@ -237,6 +253,10 @@ class SeekMailViewModel(
         val taggingTargetMail: SeekMailSummary? = null,
         val actionTargetMail: SeekMailSummary? = null,
         val pendingDeleteMail: SeekMailSummary? = null,
+        val isSelectionMode: Boolean = false,
+        val selectedMailIds: Set<Long> = emptySet(),
+        val pendingBatchDeleteMails: List<SeekMailSummary> = emptyList(),
+        val batchTaggingMails: List<SeekMailSummary> = emptyList(),
         val isSearchExpanded: Boolean = false,
         val searchDraft: String = "",
         val activeSearchQuery: String = "",
@@ -412,6 +432,12 @@ class SeekMailViewModel(
         val effectiveMailsErrorMessage = if (isArchivedMode) null else state.mailsErrorMessage
         val effectiveMailsErrorKind = if (isArchivedMode) null else state.mailsErrorKind
         val activeInboxUnreadCount = activeInboxMails.count { !it.isRead }
+        val effectiveSelectedMailIds = if (!state.isSelectionMode || state.selectedMailIds.isEmpty()) {
+            emptySet()
+        } else {
+            val visibleIds = visibleMails.mapTo(HashSet(visibleMails.size)) { it.id }
+            state.selectedMailIds.filterTo(LinkedHashSet()) { it in visibleIds }
+        }
 
         val overlaidPreview = state.openedPreviewSummary?.let { preview ->
             if (!preview.isRead && preview.id in readIds) preview.copy(isRead = true) else preview
@@ -489,6 +515,10 @@ class SeekMailViewModel(
             archivedMailCount = archivedMailsForMailbox.size,
             actionTargetMail = state.actionTargetMail,
             pendingDeleteMail = state.pendingDeleteMail,
+            isSelectionMode = state.isSelectionMode,
+            selectedMailIds = effectiveSelectedMailIds,
+            pendingBatchDeleteMails = state.pendingBatchDeleteMails,
+            batchTaggingMails = state.batchTaggingMails,
             activeInboxUnreadCount = activeInboxUnreadCount,
             isSearchExpanded = state.isSearchExpanded,
             searchDraft = state.searchDraft,
@@ -736,7 +766,7 @@ class SeekMailViewModel(
     fun selectMailbox(mailboxId: Long?) {
         val current = _internalState.value
         if (current.selectedMailboxId == mailboxId && current.mailsErrorMessage == null) return
-        _internalState.update { it.copy(selectedMailboxId = mailboxId) }
+        _internalState.update { it.withoutSelection().copy(selectedMailboxId = mailboxId) }
         if (current.filterMode != SeekMailFilterMode.ARCHIVED) {
             loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
         }
@@ -749,7 +779,7 @@ class SeekMailViewModel(
             return
         }
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 filterMode = mode,
                 selectedTagId = null,
                 selectedLocalTagId = null,
@@ -771,7 +801,7 @@ class SeekMailViewModel(
         val current = _internalState.value
         val nextTagId = if (current.selectedTagId == tagId) null else tagId
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 filterMode = SeekMailFilterMode.ALL,
                 selectedTagId = nextTagId,
                 selectedLocalTagId = null,
@@ -793,7 +823,7 @@ class SeekMailViewModel(
                 current.mailsErrorMessage != null
             )
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 filterMode = nextFilterMode,
                 selectedTagId = null,
                 selectedLocalTagId = nextLocalTagId,
@@ -803,6 +833,292 @@ class SeekMailViewModel(
             loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
         }
     }
+
+    // ── Multi-Select & Batch Operations ──────────────────────────────────────
+
+    fun enterSelectionMode(initialMailId: Long? = null) {
+        _internalState.update { current ->
+            current.copy(
+                isSelectionMode = true,
+                selectedMailIds = if (initialMailId != null) setOf(initialMailId) else emptySet(),
+                actionTargetMail = null,
+                taggingTargetMail = null,
+                pendingDeleteMail = null,
+                pendingBatchDeleteMails = emptyList(),
+                batchTaggingMails = emptyList(),
+            )
+        }
+    }
+
+    fun enterSelectionModeFromActionSheet() {
+        val targetId = _internalState.value.actionTargetMail?.id
+        enterSelectionMode(initialMailId = targetId)
+    }
+
+    fun exitSelectionMode() {
+        _internalState.update { it.withoutSelection() }
+    }
+
+    fun toggleMailSelection(mailId: Long) {
+        if (mailId <= 0L) return
+        _internalState.update { current ->
+            if (!current.isSelectionMode) {
+                current.copy(
+                    isSelectionMode = true,
+                    selectedMailIds = setOf(mailId),
+                    actionTargetMail = null,
+                    taggingTargetMail = null,
+                    pendingDeleteMail = null,
+                )
+            } else {
+                val next = if (mailId in current.selectedMailIds) {
+                    current.selectedMailIds - mailId
+                } else {
+                    current.selectedMailIds + mailId
+                }
+                current.copy(selectedMailIds = next)
+            }
+        }
+    }
+
+    fun toggleSelectAllVisible() {
+        val visibleIds = uiState.value.mails.map { it.id }
+        if (visibleIds.isEmpty()) return
+        _internalState.update { current ->
+            val visibleSet = visibleIds.toSet()
+            val allSelected = visibleSet.all { it in current.selectedMailIds }
+            current.copy(
+                isSelectionMode = true,
+                selectedMailIds = if (allSelected) emptySet() else visibleSet,
+            )
+        }
+    }
+
+    private fun resolveSelectedVisibleMails(): List<SeekMailSummary> {
+        val selectedIds = _internalState.value.selectedMailIds
+        if (selectedIds.isEmpty()) return emptyList()
+        return uiState.value.mails.filter { it.id in selectedIds }
+    }
+
+    fun archiveSelectedMails() {
+        val targets = resolveSelectedVisibleMails()
+        if (targets.isEmpty()) return
+        archiveMailsBatch(targets = targets, showUndoSnackbar = true)
+    }
+
+    fun unarchiveSelectedMails() {
+        val targets = resolveSelectedVisibleMails()
+        if (targets.isEmpty()) return
+        unarchiveMailsBatch(targets = targets, showUndoSnackbar = true)
+    }
+
+    private fun archiveMailsBatch(
+        targets: List<SeekMailSummary>,
+        showUndoSnackbar: Boolean,
+        feedbackMessage: String? = null,
+    ) {
+        if (targets.isEmpty()) return
+        val targetIds = targets.mapTo(HashSet(targets.size)) { it.id }
+        val shouldCloseDetail = _internalState.value.openedMailId in targetIds
+        _internalState.update { current ->
+            current.withoutSelection().copy(
+                actionTargetMail = if (current.actionTargetMail?.id in targetIds) null else current.actionTargetMail,
+                taggingTargetMail = if (current.taggingTargetMail?.id in targetIds) null else current.taggingTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.archiveMailsLocally(targets)
+            if (showUndoSnackbar) {
+                emitSnackbar(
+                    message = "已存档 ${targets.size} 封邮件",
+                    actionLabel = "撤销",
+                    onAction = {
+                        unarchiveMailsBatch(
+                            targets = targets,
+                            showUndoSnackbar = false,
+                            feedbackMessage = "已撤销存档",
+                        )
+                    },
+                )
+            } else if (!feedbackMessage.isNullOrBlank()) {
+                emitSnackbar(feedbackMessage)
+            }
+        }
+    }
+
+    private fun unarchiveMailsBatch(
+        targets: List<SeekMailSummary>,
+        showUndoSnackbar: Boolean,
+        feedbackMessage: String? = null,
+    ) {
+        if (targets.isEmpty()) return
+        val targetIds = targets.mapTo(HashSet(targets.size)) { it.id }
+        val stateSnapshot = _internalState.value
+        val shouldCloseDetail = stateSnapshot.openedMailId in targetIds &&
+            stateSnapshot.filterMode == SeekMailFilterMode.ARCHIVED
+        _internalState.update { current ->
+            current.withoutSelection().copy(
+                actionTargetMail = if (current.actionTargetMail?.id in targetIds) null else current.actionTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.unarchiveMailsLocally(targetIds)
+            targets.forEach { mergeMailBackIntoInboxIfCompatible(it) }
+            if (showUndoSnackbar) {
+                emitSnackbar(
+                    message = "已取消存档 ${targets.size} 封邮件",
+                    actionLabel = "撤销",
+                    onAction = {
+                        archiveMailsBatch(
+                            targets = targets,
+                            showUndoSnackbar = false,
+                            feedbackMessage = "已重新存档",
+                        )
+                    },
+                )
+            } else if (!feedbackMessage.isNullOrBlank()) {
+                emitSnackbar(feedbackMessage)
+            }
+        }
+    }
+
+    fun markSelectedMailsRead() {
+        val targets = resolveSelectedVisibleMails().filter { !it.isRead }
+        _internalState.update { it.withoutSelection() }
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            seekMailRepository.markMailsReadLocally(targets.map { it.id })
+            emitSnackbar("已将 ${targets.size} 封邮件标为已读")
+        }
+    }
+
+    fun requestDeleteSelectedMails() {
+        val targets = resolveSelectedVisibleMails()
+        if (targets.isEmpty()) return
+        _internalState.update { it.copy(pendingBatchDeleteMails = targets) }
+    }
+
+    fun dismissBatchDeleteDialog() {
+        _internalState.update { it.copy(pendingBatchDeleteMails = emptyList()) }
+    }
+
+    fun confirmDeleteSelectedMails() {
+        val targets = _internalState.value.pendingBatchDeleteMails
+        if (targets.isEmpty()) return
+        val targetIds = targets.mapTo(HashSet(targets.size)) { it.id }
+        val archiveStore = seekMailRepository.localArchiveStore.value
+        val previouslyArchived = targets.filter { archiveStore.isArchived(it.id) }
+        val shouldCloseDetail = _internalState.value.openedMailId in targetIds
+        _internalState.update { current ->
+            current.withoutSelection().copy(
+                actionTargetMail = if (current.actionTargetMail?.id in targetIds) null else current.actionTargetMail,
+                pendingDeleteMail = if (current.pendingDeleteMail?.id in targetIds) null else current.pendingDeleteMail,
+                taggingTargetMail = if (current.taggingTargetMail?.id in targetIds) null else current.taggingTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.deleteMailsLocally(targetIds)
+            emitSnackbar(
+                message = "已从本地删除 ${targets.size} 封邮件",
+                actionLabel = "撤销",
+                onAction = {
+                    restoreDeletedMailsBatch(
+                        targets = targets,
+                        previouslyArchived = previouslyArchived,
+                    )
+                },
+            )
+        }
+    }
+
+    private fun restoreDeletedMailsBatch(
+        targets: List<SeekMailSummary>,
+        previouslyArchived: List<SeekMailSummary>,
+    ) {
+        if (targets.isEmpty()) return
+        val archivedIds = previouslyArchived.mapTo(HashSet(previouslyArchived.size)) { it.id }
+        viewModelScope.launch {
+            seekMailRepository.restoreDeletedMailsLocally(
+                mailIds = targets.map { it.id },
+                restoredArchiveSummaries = previouslyArchived,
+            )
+            targets.forEach { summary ->
+                if (summary.id !in archivedIds) {
+                    mergeMailBackIntoInboxIfCompatible(summary)
+                }
+            }
+            emitSnackbar("已恢复 ${targets.size} 封邮件")
+        }
+    }
+
+    fun openBatchTagSheet() {
+        val targets = resolveSelectedVisibleMails()
+        if (targets.isEmpty()) return
+        _internalState.update { it.copy(batchTaggingMails = targets) }
+    }
+
+    fun dismissBatchTagSheet() {
+        _internalState.update { it.copy(batchTaggingMails = emptyList()) }
+    }
+
+    fun toggleLocalTagForBatch(tagId: String) {
+        val targets = _internalState.value.batchTaggingMails
+        if (targets.isEmpty() || tagId.isBlank()) return
+        val targetIds = targets.map { it.id }
+        viewModelScope.launch {
+            val tagMap = seekMailRepository.localTagStore.value.mailTagIds
+            val allHaveTag = targetIds.all { mailId -> tagId in tagMap[mailId].orEmpty() }
+            if (allHaveTag) {
+                seekMailRepository.removeLocalTagFromMails(targetIds, tagId)
+            } else {
+                seekMailRepository.addLocalTagToMails(targetIds, tagId)
+            }
+        }
+    }
+
+    fun createAndAttachLocalTagForBatch(name: String, colorHex: String) {
+        val trimmed = name.trim()
+        val targets = _internalState.value.batchTaggingMails
+        if (trimmed.isEmpty() || targets.isEmpty()) return
+        val targetIds = targets.map { it.id }
+        viewModelScope.launch {
+            seekMailRepository.createLocalTag(name = trimmed, colorHex = colorHex)
+                .onSuccess { created ->
+                    seekMailRepository.addLocalTagToMails(targetIds, created.id)
+                    emitSnackbar("已为 ${targets.size} 封邮件打上标签「${created.name}」")
+                }
+                .onFailure { err ->
+                    emitSnackbar(
+                        err.message?.takeIf { it.isNotBlank() } ?: "创建标签失败",
+                    )
+                }
+        }
+    }
+
+    fun clearLocalTagsForBatch() {
+        val targets = _internalState.value.batchTaggingMails
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            seekMailRepository.clearLocalTagsForMails(targets.map { it.id })
+            emitSnackbar("已清空 ${targets.size} 封邮件的本地标签")
+        }
+    }
+
+    private fun InternalState.withoutSelection(): InternalState = copy(
+        isSelectionMode = false,
+        selectedMailIds = emptySet(),
+        pendingBatchDeleteMails = emptyList(),
+        batchTaggingMails = emptyList(),
+    )
 
     fun openMailActionSheet(summary: SeekMailSummary) {
         _internalState.update { it.copy(actionTargetMail = summary) }
@@ -1065,7 +1381,7 @@ class SeekMailViewModel(
         }
         val staysArchived = current.filterMode == SeekMailFilterMode.ARCHIVED
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 searchDraft = query,
                 activeSearchQuery = query,
                 filterMode = if (query.isNotEmpty() && !staysArchived) SeekMailFilterMode.ALL else it.filterMode,
@@ -1080,7 +1396,7 @@ class SeekMailViewModel(
         val current = _internalState.value
         val hadActiveSearch = current.activeSearchQuery.isNotBlank()
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 searchDraft = "",
                 activeSearchQuery = "",
             )
@@ -1092,7 +1408,7 @@ class SeekMailViewModel(
 
     fun clearAllFilters() {
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 selectedMailboxId = null,
                 filterMode = SeekMailFilterMode.ALL,
                 selectedTagId = null,
@@ -1525,7 +1841,7 @@ class SeekMailViewModel(
     fun filterMailsByContact(contact: SeekMailContact) {
         val email = contact.email.trim()
         _internalState.update {
-            it.copy(
+            it.withoutSelection().copy(
                 showContactsSheet = false,
                 isSearchExpanded = true,
                 searchDraft = email,

@@ -70,6 +70,10 @@ interface SeekMailRepository {
 
     suspend fun markMailReadLocally(mailId: Long)
 
+    suspend fun markMailsReadLocally(mailIds: Collection<Long>) {
+        mailIds.forEach { markMailReadLocally(it) }
+    }
+
     suspend fun createLocalTag(
         name: String,
         colorHex: String,
@@ -81,16 +85,60 @@ interface SeekMailRepository {
 
     suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) = Unit
 
+    suspend fun addLocalTagToMails(mailIds: Collection<Long>, tagId: String) {
+        mailIds.forEach { mailId ->
+            val current = localTagStore.value.mailTagIds[mailId].orEmpty()
+            if (tagId !in current) {
+                toggleLocalTagForMail(mailId, tagId)
+            }
+        }
+    }
+
+    suspend fun removeLocalTagFromMails(mailIds: Collection<Long>, tagId: String) {
+        mailIds.forEach { mailId ->
+            val current = localTagStore.value.mailTagIds[mailId].orEmpty()
+            if (tagId in current) {
+                toggleLocalTagForMail(mailId, tagId)
+            }
+        }
+    }
+
+    suspend fun clearLocalTagsForMails(mailIds: Collection<Long>) {
+        mailIds.forEach { setLocalTagsForMail(it, emptyList()) }
+    }
+
     suspend fun archiveMailLocally(summary: SeekMailSummary) = Unit
+
+    suspend fun archiveMailsLocally(summaries: Collection<SeekMailSummary>) {
+        summaries.forEach { archiveMailLocally(it) }
+    }
 
     suspend fun unarchiveMailLocally(mailId: Long) = Unit
 
+    suspend fun unarchiveMailsLocally(mailIds: Collection<Long>) {
+        mailIds.forEach { unarchiveMailLocally(it) }
+    }
+
     suspend fun deleteMailLocally(mailId: Long) = Unit
+
+    suspend fun deleteMailsLocally(mailIds: Collection<Long>) {
+        mailIds.forEach { deleteMailLocally(it) }
+    }
 
     suspend fun restoreDeletedMailLocally(
         mailId: Long,
         restoredArchiveSummary: SeekMailSummary? = null,
     ) = Unit
+
+    suspend fun restoreDeletedMailsLocally(
+        mailIds: Collection<Long>,
+        restoredArchiveSummaries: Collection<SeekMailSummary> = emptyList(),
+    ) {
+        val archiveById = restoredArchiveSummaries.associateBy { it.id }
+        mailIds.forEach { id ->
+            restoreDeletedMailLocally(id, archiveById[id])
+        }
+    }
 
     suspend fun clearCache()
 }

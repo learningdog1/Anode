@@ -463,4 +463,82 @@ class SeekMailRepositoryTest {
             repo.localArchiveStore.first { it.archivedMails.isEmpty() && it.deletedMailIds.isEmpty() }
         }
     }
+
+    @Test
+    fun `batch read, tag, archive, delete, and restore operations persist atomically across restarts`(): Unit = runBlocking {
+        val repo = createRepository()
+        settingsRepository.setSeekMailApiKey(dummyKeyA)
+
+        val m1 = SeekMailSummary(
+            id = 1001L,
+            mailboxId = 10L,
+            fromAddress = "a@example.com",
+            fromName = "A",
+            toAddress = "box@seek.li",
+            subject = "One",
+            snippet = "S1",
+            receivedAt = "2026-11-23T08:00:00Z",
+        )
+        val m2 = SeekMailSummary(
+            id = 1002L,
+            mailboxId = 10L,
+            fromAddress = "b@example.com",
+            fromName = "B",
+            toAddress = "box@seek.li",
+            subject = "Two",
+            snippet = "S2",
+            receivedAt = "2026-11-23T09:00:00Z",
+        )
+        val m3 = SeekMailSummary(
+            id = 1003L,
+            mailboxId = 10L,
+            fromAddress = "c@example.com",
+            fromName = "C",
+            toAddress = "box@seek.li",
+            subject = "Three",
+            snippet = "S3",
+            receivedAt = "2026-11-23T10:00:00Z",
+        )
+
+        val tag = repo.createLocalTag("批量", "#2563EB").getOrThrow()
+        repo.addLocalTagToMails(listOf(1001L, 1002L, 1003L), tag.id)
+        assertEquals(3, repo.localTagStore.value.mailCountForTag(tag.id))
+
+        repo.removeLocalTagFromMails(listOf(1002L), tag.id)
+        assertEquals(2, repo.localTagStore.value.mailCountForTag(tag.id))
+
+        repo.markMailsReadLocally(listOf(1001L, 1002L))
+        assertTrue(1001L in repo.locallyReadMailIds.value && 1002L in repo.locallyReadMailIds.value)
+
+        repo.archiveMailsLocally(listOf(m1, m2))
+        assertEquals(listOf(1002L, 1001L), repo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+
+        repo.deleteMailsLocally(listOf(1002L, 1003L))
+        assertTrue(repo.localArchiveStore.value.isDeleted(1002L))
+        assertTrue(repo.localArchiveStore.value.isDeleted(1003L))
+        assertEquals(listOf(1001L), repo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+
+        repo.restoreDeletedMailsLocally(
+            mailIds = listOf(1002L, 1003L),
+            restoredArchiveSummaries = listOf(m2),
+        )
+        assertTrue(repo.localArchiveStore.value.isArchived(1002L))
+        assertTrue(!repo.localArchiveStore.value.isArchived(1003L))
+        assertTrue(!repo.localArchiveStore.value.isDeleted(1003L))
+
+        val coldScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val coldRepo = createRepository(coldScope)
+            withTimeout(5_000L) {
+                coldRepo.localArchiveStore.first { it.archivedMails.size == 2 }
+            }
+            assertEquals(setOf(1001L, 1002L), coldRepo.locallyReadMailIds.value)
+            assertEquals(2, coldRepo.localTagStore.value.mailCountForTag(tag.id))
+
+            coldRepo.clearLocalTagsForMails(listOf(1001L, 1003L))
+            assertEquals(0, coldRepo.localTagStore.value.mailCountForTag(tag.id))
+        } finally {
+            coldScope.cancel()
+        }
+    }
 }

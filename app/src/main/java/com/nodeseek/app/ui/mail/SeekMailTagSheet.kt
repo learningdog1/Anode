@@ -102,6 +102,9 @@ internal fun SeekMailTagBottomSheet(
     onClearMailTags: () -> Unit,
     onDeleteTagDefinition: (String) -> Unit,
     onDismiss: () -> Unit,
+    headerTitle: String = "邮件标签",
+    headerSubtitle: String? = null,
+    showClearButton: Boolean = assignedTagIds.isNotEmpty(),
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val haptics = LocalHapticFeedback.current
@@ -173,19 +176,19 @@ internal fun SeekMailTagBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(1.dp),
                 ) {
                     Text(
-                        text = "邮件标签",
+                        text = headerTitle,
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = mail.subject.ifBlank { mail.fromName.ifBlank { mail.fromAddress } },
+                        text = headerSubtitle ?: mail.subject.ifBlank { mail.fromName.ifBlank { mail.fromAddress } },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (assignedTagIds.isNotEmpty()) {
+                if (showClearButton) {
                     TextButton(
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)

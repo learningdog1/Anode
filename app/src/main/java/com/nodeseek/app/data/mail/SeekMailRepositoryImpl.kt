@@ -352,6 +352,21 @@ class SeekMailRepositoryImpl(
         markMailReadLocallyForKey(key, mailId)
     }
 
+    override suspend fun markMailsReadLocally(mailIds: Collection<Long>) {
+        val validIds = mailIds.filter { it > 0L }
+        if (validIds.isEmpty()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _locallyReadMailIds.value
+            val updated = current + validIds
+            if (updated == current) return
+            _locallyReadMailIds.value = updated
+            diskCache?.saveLocallyReadIds(key, updated)
+        }
+    }
+
     override suspend fun createLocalTag(
         name: String,
         colorHex: String,
@@ -460,18 +475,104 @@ class SeekMailRepositoryImpl(
         }
     }
 
+    override suspend fun addLocalTagToMails(mailIds: Collection<Long>, tagId: String) {
+        val validIds = mailIds.filter { it > 0L }
+        if (validIds.isEmpty() || tagId.isBlank()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            if (current.tags.none { it.id == tagId }) return
+            val nextMap = current.mailTagIds.toMutableMap()
+            var changed = false
+            validIds.forEach { mailId ->
+                val existing = nextMap[mailId].orEmpty()
+                if (tagId !in existing) {
+                    nextMap[mailId] = existing + tagId
+                    changed = true
+                }
+            }
+            if (!changed) return
+            val updated = current.copy(mailTagIds = nextMap)
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
+    override suspend fun removeLocalTagFromMails(mailIds: Collection<Long>, tagId: String) {
+        val validIds = mailIds.filter { it > 0L }
+        if (validIds.isEmpty() || tagId.isBlank()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            val nextMap = current.mailTagIds.toMutableMap()
+            var changed = false
+            validIds.forEach { mailId ->
+                val existing = nextMap[mailId].orEmpty()
+                if (tagId in existing) {
+                    val remaining = existing.filterNot { it == tagId }
+                    if (remaining.isEmpty()) nextMap.remove(mailId) else nextMap[mailId] = remaining
+                    changed = true
+                }
+            }
+            if (!changed) return
+            val updated = current.copy(mailTagIds = nextMap)
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
+    override suspend fun clearLocalTagsForMails(mailIds: Collection<Long>) {
+        val validIds = mailIds.filter { it > 0L }
+        if (validIds.isEmpty()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            val nextMap = current.mailTagIds.toMutableMap()
+            var changed = false
+            validIds.forEach { mailId ->
+                if (nextMap.remove(mailId) != null) {
+                    changed = true
+                }
+            }
+            if (!changed) return
+            val updated = current.copy(mailTagIds = nextMap)
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
     override suspend fun archiveMailLocally(summary: SeekMailSummary) {
-        if (summary.id <= 0L) return
+        archiveMailsLocally(listOf(summary))
+    }
+
+    override suspend fun archiveMailsLocally(summaries: Collection<SeekMailSummary>) {
+        val validSummaries = summaries.filter { it.id > 0L }
+        if (validSummaries.isEmpty()) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
         stateMutex.withLock {
             if (activeKey != key) return
             val current = _localArchiveStore.value
-            val normalizedSummary = overlayReadState(summary, _locallyReadMailIds.value)
+            val readIds = _locallyReadMailIds.value
+            val now = System.currentTimeMillis()
+            val nextArchived = current.archivedMails.toMutableMap()
+            val nextArchivedAt = current.archivedAtMillis.toMutableMap()
+            val nextDeleted = current.deletedMailIds.toMutableSet()
+            validSummaries.forEach { summary ->
+                nextArchived[summary.id] = overlayReadState(summary, readIds)
+                nextArchivedAt[summary.id] = now
+                nextDeleted.remove(summary.id)
+            }
             val updated = current.copy(
-                archivedMails = current.archivedMails + (summary.id to normalizedSummary),
-                archivedAtMillis = current.archivedAtMillis + (summary.id to System.currentTimeMillis()),
-                deletedMailIds = current.deletedMailIds - summary.id,
+                archivedMails = nextArchived,
+                archivedAtMillis = nextArchivedAt,
+                deletedMailIds = nextDeleted,
             )
             _localArchiveStore.value = updated
             diskCache?.saveLocalArchiveStore(key, updated)
@@ -479,16 +580,23 @@ class SeekMailRepositoryImpl(
     }
 
     override suspend fun unarchiveMailLocally(mailId: Long) {
-        if (mailId <= 0L) return
+        unarchiveMailsLocally(listOf(mailId))
+    }
+
+    override suspend fun unarchiveMailsLocally(mailIds: Collection<Long>) {
+        val validIds = mailIds.filter { it > 0L }
+        if (validIds.isEmpty()) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
         stateMutex.withLock {
             if (activeKey != key) return
             val current = _localArchiveStore.value
-            if (mailId !in current.archivedMails && mailId !in current.archivedAtMillis) return
+            val nextArchived = current.archivedMails - validIds.toSet()
+            val nextArchivedAt = current.archivedAtMillis - validIds.toSet()
+            if (nextArchived == current.archivedMails && nextArchivedAt == current.archivedAtMillis) return
             val updated = current.copy(
-                archivedMails = current.archivedMails - mailId,
-                archivedAtMillis = current.archivedAtMillis - mailId,
+                archivedMails = nextArchived,
+                archivedAtMillis = nextArchivedAt,
             )
             _localArchiveStore.value = updated
             diskCache?.saveLocalArchiveStore(key, updated)
@@ -496,16 +604,21 @@ class SeekMailRepositoryImpl(
     }
 
     override suspend fun deleteMailLocally(mailId: Long) {
-        if (mailId <= 0L) return
+        deleteMailsLocally(listOf(mailId))
+    }
+
+    override suspend fun deleteMailsLocally(mailIds: Collection<Long>) {
+        val validIds = mailIds.filter { it > 0L }.toSet()
+        if (validIds.isEmpty()) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
         stateMutex.withLock {
             if (activeKey != key) return
             val current = _localArchiveStore.value
             val updated = current.copy(
-                archivedMails = current.archivedMails - mailId,
-                archivedAtMillis = current.archivedAtMillis - mailId,
-                deletedMailIds = current.deletedMailIds + mailId,
+                archivedMails = current.archivedMails - validIds,
+                archivedAtMillis = current.archivedAtMillis - validIds,
+                deletedMailIds = current.deletedMailIds + validIds,
             )
             if (updated == current) return
             _localArchiveStore.value = updated
@@ -517,27 +630,37 @@ class SeekMailRepositoryImpl(
         mailId: Long,
         restoredArchiveSummary: SeekMailSummary?,
     ) {
-        if (mailId <= 0L) return
+        restoreDeletedMailsLocally(
+            mailIds = listOf(mailId),
+            restoredArchiveSummaries = listOfNotNull(restoredArchiveSummary),
+        )
+    }
+
+    override suspend fun restoreDeletedMailsLocally(
+        mailIds: Collection<Long>,
+        restoredArchiveSummaries: Collection<SeekMailSummary>,
+    ) {
+        val validIds = mailIds.filter { it > 0L }.toSet()
+        if (validIds.isEmpty()) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
         stateMutex.withLock {
             if (activeKey != key) return
             val current = _localArchiveStore.value
-            val normalizedArchive = restoredArchiveSummary?.let {
-                overlayReadState(it, _locallyReadMailIds.value)
+            val readIds = _locallyReadMailIds.value
+            val now = System.currentTimeMillis()
+            val nextArchived = current.archivedMails.toMutableMap()
+            val nextArchivedAt = current.archivedAtMillis.toMutableMap()
+            restoredArchiveSummaries.forEach { summary ->
+                if (summary.id in validIds) {
+                    nextArchived[summary.id] = overlayReadState(summary, readIds)
+                    nextArchivedAt[summary.id] = now
+                }
             }
             val updated = current.copy(
-                archivedMails = if (normalizedArchive != null) {
-                    current.archivedMails + (mailId to normalizedArchive)
-                } else {
-                    current.archivedMails
-                },
-                archivedAtMillis = if (normalizedArchive != null) {
-                    current.archivedAtMillis + (mailId to System.currentTimeMillis())
-                } else {
-                    current.archivedAtMillis
-                },
-                deletedMailIds = current.deletedMailIds - mailId,
+                archivedMails = nextArchived,
+                archivedAtMillis = nextArchivedAt,
+                deletedMailIds = current.deletedMailIds - validIds,
             )
             if (updated == current) return
             _localArchiveStore.value = updated
