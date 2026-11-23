@@ -1101,91 +1101,67 @@ private fun AssetsTabContent(
         )
     }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item(key = "assets_header_bar", contentType = "assets_header") {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = "按到期倒计时排序 · 共 ${uiState.assets.size} 台",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 84.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item(key = "assets_renewal_timeline", contentType = "assets_timeline") {
+                AssetRenewalTimelineStrip(
+                    totalAssetCount = uiState.assets.size,
+                    upcomingRenewals = uiState.portfolioSummary.upcomingRenewals,
+                    modifier = Modifier.padding(bottom = 2.dp),
                 )
-                FilledTonalButton(
-                    onClick = onAddAsset,
-                    shape = CircleShape,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "录入小鸡",
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        softWrap = false,
+            }
+
+            if (sortedAssets.isEmpty()) {
+                item(key = "assets_empty", contentType = "empty_state") {
+                    FleetEmptyStateCard(
+                        icon = Icons.Rounded.Storage,
+                        title = "资产账本还是空的",
+                        description = "记录每台 VPS 的配置、线路、续费币种与到期日，自动折算月均/年化人民币开销，并支持「不想续了 · 一键估值出机」。",
+                        actionLabel = "录入第一台服务器",
+                        onAction = onAddAsset,
+                    )
+                }
+            } else {
+                items(
+                    items = sortedAssets,
+                    key = { asset -> asset.id },
+                    contentType = { "asset_card" },
+                ) { asset ->
+                    val renewal = renewalsByAssetId[asset.id]
+                    val linkedProbe = asset.linkedProbeKey?.let { probesByKey[it] }
+                    val trafficForecast = asset.linkedProbeKey?.let { uiState.trafficForecastsByProbeKey[it] }
+                    val idleAssessment = asset.linkedProbeKey?.let { uiState.idleAssessmentsByProbeKey[it] }
+                    VpsAssetCard(
+                        asset = asset,
+                        renewalItem = renewal,
+                        linkedProbe = linkedProbe,
+                        trafficForecast = trafficForecast,
+                        idleAssessment = idleAssessment,
+                        onEdit = { onEditAsset(asset) },
+                        onMarkRenewed = { onRequestRenewAsset(asset, renewal) },
+                        onDelete = { onRequestDeleteAsset(asset) },
+                        onBindProbe = { onBindProbe(asset) },
+                        onOpenSalePost = { onOpenSalePost(asset) },
+                        onOpenUrl = onOpenUrl,
+                        modifier = Modifier.animateItem(),
                     )
                 }
             }
         }
 
-        if (uiState.idleServers.isNotEmpty()) {
-            item(key = "assets_idle_banner", contentType = "idle_banner") {
-                IdleFleetSummaryBanner(
-                    idleServers = uiState.idleServers,
-                    onOpenIdleSalePost = onOpenIdleSalePost,
-                )
-            }
-        }
-
-        if (sortedAssets.isEmpty()) {
-            item(key = "assets_empty", contentType = "empty_state") {
-                FleetEmptyStateCard(
-                    icon = Icons.Rounded.Storage,
-                    title = "资产账本还是空的",
-                    description = "记录每台 VPS 的配置、线路、续费币种与到期日，自动折算月均/年化人民币开销，并支持「不想续了 · 一键估值出机」。",
-                    actionLabel = "录入第一台服务器",
-                    onAction = onAddAsset,
-                )
-            }
-        } else {
-            items(
-                items = sortedAssets,
-                key = { asset -> asset.id },
-                contentType = { "asset_card" },
-            ) { asset ->
-                val renewal = renewalsByAssetId[asset.id]
-                val linkedProbe = asset.linkedProbeKey?.let { probesByKey[it] }
-                val trafficForecast = asset.linkedProbeKey?.let { uiState.trafficForecastsByProbeKey[it] }
-                val idleAssessment = asset.linkedProbeKey?.let { uiState.idleAssessmentsByProbeKey[it] }
-                VpsAssetCard(
-                    asset = asset,
-                    renewalItem = renewal,
-                    linkedProbe = linkedProbe,
-                    trafficForecast = trafficForecast,
-                    idleAssessment = idleAssessment,
-                    onEdit = { onEditAsset(asset) },
-                    onMarkRenewed = { onRequestRenewAsset(asset, renewal) },
-                    onDelete = { onRequestDeleteAsset(asset) },
-                    onBindProbe = { onBindProbe(asset) },
-                    onOpenSalePost = { onOpenSalePost(asset) },
-                    onOpenUrl = onOpenUrl,
-                    modifier = Modifier.animateItem(),
-                )
-            }
-        }
+        AddAssetFloatingPill(
+            onClick = onAddAsset,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(end = 16.dp, bottom = 14.dp),
+        )
     }
 }
 
@@ -1204,593 +1180,20 @@ private fun VpsAssetCard(
     onOpenUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val urgency = renewalItem?.urgency
-
-    val isRenewalDue = renewalItem?.isRenewalDue == true
-
-    val displayTags = remember(asset.tags, asset.routeTag) { asset.resolvedTags }
-
-    val badgeText = when (urgency) {
-        AssetExpiryUrgency.EXPIRED -> {
-            val overdue = (-renewalItem.daysRemaining).coerceAtLeast(1L)
-            "已过期 ${overdue}天"
-        }
-        AssetExpiryUrgency.CRITICAL -> {
-            when {
-                renewalItem.daysRemaining == 0L -> "今日到期"
-                isRenewalDue -> "剩 ${renewalItem.daysRemaining} 天 · 待续费"
-                else -> "剩 ${renewalItem.daysRemaining} 天"
-            }
-        }
-        AssetExpiryUrgency.WARNING,
-        AssetExpiryUrgency.NORMAL,
-        -> if (isRenewalDue) {
-            "剩 ${renewalItem.daysRemaining} 天 · 待续费"
-        } else {
-            "剩 ${renewalItem.daysRemaining} 天"
-        }
-        else -> "日期待补"
-    }
-    val badgeIcon: ImageVector? = when {
-        urgency == AssetExpiryUrgency.EXPIRED -> Icons.Rounded.WarningAmber
-        urgency == AssetExpiryUrgency.CRITICAL -> Icons.Rounded.Schedule
-        isRenewalDue -> Icons.Rounded.NotificationsActive
-        else -> null
-    }
-    val badgeFg = when {
-        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
-            MaterialTheme.colorScheme.onErrorContainer
-        isRenewalDue -> ext.onDrumstickContainer
-        urgency == AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.onSecondaryContainer
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    val badgeBg = when {
-        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
-            MaterialTheme.colorScheme.errorContainer
-        isRenewalDue -> ext.drumstickContainer
-        urgency == AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.secondaryContainer
-        else -> MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val cardAccentColor: Color? = when {
-        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
-            MaterialTheme.colorScheme.error
-        isRenewalDue -> ext.onDrumstickContainer
-        else -> null
-    }
-    val cardBorderColor = when {
-        urgency == AssetExpiryUrgency.EXPIRED ->
-            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.55f else 0.45f)
-        urgency == AssetExpiryUrgency.CRITICAL ->
-            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.42f else 0.34f)
-        isRenewalDue ->
-            ext.onDrumstickContainer.copy(alpha = if (isDark) 0.42f else 0.32f)
-        else -> ext.cardBorder
-    }
-    val expiryTextColor = when {
-        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
-            MaterialTheme.colorScheme.error
-        isRenewalDue -> ext.onDrumstickContainer
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.ElevatedTile,
-                containerColor = ext.cardSurface,
-                borderColor = cardBorderColor,
-                accentColor = cardAccentColor,
-                elevation = PulseElevation.Card,
-            )
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        // Header: Nickname + Provider/Region + Expressive Countdown Badge
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Text(
-                    text = asset.nickname,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                val metaText = remember(asset.providerName, asset.region) {
-                    buildList {
-                        if (asset.providerName.isNotBlank()) add(asset.providerName)
-                        if (asset.region.isNotBlank()) add(asset.region)
-                    }.joinToString(" · ")
-                }
-                if (metaText.isNotBlank()) {
-                    Text(
-                        text = metaText,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-
-            PulseAccentPill(
-                text = badgeText,
-                icon = badgeIcon,
-                containerColor = badgeBg,
-                contentColor = badgeFg,
-            )
-        }
-
-        // Multi-Select Tags & Metadata Chips
-        val hasMetadataChips = displayTags.isNotEmpty() ||
-            asset.autoRenew ||
-            asset.trafficResetDay != null ||
-            asset.autoRenewNote.isNotBlank() ||
-            idleAssessment?.isIdle == true
-        if (hasMetadataChips) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                displayTags.forEach { tag ->
-                    PulseAccentPill(
-                        text = tag,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.72f else 0.85f),
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                }
-                if (asset.autoRenew) {
-                    PulseAccentPill(
-                        text = "自动续费",
-                        icon = Icons.Rounded.Autorenew,
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = if (isDark) 0.78f else 0.90f),
-                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                    )
-                }
-                if (asset.trafficResetDay != null) {
-                    PulseAccentPill(
-                        text = "每月 ${asset.trafficResetDay} 号重置",
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (asset.autoRenewNote.isNotBlank()) {
-                    PulseAccentPill(
-                        text = asset.autoRenewNote,
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.widthIn(max = 180.dp),
-                    )
-                }
-                if (idleAssessment?.isIdle == true) {
-                    PulseAccentPill(
-                        text = "闲置",
-                        containerColor = ext.drumstickContainer,
-                        contentColor = ext.onDrumstickContainer,
-                    )
-                }
-            }
-        }
-
-        // Expressive Billing & Specs Bento Box
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .border(0.75.dp, ext.cardBorder.copy(alpha = 0.72f), RoundedCornerShape(14.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    val origCost = if (asset.currency == ValuationCurrency.CNY) {
-                        "¥${asset.renewalAmount}"
-                    } else {
-                        "${asset.currency.symbol}${asset.renewalAmount} ${asset.currency.code}"
-                    }
-                    Row(
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text(
-                            text = origCost,
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                            ).withTabularNumbers(),
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "/ ${asset.cyclePreset.shortLabel}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-                    if (renewalItem != null) {
-                        Text(
-                            text = "≈ ¥${renewalItem.renewalCny.toPlainString()} · 月均 ¥${renewalItem.monthlyCostCny.toPlainString()}",
-                            style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text(
-                        text = if (isRenewalDue) "待续费到期日" else "到期日",
-                        style = NodePulseThemeTokens.extraTypography.microLabel,
-                        fontWeight = FontWeight.Medium,
-                        color = if (isRenewalDue) expiryTextColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                    Text(
-                        text = asset.expiryDateIso.ifBlank { "未设置" },
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                        ).withTabularNumbers(),
-                        color = expiryTextColor,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-
-            if (asset.specsSummary.isNotBlank()) {
-                PulseGradientDivider(color = ext.cardBorder.copy(alpha = 0.55f))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(
-                        Icons.Rounded.Memory,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = asset.specsSummary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-
-        // Renewal-Due Callout Strip with One-Tap "已续费" Action
-        if (isRenewalDue) {
-            renewalItem?.let { dueRenewal ->
-                AssetRenewalDueStrip(
-                    renewalItem = dueRenewal,
-                    onMarkRenewed = onMarkRenewed,
-                )
-            }
-        }
-
-        // Linked Probe Telemetry Capsule (live-updated on 2s tick)
-        if (linkedProbe != null) {
-            val probeDot by animateColorAsState(
-                targetValue = if (linkedProbe.isOnline) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-                animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-                label = "assetProbeDot",
-            )
-            val animCpu by animateFloatAsState(
-                targetValue = if (linkedProbe.isOnline) linkedProbe.cpuPercent.coerceIn(0.0, 100.0).toFloat() else 0f,
-                animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-                label = "assetProbeCpu",
-            )
-            val animRam by animateFloatAsState(
-                targetValue = if (linkedProbe.isOnline) linkedProbe.memUsageRatio.coerceIn(0f, 1f) * 100f else 0f,
-                animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-                label = "assetProbeRam",
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .border(0.75.dp, ext.cardBorder, RoundedCornerShape(12.dp))
-                    .clickable(onClick = onBindProbe)
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(probeDot),
-                    )
-                    Text(
-                        text = linkedProbe.name,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Text(
-                    text = if (linkedProbe.isOnline) {
-                        String.format(
-                            Locale.US,
-                            "CPU %.0f%% · RAM %d%%",
-                            animCpu,
-                            animRam.roundToInt(),
-                        )
-                    } else {
-                        "探针离线"
-                    },
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = if (linkedProbe.isOnline) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    },
-                    maxLines = 1,
-                    softWrap = false,
-                )
-            }
-            if (trafficForecast != null && trafficForecast.limitBytes != null) {
-                TrafficForecastCaptionRow(forecast = trafficForecast)
-            }
-        }
-
-        if (idleAssessment?.isIdle == true) {
-            IdleServerCalloutStrip(
-                assessment = idleAssessment,
-                actionLabel = "出掉回血",
-                onAction = onOpenSalePost,
-            )
-        }
-
-        PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f))
-
-        // Action Bar: Edit / Bind / Renew (early) / Links / Delete + Prominent "不想续了 · 一键出机"
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Rounded.Edit, contentDescription = "编辑", modifier = Modifier.size(18.dp))
-                }
-                IconButton(onClick = onBindProbe, modifier = Modifier.size(34.dp)) {
-                    Icon(
-                        Icons.Rounded.Link,
-                        contentDescription = "绑定探针",
-                        tint = if (linkedProbe != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                if (!isRenewalDue) {
-                    IconButton(onClick = onMarkRenewed, modifier = Modifier.size(34.dp)) {
-                        Icon(
-                            Icons.Rounded.EventRepeat,
-                            contentDescription = "标记已续费",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-                if (asset.panelManageUrl.isNotBlank() || asset.purchaseUrl.isNotBlank()) {
-                    IconButton(
-                        onClick = { onOpenUrl(asset.panelManageUrl.ifBlank { asset.purchaseUrl }) },
-                        modifier = Modifier.size(34.dp),
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Rounded.OpenInNew,
-                            contentDescription = "打开面板/购买链接",
-                            modifier = Modifier.size(17.dp),
-                        )
-                    }
-                }
-                IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
-                    Icon(
-                        Icons.Rounded.DeleteOutline,
-                        contentDescription = "删除",
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
-
-            // Signature CTA: "不想续了 · 一键出机"
-            Row(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-                    .pulseBouncyClickable(
-                        pressedScale = NodePulseMotion.chipPressScale,
-                        role = Role.Button,
-                        onClick = onOpenSalePost,
-                    )
-                    .padding(horizontal = 13.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                Icon(
-                    Icons.Rounded.LocalOffer,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(15.dp),
-                )
-                Text(
-                    text = if (idleAssessment?.isIdle == true) "出掉回血 · 生成出售帖" else "不想续了 · 一键出机",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AssetRenewalDueStrip(
-    renewalItem: UpcomingRenewalItem,
-    onMarkRenewed: () -> Unit,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isUrgentError = renewalItem.urgency == AssetExpiryUrgency.EXPIRED ||
-        renewalItem.urgency == AssetExpiryUrgency.CRITICAL
-    val containerColor = if (isUrgentError) {
-        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f)
-    } else {
-        ext.drumstickContainer.copy(alpha = 0.72f)
-    }
-    val borderColor = if (isUrgentError) {
-        MaterialTheme.colorScheme.error.copy(alpha = 0.28f)
-    } else {
-        ext.onDrumstickContainer.copy(alpha = 0.25f)
-    }
-    val contentColor = if (isUrgentError) {
-        MaterialTheme.colorScheme.onErrorContainer
-    } else {
-        ext.onDrumstickContainer
-    }
-    val buttonBg = if (isUrgentError) {
-        MaterialTheme.colorScheme.error
-    } else {
-        MaterialTheme.colorScheme.primary
-    }
-    val buttonFg = if (isUrgentError) {
-        MaterialTheme.colorScheme.onError
-    } else {
-        MaterialTheme.colorScheme.onPrimary
-    }
-
-    val titleCopy = when (renewalItem.urgency) {
-        AssetExpiryUrgency.EXPIRED -> {
-            val overdue = (-renewalItem.daysRemaining).coerceAtLeast(1L)
-            if (renewalItem.cyclesToAdvanceOnRenewal > 1) {
-                "已逾期 ${overdue} 天（将顺延 ${renewalItem.cyclesToAdvanceOnRenewal} 期）"
-            } else {
-                "已逾期 ${overdue} 天，确认后顺延到期日"
-            }
-        }
-        AssetExpiryUrgency.CRITICAL -> {
-            if (renewalItem.daysRemaining == 0L) "今日到期，续费后自动顺延周期"
-            else "剩余 ${renewalItem.daysRemaining} 天到期，建议及时续费"
-        }
-        else -> "进入续费提醒窗口（剩 ${renewalItem.daysRemaining} 天）"
-    }
-    val nextExpiryHint = renewalItem.nextExpiryAfterRenewalIso?.let { "确认后新到期日：$it" }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(containerColor)
-            .border(0.75.dp, borderColor, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(end = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = titleCopy,
-                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                fontWeight = FontWeight.SemiBold,
-                color = contentColor,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (nextExpiryHint != null) {
-                Text(
-                    text = nextExpiryHint,
-                    style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
-                    fontWeight = FontWeight.Medium,
-                    color = contentColor.copy(alpha = 0.85f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        Row(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(buttonBg)
-                .pulseBouncyClickable(
-                    pressedScale = NodePulseMotion.chipPressScale,
-                    role = Role.Button,
-                    onClickLabel = "已续费",
-                    onClick = onMarkRenewed,
-                )
-                .padding(horizontal = 11.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                Icons.Rounded.CheckCircle,
-                contentDescription = null,
-                tint = buttonFg,
-                modifier = Modifier.size(14.dp),
-            )
-            Text(
-                text = "已续费",
-                style = NodePulseThemeTokens.extraTypography.microLabel,
-                fontWeight = FontWeight.Bold,
-                color = buttonFg,
-                maxLines = 1,
-                softWrap = false,
-            )
-        }
-    }
+    AssetTicketCard(
+        asset = asset,
+        renewalItem = renewalItem,
+        linkedProbe = linkedProbe,
+        trafficForecast = trafficForecast,
+        idleAssessment = idleAssessment,
+        onEdit = onEdit,
+        onMarkRenewed = onMarkRenewed,
+        onDelete = onDelete,
+        onBindProbe = onBindProbe,
+        onOpenSalePost = onOpenSalePost,
+        onOpenUrl = onOpenUrl,
+        modifier = modifier,
+    )
 }
 
 @Composable

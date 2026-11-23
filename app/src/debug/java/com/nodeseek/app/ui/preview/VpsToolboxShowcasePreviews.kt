@@ -729,7 +729,18 @@ fun Showcase04MyServersProbes() {
 
 // ── Feature 4b: My Servers — Asset Ledger & One-Click Valuation Sale Post ────────────────
 
-@Preview(device = TOOLBOX_PHONE_SPEC, showBackground = true)
+@Preview(
+    name = "Light",
+    device = TOOLBOX_PHONE_SPEC,
+    showBackground = true,
+    uiMode = android.content.res.Configuration.UI_MODE_NIGHT_NO,
+)
+@Preview(
+    name = "Dark",
+    device = TOOLBOX_PHONE_SPEC,
+    showBackground = true,
+    uiMode = android.content.res.Configuration.UI_MODE_NIGHT_YES,
+)
 @Composable
 fun Showcase05MyServersAssetLedger() {
     val asset1 = remember {
@@ -737,13 +748,14 @@ fun Showcase05MyServersAssetLedger() {
             id = "asset-1",
             nickname = "DMIT 东京 Pro Tiny",
             providerName = "DMIT",
-            specsSummary = "2C / 2G / 40G NVMe / 1TB",
+            specsSummary = "2C/2G/40G NVMe/1TB",
             region = "东京",
-            routeTag = "CN2 GIA",
+            tags = listOf("CN2 GIA"),
             renewalAmount = "149.90",
             currency = ValuationCurrency.USD,
             cyclePreset = BillingCyclePreset.ANNUAL,
-            expiryDateIso = "2026-11-24",
+            expiryDateIso = "2026-11-28",
+            panelManageUrl = "https://www.dmit.io/clientarea.php",
             linkedProbeKey = "p-nezha:101",
             monthlyTrafficQuotaGb = 1000.0,
             remindDaysBeforeExpiry = 7,
@@ -752,22 +764,167 @@ fun Showcase05MyServersAssetLedger() {
     val asset2 = remember {
         VpsAssetRecord(
             id = "asset-2",
+            nickname = "RackNerd 洛杉矶黑五",
+            providerName = "RackNerd",
+            specsSummary = "1C/1.5G/25G/3TB",
+            region = "LA DC02",
+            tags = listOf("KVM"),
+            renewalAmount = "10.98",
+            currency = ValuationCurrency.USD,
+            cyclePreset = BillingCyclePreset.ANNUAL,
+            expiryDateIso = "2026-12-06",
+            purchaseUrl = "https://my.racknerd.com/clientarea.php",
+            linkedProbeKey = "p-nezha:105",
+            monthlyTrafficQuotaGb = 3000.0,
+            remindDaysBeforeExpiry = 14,
+        )
+    }
+    val asset3 = remember {
+        VpsAssetRecord(
+            id = "asset-3",
+            nickname = "Vultr 新加坡高频",
+            providerName = "Vultr",
+            specsSummary = "1C/1G/32G/2TB",
+            region = "新加坡",
+            tags = listOf("原生 IP"),
+            renewalAmount = "24.00",
+            currency = ValuationCurrency.USD,
+            cyclePreset = BillingCyclePreset.MONTHLY,
+            expiryDateIso = "2026-12-20",
+            linkedProbeKey = "p-komari:201",
+            monthlyTrafficQuotaGb = 2000.0,
+            remindDaysBeforeExpiry = 7,
+            autoRenew = true,
+            autoRenewNote = "自动扣款",
+        )
+    }
+    val asset4 = remember {
+        VpsAssetRecord(
+            id = "asset-4",
+            nickname = "Hetzner 法兰克福 CX22",
+            providerName = "Hetzner",
+            specsSummary = "2C/4G/40G/20TB",
+            region = "FSN1",
+            renewalAmount = "4.59",
+            currency = ValuationCurrency.EUR,
+            cyclePreset = BillingCyclePreset.MONTHLY,
+            expiryDateIso = "2027-01-02",
+            linkedProbeKey = "p-nezha:104",
+            monthlyTrafficQuotaGb = 20_000.0,
+            remindDaysBeforeExpiry = 7,
+        )
+    }
+    val asset5 = remember {
+        VpsAssetRecord(
+            id = "asset-5",
             nickname = "ClawCloud 香港优化年付",
             providerName = "ClawCloud",
-            specsSummary = "2C / 2G / 40G NVMe / 1TB",
+            specsSummary = "2C/2G/40G/1TB",
             region = "香港",
-            routeTag = "阿里云 BGP",
+            tags = listOf("阿里云 BGP"),
             renewalAmount = "18.00",
             currency = ValuationCurrency.USD,
             cyclePreset = BillingCyclePreset.ANNUAL,
             expiryDateIso = "2027-08-15",
             linkedProbeKey = "p-komari:202",
             monthlyTrafficQuotaGb = 1000.0,
+            trafficResetDay = 1,
+            remindDaysBeforeExpiry = 7,
+        )
+    }
+    val asset6 = remember {
+        VpsAssetRecord(
+            id = "asset-6",
+            nickname = "搬瓦工 CN2 GIA-E",
+            providerName = "BandwagonHost",
+            specsSummary = "2C/1G/20G/1TB",
+            region = "DC6",
+            tags = listOf("CN2 GIA"),
+            renewalAmount = "169.99",
+            currency = ValuationCurrency.USD,
+            cyclePreset = BillingCyclePreset.ANNUAL,
+            expiryDateIso = "2027-10-01",
+            linkedProbeKey = null,
+            monthlyTrafficQuotaGb = 1000.0,
             remindDaysBeforeExpiry = 7,
         )
     }
 
-    val renewals = remember(asset1, asset2) {
+    val previewSnapshots = remember {
+        listOf(
+            ProbeServerSnapshot(
+                panelId = "p-nezha",
+                remoteServerId = "101",
+                name = "DMIT-TYO-Pro-Tiny",
+                countryCode = "JP",
+                cpuCores = 2,
+                cpuPercent = 24.6,
+                memUsedBytes = 940L * 1024 * 1024,
+                memTotalBytes = 2048L * 1024 * 1024,
+                isOnline = true,
+            ),
+            ProbeServerSnapshot(
+                panelId = "p-nezha",
+                remoteServerId = "105",
+                name = "RackNerd-LAX-DC02",
+                countryCode = "US",
+                cpuCores = 1,
+                isOnline = false,
+            ),
+            ProbeServerSnapshot(
+                panelId = "p-komari",
+                remoteServerId = "201",
+                name = "Vultr-SGP-HighFreq",
+                countryCode = "SG",
+                cpuCores = 1,
+                cpuPercent = 58.2,
+                memUsedBytes = 720L * 1024 * 1024,
+                memTotalBytes = 1024L * 1024 * 1024,
+                isOnline = true,
+            ),
+            ProbeServerSnapshot(
+                panelId = "p-nezha",
+                remoteServerId = "104",
+                name = "Hetzner-FSN-CX22",
+                countryCode = "DE",
+                cpuCores = 2,
+                cpuPercent = 1.2,
+                memUsedBytes = 460L * 1024 * 1024,
+                memTotalBytes = 4096L * 1024 * 1024,
+                isOnline = true,
+            ),
+            ProbeServerSnapshot(
+                panelId = "p-komari",
+                remoteServerId = "202",
+                name = "ClawCloud-HK-Opt",
+                countryCode = "HK",
+                cpuCores = 2,
+                cpuPercent = 11.2,
+                memUsedBytes = 680L * 1024 * 1024,
+                memTotalBytes = 2048L * 1024 * 1024,
+                isOnline = true,
+            ),
+        )
+    }
+
+    val idleAssessment = remember(asset4) {
+        com.nodeseek.app.domain.fleet.ServerIdleAssessment(
+            probeKey = "p-nezha:104",
+            serverName = "Hetzner-FSN-CX22",
+            linkedAsset = asset4,
+            status = com.nodeseek.app.domain.fleet.IdleClassificationStatus.IDLE,
+            avgCpu30dPercent = 1.2,
+            recordedDays = 14,
+            totalSamples = 14,
+            trafficUsageRatio = 0.003,
+            projectedTrafficUsageRatio = 0.006,
+            monthlyTransferBytes = 6L * 1024 * 1024 * 1024,
+            trafficLimitBytes = 20_000L * 1024 * 1024 * 1024,
+            recommendationText = "近 14 天平均 CPU 1.2%，流量 0.3%，建议出掉回血",
+        )
+    }
+
+    val renewals = remember(asset1, asset2, asset3, asset4, asset5, asset6) {
         listOf(
             UpcomingRenewalItem(
                 asset = asset1,
@@ -777,20 +934,62 @@ fun Showcase05MyServersAssetLedger() {
                 monthlyCostCny = BigDecimal("90.44"),
                 annualizedCostCny = BigDecimal("1085.28"),
                 isWithinReminderWindow = true,
+                nextExpiryAfterRenewalIso = "2027-11-28",
             ),
             UpcomingRenewalItem(
                 asset = asset2,
-                daysRemaining = 269L,
+                daysRemaining = 13L,
+                urgency = AssetExpiryUrgency.WARNING,
+                renewalCny = BigDecimal("79.50"),
+                monthlyCostCny = BigDecimal("6.62"),
+                annualizedCostCny = BigDecimal("79.50"),
+                isWithinReminderWindow = true,
+                nextExpiryAfterRenewalIso = "2027-12-06",
+            ),
+            UpcomingRenewalItem(
+                asset = asset3,
+                daysRemaining = 27L,
+                urgency = AssetExpiryUrgency.NORMAL,
+                renewalCny = BigDecimal("173.80"),
+                monthlyCostCny = BigDecimal("173.80"),
+                annualizedCostCny = BigDecimal("2085.60"),
+                isWithinReminderWindow = false,
+                nextExpiryAfterRenewalIso = "2027-01-20",
+            ),
+            UpcomingRenewalItem(
+                asset = asset4,
+                daysRemaining = 40L,
+                urgency = AssetExpiryUrgency.NORMAL,
+                renewalCny = BigDecimal("35.80"),
+                monthlyCostCny = BigDecimal("35.80"),
+                annualizedCostCny = BigDecimal("429.60"),
+                isWithinReminderWindow = false,
+                nextExpiryAfterRenewalIso = "2027-02-02",
+            ),
+            UpcomingRenewalItem(
+                asset = asset5,
+                daysRemaining = 265L,
                 urgency = AssetExpiryUrgency.NORMAL,
                 renewalCny = BigDecimal("130.32"),
                 monthlyCostCny = BigDecimal("10.86"),
                 annualizedCostCny = BigDecimal("130.32"),
                 isWithinReminderWindow = false,
+                nextExpiryAfterRenewalIso = "2028-08-15",
+            ),
+            UpcomingRenewalItem(
+                asset = asset6,
+                daysRemaining = 312L,
+                urgency = AssetExpiryUrgency.NORMAL,
+                renewalCny = BigDecimal("1230.00"),
+                monthlyCostCny = BigDecimal("102.50"),
+                annualizedCostCny = BigDecimal("1230.00"),
+                isWithinReminderWindow = false,
+                nextExpiryAfterRenewalIso = "2028-10-01",
             ),
         )
     }
 
-    PreviewPhoneFrame(themeMode = PulseThemeMode.PAPER_LIGHT) {
+    PreviewPhoneFrame(themeMode = PulseThemeMode.SYSTEM) {
         val container = LocalAppContainer.current
         val vm = remember(container) {
             MyServersViewModel(
@@ -810,16 +1009,21 @@ fun Showcase05MyServersAssetLedger() {
             viewModel = vm,
             previewUiState = MyServersUiState(
                 selectedTab = MyServersTab.ASSETS,
-                assets = listOf(asset1, asset2),
+                snapshots = previewSnapshots,
+                filteredSnapshots = previewSnapshots,
+                assets = listOf(asset1, asset2, asset3, asset4, asset5, asset6),
+                idleAssessmentsByProbeKey = mapOf("p-nezha:104" to idleAssessment),
+                idleServers = listOf(idleAssessment),
                 portfolioSummary = FleetPortfolioSummary(
-                    totalMachineCount = 2,
-                    totalProbeNodeCount = 2,
-                    onlineProbeCount = 2,
-                    offlineProbeCount = 0,
-                    totalMonthlyCostCny = BigDecimal("101.30"),
-                    totalAnnualizedCostCny = BigDecimal("1215.60"),
+                    totalMachineCount = 6,
+                    totalProbeNodeCount = 5,
+                    onlineProbeCount = 4,
+                    offlineProbeCount = 1,
+                    totalMonthlyCostCny = BigDecimal("142.50"),
+                    totalAnnualizedCostCny = BigDecimal("1710.00"),
                     upcomingRenewals = renewals,
-                    dueSoonRenewalCount = 1,
+                    dueSoonRenewalCount = 2,
+                    dueRenewals = renewals.take(2),
                 ),
                 lastSyncEpochMillis = SHOWCASE_NOW_MILLIS - 12_000L,
             ),
