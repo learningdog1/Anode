@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,9 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -45,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
@@ -58,8 +62,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,20 +81,22 @@ import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
-import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.ui.components.PulseAlertDialog
+import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseSectionHeader
+import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.UUID
 
-private val ROUTE_TAG_PRESETS = listOf("CN2 GIA", "9929", "CMIN2", "BGP", "优化直连", "落地")
+private val ROUTE_TAG_PRESETS = VpsAssetRecord.DEFAULT_TAG_PRESETS
 private val REMIND_DAY_PRESETS = listOf(0 to "不提醒", 3 to "提前 3 天", 7 to "提前 7 天", 15 to "提前 15 天", 30 to "提前 30 天")
 private val TRAFFIC_RESET_DAY_PRESETS = listOf(
     null to "跟随到期日",
@@ -103,6 +119,9 @@ internal fun AssetEditorBottomSheet(
     onDismiss: () -> Unit,
     saveError: String? = null,
     onClearSaveError: () -> Unit = {},
+    existingTags: List<String> = emptyList(),
+    initialTags: List<String>? = null,
+    initialAutoRenew: Boolean? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.92f).dp
@@ -111,7 +130,14 @@ internal fun AssetEditorBottomSheet(
     var nickname by remember(draft) { mutableStateOf(draft.nickname) }
     var providerName by remember(draft) { mutableStateOf(draft.providerName) }
     var region by remember(draft) { mutableStateOf(draft.region) }
-    var routeTag by remember(draft) { mutableStateOf(draft.routeTag) }
+    var selectedTags by remember(draft, initialTags) {
+        mutableStateOf(
+            VpsAssetRecord.normalizeTags(
+                initialTags ?: VpsAssetRecord.parseLegacyTags(draft.routeTag),
+            ),
+        )
+    }
+    var customTagInput by remember(draft) { mutableStateOf("") }
     var specsSummary by remember(draft) { mutableStateOf(draft.specsSummary) }
     var renewalAmount by remember(draft) { mutableStateOf(draft.renewalAmount) }
     var currency by remember(draft) { mutableStateOf(draft.currency) }
@@ -119,6 +145,7 @@ internal fun AssetEditorBottomSheet(
     var customCycleDays by remember(draft) { mutableStateOf(draft.customCycleDays) }
     var expiryDateIso by remember(draft) { mutableStateOf(draft.expiryDateIso) }
     var remindDays by remember(draft) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
+    var autoRenew by remember(draft, initialAutoRenew) { mutableStateOf(initialAutoRenew ?: false) }
     var monthlyTrafficQuotaGb by remember(draft) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
     var trafficResetDayText by remember(draft) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
     var linkedProbeKey by remember(draft) { mutableStateOf(draft.linkedProbeKey) }
@@ -126,6 +153,22 @@ internal fun AssetEditorBottomSheet(
     var panelManageUrl by remember(draft) { mutableStateOf(draft.panelManageUrl) }
     var autoRenewNote by remember(draft) { mutableStateOf(draft.autoRenewNote) }
     var notes by remember(draft) { mutableStateOf(draft.notes) }
+
+    val candidateTags = remember(existingTags) {
+        VpsAssetRecord.mergeTags(ROUTE_TAG_PRESETS, existingTags)
+    }
+    val selectedTagKeys = remember(selectedTags) {
+        selectedTags.map { it.lowercase(Locale.ROOT) }.toSet()
+    }
+    fun commitCustomTag(raw: String = customTagInput) {
+        val updated = commitCustomTagInput(
+            selectedTags = selectedTags,
+            rawInput = raw,
+            candidateTags = candidateTags,
+        )
+        selectedTags = updated
+        customTagInput = ""
+    }
 
     var showCurrencyPicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
@@ -216,25 +259,87 @@ internal fun AssetEditorBottomSheet(
                     colors = fleetTextFieldColors(),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "线路与资产标签（可多选）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (selectedTags.isNotEmpty()) {
+                        Text(
+                            text = "已选 ${selectedTags.size} 项",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+                if (selectedTags.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        selectedTags.forEach { tag ->
+                            SelectedAssetTagChip(
+                                label = tag,
+                                onRemove = { selectedTags = toggleAssetTag(selectedTags, tag) },
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(
-                    value = routeTag,
-                    onValueChange = { routeTag = it },
-                    label = { Text("线路标签（选填）") },
-                    placeholder = { Text("CN2 GIA / 9929 / CMIN2") },
+                    value = customTagInput,
+                    onValueChange = { incoming ->
+                        if (incoming.contains('\n') || incoming.contains('\r')) {
+                            commitCustomTag(incoming)
+                        } else {
+                            customTagInput = incoming
+                        }
+                    },
+                    label = { Text("自定义标签（按回车添加）") },
+                    placeholder = { Text("输入自定义标签后按回车创建") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = { commitCustomTag() },
+                    ),
+                    trailingIcon = if (customTagInput.isNotBlank()) {
+                        {
+                            IconButton(onClick = { commitCustomTag() }) {
+                                Icon(Icons.Rounded.Add, contentDescription = "添加标签")
+                            }
+                        }
+                    } else {
+                        null
+                    },
                     shape = PulseArchitecturalShapes.MediumBadge,
                     colors = fleetTextFieldColors(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onPreviewKeyEvent { keyEvent ->
+                            if (keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter) {
+                                if (keyEvent.type == KeyEventType.KeyUp) {
+                                    commitCustomTag()
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        },
                 )
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    ROUTE_TAG_PRESETS.forEach { preset ->
-                        FleetChoiceChip(
-                            label = preset,
-                            selected = routeTag.equals(preset, ignoreCase = true),
-                            onClick = { routeTag = if (routeTag == preset) "" else preset },
+                    candidateTags.forEach { tag ->
+                        AssetTagToggleChip(
+                            label = tag,
+                            selected = tag.lowercase(Locale.ROOT) in selectedTagKeys,
+                            onClick = { selectedTags = toggleAssetTag(selectedTags, tag) },
                         )
                     }
                 }
@@ -279,7 +384,7 @@ internal fun AssetEditorBottomSheet(
                         value = renewalAmount,
                         onValueChange = { renewalAmount = sanitizeAssetDecimal(it) },
                         label = { Text("周期续费金额 *") },
-                        placeholder = { Text("10.98") },
+                        placeholder = { Text("请输入金额") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         shape = PulseArchitecturalShapes.MediumBadge,
@@ -324,7 +429,7 @@ internal fun AssetEditorBottomSheet(
                         value = expiryDateIso,
                         onValueChange = { expiryDateIso = it },
                         label = { Text("到期日期 (yyyy-MM-dd) *") },
-                        placeholder = { Text("2027-11-19") },
+                        placeholder = { Text("例如：2027-11-19") },
                         singleLine = true,
                         trailingIcon = {
                             IconButton(onClick = { showDatePicker = true }) {
@@ -371,6 +476,45 @@ internal fun AssetEditorBottomSheet(
                             onClick = { remindDays = days },
                         )
                     }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(PulseArchitecturalShapes.MediumBadge)
+                        .background(ext.cardSurface)
+                        .border(0.8.dp, ext.cardBorder, PulseArchitecturalShapes.MediumBadge)
+                        .toggleable(
+                            value = autoRenew,
+                            role = Role.Switch,
+                            onValueChange = { autoRenew = it },
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "自动续费",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "到期后自动按计费周期顺延到期日",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = autoRenew,
+                        onCheckedChange = null,
+                    )
                 }
 
                 PulseGradientDivider()
@@ -555,6 +699,13 @@ internal fun AssetEditorBottomSheet(
                             else -> {
                                 validationError = null
                                 onClearSaveError()
+                                val finalTags = commitCustomTagInput(
+                                    selectedTags = selectedTags,
+                                    rawInput = customTagInput,
+                                    candidateTags = candidateTags,
+                                )
+                                selectedTags = finalTags
+                                customTagInput = ""
                                 onSave(
                                     VpsAssetRecord(
                                         id = draft.editingId ?: UUID.randomUUID().toString(),
@@ -562,7 +713,7 @@ internal fun AssetEditorBottomSheet(
                                         providerName = providerName.trim(),
                                         specsSummary = specsSummary.trim(),
                                         region = region.trim(),
-                                        routeTag = routeTag.trim(),
+                                        routeTag = VpsAssetRecord.formatRouteTag(finalTags),
                                         renewalAmount = renewalAmount.trim(),
                                         currency = currency,
                                         cyclePreset = cyclePreset,
@@ -580,6 +731,8 @@ internal fun AssetEditorBottomSheet(
                                         remindDaysBeforeExpiry = remindDays,
                                         autoRenewNote = autoRenewNote.trim(),
                                         notes = notes.trim(),
+                                        tags = finalTags,
+                                        autoRenew = autoRenew,
                                     ),
                                 )
                             }
@@ -692,6 +845,130 @@ internal fun AssetEditorBottomSheet(
         ) {
             DatePicker(state = datePickerState)
         }
+    }
+}
+
+@Composable
+private fun SelectedAssetTagChip(
+    label: String,
+    onRemove: () -> Unit,
+) {
+    val isDark = NodePulseThemeTokens.isDark
+    val borderColor = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.55f else 0.40f)
+    Row(
+        modifier = Modifier
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .border(1.dp, borderColor, PulseArchitecturalShapes.SmallChip)
+            .pulseBouncyClickable(
+                pressedScale = NodePulseMotion.chipPressScale,
+                role = Role.Button,
+                onClick = onRemove,
+            )
+            .padding(start = 10.dp, end = 7.dp, top = 5.dp, bottom = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = "移除标签 $label",
+            tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+            modifier = Modifier.size(14.dp),
+        )
+    }
+}
+
+@Composable
+private fun AssetTagToggleChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
+    val bg = if (selected) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val fg = if (selected) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val borderColor = if (selected) {
+        MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.55f else 0.40f)
+    } else {
+        ext.cardBorder
+    }
+
+    Row(
+        modifier = Modifier
+            .clip(PulseArchitecturalShapes.SmallChip)
+            .background(bg)
+            .border(if (selected) 1.dp else 0.8.dp, borderColor, PulseArchitecturalShapes.SmallChip)
+            .semantics { toggleableState = ToggleableState(selected) }
+            .pulseBouncyClickable(
+                pressedScale = NodePulseMotion.chipPressScale,
+                role = Role.Checkbox,
+                onClick = onClick,
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (selected) {
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+internal fun commitCustomTagInput(
+    selectedTags: List<String>,
+    rawInput: String,
+    candidateTags: List<String> = VpsAssetRecord.DEFAULT_TAG_PRESETS,
+): List<String> {
+    val parsed = VpsAssetRecord.parseCustomTagInput(rawInput)
+    if (parsed.isEmpty()) return selectedTags
+    val canonicalByLower = candidateTags.associateBy { it.lowercase(Locale.ROOT) }
+    val canonicalized = parsed.map { token ->
+        canonicalByLower[token.lowercase(Locale.ROOT)] ?: token
+    }
+    return VpsAssetRecord.mergeTags(selectedTags, canonicalized)
+}
+
+internal fun toggleAssetTag(
+    selectedTags: List<String>,
+    tag: String,
+): List<String> {
+    val clean = VpsAssetRecord.normalizeTag(tag)
+    if (clean.isEmpty()) return selectedTags
+    val exists = selectedTags.any { it.equals(clean, ignoreCase = true) }
+    return if (exists) {
+        selectedTags.filterNot { it.equals(clean, ignoreCase = true) }
+    } else {
+        VpsAssetRecord.mergeTags(selectedTags, listOf(clean))
     }
 }
 

@@ -141,24 +141,7 @@ open class FleetAlertNotifier(
         if (!canPostNotification()) return
         ensureChannels()
 
-        val countdownLabel = when {
-            daysRemaining <= 0L -> "今日到期"
-            daysRemaining == 1L -> "明日到期"
-            else -> "剩余 $daysRemaining 天到期"
-        }
-        val title = "续费提醒 · ${asset.nickname} ($countdownLabel)"
-        val body = buildString {
-            if (asset.providerName.isNotBlank()) {
-                append(asset.providerName)
-                if (asset.region.isNotBlank()) append(" · ").append(asset.region)
-                append("\n")
-            }
-            append("到期日：").append(asset.expiryDateIso)
-            append(" · 续费约 ¥").append(renewalCny.toPlainString())
-            if (asset.specsSummary.isNotBlank()) {
-                append("（").append(asset.specsSummary).append("）")
-            }
-        }
+        val (title, summary, body) = formatRenewalReminderCopy(asset, daysRemaining, renewalCny)
         val notificationId = notificationIdForKey(
             "renewal:${asset.id}:${asset.expiryDateIso}",
             BASE_ID_RENEWAL,
@@ -167,12 +150,18 @@ open class FleetAlertNotifier(
         val notification = NotificationCompat.Builder(appContext, CHANNEL_RENEWAL_REMINDER)
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle(title)
-            .setContentText("到期日 ${asset.expiryDateIso} · 预计续费 ¥${renewalCny.toPlainString()}")
+            .setContentText(summary)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)
-            .setContentIntent(createOpenFleetPendingIntent(notificationId, EXTRA_TAB_ASSETS))
+            .setContentIntent(
+                createOpenFleetPendingIntent(
+                    requestCode = notificationId,
+                    targetTab = EXTRA_TAB_ASSETS,
+                    assetId = asset.id,
+                ),
+            )
             .build()
 
         notifySafely(notificationId, notification)
@@ -203,11 +192,18 @@ open class FleetAlertNotifier(
         notifySafely(notificationId, notification)
     }
 
-    private fun createOpenFleetPendingIntent(requestCode: Int, targetTab: String): PendingIntent {
+    private fun createOpenFleetPendingIntent(
+        requestCode: Int,
+        targetTab: String,
+        assetId: String? = null,
+    ): PendingIntent {
         val intent = Intent(appContext, MainActivity::class.java).apply {
             action = ACTION_OPEN_FLEET
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_FLEET_TAB, targetTab)
+            if (!assetId.isNullOrBlank()) {
+                putExtra(EXTRA_ASSET_ID, assetId)
+            }
         }
         return PendingIntent.getActivity(
             appContext,
@@ -249,6 +245,7 @@ open class FleetAlertNotifier(
 
         const val ACTION_OPEN_FLEET = "com.nodeseek.app.action.OPEN_FLEET"
         const val EXTRA_FLEET_TAB = "com.nodeseek.app.extra.FLEET_TAB"
+        const val EXTRA_ASSET_ID = "com.nodeseek.app.extra.ASSET_ID"
         const val EXTRA_TAB_PROBES = "probes"
         const val EXTRA_TAB_ASSETS = "assets"
 
@@ -256,6 +253,42 @@ open class FleetAlertNotifier(
         private const val BASE_ID_RECOVERY = 64_000
         private const val BASE_ID_RENEWAL = 68_000
         private const val BASE_ID_TRAFFIC = 72_000
+
+        internal fun formatRenewalReminderCopy(
+            asset: VpsAssetRecord,
+            daysRemaining: Long,
+            renewalCny: BigDecimal,
+        ): Triple<String, String, String> {
+            val countdownLabel = when {
+                daysRemaining < 0L -> "已过期 ${-daysRemaining} 天"
+                daysRemaining == 0L -> "今日到期"
+                daysRemaining == 1L -> "明日到期"
+                else -> "剩余 $daysRemaining 天到期"
+            }
+            val titlePrefix = if (daysRemaining < 0L) "续费逾期" else "续费提醒"
+            val title = "$titlePrefix · ${asset.nickname} ($countdownLabel)"
+            val autoRenewSummarySuffix = if (asset.autoRenew) " · 自动续费" else ""
+            val summary = "到期日 ${asset.expiryDateIso} · 预计续费 ¥${renewalCny.toPlainString()}$autoRenewSummarySuffix"
+            val body = buildString {
+                if (asset.providerName.isNotBlank()) {
+                    append(asset.providerName)
+                    if (asset.region.isNotBlank()) append(" · ").append(asset.region)
+                    append("\n")
+                }
+                append("到期日：").append(asset.expiryDateIso)
+                append(" · 续费约 ¥").append(renewalCny.toPlainString())
+                append(" / ").append(asset.cyclePreset.shortLabel)
+                if (asset.specsSummary.isNotBlank()) {
+                    append("（").append(asset.specsSummary).append("）")
+                }
+                if (asset.autoRenew) {
+                    append("\n已开启自动续费，到期后将自动按周期顺延，请注意核对扣款")
+                } else if (daysRemaining <= 0L) {
+                    append("\n如已完成续费，可进入资产账本点击「已续费」自动顺延到期日")
+                }
+            }
+            return Triple(title, summary, body)
+        }
 
         internal fun formatTrafficWarningCopy(
             alert: FleetAlertTransition.TrafficThresholdReached,

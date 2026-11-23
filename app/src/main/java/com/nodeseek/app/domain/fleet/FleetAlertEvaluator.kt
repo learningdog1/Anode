@@ -8,16 +8,25 @@ import java.time.temporal.ChronoUnit
 
 /**
  * Pure domain evaluator for:
- * 1. Probe node `ONLINE -> OFFLINE` transitions with per-outage deduplication & optional recovery alerts.
- * 2. VPS asset expiry renewal reminders within `remindDaysBeforeExpiry`, deduped per `(assetId, expiryDateIso)`.
- * 3. Per-cycle >=80% traffic usage warnings (with exhaustion date forecast), deduped per `(probeKey, cycleStartDate)`.
+ * 1. Auto-rolling expired VPS assets flagged with [VpsAssetRecord.autoRenew].
+ * 2. Probe node `ONLINE -> OFFLINE` transitions with per-outage deduplication & optional recovery alerts.
+ * 3. VPS asset expiry renewal reminders within `remindDaysBeforeExpiry` (plus one-shot overdue
+ *    reminders when still unrenewed after expiry), deduped per `(assetId, expiryDateIso)`.
+ * 4. Per-cycle >=80% traffic usage warnings (with exhaustion date forecast), deduped per `(probeKey, cycleStartDate)`.
  */
 object FleetAlertEvaluator {
 
     data class EvaluationOutput(
         val updatedTracker: FleetAlertTrackerState,
         val report: FleetMonitorCheckReport,
+        val updatedAssets: List<VpsAssetRecord> = emptyList(),
     )
+
+    internal fun renewalUpcomingDedupKey(assetId: String, expiryDateIso: String): String =
+        "$assetId:${expiryDateIso.trim()}"
+
+    internal fun renewalOverdueDedupKey(assetId: String, expiryDateIso: String): String =
+        "$assetId:${expiryDateIso.trim()}:overdue"
 
     fun evaluate(
         previousTracker: FleetAlertTrackerState,
@@ -41,6 +50,22 @@ object FleetAlertEvaluator {
         val recoveryAlerts = mutableListOf<FleetAlertTransition.RecoveredOnline>()
         val renewalReminders = mutableListOf<FleetAlertTransition.RenewalReminderDue>()
         val trafficAlerts = mutableListOf<FleetAlertTransition.TrafficThresholdReached>()
+        val autoRolledRenewals = mutableListOf<AssetRenewalResult>()
+
+        // 0. Auto-roll expired assets explicitly marked autoRenew = true before evaluating reminders.
+        val effectiveAssets = assets.map { asset ->
+            val rolled = FleetPortfolioCalculator.autoRollIfExpired(
+                asset = asset,
+                today = today,
+                nowEpochMillis = nowEpochMillis,
+            )
+            if (rolled != null) {
+                autoRolledRenewals += rolled
+                rolled.updatedAsset
+            } else {
+                asset
+            }
+        }
 
         // Prune probe tracking entries whose panels were deleted
         val validPanelIds = panelsById.keys
@@ -58,7 +83,7 @@ object FleetAlertEvaluator {
         }
 
         val assetsByProbeKey = LinkedHashMap<String, VpsAssetRecord>()
-        for (asset in assets) {
+        for (asset in effectiveAssets) {
             val key = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() } ?: continue
             assetsByProbeKey.putIfAbsent(key, asset)
         }
@@ -151,26 +176,36 @@ object FleetAlertEvaluator {
             }
         }
 
-        // 2. Evaluate upcoming renewal reminders within `remindDaysBeforeExpiry`
-        val validRenewalKeyPrefixes = assets.map { "${it.id}:${it.expiryDateIso.trim()}" }.toSet()
-        nextRenewalKeys.retainAll(validRenewalKeyPrefixes)
+        // 2. Evaluate upcoming and overdue renewal reminders within `remindDaysBeforeExpiry`
+        val validRenewalKeys = effectiveAssets.flatMap { asset ->
+            listOf(
+                renewalUpcomingDedupKey(asset.id, asset.expiryDateIso),
+                renewalOverdueDedupKey(asset.id, asset.expiryDateIso),
+            )
+        }.toSet()
+        nextRenewalKeys.retainAll(validRenewalKeys)
 
-        for (asset in assets) {
+        for (asset in effectiveAssets) {
             val remindDays = asset.remindDaysBeforeExpiry
             if (remindDays <= 0) continue
             val expiryDate = FleetPortfolioCalculator.parseExpiryDate(asset.expiryDateIso) ?: continue
             val daysRemaining = ChronoUnit.DAYS.between(today, expiryDate)
-            if (daysRemaining in 0L..remindDays.toLong()) {
-                val dedupKey = "${asset.id}:${asset.expiryDateIso.trim()}"
-                if (nextRenewalKeys.add(dedupKey)) {
-                    val rate = fxRatesState?.rateFor(asset.currency) ?: asset.currency.defaultCnyRate
-                    val (renewalCny, _, _) = FleetPortfolioCalculator.computeAssetCnyCosts(asset, rate)
-                    renewalReminders += FleetAlertTransition.RenewalReminderDue(
-                        asset = asset,
-                        daysRemaining = daysRemaining,
-                        renewalCny = renewalCny.setScale(2, RoundingMode.HALF_UP),
-                    )
-                }
+            val dedupKey = when {
+                daysRemaining in 0L..remindDays.toLong() ->
+                    renewalUpcomingDedupKey(asset.id, asset.expiryDateIso)
+                daysRemaining < 0L ->
+                    renewalOverdueDedupKey(asset.id, asset.expiryDateIso)
+                else -> null
+            } ?: continue
+
+            if (nextRenewalKeys.add(dedupKey)) {
+                val rate = fxRatesState?.rateFor(asset.currency) ?: asset.currency.defaultCnyRate
+                val (renewalCny, _, _) = FleetPortfolioCalculator.computeAssetCnyCosts(asset, rate)
+                renewalReminders += FleetAlertTransition.RenewalReminderDue(
+                    asset = asset,
+                    daysRemaining = daysRemaining,
+                    renewalCny = renewalCny.setScale(2, RoundingMode.HALF_UP),
+                )
             }
         }
 
@@ -193,7 +228,9 @@ object FleetAlertEvaluator {
                 renewalReminders = sortedRenewalReminders,
                 trafficAlerts = trafficAlerts,
                 checkedAtEpochMillis = nowEpochMillis,
+                autoRolledRenewals = autoRolledRenewals,
             ),
+            updatedAssets = effectiveAssets,
         )
     }
 }
