@@ -28,4 +28,6 @@ interface AppUpdateManager {
     fun openUnknownSourcesSettings(): Boolean
 
     fun onAppResumed()
+
+    fun onAppBackgrounded() = Unit
 }

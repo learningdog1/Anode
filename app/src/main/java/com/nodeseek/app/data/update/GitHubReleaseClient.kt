@@ -95,6 +95,7 @@ class GitHubReleaseClient(
     val repo: String = BuildConfig.GITHUB_REPO,
     private val userAgent: String = "Anode/${BuildConfig.VERSION_NAME} (Android)",
     private val supportedAbis: List<String> = emptyList(),
+    private val allowLoopbackHttp: Boolean = false,
 ) {
     companion object {
         val DEFAULT_API_BASE_URL: HttpUrl = "https://api.github.com".toHttpUrl()
@@ -122,14 +123,19 @@ class GitHubReleaseClient(
             return normalized in LOOPBACK_HOSTS
         }
 
-        internal fun isTrustedGitHubUrl(url: HttpUrl): Boolean {
+        internal fun isTrustedGitHubUrl(
+            url: HttpUrl,
+            allowLoopbackHttp: Boolean = false,
+        ): Boolean {
             val host = url.host.trim().lowercase(Locale.ROOT)
             if (url.scheme.equals("https", ignoreCase = true)) {
                 return host == "api.github.com" ||
                     host == "github.com" ||
                     host.endsWith(".githubusercontent.com")
             }
-            return url.scheme.equals("http", ignoreCase = true) && isLoopbackHost(host)
+            return allowLoopbackHttp &&
+                url.scheme.equals("http", ignoreCase = true) &&
+                isLoopbackHost(host)
         }
 
         internal fun sanitizeApkFileName(rawName: String): String {
@@ -147,8 +153,8 @@ class GitHubReleaseClient(
     }
 
     init {
-        require(isTrustedGitHubUrl(apiBaseUrl)) {
-            "GitHub API baseUrl must use trusted HTTPS GitHub origin or loopback HTTP, got: $apiBaseUrl"
+        require(isTrustedGitHubUrl(apiBaseUrl, allowLoopbackHttp)) {
+            "GitHub API baseUrl must use trusted HTTPS GitHub origin, got: $apiBaseUrl"
         }
         require(owner.isNotBlank() && repo.isNotBlank()) {
             "GitHub owner and repo must not be blank"
@@ -162,7 +168,7 @@ class GitHubReleaseClient(
 
     private val trustedOriginNetworkInterceptor = Interceptor { chain ->
         val req = chain.request()
-        if (!isTrustedGitHubUrl(req.url)) {
+        if (!isTrustedGitHubUrl(req.url, allowLoopbackHttp)) {
             throw GitHubReleaseException("安全校验失败：拒绝访问非 GitHub 源站 (${req.url.host})")
         }
         chain.proceed(req)
@@ -260,7 +266,7 @@ class GitHubReleaseClient(
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         val downloadHttpUrl = asset.downloadUrl.trim().toHttpUrlOrNull()
-            ?.takeIf { isTrustedGitHubUrl(it) }
+            ?.takeIf { isTrustedGitHubUrl(it, allowLoopbackHttp) }
             ?: throw GitHubReleaseException("安装包下载地址不受信任或格式无效")
 
         if (!targetDir.exists() && !targetDir.mkdirs()) {
@@ -291,7 +297,7 @@ class GitHubReleaseClient(
         try {
             val response = call.awaitResponse()
             response.use { resp ->
-                if (!isTrustedGitHubUrl(resp.request.url)) {
+                if (!isTrustedGitHubUrl(resp.request.url, allowLoopbackHttp)) {
                     throw GitHubReleaseException("安全校验失败：下载重定向目标域名不受信任")
                 }
                 if (!resp.isSuccessful) {
@@ -402,7 +408,7 @@ class GitHubReleaseClient(
             cleanName.endsWith(".apk", ignoreCase = true) &&
                 (asset.state.isBlank() || asset.state.equals("uploaded", ignoreCase = true)) &&
                 url != null &&
-                isTrustedGitHubUrl(url)
+                isTrustedGitHubUrl(url, allowLoopbackHttp)
         }
         if (candidates.isEmpty()) return null
 
@@ -553,7 +559,7 @@ class GitHubReleaseClient(
         etag: String?,
         allowNotFound: Boolean,
     ): RawApiResponse {
-        if (!isTrustedGitHubUrl(url)) {
+        if (!isTrustedGitHubUrl(url, allowLoopbackHttp)) {
             throw GitHubReleaseException("安全校验失败：非法的 GitHub API 地址")
         }
         val builder = Request.Builder()
@@ -570,7 +576,7 @@ class GitHubReleaseClient(
         return try {
             val resp = call.awaitResponse()
             resp.use { response ->
-                if (!isTrustedGitHubUrl(response.request.url)) {
+                if (!isTrustedGitHubUrl(response.request.url, allowLoopbackHttp)) {
                     throw GitHubReleaseException("安全校验失败：GitHub API 重定向至非信任域名")
                 }
                 val code = response.code

@@ -388,6 +388,7 @@ class DefaultAppContainer(
     }
 
     fun onAppEnteredBackground() {
+        appUpdateManager.onAppBackgrounded()
         awayDigestRepository.onAppBackgrounded()
         radarWorkScheduler.onAppEnteredBackgroundAsync(applicationScope) {
             runCatching { radarRepository.getPollingSettings() }
@@ -416,6 +417,7 @@ class DefaultAppContainer(
             cacheFile = File(appContext.filesDir, AppUpdateManagerImpl.CACHE_FILE_NAME),
             apkDirectory = File(appContext.cacheDir, AppUpdateManagerImpl.APK_CACHE_DIR_NAME),
             externalScope = applicationScope,
+            mainDispatcher = Dispatchers.Main.immediate,
         )
     }
 

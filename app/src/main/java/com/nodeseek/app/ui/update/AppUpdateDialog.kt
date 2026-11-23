@@ -709,10 +709,15 @@ private fun UpdatePhaseBanner(
                     modifier = Modifier.size(19.dp),
                 )
                 Text(
-                    text = if (phase.requiresInstallPermission) {
-                        "安装包已校验完成，请先在系统设置中允许 Anode「安装未知应用」，返回后自动继续。"
-                    } else {
-                        "安装包已通过完整性校验，点击下方「立即安装」开始升级。"
+                    text = when {
+                        phase.requiresInstallPermission && phase.sha256Verified ->
+                            "安装包已通过包名、签名与 SHA-256 校验，请先在系统设置中允许 Anode「安装未知应用」，返回后自动继续。"
+                        phase.requiresInstallPermission ->
+                            "安装包已校验包名与签名（当前版本未提供 SHA-256 摘要），请先在系统设置中允许 Anode「安装未知应用」，返回后自动继续。"
+                        phase.sha256Verified ->
+                            "安装包已通过包名、签名与 SHA-256 校验，点击下方「立即安装」开始升级。"
+                        else ->
+                            "安装包已校验包名与签名（当前版本未提供 SHA-256 摘要），点击下方「立即安装」开始升级。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = contentColor,

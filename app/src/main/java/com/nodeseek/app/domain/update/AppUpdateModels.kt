@@ -51,6 +51,7 @@ sealed interface UpdateDownloadPhase {
     data class ReadyToInstall(
         val apkPath: String,
         val requiresInstallPermission: Boolean = false,
+        val sha256Verified: Boolean = false,
     ) : UpdateDownloadPhase
 
     data class Failed(

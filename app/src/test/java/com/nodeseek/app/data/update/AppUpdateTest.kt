@@ -164,6 +164,7 @@ class AppUpdateTest {
             owner = "learningdog1",
             repo = "Anode",
             supportedAbis = listOf("arm64-v8a", "armeabi-v7a"),
+            allowLoopbackHttp = true,
         )
 
         val result = client.fetchLatestRelease(includePrerelease = false, cachedEtag = null)
@@ -216,6 +217,7 @@ class AppUpdateTest {
             apiBaseUrl = server.url("/"),
             owner = "learningdog1",
             repo = "Anode",
+            allowLoopbackHttp = true,
         )
 
         val first = client.fetchLatestRelease(includePrerelease = false, cachedEtag = null) as FetchReleaseResponse.Success
@@ -300,6 +302,7 @@ class AppUpdateTest {
             owner = "learningdog1",
             repo = "Anode",
             supportedAbis = listOf("arm64-v8a", "armeabi-v7a"),
+            allowLoopbackHttp = true,
         )
 
         val stable = client.fetchLatestRelease(includePrerelease = false) as FetchReleaseResponse.Success
@@ -332,6 +335,7 @@ class AppUpdateTest {
             apiBaseUrl = server.url("/"),
             owner = "learningdog1",
             repo = "Anode",
+            allowLoopbackHttp = true,
         )
 
         val asset = AppReleaseAsset(
@@ -457,6 +461,7 @@ class AppUpdateTest {
                 apiBaseUrl = server.url("/"),
                 owner = "learningdog1",
                 repo = "Anode",
+                allowLoopbackHttp = true,
             )
             var nowMillis = 1_000_000L
             val manager = AppUpdateManagerImpl(
@@ -501,6 +506,7 @@ class AppUpdateTest {
             )
             val readyPhase = readyState.downloadPhase as UpdateDownloadPhase.ReadyToInstall
             assertTrue(readyPhase.requiresInstallPermission)
+            assertTrue(readyPhase.sha256Verified)
             assertEquals(0, fakeInstaller.launchedFiles.size)
 
             // 4. User opens unknown sources settings, grants permission, and returns to app (onAppResumed)
@@ -509,6 +515,11 @@ class AppUpdateTest {
             fakeInstaller.canInstall = true
             manager.onAppResumed()
 
+            withTimeout(3_000L) {
+                while (fakeInstaller.launchedFiles.isEmpty()) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
             val resumedPhase = manager.state.value.downloadPhase as UpdateDownloadPhase.ReadyToInstall
             assertFalse(resumedPhase.requiresInstallPermission)
             assertEquals(1, fakeInstaller.launchedFiles.size)
@@ -536,6 +547,7 @@ class AppUpdateTest {
                 apiBaseUrl = server.url("/"),
                 owner = "learningdog1",
                 repo = "Anode",
+                allowLoopbackHttp = true,
             )
             val manager = AppUpdateManagerImpl(
                 releaseClient = client,
@@ -559,6 +571,250 @@ class AppUpdateTest {
         }
     }
 
+    @Test
+    fun `GitHubReleaseClient rejects loopback HTTP by default`() {
+        var threw = false
+        try {
+            GitHubReleaseClient(
+                apiBaseUrl = server.url("/"),
+                owner = "learningdog1",
+                repo = "Anode",
+            )
+        } catch (_: IllegalArgumentException) {
+            threw = true
+        }
+        assertTrue("Expected default allowLoopbackHttp=false to reject loopback HTTP", threw)
+        assertFalse(GitHubReleaseClient.isTrustedGitHubUrl(server.url("/")))
+        assertTrue(GitHubReleaseClient.isTrustedGitHubUrl(server.url("/"), allowLoopbackHttp = true))
+    }
+
+    @Test
+    fun `AppUpdateManagerImpl rejects mismatched signature and downgrade APKs and deletes file`() = runBlocking {
+        val fakeApkBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04) + ByteArray(2048) { 0x22 }
+        val expectedSha = sha256Hex(fakeApkBytes)
+        val releaseJson = """
+            {
+              "tag_name": "v2.0.0",
+              "name": "Anode v2.0.0",
+              "draft": false,
+              "prerelease": false,
+              "published_at": "2026-12-01T12:00:00Z",
+              "html_url": "https://github.com/learningdog1/Anode/releases/tag/v2.0.0",
+              "assets": [
+                {
+                  "id": 6001,
+                  "name": "Anode-v2.0.0-release.apk",
+                  "state": "uploaded",
+                  "size": ${fakeApkBytes.size},
+                  "digest": "sha256:$expectedSha",
+                  "browser_download_url": "${server.url("/dl/Anode-v2.0.0-release.apk")}"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val settingsRepo = FakeSettingsRepository()
+        val fakeInstaller = FakeApkInstallerGateway(
+            canInstall = true,
+            signatureValid = false,
+            archiveVersionCode = 20L,
+        )
+        val cacheFile = File(tempRoot, "update_cache_sig.json")
+        val apkDir = File(tempRoot, "apk_cache_sig").apply { mkdirs() }
+        val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val client = GitHubReleaseClient(
+                apiBaseUrl = server.url("/"),
+                owner = "learningdog1",
+                repo = "Anode",
+                allowLoopbackHttp = true,
+            )
+            val manager = AppUpdateManagerImpl(
+                releaseClient = client,
+                settingsRepository = settingsRepo,
+                installer = fakeInstaller,
+                cacheFile = cacheFile,
+                apkDirectory = apkDir,
+                externalScope = managerScope,
+                currentVersionName = "1.0.0",
+                currentVersionCode = 10,
+            )
+
+            server.enqueue(MockResponse().setResponseCode(200).setBody(releaseJson))
+            assertTrue(manager.checkForUpdates(manual = true) is UpdateCheckResult.UpdateAvailable)
+
+            // 1. Signature mismatch -> Failed & deleted
+            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(fakeApkBytes)))
+            manager.startDownloadAndInstall()
+            val sigFailed = withTimeout(5_000L) {
+                manager.state.first { it.downloadPhase is UpdateDownloadPhase.Failed }
+            }
+            assertTrue((sigFailed.downloadPhase as UpdateDownloadPhase.Failed).message.contains("签名"))
+            assertFalse(File(apkDir, "Anode-v2.0.0-release.apk").exists())
+            assertEquals(0, fakeInstaller.launchedFiles.size)
+
+            // 2. Signature valid but versionCode < currentVersionCode -> downgrade blocked & deleted
+            fakeInstaller.signatureValid = true
+            fakeInstaller.archiveVersionCode = 5L
+            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(fakeApkBytes)))
+            manager.startDownloadAndInstall()
+            val downgradeFailed = withTimeout(5_000L) {
+                manager.state.first {
+                    val phase = it.downloadPhase
+                    phase is UpdateDownloadPhase.Failed && phase.message.contains("降级")
+                }
+            }
+            assertTrue((downgradeFailed.downloadPhase as UpdateDownloadPhase.Failed).message.contains("降级"))
+            assertFalse(File(apkDir, "Anode-v2.0.0-release.apk").exists())
+            assertEquals(0, fakeInstaller.launchedFiles.size)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    @Test
+    fun `AppUpdateManagerImpl defers install when completed in background and resumes on foreground`() = runBlocking {
+        val fakeApkBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04) + ByteArray(2048) { 0x33 }
+        val releaseJson = """
+            {
+              "tag_name": "v2.1.0",
+              "name": "Anode v2.1.0",
+              "draft": false,
+              "prerelease": false,
+              "published_at": "2026-12-01T12:00:00Z",
+              "html_url": "https://github.com/learningdog1/Anode/releases/tag/v2.1.0",
+              "assets": [
+                {
+                  "id": 7001,
+                  "name": "Anode-v2.1.0-release.apk",
+                  "state": "uploaded",
+                  "size": ${fakeApkBytes.size},
+                  "browser_download_url": "${server.url("/dl/Anode-v2.1.0-release.apk")}"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val settingsRepo = FakeSettingsRepository()
+        val fakeInstaller = FakeApkInstallerGateway(canInstall = true, archiveVersionCode = 21L)
+        val cacheFile = File(tempRoot, "update_cache_bg.json")
+        val apkDir = File(tempRoot, "apk_cache_bg").apply { mkdirs() }
+        val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val client = GitHubReleaseClient(
+                apiBaseUrl = server.url("/"),
+                owner = "learningdog1",
+                repo = "Anode",
+                allowLoopbackHttp = true,
+            )
+            val manager = AppUpdateManagerImpl(
+                releaseClient = client,
+                settingsRepository = settingsRepo,
+                installer = fakeInstaller,
+                cacheFile = cacheFile,
+                apkDirectory = apkDir,
+                externalScope = managerScope,
+                currentVersionName = "1.0.0",
+                currentVersionCode = 10,
+            )
+
+            server.enqueue(MockResponse().setResponseCode(200).setBody(releaseJson))
+            assertTrue(manager.checkForUpdates(manual = true) is UpdateCheckResult.UpdateAvailable)
+
+            // User clicks "后台下载" and switches app to background
+            manager.dismissUpdatePrompt()
+            manager.onAppBackgrounded()
+            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(fakeApkBytes)))
+            manager.startDownloadAndInstall()
+
+            val readyState = withTimeout(5_000L) {
+                manager.state.first { it.downloadPhase is UpdateDownloadPhase.ReadyToInstall }
+            }
+            val readyPhase = readyState.downloadPhase as UpdateDownloadPhase.ReadyToInstall
+            assertFalse(readyPhase.sha256Verified)
+            assertFalse(readyPhase.requiresInstallPermission)
+            assertEquals(0, fakeInstaller.launchedFiles.size)
+            withTimeout(3_000L) {
+                while (fakeInstaller.notifiedVersions.isEmpty()) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
+            assertEquals(listOf("2.1.0"), fakeInstaller.notifiedVersions)
+            assertTrue(manager.state.value.showUpdatePrompt)
+
+            // App returns to foreground -> auto-launches install
+            manager.onAppResumed()
+            withTimeout(3_000L) {
+                while (fakeInstaller.launchedFiles.isEmpty()) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
+            assertEquals(1, fakeInstaller.launchedFiles.size)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    @Test
+    fun `AppUpdateManagerImpl preserves prerelease ETag across cold-start settings hydration`() = runBlocking {
+        val cacheFile = File(tempRoot, "update_cache_pre_etag.json")
+        cacheFile.writeText(
+            """
+            {
+              "lastCheckedAtMillis": 1000,
+              "etag": "\"etag-pre-999\"",
+              "includePrerelease": true,
+              "cachedRelease": {
+                "tagName": "v2.0.0-rc.1",
+                "versionName": "2.0.0-rc.1",
+                "title": "Anode v2.0.0-rc.1",
+                "changelogMarkdown": "",
+                "publishedAtIso": "2026-12-01T12:00:00Z",
+                "isPrerelease": true,
+                "htmlUrl": "https://github.com/learningdog1/Anode/releases/tag/v2.0.0-rc.1"
+              }
+            }
+            """.trimIndent(),
+        )
+        // Simulate cold-start StateFlow starting with default includePrereleaseUpdates=false, then hydrating to true
+        val settingsRepo = FakeSettingsRepository()
+        val fakeInstaller = FakeApkInstallerGateway(canInstall = true)
+        val apkDir = File(tempRoot, "apk_cache_pre_etag").apply { mkdirs() }
+        val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val client = GitHubReleaseClient(
+                apiBaseUrl = server.url("/"),
+                owner = "learningdog1",
+                repo = "Anode",
+                allowLoopbackHttp = true,
+            )
+            val manager = AppUpdateManagerImpl(
+                releaseClient = client,
+                settingsRepository = settingsRepo,
+                installer = fakeInstaller,
+                cacheFile = cacheFile,
+                apkDirectory = apkDir,
+                externalScope = managerScope,
+                currentVersionName = "1.0.0",
+                currentVersionCode = 1,
+                nowMillisProvider = { 50_000_000L },
+            )
+
+            // Hydrate settings from false -> true (matching disk cache)
+            kotlinx.coroutines.delay(50L)
+            settingsRepo.setIncludePrereleaseUpdates(true)
+            kotlinx.coroutines.delay(100L)
+
+            server.enqueue(MockResponse().setResponseCode(304))
+            val result = manager.checkForUpdates(manual = true)
+            assertTrue(result is UpdateCheckResult.UpdateAvailable)
+            val req = server.takeRequest()
+            assertEquals("\"etag-pre-999\"", req.getHeader("If-None-Match"))
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString("") { "%02x".format(Locale.ROOT, it) }
@@ -566,15 +822,23 @@ class AppUpdateTest {
 
     private class FakeApkInstallerGateway(
         var canInstall: Boolean,
+        var signatureValid: Boolean = true,
+        var archiveVersionCode: Long? = null,
+        var archiveVersionName: String? = null,
     ) : ApkInstallerGateway {
         val launchedFiles = mutableListOf<File>()
+        val notifiedVersions = mutableListOf<String>()
         var settingsOpenedCount = 0
 
         override fun canRequestPackageInstalls(): Boolean = canInstall
 
         override fun verifyArchivePackageName(apkFile: File): Boolean = apkFile.isFile && apkFile.length() > 0L
 
-        override fun getArchiveVersionName(apkFile: File): String? = null
+        override fun verifyArchiveSignature(apkFile: File): Boolean = signatureValid
+
+        override fun getArchiveVersionName(apkFile: File): String? = archiveVersionName
+
+        override fun getArchiveVersionCode(apkFile: File): Long? = archiveVersionCode
 
         override fun launchInstall(apkFile: File): Boolean {
             launchedFiles.add(apkFile)
@@ -584,6 +848,10 @@ class AppUpdateTest {
         override fun openUnknownSourcesSettings(): Boolean {
             settingsOpenedCount += 1
             return true
+        }
+
+        override fun notifyUpdateReady(versionName: String) {
+            notifiedVersions.add(versionName)
         }
     }
 }
