@@ -332,12 +332,14 @@ fun MarkdownRenderer(
 
     val triggerImageLongPress: (String, String, String?) -> Unit = remember(haptics) {
         { url, alt, linkUrl ->
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            actionSheetImage = ImageActionTarget(
-                imageUrl = url,
-                altText = alt,
-                linkUrl = linkUrl,
-            )
+            if (normalizeMarkdownImageUrl(url).isNotBlank()) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                actionSheetImage = ImageActionTarget(
+                    imageUrl = url,
+                    altText = alt,
+                    linkUrl = linkUrl,
+                )
+            }
         }
     }
 
@@ -2480,16 +2482,20 @@ internal fun normalizeMarkdownImageUrl(rawUrl: String?): String {
         ?.trim()
         .orEmpty()
     if (trimmed.isEmpty()) return ""
-    val lower = trimmed.lowercase()
+    val lower = trimmed.lowercase(java.util.Locale.US)
     return when {
-        lower.startsWith("data:") ||
+        lower.startsWith("file:") ||
             lower.startsWith("content:") ||
-            lower.startsWith("file:") ||
-            lower.startsWith("android.resource:") -> trimmed
+            lower.startsWith("android.resource:") ||
+            lower.startsWith("javascript:") ||
+            lower.startsWith("vbscript:") -> ""
+        lower.startsWith("data:") -> {
+            if (lower.startsWith("data:image/")) trimmed else ""
+        }
         lower.startsWith("https://") -> "https://" + trimmed.substring(8)
         lower.startsWith("http://") -> {
             val rest = trimmed.substring(7)
-            val host = rest.substringBefore('/').substringBefore(':').lowercase()
+            val host = rest.substringBefore('/').substringBefore(':').lowercase(java.util.Locale.US)
             if (host == "localhost" || host == "127.0.0.1") {
                 "http://$rest"
             } else {
@@ -2497,7 +2503,16 @@ internal fun normalizeMarkdownImageUrl(rawUrl: String?): String {
             }
         }
         trimmed.startsWith("//") -> "https:$trimmed"
-        else -> normalizeNodeSeekAssetUrl(trimmed) ?: trimmed
+        else -> {
+            // Reject arbitrary unknown URI schemes (e.g. `intent:`, `ftp:`) while keeping relative paths.
+            val schemeColon = trimmed.indexOf(':')
+            val firstSlash = trimmed.indexOf('/')
+            if (schemeColon > 0 && (firstSlash < 0 || schemeColon < firstSlash)) {
+                ""
+            } else {
+                normalizeNodeSeekAssetUrl(trimmed) ?: trimmed
+            }
+        }
     }
 }
 
@@ -3258,14 +3273,12 @@ fun PulseZoomableImageCard(
                                 asyncSucceeded = false
                                 loadStatus = ImageLoadStatus.LOADING
                                 retryNonce++
-                            } else {
-                                onClick()
                             }
-                        } else {
+                        } else if (resolvedUrl.isNotBlank()) {
                             onClick()
                         }
                     },
-                    onLongClick = onLongClick,
+                    onLongClick = if (resolvedUrl.isNotBlank()) onLongClick else null,
                 ),
             contentAlignment = if (isCompact) Alignment.CenterStart else Alignment.Center,
         ) {
@@ -3284,34 +3297,38 @@ fun PulseZoomableImageCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
-                        text = altText.ifBlank { "图片加载失败，点按重试" },
+                        text = altText.ifBlank {
+                            if (resolvedUrl.isBlank()) "图片地址无效或不受支持" else "图片加载失败，点按重试"
+                        },
                         style = if (isCompact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
-                        modifier = Modifier.clickable(onClick = onClick),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    if (resolvedUrl.isNotBlank()) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                            modifier = Modifier.clickable(onClick = onClick),
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                contentDescription = "打开原图",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(12.dp),
-                            )
-                            Text(
-                                text = "原图",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = "打开原图",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(12.dp),
+                                )
+                                Text(
+                                    text = "原图",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                )
+                            }
                         }
                     }
                 }
@@ -5114,34 +5131,44 @@ private fun parseInlineLinkDestination(text: String, openParenIdx: Int): Pair<St
     return null
 }
 
+private fun isDisallowedHtmlImageScheme(candidate: String): Boolean {
+    val lower = candidate.trim().lowercase(java.util.Locale.US)
+    return lower.startsWith("javascript:") ||
+        lower.startsWith("vbscript:") ||
+        lower.startsWith("file:") ||
+        lower.startsWith("content:") ||
+        lower.startsWith("android.resource:")
+}
+
 private fun resolveHtmlImageSrc(attrs: Map<String, String>): String? {
     val lazyKeys = listOf("data-src", "data-original", "data-lazy-src", "data-url", "data-actualsrc")
     for (key in lazyKeys) {
         val candidate = attrs[key]?.let(::decodeHtmlEntitiesMinimal)?.trim()
         if (!candidate.isNullOrBlank() &&
             !candidate.startsWith("data:image/", ignoreCase = true) &&
-            !candidate.startsWith("javascript:", ignoreCase = true)
+            !isDisallowedHtmlImageScheme(candidate)
         ) {
-            return normalizeMarkdownImageUrl(candidate)
+            return normalizeMarkdownImageUrl(candidate).takeIf { it.isNotBlank() }
         }
     }
     val directSrc = attrs["src"]?.let(::decodeHtmlEntitiesMinimal)?.trim()
     if (!directSrc.isNullOrBlank() &&
         !directSrc.startsWith("data:image/", ignoreCase = true) &&
-        !directSrc.startsWith("javascript:", ignoreCase = true)
+        !isDisallowedHtmlImageScheme(directSrc)
     ) {
-        return normalizeMarkdownImageUrl(directSrc)
+        return normalizeMarkdownImageUrl(directSrc).takeIf { it.isNotBlank() }
     }
     val srcset = (attrs["data-srcset"] ?: attrs["srcset"])?.let(::decodeHtmlEntitiesMinimal)?.trim()
     if (!srcset.isNullOrBlank()) {
         val first = srcset.substringBefore(',').trim().substringBefore(' ').trim()
-        if (first.isNotEmpty() && !first.startsWith("javascript:", ignoreCase = true)) {
-            return normalizeMarkdownImageUrl(first)
+        if (first.isNotEmpty() && !isDisallowedHtmlImageScheme(first)) {
+            return normalizeMarkdownImageUrl(first).takeIf { it.isNotBlank() }
         }
     }
     return directSrc
-        ?.takeIf { it.isNotBlank() && !it.startsWith("javascript:", ignoreCase = true) }
+        ?.takeIf { it.isNotBlank() && !isDisallowedHtmlImageScheme(it) }
         ?.let(::normalizeMarkdownImageUrl)
+        ?.takeIf { it.isNotBlank() }
 }
 
 private fun parseHtmlAttributes(attrText: String): Map<String, String> {
