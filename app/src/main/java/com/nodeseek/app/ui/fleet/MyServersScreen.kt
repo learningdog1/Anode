@@ -159,6 +159,7 @@ fun MyServersScreen(
     onConsumeRestockPrefill: (() -> Unit)? = null,
     previewUiState: MyServersUiState? = null,
     viewModel: MyServersViewModel? = null,
+    previewProbeViewMode: ProbeViewMode? = null,
 ) {
     val context = LocalContext.current
     val resolvedViewModel: MyServersViewModel = viewModel ?: run {
@@ -224,6 +225,7 @@ fun MyServersScreen(
                 showLiveBadge = hasEnabledPanels && uiState.selectedTab == MyServersTab.PROBES,
                 animateLiveDot = !isInspectionMode && previewUiState == null,
                 onBack = onBack,
+                onOpenPanelManager = resolvedViewModel::openPanelManager,
                 onRefresh = resolvedViewModel::refreshCurrentTab,
             )
         },
@@ -237,8 +239,8 @@ fun MyServersScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FleetPortfolioHeroCard(
                     summary = uiState.portfolioSummary,
@@ -274,12 +276,14 @@ fun MyServersScreen(
                 MyServersTab.PROBES -> {
                     ProbesTabContent(
                         uiState = uiState,
+                        previewViewMode = previewProbeViewMode,
                         onRefresh = resolvedViewModel::refreshAllProbes,
                         onSelectFilter = resolvedViewModel::selectProbeFilter,
                         onSelectPanelFilter = resolvedViewModel::selectPanelFilter,
                         onOpenPanelManager = resolvedViewModel::openPanelManager,
                         onAddAssetFromProbe = resolvedViewModel::openAddAssetFromProbe,
                         onOpenIdleSalePost = resolvedViewModel::openIdleSalePost,
+                        onOpenLinkedAsset = resolvedViewModel::openEditAssetSheet,
                     )
                 }
                 MyServersTab.ASSETS -> {
@@ -414,6 +418,7 @@ private fun MyServersTopBar(
     showLiveBadge: Boolean,
     animateLiveDot: Boolean,
     onBack: () -> Unit,
+    onOpenPanelManager: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -422,9 +427,9 @@ private fun MyServersTopBar(
             .fillMaxWidth()
             .pulseGlassSurface(showBottomBorder = true)
             .statusBarsPadding()
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         IconButton(onClick = onBack) {
             Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
@@ -478,7 +483,27 @@ private fun MyServersTopBar(
             )
         }
 
-        // Single dedicated Refresh action in top-right (no duplicate panel/add buttons).
+        // Probe panel & monitor manager quick entry
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .pulseBouncyClickable(
+                    pressedScale = NodePulseMotion.chipPressScale,
+                    role = Role.Button,
+                    onClickLabel = "管理探针面板",
+                    onClick = onOpenPanelManager,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = "管理探针面板",
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+
         val refreshModifier = if (isRefreshing) {
             val spinTransition = rememberInfiniteTransition(label = "fleetRefreshSpin")
             val spinAngle = spinTransition.animateFloat(
@@ -498,7 +523,7 @@ private fun MyServersTopBar(
         Box(
             modifier = Modifier
                 .padding(end = 4.dp)
-                .size(38.dp)
+                .size(36.dp)
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.75f))
                 .border(0.75.dp, ext.cardBorder, CircleShape)
@@ -516,7 +541,7 @@ private fun MyServersTopBar(
                 contentDescription = if (selectedTab == MyServersTab.PROBES) "刷新探针" else "刷新汇率与状态",
                 tint = if (isRefreshing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
-                    .size(20.dp)
+                    .size(19.dp)
                     .then(refreshModifier),
             )
         }
@@ -553,19 +578,25 @@ private fun FleetPortfolioHeroCard(
         summary.dueSoonRenewalCount > 0 || summary.dueRenewals.isNotEmpty() -> ext.onDrumstickContainer
         else -> MaterialTheme.colorScheme.onSurface
     }
+    val monthlyDisplay = remember(summary.totalMonthlyCostCny) {
+        "¥${formatHeroCurrencyValue(summary.totalMonthlyCostCny)}"
+    }
+    val annualizedDisplay = remember(summary.totalAnnualizedCostCny) {
+        "¥${formatHeroCurrencyValue(summary.totalAnnualizedCostCny)}"
+    }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .pulseHeroCard(
                 accentColor = MaterialTheme.colorScheme.primary,
-                shape = PulseArchitecturalShapes.HeroBento,
+                shape = RoundedCornerShape(20.dp),
                 elevation = PulseElevation.Card,
             )
-            .padding(horizontal = 14.dp, vertical = 13.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        // Expressive 4-column telemetry KPI strip
+        // Compact 4-column telemetry KPI row with thin vertical dividers
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -573,35 +604,33 @@ private fun FleetPortfolioHeroCard(
         ) {
             HeroKpiColumn(
                 label = "探针在线",
-                value = "${summary.onlineProbeCount}/${summary.totalProbeNodeCount} 台",
+                value = "${summary.onlineProbeCount}/${summary.totalProbeNodeCount}",
                 valueColor = onlineValueColor,
-                modifier = Modifier.weight(0.95f),
+                modifier = Modifier.weight(0.88f),
             )
             HeroVerticalDivider()
             HeroKpiColumn(
                 label = "月均支出",
-                value = "¥${summary.totalMonthlyCostCny.toPlainString()}",
+                value = monthlyDisplay,
                 valueColor = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1.1f),
             )
             HeroVerticalDivider()
             HeroKpiColumn(
                 label = "年化支出",
-                value = "¥${summary.totalAnnualizedCostCny.toPlainString()}",
-                modifier = Modifier.weight(1.15f),
+                value = annualizedDisplay,
+                modifier = Modifier.weight(1.12f),
             )
             HeroVerticalDivider()
             HeroKpiColumn(
                 label = "近期续费",
                 value = "${summary.dueSoonRenewalCount} 台",
                 valueColor = renewalValueColor,
-                modifier = Modifier.weight(0.82f),
+                modifier = Modifier.weight(0.84f),
             )
         }
 
-        PulseGradientDivider(color = ext.cardBorder.copy(alpha = 0.55f))
-
-        // Compact Footer Strip: FX tap-to-refresh + Background Patrol Settings entry
+        // Ultra-compact status micro line: ledger count / FX refresh + patrol status dot
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -612,44 +641,48 @@ private fun FleetPortfolioHeroCard(
                     .weight(1f, fill = false)
                     .padding(end = 8.dp)
                     .clip(PulseArchitecturalShapes.SmallChip)
-                    .clickable(onClick = onRefreshFx)
-                    .padding(horizontal = 4.dp, vertical = 3.dp),
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = "刷新汇率",
+                        onClick = onRefreshFx,
+                    )
+                    .padding(vertical = 1.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.CurrencyExchange,
                     contentDescription = "刷新汇率",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                    modifier = Modifier.size(11.dp),
                 )
                 Text(
-                    text = "账本 ${summary.totalMachineCount} 台" +
+                    text = "账本在册 ${summary.totalMachineCount} 台" +
                         (usdRateDisplay?.let { " · $it" }.orEmpty()),
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                        fontWeight = FontWeight.Normal,
+                    ).withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.outline,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+
             Row(
                 modifier = Modifier
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.90f))
-                    .border(0.75.dp, ext.cardBorder, CircleShape)
-                    .pulseBouncyClickable(
-                        pressedScale = NodePulseMotion.chipPressScale,
+                    .clickable(
                         role = Role.Button,
                         onClickLabel = "后台巡检设置",
                         onClick = onOpenMonitorSettings,
                     )
-                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Box(
                     modifier = Modifier
-                        .size(6.dp)
+                        .size(5.dp)
                         .clip(CircleShape)
                         .background(
                             if (backgroundMonitorEnabled) {
@@ -661,8 +694,10 @@ private fun FleetPortfolioHeroCard(
                 )
                 Text(
                     text = if (backgroundMonitorEnabled) "后台巡检中" else "巡检已停",
-                    style = NodePulseThemeTokens.extraTypography.microLabel,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                        fontWeight = FontWeight.Medium,
+                    ),
+                    color = MaterialTheme.colorScheme.outline,
                     maxLines = 1,
                     softWrap = false,
                 )
@@ -671,13 +706,23 @@ private fun FleetPortfolioHeroCard(
     }
 }
 
+private fun formatHeroCurrencyValue(amount: java.math.BigDecimal): String {
+    val stripped = amount.stripTrailingZeros()
+    return when {
+        stripped.compareTo(java.math.BigDecimal.ZERO) == 0 -> "0"
+        stripped.scale() <= 0 -> stripped.toPlainString()
+        stripped.scale() == 1 -> stripped.toPlainString()
+        else -> amount.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+    }
+}
+
 @Composable
 private fun HeroVerticalDivider() {
     Box(
         modifier = Modifier
-            .width(0.75.dp)
+            .width(1.dp)
             .height(26.dp)
-            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+            .background(NodePulseThemeTokens.extendedColors.cardBorder),
     )
 }
 
@@ -690,12 +735,12 @@ private fun HeroKpiColumn(
 ) {
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         Text(
             text = value,
-            style = MaterialTheme.typography.labelLarge.copy(
-                fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleSmall.copy(
+                fontWeight = FontWeight.ExtraBold,
             ).withTabularNumbers(),
             color = valueColor,
             maxLines = 1,
@@ -703,7 +748,9 @@ private fun HeroKpiColumn(
         )
         Text(
             text = label,
-            style = NodePulseThemeTokens.extraTypography.microLabel,
+            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                fontWeight = FontWeight.Normal,
+            ),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -722,6 +769,8 @@ private fun ProbesTabContent(
     onOpenPanelManager: () -> Unit,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
+    previewViewMode: ProbeViewMode? = null,
 ) {
     val panelsById = remember(uiState.panels) { uiState.panels.associateBy { it.id } }
     val panelScopedSnapshots = remember(uiState.snapshots, uiState.selectedPanelIdFilter) {
@@ -737,9 +786,7 @@ private fun ProbesTabContent(
             asset.linkedProbeKey?.let { key -> key to asset }
         }.toMap()
     }
-    val snapshotsByKey = remember(uiState.snapshots) {
-        uiState.snapshots.associateBy { it.probeKey }
-    }
+    val (viewMode, onSelectViewMode) = rememberPersistedProbeViewMode(overrideMode = previewViewMode)
 
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
@@ -750,66 +797,24 @@ private fun ProbesTabContent(
             modifier = Modifier
                 .fillMaxSize()
                 .navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Online / Offline & Panel Filter Bar
+            // Single-row Filter Bar: All/Online/Offline + Panel Dropdown (with 管理面板) + Cards/List toggle
             item(key = "probe_filter_bar", contentType = "filter_bar") {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            ProbeOnlineFilter.entries.forEach { filter ->
-                                val count = when (filter) {
-                                    ProbeOnlineFilter.ALL -> panelScopedSnapshots.size
-                                    ProbeOnlineFilter.ONLINE -> panelScopedSnapshots.count { it.isOnline }
-                                    ProbeOnlineFilter.OFFLINE -> panelScopedSnapshots.count { !it.isOnline }
-                                }
-                                FleetChoiceChip(
-                                    label = "${filter.label} $count",
-                                    selected = uiState.probeFilter == filter,
-                                    onClick = { onSelectFilter(filter) },
-                                )
-                            }
-                        }
-                        // Single clear entry point for managing probe panels.
-                        FleetActionPill(
-                            label = "管理面板",
-                            icon = Icons.Rounded.Tune,
-                            onClick = onOpenPanelManager,
-                        )
-                    }
-
-                    if (uiState.panels.size > 1) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            FleetChoiceChip(
-                                label = "全部面板",
-                                selected = uiState.selectedPanelIdFilter == null,
-                                onClick = { onSelectPanelFilter(null) },
-                            )
-                            uiState.panels.forEach { panel ->
-                                FleetChoiceChip(
-                                    label = panel.name,
-                                    selected = uiState.selectedPanelIdFilter == panel.id,
-                                    onClick = { onSelectPanelFilter(panel.id) },
-                                )
-                            }
-                        }
-                    }
-                }
+                ProbeFilterAndViewBar(
+                    panelScopedSnapshots = panelScopedSnapshots,
+                    allSnapshots = uiState.snapshots,
+                    panels = uiState.panels,
+                    selectedFilter = uiState.probeFilter,
+                    selectedPanelIdFilter = uiState.selectedPanelIdFilter,
+                    viewMode = viewMode,
+                    onSelectFilter = onSelectFilter,
+                    onSelectPanelFilter = onSelectPanelFilter,
+                    onOpenPanelManager = onOpenPanelManager,
+                    onSelectViewMode = onSelectViewMode,
+                    modifier = Modifier.padding(bottom = 2.dp),
+                )
             }
 
             // Panel Error Banner
@@ -852,25 +857,6 @@ private fun ProbesTabContent(
                 }
             }
 
-            if (uiState.highTrafficForecasts.isNotEmpty()) {
-                item(key = "probes_traffic_warning_banner", contentType = "traffic_banner") {
-                    TrafficThresholdWarningBanner(
-                        forecasts = uiState.highTrafficForecasts,
-                        snapshotsByKey = snapshotsByKey,
-                        assetsByProbeKey = assetsByProbeKey,
-                    )
-                }
-            }
-
-            if (uiState.idleServers.isNotEmpty()) {
-                item(key = "probes_idle_banner", contentType = "idle_banner") {
-                    IdleFleetSummaryBanner(
-                        idleServers = uiState.idleServers,
-                        onOpenIdleSalePost = onOpenIdleSalePost,
-                    )
-                }
-            }
-
             // Empty States
             if (uiState.panels.isEmpty()) {
                 item(key = "probes_empty_panels", contentType = "empty_state") {
@@ -898,6 +884,20 @@ private fun ProbesTabContent(
                         },
                     )
                 }
+            } else if (viewMode == ProbeViewMode.DENSE_LIST) {
+                item(key = "probe_dense_list", contentType = "probe_dense_list") {
+                    ProbeDenseListCard(
+                        snapshots = uiState.filteredSnapshots,
+                        panelsById = panelsById,
+                        assetsByProbeKey = assetsByProbeKey,
+                        trafficForecastsByProbeKey = uiState.trafficForecastsByProbeKey,
+                        idleAssessmentsByProbeKey = uiState.idleAssessmentsByProbeKey,
+                        referenceNowEpochMillis = uiState.lastSyncEpochMillis,
+                        onAddAssetFromProbe = onAddAssetFromProbe,
+                        onOpenIdleSalePost = onOpenIdleSalePost,
+                        onOpenLinkedAsset = onOpenLinkedAsset,
+                    )
+                }
             } else {
                 items(
                     items = uiState.filteredSnapshots,
@@ -914,8 +914,10 @@ private fun ProbesTabContent(
                         linkedAsset = linkedAsset,
                         trafficForecast = trafficForecast,
                         idleAssessment = idleAssessment,
+                        referenceNowEpochMillis = uiState.lastSyncEpochMillis,
                         onAddAssetFromProbe = onAddAssetFromProbe,
                         onOpenIdleSalePost = onOpenIdleSalePost,
+                        onOpenLinkedAsset = onOpenLinkedAsset,
                         modifier = Modifier.animateItem(),
                     )
                 }
@@ -974,653 +976,24 @@ private fun ProbeServerCard(
     linkedAsset: VpsAssetRecord?,
     trafficForecast: ServerTrafficForecast?,
     idleAssessment: ServerIdleAssessment?,
+    referenceNowEpochMillis: Long,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val statusDotColor by animateColorAsState(
-        targetValue = if (snapshot.isOnline) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "probeDotColor",
+    CompactProbeServerCard(
+        snapshot = snapshot,
+        panel = panel,
+        linkedAsset = linkedAsset,
+        trafficForecast = trafficForecast,
+        idleAssessment = idleAssessment,
+        referenceNowEpochMillis = referenceNowEpochMillis,
+        onAddAssetFromProbe = onAddAssetFromProbe,
+        onOpenIdleSalePost = onOpenIdleSalePost,
+        onOpenLinkedAsset = onOpenLinkedAsset,
+        modifier = modifier,
     )
-    val statusBg by animateColorAsState(
-        targetValue = if (snapshot.isOnline) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.errorContainer
-        },
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "probeStatusBg",
-    )
-    val statusFg by animateColorAsState(
-        targetValue = if (snapshot.isOnline) {
-            MaterialTheme.colorScheme.onPrimaryContainer
-        } else {
-            MaterialTheme.colorScheme.onErrorContainer
-        },
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "probeStatusFg",
-    )
-    val cardBorderColor by animateColorAsState(
-        targetValue = if (snapshot.isOnline) {
-            ext.cardBorder
-        } else {
-            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.50f else 0.42f)
-        },
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "probeCardBorder",
-    )
-    val cardAccentColor = if (snapshot.isOnline) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.error
-    }
-
-    val effectiveTrafficLimit = trafficForecast?.limitBytes
-        ?: FleetTrafficAndIdleAnalyzer.resolveEffectiveTrafficLimitBytes(snapshot, linkedAsset)
-    val trafficRatio = effectiveTrafficLimit?.takeIf { it > 0L }?.let { limit ->
-        (snapshot.totalMonthlyTransferBytes.toDouble() / limit.toDouble()).toFloat().coerceIn(0f, 1f)
-    }
-
-    val targetCpu = if (snapshot.isOnline) snapshot.cpuPercent.coerceIn(0.0, 100.0).toFloat() else 0f
-    val targetMemRatio = if (snapshot.isOnline) snapshot.memUsageRatio.coerceIn(0f, 1f) else 0f
-    val targetDiskRatio = if (snapshot.isOnline) snapshot.diskUsageRatio.coerceIn(0f, 1f) else 0f
-
-    val animatedCpu by animateFloatAsState(
-        targetValue = targetCpu,
-        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-        label = "probeCpuNumber",
-    )
-    val animatedMemPct by animateFloatAsState(
-        targetValue = targetMemRatio * 100f,
-        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-        label = "probeMemNumber",
-    )
-    val animatedDiskPct by animateFloatAsState(
-        targetValue = targetDiskRatio * 100f,
-        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-        label = "probeDiskNumber",
-    )
-
-    val hasDiskTelemetry = snapshot.diskTotalBytes > 0L || snapshot.diskUsedBytes > 0L
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.ElevatedTile,
-                containerColor = ext.cardSurface,
-                borderColor = cardBorderColor,
-                accentColor = cardAccentColor,
-                elevation = PulseElevation.Card,
-            )
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        // Header: Expressive Region Badge + Server Identity + Status Pill
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            val codeBadge = snapshot.countryCode.trim().uppercase(Locale.US).ifBlank { "VPS" }
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(statusBg.copy(alpha = if (isDark) 0.72f else 0.85f))
-                    .border(
-                        width = 0.8.dp,
-                        color = statusDotColor.copy(alpha = if (isDark) 0.42f else 0.24f),
-                        shape = RoundedCornerShape(12.dp),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = codeBadge,
-                    style = NodePulseThemeTokens.extraTypography.codeLabel.copy(
-                        fontWeight = FontWeight.ExtraBold,
-                    ),
-                    color = statusFg,
-                    maxLines = 1,
-                )
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(statusDotColor),
-                )
-            }
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(
-                    text = snapshot.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                val subtitle = remember(panel?.name, snapshot.os, snapshot.uptimeSeconds, snapshot.isOnline) {
-                    buildList {
-                        panel?.name?.takeIf { it.isNotBlank() }?.let { add(it) }
-                        snapshot.os.takeIf { it.isNotBlank() }?.let { add(it) }
-                        if (snapshot.isOnline && snapshot.uptimeSeconds > 0L) {
-                            add("运行 ${formatUptimeChinese(snapshot.uptimeSeconds)}")
-                        } else if (!snapshot.isOnline) {
-                            add("节点未响应")
-                        }
-                    }.joinToString(" · ").ifBlank { "探针节点" }
-                }
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (idleAssessment?.isIdle == true) {
-                    PulseAccentPill(
-                        text = "闲置",
-                        containerColor = ext.drumstickContainer,
-                        contentColor = ext.onDrumstickContainer,
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(statusBg)
-                        .padding(horizontal = 9.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(statusDotColor),
-                    )
-                    Text(
-                        text = if (snapshot.isOnline) "在线" else "离线",
-                        style = NodePulseThemeTokens.extraTypography.microLabel,
-                        color = statusFg,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-        }
-
-        // Fixed-geometry 2x2 Expressive Telemetry Bento (zero relayout on 2s updates)
-        val cpuDetail = buildList {
-            if (snapshot.cpuCores > 0) add("${snapshot.cpuCores}核")
-            snapshot.load1?.let { add(String.format(Locale.US, "Load %.2f", it)) }
-        }.joinToString(" · ").ifBlank { "实时负载" }
-
-        val memDetail = if (snapshot.memTotalBytes > 0L) {
-            "${formatBytesCompact(snapshot.memUsedBytes)} / ${formatBytesCompact(snapshot.memTotalBytes)}"
-        } else {
-            formatBytesCompact(snapshot.memUsedBytes)
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ProbeMetricBentoTile(
-                label = "CPU",
-                valueText = String.format(Locale.US, "%.1f%%", animatedCpu),
-                caption = cpuDetail,
-                progress = (targetCpu / 100f).coerceIn(0f, 1f),
-                isDimmed = !snapshot.isOnline,
-                modifier = Modifier.weight(1f),
-            )
-            ProbeMetricBentoTile(
-                label = "内存",
-                valueText = "${animatedMemPct.roundToInt()}%",
-                caption = memDetail,
-                progress = targetMemRatio,
-                isDimmed = !snapshot.isOnline,
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        if (hasDiskTelemetry) {
-            val diskDetail = if (snapshot.diskTotalBytes > 0L) {
-                "${formatBytesCompact(snapshot.diskUsedBytes)} / ${formatBytesCompact(snapshot.diskTotalBytes)}"
-            } else {
-                formatBytesCompact(snapshot.diskUsedBytes)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ProbeMetricBentoTile(
-                    label = "硬盘",
-                    valueText = "${animatedDiskPct.roundToInt()}%",
-                    caption = diskDetail,
-                    progress = targetDiskRatio,
-                    isDimmed = !snapshot.isOnline,
-                    modifier = Modifier.weight(1f),
-                )
-                ProbeLiveBandwidthTile(
-                    netInSpeedBps = if (snapshot.isOnline) snapshot.netInSpeedBps else 0L,
-                    netOutSpeedBps = if (snapshot.isOnline) snapshot.netOutSpeedBps else 0L,
-                    isDimmed = !snapshot.isOnline,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        } else {
-            ProbeLiveBandwidthWideStrip(
-                netInSpeedBps = if (snapshot.isOnline) snapshot.netInSpeedBps else 0L,
-                netOutSpeedBps = if (snapshot.isOnline) snapshot.netOutSpeedBps else 0L,
-                isDimmed = !snapshot.isOnline,
-            )
-        }
-
-        // Monthly Traffic Quota Strip (when reported or configured via linked asset)
-        if (snapshot.totalMonthlyTransferBytes > 0L || effectiveTrafficLimit != null) {
-            ProbeMonthlyTrafficPanel(
-                monthlyInBytes = snapshot.monthlyTransferInBytes,
-                monthlyOutBytes = snapshot.monthlyTransferOutBytes,
-                effectiveLimitBytes = effectiveTrafficLimit,
-                trafficRatio = trafficRatio,
-                trafficForecast = trafficForecast,
-            )
-        }
-
-        if (idleAssessment?.isIdle == true) {
-            IdleServerCalloutStrip(
-                assessment = idleAssessment,
-                actionLabel = if (linkedAsset != null) "出掉回血" else "录入并出机",
-                onAction = { onOpenIdleSalePost(snapshot.probeKey) },
-            )
-        }
-
-        PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f))
-
-        // Clean Footer: Linked Asset Pill or Single "录入账本" CTA
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            if (linkedAsset != null) {
-                PulseAccentPill(
-                    text = "账本：${linkedAsset.nickname}",
-                    icon = Icons.Rounded.Link,
-                    modifier = Modifier.widthIn(max = 200.dp),
-                )
-                if (linkedAsset.expiryDateIso.isNotBlank()) {
-                    Text(
-                        text = "到期 ${linkedAsset.expiryDateIso}",
-                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            } else {
-                Text(
-                    text = "未关联资产账本",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                )
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f))
-                        .pulseBouncyClickable(
-                            pressedScale = NodePulseMotion.chipPressScale,
-                            role = Role.Button,
-                            onClick = { onAddAssetFromProbe(snapshot) },
-                        )
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        Icons.Rounded.Add,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(13.dp),
-                    )
-                    Text(
-                        text = "录入账本",
-                        style = NodePulseThemeTokens.extraTypography.microLabel,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProbeMetricBentoTile(
-    label: String,
-    valueText: String,
-    caption: String,
-    progress: Float,
-    isDimmed: Boolean,
-    modifier: Modifier = Modifier,
-    warningThreshold: Float = 0.85f,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val barColor = when {
-        isDimmed -> MaterialTheme.colorScheme.outlineVariant
-        progress >= 0.92f -> MaterialTheme.colorScheme.error
-        progress >= warningThreshold -> ext.onDrumstickContainer
-        else -> MaterialTheme.colorScheme.primary
-    }
-    val valueColor = when {
-        isDimmed -> MaterialTheme.colorScheme.onSurfaceVariant
-        progress >= 0.92f -> MaterialTheme.colorScheme.error
-        progress >= warningThreshold -> ext.onDrumstickContainer
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-
-    Column(
-        modifier = modifier
-            .heightIn(min = 72.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(0.75.dp, ext.cardBorder.copy(alpha = 0.72f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                softWrap = false,
-            )
-            Text(
-                text = valueText,
-                style = MaterialTheme.typography.labelLarge.copy(
-                    fontWeight = FontWeight.Bold,
-                ).withTabularNumbers(),
-                color = valueColor,
-                maxLines = 1,
-                softWrap = false,
-            )
-        }
-        SmoothMetricProgressBar(
-            progress = progress,
-            barColor = barColor,
-            height = 5.dp,
-        )
-        Text(
-            text = caption,
-            style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun ProbeLiveBandwidthTile(
-    netInSpeedBps: Long,
-    netOutSpeedBps: Long,
-    isDimmed: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val primaryTint = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
-    val secondaryTint = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.tertiary
-    val textColor = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-
-    Column(
-        modifier = modifier
-            .heightIn(min = 72.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(0.75.dp, ext.cardBorder.copy(alpha = 0.72f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = "实时带宽",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                softWrap = false,
-            )
-            Icon(
-                imageVector = Icons.Rounded.SwapVert,
-                contentDescription = null,
-                tint = primaryTint.copy(alpha = 0.78f),
-                modifier = Modifier.size(14.dp),
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                Icons.Rounded.ArrowDownward,
-                contentDescription = "下行",
-                tint = primaryTint,
-                modifier = Modifier.size(13.dp),
-            )
-            Text(
-                text = formatSpeedBps(netInSpeedBps),
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold).withTabularNumbers(),
-                color = textColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                Icons.Rounded.ArrowUpward,
-                contentDescription = "上行",
-                tint = secondaryTint,
-                modifier = Modifier.size(13.dp),
-            )
-            Text(
-                text = formatSpeedBps(netOutSpeedBps),
-                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProbeLiveBandwidthWideStrip(
-    netInSpeedBps: Long,
-    netOutSpeedBps: Long,
-    isDimmed: Boolean,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val primaryTint = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
-    val secondaryTint = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.tertiary
-    val textColor = if (isDimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(0.75.dp, ext.cardBorder.copy(alpha = 0.72f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Row(
-            modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Icon(
-                Icons.Rounded.ArrowDownward,
-                contentDescription = "下行",
-                tint = primaryTint,
-                modifier = Modifier.size(14.dp),
-            )
-            Text(
-                text = "下行",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = formatSpeedBps(netInSpeedBps),
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold).withTabularNumbers(),
-                color = textColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Box(
-            modifier = Modifier
-                .width(0.75.dp)
-                .height(16.dp)
-                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
-        )
-        Row(
-            modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Icon(
-                Icons.Rounded.ArrowUpward,
-                contentDescription = "上行",
-                tint = secondaryTint,
-                modifier = Modifier.size(14.dp),
-            )
-            Text(
-                text = "上行",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = formatSpeedBps(netOutSpeedBps),
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold).withTabularNumbers(),
-                color = textColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProbeMonthlyTrafficPanel(
-    monthlyInBytes: Long,
-    monthlyOutBytes: Long,
-    effectiveLimitBytes: Long?,
-    trafficRatio: Float?,
-    trafficForecast: ServerTrafficForecast?,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val barColor = when {
-        trafficRatio == null -> MaterialTheme.colorScheme.primary
-        trafficRatio >= 0.92f -> MaterialTheme.colorScheme.error
-        trafficRatio >= 0.80f -> ext.onDrumstickContainer
-        else -> MaterialTheme.colorScheme.primary
-    }
-    val pctValue = trafficForecast?.usageRatio?.times(100.0)
-        ?: trafficRatio?.times(100f)?.toDouble()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(0.75.dp, ext.cardBorder.copy(alpha = 0.72f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = "月流量",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                softWrap = false,
-            )
-            val detail = buildString {
-                append("↓ ${formatBytesBinary(monthlyInBytes)}  ↑ ${formatBytesBinary(monthlyOutBytes)}")
-                if (effectiveLimitBytes != null) {
-                    append(" / ${formatBytesCompact(effectiveLimitBytes)}")
-                }
-                if (pctValue != null) {
-                    append(" (${pctValue.roundToInt()}%)")
-                }
-            }
-            Text(
-                text = detail,
-                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .padding(start = 8.dp),
-            )
-        }
-        if (trafficRatio != null) {
-            SmoothMetricProgressBar(
-                progress = trafficRatio,
-                barColor = barColor,
-                height = 5.dp,
-            )
-        }
-        if (trafficForecast != null && trafficForecast.limitBytes != null) {
-            TrafficForecastCaptionRow(forecast = trafficForecast)
-        }
-    }
 }
 
 @Composable
