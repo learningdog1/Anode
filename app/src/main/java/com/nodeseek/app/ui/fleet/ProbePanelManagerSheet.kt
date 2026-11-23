@@ -46,8 +46,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -72,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
@@ -311,28 +310,26 @@ internal fun ProbePanelManagerSheet(
                             }
                         }
 
-                        OutlinedTextField(
+                        PulseTextField(
                             value = nameInput,
                             onValueChange = { nameInput = it },
-                            label = { Text("面板名称") },
-                            placeholder = { Text("例如：主力哪吒 / Komari 亚太") },
+                            label = "面板名称",
+                            placeholder = "例如：主力哪吒 / Komari 亚太",
                             singleLine = true,
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = fleetTextFieldColors(),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier.fillMaxWidth(),
                         )
 
-                        OutlinedTextField(
+                        PulseTextField(
                             value = urlInput,
                             onValueChange = {
                                 urlInput = it
                                 onClearTestState()
                             },
-                            label = { Text("面板地址 (URL)") },
-                            placeholder = { Text("https://probe.example.com") },
+                            label = "面板地址 (URL)",
+                            placeholder = "https://probe.example.com",
                             singleLine = true,
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = fleetTextFieldColors(),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier.fillMaxWidth(),
                         )
 
@@ -360,14 +357,14 @@ internal fun ProbePanelManagerSheet(
                             }
                         }
 
-                        OutlinedTextField(
+                        PulseTextField(
                             value = tokenInput,
                             onValueChange = {
                                 tokenInput = it
                                 onClearTestState()
                             },
-                            label = { Text("API Token / Cookie（公开面板可留空）") },
-                            placeholder = { Text("哪吒 API Token / JWT / Komari Key") },
+                            label = "API Token / Cookie（公开可留空）",
+                            placeholder = "哪吒 API Token / JWT / Komari Key",
                             singleLine = true,
                             visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
                             trailingIcon = {
@@ -378,7 +375,7 @@ internal fun ProbePanelManagerSheet(
                                     )
                                 }
                             },
-                            supportingText = {
+                            supportingContent = {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -392,8 +389,7 @@ internal fun ProbePanelManagerSheet(
                                     Text("令牌经 Android Keystore AES-GCM 加密保存在本地")
                                 }
                             },
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = fleetTextFieldColors(),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier.fillMaxWidth(),
                         )
 
@@ -798,13 +794,6 @@ internal fun FleetChoiceChip(
         )
     }
 }
-
-@Composable
-internal fun fleetTextFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedContainerColor = NodePulseThemeTokens.extendedColors.cardSurface,
-    unfocusedContainerColor = NodePulseThemeTokens.extendedColors.cardSurface,
-    unfocusedBorderColor = NodePulseThemeTokens.extendedColors.cardBorder,
-)
 
 internal object FleetSemanticColors {
     @Composable

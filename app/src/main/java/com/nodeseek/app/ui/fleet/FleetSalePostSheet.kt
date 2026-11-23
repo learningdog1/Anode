@@ -40,7 +40,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -75,6 +74,7 @@ import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.ValuationMarkdownStyle
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.ui.components.MarkdownRenderer
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -344,17 +344,17 @@ internal fun FleetSalePostSheet(
             ) {
                 // Asking Price + Quick Presets
                 PulseSectionHeader(title = "出让定价与过户选项", icon = Icons.Rounded.LocalOffer)
-                OutlinedTextField(
+                PulseTextField(
                     value = askingPriceText,
                     onValueChange = {
                         askingPriceText = sanitizeAssetDecimal(it)
                         customTitleOverride = null
                     },
-                    label = { Text("出让明盘价 (CNY ¥)") },
+                    label = "出让明盘价 (CNY ¥)",
+                    placeholder = "0.00",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 FlowRow(
@@ -404,15 +404,15 @@ internal fun FleetSalePostSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = pushFeeText,
                         onValueChange = { pushFeeText = sanitizeAssetDecimal(it) },
-                        label = { Text("Push / 过户费 (CNY ¥)") },
+                        label = "Push / 过户费 (CNY ¥)",
+                        placeholder = "0",
                         singleLine = true,
                         enabled = pushFeeBearer != PushFeeBearer.FREE,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -457,14 +457,13 @@ internal fun FleetSalePostSheet(
                     }
                 }
 
-                OutlinedTextField(
+                PulseTextField(
                     value = extraNote,
                     onValueChange = { extraNote = it },
-                    label = { Text("交易补充说明（选填）") },
-                    placeholder = { Text("例如：IP 干净解锁流媒体，站内私信秒回") },
+                    label = "交易补充说明（选填）",
+                    placeholder = "例如：IP 干净解锁流媒体，站内私信秒回",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -505,13 +504,13 @@ internal fun FleetSalePostSheet(
                     },
                 )
 
-                OutlinedTextField(
+                PulseTextField(
                     value = effectiveTitle,
                     onValueChange = { customTitleOverride = it },
-                    label = { Text("发帖标题（可微调）") },
+                    label = "发帖标题（可微调）",
+                    placeholder = "输入交易帖标题…",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
