@@ -306,13 +306,19 @@ internal class HttpSellerTrustRemoteDataSource(
     }
 
     private suspend fun fetchRssExposeFallbackOrThrow(originalError: Throwable): ParsedFeedPageDto {
-        val rssPage = runCatching { apiClient.fetchRssFeed() }.getOrNull()
+        val rssPage = runCatching { apiClient.fetchRssFeed() }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull()
             ?: throw originalError
         val exposeTopics = rssPage.topics.filter { topic ->
             topic.categoryKey.equals("expose", ignoreCase = true) ||
                 topic.categoryName.contains("曝光")
         }
-        return rssPage.copy(pinnedTopics = emptyList(), topics = exposeTopics)
+        return rssPage.copy(
+            pinnedTopics = emptyList(),
+            topics = exposeTopics,
+            isFromRssFallback = true,
+        )
     }
 
     override suspend fun searchExposureTopicsPage1(

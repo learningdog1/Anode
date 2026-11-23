@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import okhttp3.OkHttpClient
 import java.io.File
 
@@ -38,6 +40,7 @@ class OfficialTradeRepositoryImpl internal constructor(
         username: String,
         forceRefresh: Boolean,
     ): OfficialTradeLookup {
+        keyStore.ensureLoaded()
         val apiKey = keyStore.currentApiKey()
             ?: return OfficialTradeLookup.NotConfigured
 
@@ -62,11 +65,19 @@ class OfficialTradeRepositoryImpl internal constructor(
         }
     }
 
-    override suspend fun getCachedOnly(username: String): OfficialTradeLookup.Found? =
-        cacheStore.getFreshPositiveOnly(username = username, nowMillis = clockMillis())
+    override suspend fun getCachedOnly(username: String): OfficialTradeLookup.Found? {
+        keyStore.ensureLoaded()
+        if (!keyStore.isConfigured.value) return null
+        return cacheStore.getFreshPositiveOnly(username = username, nowMillis = clockMillis())
+    }
 
     override fun observeCachedOnly(username: String): Flow<OfficialTradeLookup.Found?> =
-        cacheStore.observeFreshPositiveOnly(username = username)
+        combine(
+            keyStore.isConfigured,
+            cacheStore.observeFreshPositiveOnly(username = username),
+        ) { configured, cached ->
+            if (configured) cached else null
+        }.distinctUntilChanged()
 
     override suspend fun saveApiKey(key: String) {
         val changed = keyStore.saveApiKey(key)
@@ -77,6 +88,7 @@ class OfficialTradeRepositoryImpl internal constructor(
 
     override suspend fun clearApiKey() {
         keyStore.clearApiKey()
+        cacheStore.clear()
         rateLimiter.resetForKeyChange()
     }
 

@@ -24,13 +24,18 @@ import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.trust.TrustTag
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -200,8 +205,8 @@ data class SellerTrustUiState(
             ?: usernameHint.trim().ifEmpty { if (uid > 0L) "用户 #$uid" else "未知卖家" }
 
     val effectiveOfficialUsername: String
-        get() = report?.username?.trim()?.removePrefix("@")?.takeIf { it.isNotBlank() }
-            ?: usernameHint.trim().removePrefix("@")
+        get() = SellerTrustStateHolder.sanitizeOfficialTradeUsername(report?.username)
+            .ifBlank { SellerTrustStateHolder.sanitizeOfficialTradeUsername(usernameHint) }
 
     val officialTradeFound: OfficialTradeLookup.Found?
         get() = (officialTradeLookup as? OfficialTradeLookup.Found)?.takeIf { it.matches.isNotEmpty() }
@@ -415,6 +420,7 @@ class SellerTrustStateHolder(
                                 exposureCheckScope = report.exposureCheckScope,
                                 scannedTopicsCount = report.scannedTopicsCount,
                                 hasMoreTopicPages = report.hasMoreTopicPages,
+                                topicsSucceeded = report.topicsSucceeded,
                             ),
                         )
                     } else {
@@ -457,7 +463,7 @@ class SellerTrustStateHolder(
                     cooldownTickerJob?.cancel()
                 }
 
-                val resolvedReportUsername = report.username.trim().removePrefix("@")
+                val resolvedReportUsername = sanitizeOfficialTradeUsername(report.username)
                 if (resolvedReportUsername.isNotBlank() &&
                     !resolvedReportUsername.equals(_uiState.value.officialTradeQueriedUsername, ignoreCase = true)
                 ) {
@@ -496,9 +502,7 @@ class SellerTrustStateHolder(
         forceRefresh: Boolean = false,
     ) {
         val snapshot = _uiState.value
-        val cleanUsername = (usernameOverride ?: snapshot.effectiveOfficialUsername)
-            .trim()
-            .removePrefix("@")
+        val cleanUsername = sanitizeOfficialTradeUsername(usernameOverride ?: snapshot.effectiveOfficialUsername)
         if (cleanUsername.isEmpty()) return
 
         val now = clockMillis()
@@ -610,6 +614,7 @@ class SellerTrustStateHolder(
                                 exposureCheckScope = updated.exposureCheckScope,
                                 scannedTopicsCount = updated.scannedTopicsCount,
                                 hasMoreTopicPages = updated.hasMoreTopicPages,
+                                topicsSucceeded = updated.topicsSucceeded,
                             ),
                         )
                     } else {
@@ -681,6 +686,7 @@ class SellerTrustStateHolder(
                                 exposureCheckScope = updated.exposureCheckScope,
                                 scannedTopicsCount = updated.scannedTopicsCount,
                                 hasMoreTopicPages = updated.hasMoreTopicPages,
+                                topicsSucceeded = updated.topicsSucceeded,
                             ),
                         )
                     } else {
@@ -754,6 +760,36 @@ class SellerTrustStateHolder(
         autoSaveJob?.cancel()
         val latest = _uiState.value
         persistNote(tag = latest.draftTag, noteText = latest.draftNoteText)
+    }
+
+    /**
+     * Flushes any pending unsaved note or active debounce timer right before the sheet dismisses
+     * or leaves composition (e.g. configuration change), using a NonCancellable / detached write
+     * so user edits are never dropped when the sheet's coroutine scope is cancelled.
+     */
+    fun flushPendingNoteOnDismiss() {
+        val hadPendingDebounce = autoSaveJob?.isActive == true
+        autoSaveJob?.cancel()
+        val latest = _uiState.value
+        if (!hadPendingDebounce && !latest.hasUnsavedNoteChanges) return
+        val targetUid = latest.resolvedUid
+        if (targetUid <= 0L) return
+        val targetUsername = latest.resolvedUsername
+        val tagToSave = latest.draftTag
+        val textToSave = latest.draftNoteText
+        val targetScope = if (scope.isActive) scope else detachedNoteFlushScope
+        targetScope.launch {
+            withContext(NonCancellable) {
+                runCatching {
+                    repository.saveLocalNote(
+                        uid = targetUid,
+                        username = targetUsername,
+                        tag = tagToSave,
+                        noteText = textToSave,
+                    )
+                }
+            }
+        }
     }
 
     private fun startCooldownTicker(untilMillis: Long) {
@@ -856,6 +892,7 @@ class SellerTrustStateHolder(
                                     exposureCheckScope = existing.exposureCheckScope,
                                     scannedTopicsCount = existing.scannedTopicsCount,
                                     hasMoreTopicPages = existing.hasMoreTopicPages,
+                                    topicsSucceeded = existing.topicsSucceeded,
                                 ),
                             )
                         }
@@ -978,6 +1015,17 @@ class SellerTrustStateHolder(
         private const val DEFAULT_OFFICIAL_RETRY_SECONDS: Long = 60L
         private const val AUTO_SAVE_DEBOUNCE_MILLIS: Long = 700L
         private const val SAVED_FEEDBACK_DURATION_MILLIS: Long = 2200L
+        private val detachedNoteFlushScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val PLACEHOLDER_USERNAME_REGEX = Regex(
+            "^(?:用户|成员|user)\\s*#?\\d+$|^未知卖家$",
+            RegexOption.IGNORE_CASE,
+        )
+
+        internal fun sanitizeOfficialTradeUsername(raw: String?): String {
+            val cleaned = raw?.trim()?.removePrefix("@")?.trim().orEmpty()
+            if (cleaned.isEmpty() || PLACEHOLDER_USERNAME_REGEX.matches(cleaned)) return ""
+            return cleaned
+        }
     }
 }
 

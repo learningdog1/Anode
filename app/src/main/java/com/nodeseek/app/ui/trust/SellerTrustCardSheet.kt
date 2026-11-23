@@ -70,6 +70,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -157,9 +158,19 @@ fun SellerTrustCardSheet(
 ) {
     val uiState by stateHolder.uiState.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val handleDismiss: () -> Unit = {
+        stateHolder.flushPendingNoteOnDismiss()
+        onDismiss()
+    }
+
+    DisposableEffect(stateHolder) {
+        onDispose {
+            stateHolder.flushPendingNoteOnDismiss()
+        }
+    }
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = handleDismiss,
         sheetState = sheetState,
         modifier = modifier,
         shape = PulseArchitecturalShapes.BottomSheetTop,
@@ -181,27 +192,27 @@ fun SellerTrustCardSheet(
             onNoteTextChange = stateHolder::updateDraftNoteText,
             onSaveNote = stateHolder::saveNoteNow,
             onOpenTopic = { topicId ->
-                onDismiss()
+                handleDismiss()
                 onOpenTopic(topicId)
             },
             onOpenUserProfile = { targetUid, targetUsername ->
-                onDismiss()
+                handleDismiss()
                 onOpenUserProfile(targetUid, targetUsername)
             },
             onStartDm = onStartDm?.let { startDm ->
                 { targetUid, targetUsername ->
-                    onDismiss()
+                    handleDismiss()
                     startDm(targetUid, targetUsername)
                 }
             },
             onOpenSettings = onOpenSettings?.let { openSettings ->
                 {
-                    onDismiss()
+                    handleDismiss()
                     openSettings()
                 }
             },
             officialTradeRepository = officialTradeRepository,
-            onDismiss = onDismiss,
+            onDismiss = handleDismiss,
         )
     }
 }

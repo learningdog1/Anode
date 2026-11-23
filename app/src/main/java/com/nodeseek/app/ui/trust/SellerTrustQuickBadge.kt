@@ -26,7 +26,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -223,27 +222,18 @@ fun SellerTrustQuickBadge(
         TrustTag.NONE
     }
 
-    // Strictly zero-network official trade lookup: uses getCachedOnly / observeCachedOnly ONLY.
-    val officialUsername = cleanHint.removePrefix("@")
-        .ifBlank { cachedReport?.username?.trim()?.removePrefix("@").orEmpty() }
+    // Strictly zero-network official trade lookup: observes cached stream directly (gated on isConfigured)
+    // without triggering redundant per-badge produceState queries on global signal broadcasts.
+    val officialUsername = SellerTrustStateHolder.sanitizeOfficialTradeUsername(cleanHint)
+        .ifBlank { SellerTrustStateHolder.sanitizeOfficialTradeUsername(cachedReport?.username) }
     val cachedOfficialFound: OfficialTradeLookup.Found? = if (!isInspection && officialUsername.isNotEmpty()) {
         val officialRepo = rememberOfficialTradeRepository(override = officialTradeRepository)
         val isConfigured by officialRepo.isConfigured.collectAsStateWithLifecycle()
-        val signalEpoch by OfficialTradeUiSignalBus.epoch.collectAsStateWithLifecycle()
         val observedFlow = remember(officialRepo, officialUsername) {
             officialRepo.observeCachedOnly(officialUsername)
         }
         val observedCachedOfficial by observedFlow.collectAsStateWithLifecycle(initialValue = null)
-        val directCachedOfficial by produceState<OfficialTradeLookup.Found?>(
-            initialValue = null,
-            officialRepo,
-            officialUsername,
-            isConfigured,
-            signalEpoch,
-        ) {
-            value = if (isConfigured) officialRepo.getCachedOnly(officialUsername) else null
-        }
-        if (isConfigured) observedCachedOfficial ?: directCachedOfficial else null
+        if (isConfigured) observedCachedOfficial else null
     } else {
         null
     }

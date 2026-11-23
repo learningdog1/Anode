@@ -12,9 +12,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 
 @Serializable
 private data class EncryptedOfficialTradeKeyPayload(
@@ -50,7 +53,10 @@ class OfficialTradeKeyStore(
     }
 
     @Volatile
-    private var cachedPlainKey: String? = loadInitialKeySync()
+    private var loadNeedsRetry: Boolean = false
+
+    @Volatile
+    private var cachedPlainKey: String? = loadKeyFromDisk()
 
     private val _isConfigured = MutableStateFlow(!cachedPlainKey.isNullOrEmpty())
     val isConfigured: StateFlow<Boolean> = _isConfigured.asStateFlow()
@@ -58,6 +64,18 @@ class OfficialTradeKeyStore(
     fun currentApiKey(): String? = cachedPlainKey
 
     fun maskedApiKey(): String? = cachedPlainKey?.let(::maskKey)
+
+    suspend fun ensureLoaded() {
+        if (!loadNeedsRetry) return
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                if (!loadNeedsRetry) return@withLock
+                val loaded = loadKeyFromDisk()
+                cachedPlainKey = loaded
+                _isConfigured.value = !loaded.isNullOrEmpty()
+            }
+        }
+    }
 
     /**
      * Trims and validates [rawKey], then encrypts and atomically persists it.
@@ -77,6 +95,7 @@ class OfficialTradeKeyStore(
                 )
                 writeAtomicallyLocked(payload)
                 cachedPlainKey = validated
+                loadNeedsRetry = false
                 _isConfigured.value = true
                 previous != validated
             }
@@ -87,6 +106,7 @@ class OfficialTradeKeyStore(
         withContext(ioDispatcher) {
             mutex.withLock {
                 cachedPlainKey = null
+                loadNeedsRetry = false
                 _isConfigured.value = false
                 runCatching {
                     val tmpFile = File(keyFile.parentFile, "${keyFile.name}.tmp")
@@ -100,27 +120,64 @@ class OfficialTradeKeyStore(
     override fun toString(): String =
         "OfficialTradeKeyStore(configured=${_isConfigured.value})"
 
-    private fun loadInitialKeySync(): String? {
-        if (!keyFile.isFile) return null
+    private fun loadKeyFromDisk(): String? {
+        if (!keyFile.isFile) {
+            loadNeedsRetry = false
+            return null
+        }
         val len = keyFile.length()
-        if (len <= 0L || len > MAX_KEY_FILE_BYTES) return null
-        return runCatching {
+        if (len <= 0L || len > MAX_KEY_FILE_BYTES) {
+            loadNeedsRetry = false
+            return null
+        }
+        return try {
             val raw = keyFile.readText(Charsets.UTF_8)
-            if (raw.isBlank()) return null
+            if (raw.isBlank()) {
+                loadNeedsRetry = false
+                return null
+            }
             val payload = json.decodeFromString<EncryptedOfficialTradeKeyPayload>(raw)
-            if (payload.encryptedApiKey.isBlank()) return null
+            if (payload.encryptedApiKey.isBlank()) {
+                loadNeedsRetry = false
+                return null
+            }
             val decrypted = cipher.decrypt(payload.encryptedApiKey).trim()
+            loadNeedsRetry = false
             if (isValidKeyFormat(decrypted)) {
                 decrypted
             } else {
                 runCatching { keyFile.delete() }
                 null
             }
-        }.getOrElse {
-            // Corrupted file or invalidated Keystore key: fail closed without logging ciphertext.
-            runCatching { keyFile.delete() }
+        } catch (t: Throwable) {
+            if (isPermanentKeyCorruption(t)) {
+                // Permanently corrupted ciphertext / JSON / invalidated Keystore key: clean up safely.
+                loadNeedsRetry = false
+                runCatching { keyFile.delete() }
+            } else {
+                // Transient I/O or temporary Keystore error: preserve keyFile so a later retry recovers.
+                loadNeedsRetry = true
+            }
             null
         }
+    }
+
+    private fun isPermanentKeyCorruption(error: Throwable): Boolean {
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth < 6) {
+            if (current is SerializationException ||
+                current is IllegalArgumentException ||
+                current is AEADBadTagException ||
+                current is BadPaddingException ||
+                current.javaClass.name == "android.security.keystore.KeyPermanentlyInvalidatedException"
+            ) {
+                return true
+            }
+            current = current.cause
+            depth++
+        }
+        return false
     }
 
     private fun writeAtomicallyLocked(payload: EncryptedOfficialTradeKeyPayload) {
