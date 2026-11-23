@@ -42,6 +42,29 @@ data class SeekMailTag(
 )
 
 @Serializable
+data class SeekMailLocalTag(
+    val id: String,
+    val name: String,
+    val colorHex: String = "#2D637E",
+)
+
+@Serializable
+data class SeekMailLocalTagStore(
+    val tags: List<SeekMailLocalTag> = emptyList(),
+    val mailTagIds: Map<Long, List<String>> = emptyMap(),
+) {
+    fun tagsForMail(mailId: Long): List<SeekMailLocalTag> {
+        val ids = mailTagIds[mailId] ?: return emptyList()
+        if (ids.isEmpty() || tags.isEmpty()) return emptyList()
+        val tagById = tags.associateBy { it.id }
+        return ids.mapNotNull { tagById[it] }
+    }
+
+    fun mailCountForTag(tagId: String): Int =
+        mailTagIds.values.count { tagId in it }
+}
+
+@Serializable
 data class SeekMailAuthTelemetry(
     val spf: String = "",
     val dkim: String = "",
