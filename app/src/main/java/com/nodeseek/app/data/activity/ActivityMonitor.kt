@@ -123,6 +123,20 @@ class ActivityMonitorControllerImpl(
             isStarted = true
             if (settingsObserverJob?.isActive != true) {
                 val observer = scope.launch(start = CoroutineStart.LAZY) {
+                    preferencesStore.ensureLoaded()
+                    _runtimeStatus.update {
+                        it.copy(
+                            baselineInitialized = preferencesStore.currentBaselineInitialized,
+                            lastCheckEpochMillis = maxOf(
+                                it.lastCheckEpochMillis,
+                                preferencesStore.currentLastCheckedEpochMillis,
+                            ),
+                            lastNotifiedEpochMillis = maxOf(
+                                it.lastNotifiedEpochMillis,
+                                preferencesStore.currentLastNotifiedEpochMillis,
+                            ),
+                        )
+                    }
                     preferencesStore.settingsFlow
                         .drop(1)
                         .collect {
@@ -187,12 +201,20 @@ class ActivityMonitorControllerImpl(
         if (enabled) {
             backoffUntilEpochMillis = 0L
             consecutiveFailures = 0
-            val currentLoadedIds = repository.snapshot.value.activities
-                .map { it.id }
-                .filter { it.isNotBlank() }
+            val snap = repository.snapshot.value
+            val now = clockMillis()
+            val isFreshOnlineSnapshot = !snap.loadedFromCache &&
+                snap.activities.isNotEmpty() &&
+                (snap.lastSyncedEpochMillis <= 0L ||
+                    (now - snap.lastSyncedEpochMillis) <= REENABLE_SEED_FRESHNESS_MS)
+            val currentLoadedKeys = if (isFreshOnlineSnapshot) {
+                collectDedupKeys(snap.activities)
+            } else {
+                emptyList()
+            }
             preferencesStore.setNotificationsEnabled(
                 enabled = true,
-                seedBaselineIds = currentLoadedIds,
+                seedBaselineIds = currentLoadedKeys,
             )
             _runtimeStatus.update {
                 it.copy(
@@ -205,7 +227,10 @@ class ActivityMonitorControllerImpl(
             pendingManualTrigger.set(false)
             preferencesStore.setNotificationsEnabled(enabled = false)
             _runtimeStatus.update {
-                it.copy(isPollingNow = false)
+                it.copy(
+                    isPollingNow = false,
+                    baselineInitialized = preferencesStore.currentBaselineInitialized,
+                )
             }
             wakeSignal.trySend(Unit)
         }
@@ -434,12 +459,12 @@ class ActivityMonitorControllerImpl(
                 .distinctBy { it.id.trim() }
                 .map(ActivityLotteryClassifier::normalizeItem)
 
-            val currentIds = validActivities.map { it.id.trim() }
+            val currentDedupKeys = collectDedupKeys(validActivities)
             val wasBaselineInitialized = preferencesStore.isBaselineInitialized()
 
             if (!wasBaselineInitialized) {
                 preferencesStore.initializeBaseline(
-                    activityIds = currentIds,
+                    activityIds = currentDedupKeys,
                     checkedAtEpochMillis = finishedAt,
                 )
                 _runtimeStatus.update {
@@ -457,11 +482,16 @@ class ActivityMonitorControllerImpl(
                 )
             }
 
-            val seenIds = preferencesStore.getSeenActivityIds()
+            val seenKeys = preferencesStore.getSeenActivityIds()
             // Lottery status applies only to explicit-link lotteries: skip already-ended lotteries,
             // while never discarding non-lottery community activities (whose lottery status is null).
+            // Check both primary ID and canonical source key (`ns_topic:`/`url:`) so auto->manual
+            // upgrades of the same topic never double-notify.
             val unseenActiveItems = validActivities.filter { item ->
-                item.id.trim() !in seenIds &&
+                val primaryId = item.id.trim()
+                val canonicalKey = item.canonicalDedupKey()
+                primaryId !in seenKeys &&
+                    canonicalKey !in seenKeys &&
                     item.resolveLotteryStatusOrNull(finishedAt) != ActivityTimeStatus.ENDED
             }
             val canNotify = notificationDispatcher.hasPostNotificationsPermission()
@@ -472,8 +502,8 @@ class ActivityMonitorControllerImpl(
             }
 
             preferencesStore.recordPollOutcome(
-                currentFeedIds = currentIds,
-                newlyNotifiedIds = notifiedItems.map { it.id.trim() },
+                currentFeedIds = currentDedupKeys,
+                newlyNotifiedIds = collectDedupKeys(notifiedItems),
                 checkedAtEpochMillis = finishedAt,
             )
 
@@ -507,9 +537,28 @@ class ActivityMonitorControllerImpl(
         const val DEFAULT_STARTUP_DELAY_MS = 2_500L
         private const val MIN_WAIT_SLICE_MS = 2_000L
         private const val MIN_FOREGROUND_DEBOUNCE_MS = 8_000L
+        private const val REENABLE_SEED_FRESHNESS_MS = 10L * 60_000L
         private const val BASE_ERROR_BACKOFF_MS = 30_000L
         private const val MAX_ERROR_BACKOFF_MS = 300_000L
         private const val MAX_BACKOFF_EXPONENT = 4
+
+        internal fun collectDedupKeys(
+            items: List<com.nodeseek.app.domain.activity.ForumWatchActivityItem>,
+        ): List<String> {
+            if (items.isEmpty()) return emptyList()
+            val keys = ArrayList<String>(items.size * 2)
+            for (item in items) {
+                val id = item.id.trim()
+                if (id.isNotEmpty()) {
+                    keys.add(id)
+                }
+                val canonical = item.canonicalDedupKey()
+                if (canonical.isNotEmpty() && canonical != id) {
+                    keys.add(canonical)
+                }
+            }
+            return keys
+        }
 
         internal fun defaultIsUnmeteredNetwork(context: Context): Boolean {
             return runCatching {

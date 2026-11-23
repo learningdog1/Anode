@@ -57,7 +57,11 @@ class ActivityPreferencesStore(
 
     private val mutex = Mutex()
 
-    private var state: ActivityMonitorStoreSnapshot = readSnapshotSync()
+    @Volatile
+    private var loaded: Boolean = false
+
+    @Volatile
+    private var state: ActivityMonitorStoreSnapshot = ActivityMonitorStoreSnapshot()
 
     private val _settingsFlow = MutableStateFlow(state.settings.normalized())
     val settingsFlow: StateFlow<ActivityMonitorSettings> = _settingsFlow.asStateFlow()
@@ -71,18 +75,34 @@ class ActivityPreferencesStore(
     val currentLastNotifiedEpochMillis: Long
         get() = state.lastNotifiedEpochMillis
 
+    suspend fun ensureLoaded() {
+        mutex.withLock {
+            ensureLoadedLocked()
+        }
+    }
+
     suspend fun getSettings(): ActivityMonitorSettings =
-        mutex.withLock { _settingsFlow.value }
+        mutex.withLock {
+            ensureLoadedLocked()
+            _settingsFlow.value
+        }
 
     suspend fun isBaselineInitialized(): Boolean =
-        mutex.withLock { state.baselineInitialized }
+        mutex.withLock {
+            ensureLoadedLocked()
+            state.baselineInitialized
+        }
 
     suspend fun getSeenActivityIds(): Set<String> =
-        mutex.withLock { LinkedHashSet(state.seenActivityIds) }
+        mutex.withLock {
+            ensureLoadedLocked()
+            LinkedHashSet(state.seenActivityIds)
+        }
 
     suspend fun updateSettings(
         transform: (ActivityMonitorSettings) -> ActivityMonitorSettings,
     ): ActivityMonitorSettings = mutex.withLock {
+        ensureLoadedLocked()
         val nextSettings = transform(_settingsFlow.value).normalized()
         val nextSnapshot = state.copy(settings = nextSettings)
         persistSnapshotLocked(nextSnapshot)
@@ -92,14 +112,16 @@ class ActivityPreferencesStore(
     /**
      * Updates [ActivityMonitorSettings.notificationsEnabled].
      *
-     * When turning notifications ON (`false -> true`) while [seedBaselineIds] are already loaded
-     * on screen, merges those IDs into `seenActivityIds` and marks `baselineInitialized = true`
-     * so currently displayed historical activities do not trigger notification spam.
+     * Turning notifications OFF clears `baselineInitialized` so that re-enabling later without a
+     * fresh online snapshot silently re-establishes the baseline instead of flooding accumulated
+     * historical activities. When turning ON (`false -> true`) with fresh online [seedBaselineIds],
+     * merges those IDs and marks `baselineInitialized = true`.
      */
     suspend fun setNotificationsEnabled(
         enabled: Boolean,
         seedBaselineIds: Collection<String> = emptyList(),
     ): ActivityMonitorSettings = mutex.withLock {
+        ensureLoadedLocked()
         val previousEnabled = _settingsFlow.value.notificationsEnabled
         val nextSettings = _settingsFlow.value.copy(notificationsEnabled = enabled).normalized()
         val cleanedSeeds = sanitizeIds(seedBaselineIds)
@@ -109,10 +131,10 @@ class ActivityPreferencesStore(
         } else {
             state.seenActivityIds
         }
-        val nextBaselineInitialized = if (enabled && !previousEnabled && cleanedSeeds.isNotEmpty()) {
-            true
-        } else {
-            state.baselineInitialized
+        val nextBaselineInitialized = when {
+            !enabled -> false
+            !previousEnabled -> cleanedSeeds.isNotEmpty()
+            else -> state.baselineInitialized
         }
 
         val nextSnapshot = state.copy(
@@ -128,6 +150,7 @@ class ActivityPreferencesStore(
         activityIds: Collection<String>,
         checkedAtEpochMillis: Long,
     ) = mutex.withLock {
+        ensureLoadedLocked()
         val mergedIds = mergeAndTrimIds(state.seenActivityIds, sanitizeIds(activityIds))
         val nextSnapshot = state.copy(
             baselineInitialized = true,
@@ -142,6 +165,7 @@ class ActivityPreferencesStore(
         newlyNotifiedIds: Collection<String>,
         checkedAtEpochMillis: Long,
     ) = mutex.withLock {
+        ensureLoadedLocked()
         val cleanCurrent = sanitizeIds(currentFeedIds)
         val cleanNotified = sanitizeIds(newlyNotifiedIds)
         val mergedIds = mergeAndTrimIds(state.seenActivityIds, cleanCurrent + cleanNotified)
@@ -156,6 +180,14 @@ class ActivityPreferencesStore(
             },
         )
         persistSnapshotLocked(nextSnapshot)
+    }
+
+    private suspend fun ensureLoadedLocked() {
+        if (loaded) return
+        val diskSnapshot = withContext(ioDispatcher) { readSnapshotSync() }
+        loaded = true
+        state = diskSnapshot
+        _settingsFlow.value = diskSnapshot.settings.normalized()
     }
 
     private fun sanitizeIds(rawIds: Collection<String>): List<String> {

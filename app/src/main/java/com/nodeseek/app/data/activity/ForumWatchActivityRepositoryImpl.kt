@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +29,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.util.Locale
 
 @Serializable
 private data class CachedActivitiesListPayload(
@@ -36,6 +36,7 @@ private data class CachedActivitiesListPayload(
     val updatedAtEpochMillis: Long = 0L,
     val lastSyncedEpochMillis: Long = 0L,
     val totalCount: Int = 0,
+    val currentPage: Int = 1,
     val hasMore: Boolean = false,
     val counts: ActivityCounts = ActivityCounts(),
     val etag: String? = null,
@@ -120,16 +121,56 @@ class ForumWatchActivityRepositoryImpl(
     override suspend fun refreshActivities(force: Boolean): Result<ActivityFeedSnapshot> {
         val flightKey = if (force) "list:force" else "list:cond"
         val deferred = inFlightMutex.withLock {
-            inFlightListCalls[flightKey]?.takeIf { it.isActive } ?: repoScope.async {
-                try {
-                    performRefreshActivities(force = force)
-                } finally {
-                    inFlightMutex.withLock {
-                        inFlightListCalls.remove(flightKey)
+            inFlightListCalls[flightKey]?.takeIf { it.isActive } ?: run {
+                var holder: Deferred<Result<ActivityFeedSnapshot>>? = null
+                val created = repoScope.async {
+                    try {
+                        performRefreshActivities(force = force)
+                    } finally {
+                        withContext(NonCancellable) {
+                            inFlightMutex.withLock {
+                                if (inFlightListCalls[flightKey] === holder) {
+                                    inFlightListCalls.remove(flightKey)
+                                }
+                            }
+                        }
                     }
                 }
-            }.also { created ->
+                holder = created
                 inFlightListCalls[flightKey] = created
+                created
+            }
+        }
+        return deferred.await()
+    }
+
+    override suspend fun loadNextPage(): Result<ActivityFeedSnapshot> {
+        ensureDiskCacheLoaded()
+        val current = _snapshot.value
+        if (current.isRefreshing || current.isLoadingMore || !current.hasMore) {
+            return Result.success(current)
+        }
+        val nextPage = current.currentPage.coerceAtLeast(1) + 1
+        val flightKey = "list:page:$nextPage"
+        val deferred = inFlightMutex.withLock {
+            inFlightListCalls[flightKey]?.takeIf { it.isActive } ?: run {
+                var holder: Deferred<Result<ActivityFeedSnapshot>>? = null
+                val created = repoScope.async {
+                    try {
+                        performLoadNextPage(nextPage = nextPage)
+                    } finally {
+                        withContext(NonCancellable) {
+                            inFlightMutex.withLock {
+                                if (inFlightListCalls[flightKey] === holder) {
+                                    inFlightListCalls.remove(flightKey)
+                                }
+                            }
+                        }
+                    }
+                }
+                holder = created
+                inFlightListCalls[flightKey] = created
+                created
             }
         }
         return deferred.await()
@@ -145,16 +186,24 @@ class ForumWatchActivityRepositoryImpl(
         }
         val flightKey = "$cleanId|force=$forceRefresh"
         val deferred = inFlightMutex.withLock {
-            inFlightDetailCalls[flightKey]?.takeIf { it.isActive } ?: repoScope.async {
-                try {
-                    performGetActivityDetail(cleanId = cleanId, forceRefresh = forceRefresh)
-                } finally {
-                    inFlightMutex.withLock {
-                        inFlightDetailCalls.remove(flightKey)
+            inFlightDetailCalls[flightKey]?.takeIf { it.isActive } ?: run {
+                var holder: Deferred<Result<ForumWatchActivityDetail>>? = null
+                val created = repoScope.async {
+                    try {
+                        performGetActivityDetail(cleanId = cleanId, forceRefresh = forceRefresh)
+                    } finally {
+                        withContext(NonCancellable) {
+                            inFlightMutex.withLock {
+                                if (inFlightDetailCalls[flightKey] === holder) {
+                                    inFlightDetailCalls.remove(flightKey)
+                                }
+                            }
+                        }
                     }
                 }
-            }.also { created ->
+                holder = created
                 inFlightDetailCalls[flightKey] = created
+                created
             }
         }
         return deferred.await()
@@ -198,6 +247,7 @@ class ForumWatchActivityRepositoryImpl(
                         loadedFromCache = deduplicated.isNotEmpty() || listPayload.lastSyncedEpochMillis > 0L,
                         lastSyncedEpochMillis = listPayload.lastSyncedEpochMillis,
                         totalCount = listPayload.totalCount.coerceAtLeast(deduplicated.size),
+                        currentPage = listPayload.currentPage.coerceAtLeast(1),
                         hasMore = listPayload.hasMore,
                     )
                     baseSnap.copy(counts = baseSnap.liveCounts(now))
@@ -248,6 +298,7 @@ class ForumWatchActivityRepositoryImpl(
                         updatedAtEpochMillis = updatedSnapshot.updatedAtEpochMillis,
                         lastSyncedEpochMillis = now,
                         totalCount = updatedSnapshot.totalCount,
+                        currentPage = updatedSnapshot.currentPage,
                         hasMore = updatedSnapshot.hasMore,
                         counts = updatedSnapshot.counts,
                         etag = nextEtag,
@@ -269,10 +320,12 @@ class ForumWatchActivityRepositoryImpl(
                     updatedAtEpochMillis = resolvedUpdatedAt,
                     counts = pageData.counts,
                     isRefreshing = false,
+                    isLoadingMore = false,
                     errorMessage = null,
                     loadedFromCache = false,
                     lastSyncedEpochMillis = now,
                     totalCount = pageData.total.coerceAtLeast(deduplicated.size),
+                    currentPage = pageData.page.coerceAtLeast(1),
                     hasMore = pageData.hasMore,
                 )
                 val finalSnapshot = baseSnapshot.copy(counts = baseSnapshot.liveCounts(now))
@@ -283,6 +336,7 @@ class ForumWatchActivityRepositoryImpl(
                         updatedAtEpochMillis = resolvedUpdatedAt,
                         lastSyncedEpochMillis = now,
                         totalCount = finalSnapshot.totalCount,
+                        currentPage = finalSnapshot.currentPage,
                         hasMore = finalSnapshot.hasMore,
                         counts = finalSnapshot.counts,
                         etag = conditional.etag,
@@ -298,6 +352,54 @@ class ForumWatchActivityRepositoryImpl(
             _snapshot.update { prev ->
                 prev.copy(
                     isRefreshing = false,
+                    errorMessage = friendlyError,
+                )
+            }
+            Result.failure(t)
+        }
+    }
+
+    private suspend fun performLoadNextPage(nextPage: Int): Result<ActivityFeedSnapshot> {
+        _snapshot.update { it.copy(isLoadingMore = true, errorMessage = null) }
+        return try {
+            val pageData = apiClient.fetchActivitiesPage(
+                page = nextPage,
+                pageSize = ForumWatchActivityApiClient.DEFAULT_PAGE_SIZE,
+                status = "all",
+            )
+            val now = clockMillis()
+            val updatedSnapshot = _snapshot.updateAndGetCompat { prev ->
+                val merged = deduplicateAndSortActivities(prev.activities + pageData.items, now)
+                val next = prev.copy(
+                    activities = merged,
+                    isLoadingMore = false,
+                    errorMessage = null,
+                    totalCount = maxOf(prev.totalCount, pageData.total, merged.size),
+                    currentPage = pageData.page.coerceAtLeast(nextPage),
+                    hasMore = pageData.hasMore && pageData.items.isNotEmpty(),
+                )
+                next.copy(counts = next.liveCounts(now))
+            }
+            persistListCache(
+                payload = CachedActivitiesListPayload(
+                    updatedAtEpochMillis = updatedSnapshot.updatedAtEpochMillis,
+                    lastSyncedEpochMillis = updatedSnapshot.lastSyncedEpochMillis,
+                    totalCount = updatedSnapshot.totalCount,
+                    currentPage = updatedSnapshot.currentPage,
+                    hasMore = updatedSnapshot.hasMore,
+                    counts = updatedSnapshot.counts,
+                    etag = cachedListEtag,
+                    lastModified = cachedListLastModified,
+                    items = updatedSnapshot.activities,
+                ),
+            )
+            Result.success(updatedSnapshot)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val friendlyError = t.message?.takeIf { it.isNotBlank() } ?: "加载更多活动失败，请重试"
+            _snapshot.update { prev ->
+                prev.copy(
+                    isLoadingMore = false,
                     errorMessage = friendlyError,
                 )
             }
@@ -419,15 +521,14 @@ class ForumWatchActivityRepositoryImpl(
     }
 
     private suspend fun saveDetailEntry(id: String, entry: CachedActivityDetailEntry) {
-        val snapshotEntries = cacheMutex.withLock {
+        cacheMutex.withLock {
             detailCacheMap.remove(id)
             detailCacheMap[id] = entry
             trimDetailCacheLocked()
-            detailCacheMap.values.toList()
-        }
-        val encoded = diskJson.encodeToString(CachedActivityDetailsPayload(entries = snapshotEntries))
-        withContext(ioDispatcher) {
-            writeAtomicText(detailCacheFile, encoded)
+            val encoded = diskJson.encodeToString(CachedActivityDetailsPayload(entries = detailCacheMap.values.toList()))
+            withContext(ioDispatcher) {
+                writeAtomicText(detailCacheFile, encoded)
+            }
         }
     }
 
@@ -439,11 +540,11 @@ class ForumWatchActivityRepositoryImpl(
     }
 
     private suspend fun persistListCache(payload: CachedActivitiesListPayload) {
-        val encoded = cacheMutex.withLock {
-            diskJson.encodeToString(payload)
-        }
-        withContext(ioDispatcher) {
-            writeAtomicText(listCacheFile, encoded)
+        cacheMutex.withLock {
+            val encoded = diskJson.encodeToString(payload)
+            withContext(ioDispatcher) {
+                writeAtomicText(listCacheFile, encoded)
+            }
         }
     }
 
@@ -548,23 +649,8 @@ class ForumWatchActivityRepositoryImpl(
             return candidate.updatedAtEpochMillis >= existing.updatedAtEpochMillis
         }
 
-        private fun buildSecondaryDedupKey(item: ForumWatchActivityItem): String {
-            item.resolvedNodeSeekTopicId()?.let { topicId ->
-                return "ns_topic:$topicId"
-            }
-            val cleanUrl = normalizeSourceUrl(item.sourceUrl)
-            if (cleanUrl.isNotEmpty()) {
-                return "url:$cleanUrl"
-            }
-            return "id:${item.id.trim()}"
-        }
-
-        private fun normalizeSourceUrl(rawUrl: String): String {
-            val trimmed = rawUrl.trim()
-            if (trimmed.isEmpty()) return ""
-            val withoutFragment = trimmed.substringBefore('#').trimEnd('/')
-            return withoutFragment.lowercase(Locale.ROOT)
-        }
+        private fun buildSecondaryDedupKey(item: ForumWatchActivityItem): String =
+            item.canonicalDedupKey()
     }
 }
 

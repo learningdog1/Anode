@@ -306,6 +306,38 @@ fun ActivityScreen(
                                     },
                                 )
                             }
+
+                            if (uiState.hasMore) {
+                                item(key = "activity_load_more_footer") {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (uiState.isLoadingMore) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(22.dp),
+                                                strokeWidth = 2.2.dp,
+                                            )
+                                        } else {
+                                            FilledTonalButton(
+                                                onClick = viewModel::loadNextPage,
+                                                shape = CircleShape,
+                                            ) {
+                                                Text(
+                                                    text = if (!uiState.errorMessage.isNullOrBlank()) {
+                                                        "加载更多失败，点击重试"
+                                                    } else {
+                                                        "加载更多活动"
+                                                    },
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
