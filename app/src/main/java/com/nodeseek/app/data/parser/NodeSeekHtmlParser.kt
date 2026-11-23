@@ -103,8 +103,12 @@ object NodeSeekHtmlParser {
         """/static/image/sticker/(ac|yct|xhj|emoji)/(\d{2,4})\.(?:webm|mov|mp4|png|gif|webp)(?:[?#].*)?$""",
         RegexOption.IGNORE_CASE,
     )
-    private val PREVIEW_HTML_TAG_REGEX = Regex("""<[^>]+>""")
-    private val PREVIEW_DECORATION_REGEX = Regex("""[`*~>#]+""")
+    private val PREVIEW_HTML_TAG_REGEX = Regex(
+        """</?(?:h[1-6]|a|img|video|source|br|p|div|span|strong|b|em|i|del|s|strike|u|ins|kbd|code|pre|hr|details|summary|center|ul|ol|li|blockquote|font|small|mark|sub|sup|section|article|table|thead|tbody|tr|th|td|figure|figcaption|picture|iframe|abbr|cite|q|dl|dt|dd)\b[^>]*>""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val PREVIEW_BLOCKQUOTE_REGEX = Regex("""(?m)^\s*>+\s?""")
+    private val PREVIEW_DECORATION_REGEX = Regex("""[`*~#]+""")
 
     val DEFAULT_CATEGORY_NAMES: Map<String, String> = mapOf(
         "" to "全部",
@@ -200,12 +204,13 @@ object NodeSeekHtmlParser {
             ".post-list-item:not(.topic-carousel-item):not(.blocked-post)"
         }
 
+        val seenListIds = HashSet<Long>()
         val listPosts = document.select(itemSelector).mapNotNull { item ->
             val link = item.selectFirst(".post-title a[href^=/post-]") ?: return@mapNotNull null
             val href = link.attr("href").trim()
             val id = POST_HREF_REGEX.find(href)?.groupValues?.getOrNull(1)?.toLongOrNull()
                 ?: return@mapNotNull null
-            if (carouselSeenIds.contains(id)) {
+            if (carouselSeenIds.contains(id) || !seenListIds.add(id)) {
                 return@mapNotNull null
             }
 
@@ -511,6 +516,7 @@ object NodeSeekHtmlParser {
             .replace(PREVIEW_LINK_REGEX) { m -> m.groupValues[1] }
             .replace(PREVIEW_STICKER_REGEX, "[表情]")
             .replace(PREVIEW_HTML_TAG_REGEX, " ")
+            .replace(PREVIEW_BLOCKQUOTE_REGEX, "")
             .replace(PREVIEW_DECORATION_REGEX, "")
         text = Parser.unescapeEntities(text, false).replace('\u00A0', ' ')
         text = text.replace(WHITESPACE_REGEX, " ").trim()
@@ -794,12 +800,30 @@ object NodeSeekHtmlParser {
 
     private fun resolveElementUrl(element: Element, attrName: String): String {
         val raw = element.attr(attrName).trim()
-        if (raw.isEmpty() || raw.startsWith("javascript:", ignoreCase = true)) return ""
+        if (raw.isEmpty()) return ""
+        val schemeEnd = raw.indexOf(':')
+        if (schemeEnd > 0 && !raw.startsWith("//")) {
+            val schemePrefix = raw.substring(0, schemeEnd)
+            if (schemePrefix.all { it.isLetterOrDigit() || it == '+' || it == '-' || it == '.' }) {
+                if (!schemePrefix.equals("http", ignoreCase = true) &&
+                    !schemePrefix.equals("https", ignoreCase = true)
+                ) {
+                    return ""
+                }
+            }
+        }
         val abs = element.absUrl(attrName).trim()
         if (abs.startsWith("http://", ignoreCase = true) || abs.startsWith("https://", ignoreCase = true)) {
             return abs
         }
-        return NodeSeekUrlNormalizer.normalizeNodeSeekUrl(raw)
+        val normalized = NodeSeekUrlNormalizer.normalizeNodeSeekUrl(raw)
+        return if (normalized.startsWith("http://", ignoreCase = true) ||
+            normalized.startsWith("https://", ignoreCase = true)
+        ) {
+            normalized
+        } else {
+            ""
+        }
     }
 
     private fun resolveImageElementUrl(element: Element): String {
@@ -886,7 +910,9 @@ object NodeSeekHtmlParser {
         pageUrl: String = NodeSeekUrlNormalizer.ORIGIN,
     ): String {
         val document = Jsoup.parse(html, pageUrl)
-        val config = TempScriptParser.extractFromDocument(document, requireAllCategory = false)
+        val config = runCatching {
+            TempScriptParser.extractFromDocument(document, requireAllCategory = false)
+        }.getOrNull()
         val opMarkdown = config?.postData?.comments
             ?.firstOrNull { it.floorIndex == 0 }
             ?.markdown
@@ -909,6 +935,9 @@ object NodeSeekHtmlParser {
         }
 
         val paragraphs = root.select("h1, h2, h3, p, li").mapNotNull { el ->
+            if (el.tagName().equals("p", ignoreCase = true) && el.closest("li") != null) {
+                return@mapNotNull null
+            }
             val text = el.text().trim()
             if (text.isEmpty()) {
                 null

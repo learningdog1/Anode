@@ -1,6 +1,5 @@
 package com.nodeseek.app.domain.filter
 
-import com.nodeseek.app.data.radar.RadarKeywordMatcher
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.radar.KeywordMatchMode
 import java.util.UUID
@@ -30,9 +29,20 @@ data class ContentFilterPreset(
 }
 
 /**
- * Feed and search content filtering engine reusing [RadarKeywordMatcher.matchesKeyword].
+ * Feed and search content filtering engine with bounded compiled-regex LRU caching
+ * and nested-quantifier ReDoS protection.
  */
 object ContentFilterEngine {
+
+    private const val MAX_COMPILED_REGEX_CACHE = 64
+    private const val MAX_REGEX_PATTERN_LENGTH = 256
+    private const val MAX_MATCH_TITLE_LENGTH = 512
+
+    private val compiledRegexCacheLock = Any()
+    private val compiledRegexCache = object : LinkedHashMap<String, Regex?>(MAX_COMPILED_REGEX_CACHE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex?>?): Boolean =
+            size > MAX_COMPILED_REGEX_CACHE
+    }
 
     val CURATED_PRESETS: List<ContentFilterPreset> = listOf(
         ContentFilterPreset(
@@ -78,14 +88,21 @@ object ContentFilterEngine {
     )
 
     /**
-     * Validates a regular expression pattern without throwing.
+     * Validates a regular expression pattern without throwing, rejecting excessively long
+     * or nested-quantifier patterns prone to catastrophic backtracking (ReDoS).
      *
-     * @return `null` when [pattern] compiles cleanly, or a localized error message otherwise.
+     * @return `null` when [pattern] compiles cleanly and safely, or a localized error message otherwise.
      */
     fun validateRegex(pattern: String): String? {
         val trimmed = pattern.trim()
         if (trimmed.isEmpty()) {
             return "正则表达式不能为空"
+        }
+        if (trimmed.length > MAX_REGEX_PATTERN_LENGTH) {
+            return "正则表达式过长（最多 $MAX_REGEX_PATTERN_LENGTH 字符）"
+        }
+        if (isPotentiallyCatastrophicRegex(trimmed)) {
+            return "正则表达式包含嵌套重复量词，存在性能回溯风险，请简化写法"
         }
         return runCatching {
             Regex(trimmed, RegexOption.IGNORE_CASE)
@@ -131,8 +148,170 @@ object ContentFilterEngine {
         matchMode: KeywordMatchMode,
     ): Boolean {
         if (sampleTitle.isBlank()) return false
-        return RadarKeywordMatcher.matchesKeyword(sampleTitle, pattern, matchMode)
+        return matchesPattern(sampleTitle, pattern, matchMode)
     }
+
+    internal fun matchesPattern(
+        title: String,
+        pattern: String,
+        matchMode: KeywordMatchMode,
+    ): Boolean {
+        val cleanPattern = pattern.trim()
+        if (cleanPattern.isEmpty() || title.isBlank()) return false
+        return when (matchMode) {
+            KeywordMatchMode.CONTAINS -> title.contains(cleanPattern, ignoreCase = true)
+            KeywordMatchMode.REGEX -> {
+                val compiled = getOrCompileRegex(cleanPattern) ?: return false
+                val bounded = if (title.length > MAX_MATCH_TITLE_LENGTH) {
+                    title.substring(0, MAX_MATCH_TITLE_LENGTH)
+                } else {
+                    title
+                }
+                compiled.containsMatchIn(bounded)
+            }
+        }
+    }
+
+    internal fun getOrCompileRegex(pattern: String): Regex? {
+        val trimmed = pattern.trim()
+        if (trimmed.isEmpty() || trimmed.length > MAX_REGEX_PATTERN_LENGTH || isPotentiallyCatastrophicRegex(trimmed)) {
+            return null
+        }
+        synchronized(compiledRegexCacheLock) {
+            if (compiledRegexCache.containsKey(trimmed)) {
+                return compiledRegexCache[trimmed]
+            }
+        }
+        val compiled = runCatching { Regex(trimmed, RegexOption.IGNORE_CASE) }.getOrNull()
+        synchronized(compiledRegexCacheLock) {
+            compiledRegexCache[trimmed] = compiled
+        }
+        return compiled
+    }
+
+    /**
+     * Detects nested unbounded quantifiers such as `(a+)+`, `(a*)*`, `(\w+){2,}` that can
+     * cause exponential backtracking on adversarial or long topic titles.
+     */
+    internal fun isPotentiallyCatastrophicRegex(pattern: String): Boolean {
+        val groupHasUnboundedQuantifier = ArrayDeque<Boolean>()
+        var inCharClass = false
+        var escaped = false
+        var i = 0
+        while (i < pattern.length) {
+            val ch = pattern[i]
+            if (escaped) {
+                escaped = false
+                i++
+                continue
+            }
+            if (ch == '\\') {
+                escaped = true
+                i++
+                continue
+            }
+            if (inCharClass) {
+                if (ch == ']') {
+                    inCharClass = false
+                }
+                i++
+                continue
+            }
+            when (ch) {
+                '[' -> inCharClass = true
+                '(' -> groupHasUnboundedQuantifier.addLast(false)
+                ')' -> {
+                    val innerHadUnbounded = if (groupHasUnboundedQuantifier.isNotEmpty()) {
+                        groupHasUnboundedQuantifier.removeLast()
+                    } else {
+                        false
+                    }
+                    val nextQuantifier = parseQuantifierAt(pattern, i + 1)
+                    if (nextQuantifier != null) {
+                        if (innerHadUnbounded && nextQuantifier.isRepeating) {
+                            return true
+                        }
+                        if (nextQuantifier.isUnbounded && groupHasUnboundedQuantifier.isNotEmpty()) {
+                            groupHasUnboundedQuantifier[groupHasUnboundedQuantifier.lastIndex] = true
+                        }
+                        i = nextQuantifier.endIndex
+                        continue
+                    } else if (innerHadUnbounded && groupHasUnboundedQuantifier.isNotEmpty()) {
+                        groupHasUnboundedQuantifier[groupHasUnboundedQuantifier.lastIndex] = true
+                    }
+                }
+                '+', '*', '{' -> {
+                    val q = parseQuantifierAt(pattern, i)
+                    if (q != null) {
+                        if (q.isUnbounded && groupHasUnboundedQuantifier.isNotEmpty()) {
+                            groupHasUnboundedQuantifier[groupHasUnboundedQuantifier.lastIndex] = true
+                        }
+                        i = q.endIndex
+                        continue
+                    }
+                }
+            }
+            i++
+        }
+        return false
+    }
+
+    private data class QuantifierToken(
+        val endIndex: Int,
+        val isRepeating: Boolean,
+        val isUnbounded: Boolean,
+    )
+
+    private fun parseQuantifierAt(pattern: String, start: Int): QuantifierToken? {
+        if (start >= pattern.length) return null
+        return when (pattern[start]) {
+            '+', '*' -> {
+                var end = start + 1
+                if (end < pattern.length && (pattern[end] == '?' || pattern[end] == '+')) end++
+                QuantifierToken(endIndex = end, isRepeating = true, isUnbounded = true)
+            }
+            '{' -> {
+                val close = pattern.indexOf('}', start + 1)
+                if (close <= start + 1) return null
+                val body = pattern.substring(start + 1, close)
+                val parts = body.split(',')
+                if (parts.size > 2) return null
+                val min = parts[0].trim().toIntOrNull() ?: return null
+                val max = if (parts.size == 1) min else parts[1].trim().let { if (it.isEmpty()) null else it.toIntOrNull() ?: return null }
+                var end = close + 1
+                if (end < pattern.length && (pattern[end] == '?' || pattern[end] == '+')) end++
+                val isRepeating = max == null || max >= 2
+                val isUnbounded = max == null || max >= 10
+                QuantifierToken(endIndex = end, isRepeating = isRepeating, isUnbounded = isUnbounded)
+            }
+            else -> null
+        }
+    }
+
+    private data class CompiledRule(
+        val rule: ContentBlockRule,
+        val cleanCategorySlug: String,
+        val cleanPattern: String,
+        val compiledRegex: Regex?,
+    )
+
+    private fun compileEnabledRules(rules: List<ContentBlockRule>): List<CompiledRule> =
+        rules.mapNotNull { rule ->
+            if (!rule.isEnabled) return@mapNotNull null
+            val cleanPattern = rule.pattern.trim()
+            if (cleanPattern.isEmpty()) return@mapNotNull null
+            val regex = if (rule.matchMode == KeywordMatchMode.REGEX) {
+                getOrCompileRegex(cleanPattern) ?: return@mapNotNull null
+            } else {
+                null
+            }
+            CompiledRule(
+                rule = rule,
+                cleanCategorySlug = rule.categorySlug.trim(),
+                cleanPattern = cleanPattern,
+                compiledRegex = regex,
+            )
+        }
 
     /**
      * Returns `true` if [topic] should be hidden from the caller's feed or search stream.
@@ -163,7 +342,7 @@ object ContentFilterEngine {
             for (rule in config.rules) {
                 if (!rule.isEnabled) continue
                 if (!matchesRuleCategory(topic, rule.categorySlug)) continue
-                if (RadarKeywordMatcher.matchesKeyword(topic.title, rule.pattern, rule.matchMode)) {
+                if (matchesPattern(topic.title, rule.pattern, rule.matchMode)) {
                     return true
                 }
             }
@@ -173,7 +352,8 @@ object ContentFilterEngine {
     }
 
     /**
-     * Filters [topics] using [shouldHideTopic], returning the original list instance on fast-path no-ops.
+     * Filters [topics] using [shouldHideTopic], returning the original list instance on fast-path no-ops
+     * and pre-resolving muted categories & compiled regex rules once per batch.
      */
     fun filterTopics(
         topics: List<TopicSummary>,
@@ -182,14 +362,35 @@ object ContentFilterEngine {
         activeBoardSlug: String = "",
     ): List<TopicSummary> {
         if (topics.isEmpty() || !config.isEnabled || includeBlockedTopics) return topics
-        if (config.mutedCategorySlugs.isEmpty() && config.rules.none { it.isEnabled }) return topics
+        val mutedSet = if (config.mutedCategorySlugs.isEmpty()) {
+            emptySet()
+        } else {
+            config.mutedCategorySlugs.mapNotNull { it.trim().lowercase().takeIf(String::isNotEmpty) }.toSet()
+        }
+        val compiledRules = compileEnabledRules(config.rules)
+        if (mutedSet.isEmpty() && compiledRules.isEmpty()) return topics
+
+        val activeSlugLower = activeBoardSlug.trim().lowercase()
         return topics.filterNot { topic ->
-            shouldHideTopic(
-                topic = topic,
-                config = config,
-                includeBlockedTopics = false,
-                activeBoardSlug = activeBoardSlug,
-            )
+            val topicSlugLower = topic.categorySlug.trim().lowercase()
+            if (topicSlugLower.isNotEmpty() && topicSlugLower in mutedSet && activeSlugLower != topicSlugLower) {
+                return@filterNot true
+            }
+            if (topic.title.isBlank() || compiledRules.isEmpty()) {
+                return@filterNot false
+            }
+            val boundedTitle = if (topic.title.length > MAX_MATCH_TITLE_LENGTH) {
+                topic.title.substring(0, MAX_MATCH_TITLE_LENGTH)
+            } else {
+                topic.title
+            }
+            compiledRules.any { compiled ->
+                matchesRuleCategory(topic, compiled.cleanCategorySlug) &&
+                    when (compiled.rule.matchMode) {
+                        KeywordMatchMode.CONTAINS -> topic.title.contains(compiled.cleanPattern, ignoreCase = true)
+                        KeywordMatchMode.REGEX -> compiled.compiledRegex?.containsMatchIn(boundedTitle) == true
+                    }
+            }
         }
     }
 
