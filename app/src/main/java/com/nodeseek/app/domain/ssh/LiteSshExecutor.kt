@@ -102,6 +102,7 @@ class LiteSshExecutor @JvmOverloads constructor(
             )
             val sanitizerLock = Any()
             var hasPendingOutput = false
+            var throttleLoopRunning = false
             var lastEmittedVersion = -1L
             var throttleLoopJob: Job? = null
 
@@ -157,28 +158,52 @@ class LiteSshExecutor @JvmOverloads constructor(
                                 if (immediate != null) {
                                     emitEvent(immediate)
                                 }
-                            } else if (throttleLoopJob?.isActive == true) {
-                                synchronized(sanitizerLock) {
-                                    sanitizer.append(event.rawText)
-                                    hasPendingOutput = true
-                                }
                             } else {
-                                val leading = synchronized(sanitizerLock) {
+                                val leadingAndStart = synchronized(sanitizerLock) {
                                     sanitizer.append(event.rawText)
-                                    pollSnapshotEventLocked()
+                                    if (throttleLoopRunning) {
+                                        hasPendingOutput = true
+                                        null to false
+                                    } else {
+                                        val leading = pollSnapshotEventLocked()
+                                        if (leading != null) {
+                                            throttleLoopRunning = true
+                                            leading to true
+                                        } else {
+                                            null to false
+                                        }
+                                    }
                                 }
+                                val (leading, shouldStartThrottleLoop) = leadingAndStart
                                 if (leading != null) {
                                     emitEvent(leading)
+                                }
+                                if (shouldStartThrottleLoop) {
                                     throttleLoopJob = launch {
-                                        while (true) {
-                                            delay(outputThrottleMillis)
-                                            val trailing = synchronized(sanitizerLock) {
-                                                if (!hasPendingOutput) null else pollSnapshotEventLocked()
+                                        try {
+                                            while (true) {
+                                                delay(outputThrottleMillis)
+                                                val trailing = synchronized(sanitizerLock) {
+                                                    if (!hasPendingOutput) {
+                                                        throttleLoopRunning = false
+                                                        null
+                                                    } else {
+                                                        pollSnapshotEventLocked().also { emitted ->
+                                                            if (emitted == null) {
+                                                                throttleLoopRunning = false
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if (trailing != null) {
+                                                    send(trailing)
+                                                } else {
+                                                    break
+                                                }
                                             }
-                                            if (trailing != null) {
-                                                send(trailing)
-                                            } else {
-                                                break
+                                        } finally {
+                                            synchronized(sanitizerLock) {
+                                                throttleLoopRunning = false
                                             }
                                         }
                                     }
@@ -221,6 +246,7 @@ class LiteSshExecutor @JvmOverloads constructor(
                             sawCompleted = true
                             val finalSnap = synchronized(sanitizerLock) {
                                 hasPendingOutput = false
+                                throttleLoopRunning = false
                                 sanitizer.lineSnapshot()
                             }
                             emitEvent(

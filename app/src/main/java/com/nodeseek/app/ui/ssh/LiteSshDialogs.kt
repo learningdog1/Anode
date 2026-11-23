@@ -153,9 +153,9 @@ internal fun SshServerEditorDialog(
     var connectionMode by rememberSaveable(existing?.id) {
         mutableStateOf(existing?.effectiveConnectionMode ?: SshConnectionMode.DIRECT_SSH)
     }
-    var secret by rememberSaveable(existing?.id) { mutableStateOf("") }
-    var passphrase by rememberSaveable(existing?.id) { mutableStateOf("") }
-    var showPassword by rememberSaveable(existing?.id) { mutableStateOf(false) }
+    var secret by remember(existing?.id) { mutableStateOf("") }
+    var passphrase by remember(existing?.id) { mutableStateOf("") }
+    var showPassword by remember(existing?.id) { mutableStateOf(false) }
     var selectedJumpHostId by rememberSaveable(existing?.id) {
         mutableStateOf(
             SshJumpHostResolver.normalizeJumpHostId(existing?.jumpHostId)
@@ -484,6 +484,10 @@ internal fun SshServerEditorDialog(
                     },
                     singleLine = true,
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                    ),
                     trailingIcon = {
                         IconButton(onClick = { showPassword = !showPassword }) {
                             Icon(
@@ -507,6 +511,10 @@ internal fun SshServerEditorDialog(
                     singleLine = false,
                     minLines = 3,
                     maxLines = 5,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Ascii,
+                        autoCorrectEnabled = false,
+                    ),
                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -521,6 +529,10 @@ internal fun SshServerEditorDialog(
                     },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

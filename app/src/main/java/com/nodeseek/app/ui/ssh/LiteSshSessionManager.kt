@@ -128,6 +128,7 @@ class LiteSshSessionManager(
     private var elapsedTickerJob: Job? = null
     private var lastForegroundNotifyMillis: Long = 0L
     private var lastForegroundStatusLine: String = ""
+    @Volatile
     private var runGenerationCounter: Long = 0L
     @Volatile
     private var latestOutputTimestampMillis: Long? = null
@@ -708,7 +709,8 @@ class LiteSshSessionManager(
                 fingerprintSha256 = prompt.actualHostKey.fingerprintSha256,
                 algorithm = prompt.actualHostKey.algorithm,
             )
-            val refreshed = _uiState.value.servers.firstOrNull { it.id == server.id }
+            val refreshed = vaultRepository.serversFlow.value.firstOrNull { it.id == server.id }
+                ?: _uiState.value.servers.firstOrNull { it.id == server.id }
                 ?: if (prompt.mismatchServerId == server.id) {
                     server.copy(
                         knownHostKeyFingerprint = prompt.actualHostKey.fingerprintSha256,
@@ -717,6 +719,9 @@ class LiteSshSessionManager(
                 } else {
                     server
                 }
+            // Retry with strict verification (allowHostKeyMismatchOverride = false): the exact
+            // user-approved fingerprint has just been persisted into the vault, so only that key
+            // will succeed and a swapped third key during retry is still rejected.
             if (prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
                 executeIperf3ServiceCommand(
                     server = refreshed,
@@ -726,16 +731,16 @@ class LiteSshSessionManager(
                         ?: Iperf3RemoteServerCommands.validatePort(_uiState.value.iperf3ServerPortText)
                         ?: Iperf3RemoteServerCommands.DEFAULT_PORT,
                     autoOpenFirewall = prompt.iperf3AutoOpenFirewall,
-                    allowHostKeyMismatchOverride = true,
-                    mismatchOverrideServerId = prompt.mismatchServerId,
+                    allowHostKeyMismatchOverride = false,
+                    mismatchOverrideServerId = null,
                 )
             } else {
                 executePresetOnServer(
                     server = refreshed,
                     preset = prompt.preset,
                     command = prompt.command,
-                    allowHostKeyMismatchOverride = true,
-                    mismatchOverrideServerId = prompt.mismatchServerId,
+                    allowHostKeyMismatchOverride = false,
+                    mismatchOverrideServerId = null,
                     connectionModeOverride = SshConnectionMode.DIRECT_SSH,
                     interactiveShell = prompt.preset.id == PRESET_ID_INTERACTIVE_TERMINAL,
                 )
@@ -767,6 +772,7 @@ class LiteSshSessionManager(
     fun cancelExecution() {
         val activeJob = executionJob ?: return
         val state = _uiState.value
+        ++runGenerationCounter
         executionJob = null
         activePtyResizer = null
         activeStdinWriter = null
@@ -1565,12 +1571,12 @@ class LiteSshSessionManager(
         connectionModeOverride: SshConnectionMode? = null,
         interactiveShell: Boolean = false,
     ) {
+        val currentRunGeneration = ++runGenerationCounter
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
 
         val effectiveMode = connectionModeOverride ?: server.effectiveConnectionMode
         val startedAt = clock()
-        val currentRunGeneration = ++runGenerationCounter
         latestOutputTimestampMillis = null
         val autoRespondEnabled = !interactiveShell && _uiState.value.autoRespondPrompts
         val initialProgress = SshStageDetector.detect(
@@ -1948,11 +1954,13 @@ class LiteSshSessionManager(
                 if (activeStdinWriterGeneration == currentRunGeneration) {
                     activeStdinWriter = null
                 }
-                elapsedTickerJob?.cancel()
-                elapsedTickerJob = null
-                executionJob = null
-                syncGlobalBarState()
-                foregroundServiceController.onSessionFinished()
+                if (runGenerationCounter == currentRunGeneration) {
+                    elapsedTickerJob?.cancel()
+                    elapsedTickerJob = null
+                    executionJob = null
+                    syncGlobalBarState()
+                    foregroundServiceController.onSessionFinished()
+                }
             }
         }
     }

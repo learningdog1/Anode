@@ -493,7 +493,8 @@ class JSchSshTransport internal constructor(
         return SshJumpHostResolver.buildConnectionRequest(
             vaultRepository = vault,
             server = targetProfile,
-            allowHostKeyMismatchOverride = request.allowHostKeyMismatchOverride,
+            allowHostKeyMismatchOverride = false,
+            mismatchOverrideServerId = request.serverId,
         ).jumpHosts
     }
 

@@ -766,17 +766,20 @@ object Iperf3RemoteServerCommands {
                 """printf '\033[1;31m✗ iperf3 启动失败，请检查日志：%s\033[0m\n' "$(tail -n 5 "${'$'}LOG_FILE" 2>/dev/null || echo '无日志输出')"; exit 1; """ +
                 """fi; """ +
                 """fi""",
-            // Firewall inspection & optional automatic rule opening
+            // Firewall inspection & optional automatic rule opening (strictly non-interactive via sudo -n)
             """OPEN_FW=$openFwFlag""",
-            """if command -v ufw >/dev/null 2>&1 && ${'$'}SUDO ufw status 2>/dev/null | grep -qi "Status: active"; then """ +
-                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}SUDO ufw allow "${'$'}PORT/tcp" >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 ufw 自动放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
+            """CAN_FW_PRIV=0; [ "${'$'}IS_ROOT" -eq 1 ] && CAN_FW_PRIV=1; [ "${'$'}IS_ROOT" -eq 0 ] && [ -n "${'$'}SUDO" ] && sudo -n true >/dev/null 2>&1 && CAN_FW_PRIV=1; FW_PREFIX=""; [ "${'$'}IS_ROOT" -eq 0 ] && [ "${'$'}CAN_FW_PRIV" -eq 1 ] && FW_PREFIX="sudo -n """",
+            """if [ "${'$'}CAN_FW_PRIV" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ${'$'}FW_PREFIX ufw status 2>/dev/null | grep -qi "Status: active"; then """ +
+                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}FW_PREFIX ufw allow "${'$'}PORT/tcp" >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 ufw 自动放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
                 """else printf '\033[1;33m⚠ 检测到 ufw 防火墙已启用，若手机端连不上请放行：%sufw allow %s/tcp\033[0m\n' "${'$'}SUDO" "${'$'}PORT"; fi; """ +
-                """elif command -v firewall-cmd >/dev/null 2>&1 && ${'$'}SUDO firewall-cmd --state >/dev/null 2>&1; then """ +
-                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}SUDO firewall-cmd --add-port="${'$'}PORT/tcp" >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 firewalld 自动放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
+                """elif [ "${'$'}CAN_FW_PRIV" -eq 1 ] && command -v firewall-cmd >/dev/null 2>&1 && ${'$'}FW_PREFIX firewall-cmd --state >/dev/null 2>&1; then """ +
+                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}FW_PREFIX firewall-cmd --add-port="${'$'}PORT/tcp" >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 firewalld 自动放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
                 """else printf '\033[1;33m⚠ 检测到 firewalld 已启用，若手机端连不上请放行：%sfirewall-cmd --add-port=%s/tcp\033[0m\n' "${'$'}SUDO" "${'$'}PORT"; fi; """ +
-                """elif command -v iptables >/dev/null 2>&1 && ${'$'}SUDO iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|REJECT|DROP'; then """ +
-                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}SUDO iptables -I INPUT -p tcp --dport "${'$'}PORT" -j ACCEPT >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 iptables 临时放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
+                """elif [ "${'$'}CAN_FW_PRIV" -eq 1 ] && command -v iptables >/dev/null 2>&1 && ${'$'}FW_PREFIX iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|REJECT|DROP'; then """ +
+                """if [ "${'$'}OPEN_FW" -eq 1 ]; then ${'$'}FW_PREFIX iptables -I INPUT -p tcp --dport "${'$'}PORT" -j ACCEPT >/dev/null 2>&1 && printf '\033[1;32m✓ 已通过 iptables 临时放行端口 %s/tcp\033[0m\n' "${'$'}PORT"; """ +
                 """else printf '\033[1;33m⚠ 检测到 iptables 存在拦截规则，若连不上请放行：%siptables -I INPUT -p tcp --dport %s -j ACCEPT\033[0m\n' "${'$'}SUDO" "${'$'}PORT"; fi; """ +
+                """elif [ "${'$'}CAN_FW_PRIV" -eq 0 ] && [ "${'$'}OPEN_FW" -eq 1 ]; then """ +
+                """printf '\033[1;33m⚠ 当前非 root 账户未配置免密 sudo，已跳过自动防火墙操作；请手动放行：%sufw allow %s/tcp ｜ %sfirewall-cmd --add-port=%s/tcp ｜ %siptables -I INPUT -p tcp --dport %s -j ACCEPT\033[0m\n' "${'$'}SUDO" "$port" "${'$'}SUDO" "$port" "${'$'}SUDO" "$port"; """ +
                 """else printf '\033[0;36mℹ 防火墙参考放行命令：ufw allow %s/tcp ｜ firewall-cmd --add-port=%s/tcp ｜ iptables -I INPUT -p tcp --dport %s -j ACCEPT\033[0m\n' "$port" "$port" "$port"; fi""",
             """printf '\033[0;37mℹ 若 VPS 位于阿里云/腾讯云/AWS/Oracle 等平台，请同时确认云控制台「安全组」已放行 TCP %s 端口。\033[0m\n' "${'$'}PORT"""",
         ).joinToString("; ")
