@@ -42,12 +42,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,7 +56,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.domain.backup.BackupFileNaming
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.backup.BackupPreviewSummary
@@ -82,6 +83,12 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -92,10 +99,243 @@ import java.time.format.DateTimeFormatter
 
 private const val MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024
 
-private data class PendingBackupRestore(
+internal data class PendingBackupRestore(
     val rawJson: String,
     val summary: BackupPreviewSummary,
 )
+
+internal data class BackupRestoreUiState(
+    val includeApiKeys: Boolean = false,
+    val isExporting: Boolean = false,
+    val isInspecting: Boolean = false,
+    val isRestoring: Boolean = false,
+    val isSyncingRemoteBlocks: Boolean = false,
+    val pendingRestore: PendingBackupRestore? = null,
+    val showRemoteBlockSyncDialog: Boolean = false,
+    val lastCompletedRestoreSummary: BackupRestoreSummary? = null,
+    val selectedStrategy: RestoreStrategy = RestoreStrategy.MERGE,
+) {
+    val isBusy: Boolean
+        get() = isExporting || isInspecting || isRestoring || isSyncingRemoteBlocks
+}
+
+/**
+ * ViewModel owning backup export / inspect / restore / remote-block-sync state and coroutines
+ * so configuration changes (e.g. screen rotation) never cancel an in-flight restore or lose
+ * confirmation dialogs.
+ */
+internal class BackupRestoreViewModel(
+    private val backupManager: BackupManager,
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(BackupRestoreUiState())
+    val uiState: StateFlow<BackupRestoreUiState> = _uiState.asStateFlow()
+
+    private val _events = Channel<String>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
+
+    fun setIncludeApiKeys(include: Boolean) {
+        if (_uiState.value.isBusy) return
+        _uiState.update { it.copy(includeApiKeys = include) }
+    }
+
+    fun selectStrategy(strategy: RestoreStrategy) {
+        if (_uiState.value.isRestoring) return
+        _uiState.update { it.copy(selectedStrategy = strategy) }
+    }
+
+    fun openRemoteBlockSyncDialog(activeTargetAccount: BackupSyncTargetAccount?) {
+        if (_uiState.value.isBusy) return
+        if (activeTargetAccount != null) {
+            _uiState.update { it.copy(showRemoteBlockSyncDialog = true) }
+        } else {
+            _events.trySend("当前未登录在线账号，请先登录目标账号后再确认同步屏蔽名单")
+        }
+    }
+
+    fun dismissPendingRestore() {
+        if (_uiState.value.isRestoring) return
+        _uiState.update { it.copy(pendingRestore = null) }
+    }
+
+    fun exportToUri(
+        appContext: Context,
+        uri: Uri,
+    ) {
+        if (_uiState.value.isBusy) return
+        val includeApiKeys = _uiState.value.includeApiKeys
+        viewModelScope.launch {
+            _uiState.update { it.copy(isExporting = true) }
+            try {
+                val payload = withContext(Dispatchers.IO) {
+                    backupManager.exportBackupPayload(includeApiKeys = includeApiKeys)
+                }.getOrElse { error ->
+                    _events.trySend("导出备份失败：${error.message ?: "生成备份失败"}")
+                    return@launch
+                }
+                withContext(Dispatchers.IO) {
+                    writeTextToUri(appContext, uri, payload.rawJson)
+                }
+                val bundle = payload.bundle
+                val keySuffix = if (includeApiKeys) "含明文 API 密钥" else "已脱敏排除密钥"
+                _events.trySend(
+                    "备份已导出（${bundle.bookmarks.size} 收藏 · ${bundle.drafts.size} 草稿 · ${bundle.radar.keywordRules.size} 雷达规则 · $keySuffix）",
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                _events.trySend("导出备份失败：${t.message ?: "写入文件失败"}")
+            } finally {
+                _uiState.update { it.copy(isExporting = false) }
+            }
+        }
+    }
+
+    fun inspectFromUri(
+        appContext: Context,
+        uri: Uri,
+    ) {
+        if (_uiState.value.isBusy) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isInspecting = true) }
+            try {
+                val rawJson = withContext(Dispatchers.IO) {
+                    readTextFromUri(appContext, uri)
+                }
+                val previewResult = withContext(Dispatchers.IO) {
+                    backupManager.inspectBackup(rawJson)
+                }
+                previewResult
+                    .onSuccess { summary ->
+                        _uiState.update {
+                            it.copy(
+                                selectedStrategy = RestoreStrategy.MERGE,
+                                pendingRestore = PendingBackupRestore(
+                                    rawJson = rawJson,
+                                    summary = summary,
+                                ),
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        _events.trySend(error.message ?: "无法识别该备份文件")
+                    }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                _events.trySend("读取备份文件失败：${t.message ?: "文件读取异常"}")
+            } finally {
+                _uiState.update { it.copy(isInspecting = false) }
+            }
+        }
+    }
+
+    fun confirmRestore(activeTargetAccount: BackupSyncTargetAccount?) {
+        val currentState = _uiState.value
+        val currentPending = currentState.pendingRestore ?: return
+        if (currentState.isRestoring) return
+        val strategy = currentState.selectedStrategy
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRestoring = true) }
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    backupManager.restoreBackup(
+                        rawJson = currentPending.rawJson,
+                        strategy = strategy,
+                    )
+                }
+                result
+                    .onSuccess { outcome ->
+                        val resolvedTarget = activeTargetAccount ?: outcome.targetSyncAccount
+                        val shouldPromptRemoteSync = outcome.hasPendingRemoteBlockSync && resolvedTarget != null
+                        _uiState.update {
+                            it.copy(
+                                pendingRestore = null,
+                                lastCompletedRestoreSummary = outcome,
+                                showRemoteBlockSyncDialog = shouldPromptRemoteSync,
+                            )
+                        }
+                        if (!shouldPromptRemoteSync) {
+                            _events.trySend(formatRestoreOutcomeSnackbar(outcome))
+                        }
+                    }
+                    .onFailure { error ->
+                        _uiState.update { it.copy(pendingRestore = null) }
+                        _events.trySend("恢复失败：${error.message ?: "未知错误"}")
+                    }
+            } finally {
+                _uiState.update { it.copy(isRestoring = false) }
+            }
+        }
+    }
+
+    fun confirmRemoteBlockSync(
+        confirmedAccount: BackupSyncTargetAccount,
+        users: List<FloorAuthor>,
+    ) {
+        if (_uiState.value.isSyncingRemoteBlocks) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncingRemoteBlocks = true) }
+            try {
+                val syncResult = withContext(Dispatchers.IO) {
+                    backupManager.syncBlockedUsersToServer(
+                        expectedAccountUid = confirmedAccount.uid,
+                        expectedUsername = confirmedAccount.username,
+                        users = users,
+                    )
+                }
+                syncResult
+                    .onSuccess { outcome ->
+                        val restorePrefix = _uiState.value.lastCompletedRestoreSummary
+                            ?.let { "${formatLocalRestoreSummaryShort(it)} · " }
+                            .orEmpty()
+                        _uiState.update {
+                            it.copy(
+                                showRemoteBlockSyncDialog = false,
+                                lastCompletedRestoreSummary = null,
+                            )
+                        }
+                        _events.trySend(restorePrefix + formatRemoteSyncOutcomeSnackbar(outcome))
+                    }
+                    .onFailure { error ->
+                        _uiState.update { it.copy(showRemoteBlockSyncDialog = false) }
+                        _events.trySend("远程屏蔽同步未执行：${error.message ?: "未知错误"}")
+                    }
+            } finally {
+                _uiState.update { it.copy(isSyncingRemoteBlocks = false) }
+            }
+        }
+    }
+
+    fun keepLocalOnly() {
+        if (_uiState.value.isSyncingRemoteBlocks) return
+        val summaryToReport = _uiState.value.lastCompletedRestoreSummary
+        _uiState.update {
+            it.copy(
+                showRemoteBlockSyncDialog = false,
+                lastCompletedRestoreSummary = null,
+            )
+        }
+        backupManager.dismissPendingRemoteBlocklistSync()
+        if (summaryToReport != null) {
+            _events.trySend(
+                "${formatLocalRestoreSummaryShort(summaryToReport)}（屏蔽名单仅保留本地，未修改服务端）",
+            )
+        } else {
+            _events.trySend("已保留本地屏蔽名单，未向服务端同步")
+        }
+    }
+
+    companion object {
+        fun factory(backupManager: BackupManager): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    return BackupRestoreViewModel(backupManager) as T
+                }
+            }
+    }
+}
 
 @Composable
 fun BackupRestoreSettingsSection(
@@ -104,89 +344,41 @@ fun BackupRestoreSettingsSection(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val appContext = remember(context) { context.applicationContext ?: context }
     val ext = NodePulseThemeTokens.extendedColors
+    val viewModel: BackupRestoreViewModel = viewModel(
+        factory = BackupRestoreViewModel.factory(backupManager),
+    )
 
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val pendingRemoteSync by backupManager.pendingRemoteBlocklistSyncState.collectAsStateWithLifecycle()
     val activeTargetAccount by backupManager.currentSyncTargetAccountFlow
         .collectAsStateWithLifecycle(initialValue = null)
 
-    var includeApiKeys by rememberSaveable { mutableStateOf(true) }
-    var isExporting by remember { mutableStateOf(false) }
-    var isInspecting by remember { mutableStateOf(false) }
-    var isRestoring by remember { mutableStateOf(false) }
-    var isSyncingRemoteBlocks by remember { mutableStateOf(false) }
-    var pendingRestore by remember { mutableStateOf<PendingBackupRestore?>(null) }
-    var showRemoteBlockSyncDialog by remember { mutableStateOf(false) }
-    var lastCompletedRestoreSummary by remember { mutableStateOf<BackupRestoreSummary?>(null) }
-    var selectedStrategy by rememberSaveable { mutableStateOf(RestoreStrategy.MERGE) }
+    LaunchedEffect(viewModel, snackbarHostState) {
+        viewModel.events.collect { message ->
+            snackbarHostState.showSnackbar(message)
+        }
+    }
 
     val createDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            isExporting = true
-            try {
-                val payload = withContext(Dispatchers.IO) {
-                    backupManager.exportBackupPayload(includeApiKeys = includeApiKeys)
-                }.getOrElse { error ->
-                    snackbarHostState.showSnackbar("导出备份失败：${error.message ?: "生成备份失败"}")
-                    return@launch
-                }
-                withContext(Dispatchers.IO) {
-                    writeTextToUri(context, uri, payload.rawJson)
-                }
-                val bundle = payload.bundle
-                val keySuffix = if (includeApiKeys) "含 API 密钥" else "已脱敏排除密钥"
-                snackbarHostState.showSnackbar(
-                    "备份已导出（${bundle.bookmarks.size} 收藏 · ${bundle.drafts.size} 草稿 · ${bundle.radar.keywordRules.size} 雷达规则 · $keySuffix）",
-                )
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (t: Throwable) {
-                snackbarHostState.showSnackbar("导出备份失败：${t.message ?: "写入文件失败"}")
-            } finally {
-                isExporting = false
-            }
+        if (uri != null) {
+            viewModel.exportToUri(appContext = appContext, uri = uri)
         }
     }
 
     val openDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            isInspecting = true
-            try {
-                val rawJson = withContext(Dispatchers.IO) {
-                    readTextFromUri(context, uri)
-                }
-                val previewResult = withContext(Dispatchers.IO) {
-                    backupManager.inspectBackup(rawJson)
-                }
-                previewResult
-                    .onSuccess { summary ->
-                        selectedStrategy = RestoreStrategy.MERGE
-                        pendingRestore = PendingBackupRestore(
-                            rawJson = rawJson,
-                            summary = summary,
-                        )
-                    }
-                    .onFailure { error ->
-                        snackbarHostState.showSnackbar(error.message ?: "无法识别该备份文件")
-                    }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (t: Throwable) {
-                snackbarHostState.showSnackbar("读取备份文件失败：${t.message ?: "文件读取异常"}")
-            } finally {
-                isInspecting = false
-            }
+        if (uri != null) {
+            viewModel.inspectFromUri(appContext = appContext, uri = uri)
         }
     }
 
-    val isBusy = isExporting || isInspecting || isRestoring || isSyncingRemoteBlocks
+    val isBusy = uiState.isBusy
+    val includeApiKeys = uiState.includeApiKeys
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -209,10 +401,10 @@ fun BackupRestoreSettingsSection(
         ) {
             BackupActionRow(
                 icon = Icons.Rounded.CloudUpload,
-                title = "导出完整备份",
-                subtitle = "导出雷达规则、屏蔽列表、本地收藏、草稿与全部设置",
-                actionLabel = if (isExporting) "导出中" else "导出 JSON",
-                loading = isExporting,
+                title = "导出核心数据备份",
+                subtitle = "导出偏好设置、脉搏雷达、屏蔽过滤、本地收藏与草稿（不含 VPS 账本、SSH 凭据与浏览足迹）",
+                actionLabel = if (uiState.isExporting) "导出中" else "导出 JSON",
+                loading = uiState.isExporting,
                 enabled = !isBusy,
                 isPrimaryAccent = true,
                 onClick = {
@@ -232,7 +424,7 @@ fun BackupRestoreSettingsSection(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(enabled = !isBusy, role = Role.Switch) {
-                        includeApiKeys = !includeApiKeys
+                        viewModel.setIncludeApiKeys(!includeApiKeys)
                     }
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -241,12 +433,12 @@ fun BackupRestoreSettingsSection(
                 BackupRowIconBadge(
                     icon = Icons.Rounded.Key,
                     tint = if (includeApiKeys) {
-                        MaterialTheme.colorScheme.primary
+                        MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                     containerColor = if (includeApiKeys) {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
                     } else {
                         MaterialTheme.colorScheme.surfaceContainerHigh
                     },
@@ -263,17 +455,21 @@ fun BackupRestoreSettingsSection(
                     )
                     Text(
                         text = if (includeApiKeys) {
-                            "导出的 JSON 将包含当前保存的 NodeImage 与 SeekMail 密钥"
+                            "安全提示：导出 JSON 将明文写入 NodeImage 与 SeekMail 密钥，请妥善保管且勿公开分享"
                         } else {
-                            "已脱敏：导出文件中密钥字段将自动留空"
+                            "默认已脱敏：导出文件中 API 密钥字段将自动留空"
                         },
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (includeApiKeys) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
                 Switch(
                     checked = includeApiKeys,
-                    onCheckedChange = { if (!isBusy) includeApiKeys = it },
+                    onCheckedChange = { if (!isBusy) viewModel.setIncludeApiKeys(it) },
                     enabled = !isBusy,
                     thumbContent = if (includeApiKeys) {
                         {
@@ -301,8 +497,8 @@ fun BackupRestoreSettingsSection(
                 icon = Icons.Rounded.Restore,
                 title = "从备份文件恢复",
                 subtitle = "选择 JSON 备份文件，导入前可预览计数并选择合并或覆盖",
-                actionLabel = if (isInspecting) "解析中" else "导入恢复",
-                loading = isInspecting,
+                actionLabel = if (uiState.isInspecting) "解析中" else "导入恢复",
+                loading = uiState.isInspecting,
                 enabled = !isBusy,
                 isPrimaryAccent = false,
                 onClick = {
@@ -330,133 +526,51 @@ fun BackupRestoreSettingsSection(
                         "屏蔽用户已保存在本地 · 请先登录目标在线账号后再确认同步"
                     },
                     actionLabel = when {
-                        isSyncingRemoteBlocks -> "同步中"
+                        uiState.isSyncingRemoteBlocks -> "同步中"
                         targetForRow != null -> "确认同步"
                         else -> "待登录"
                     },
-                    loading = isSyncingRemoteBlocks,
+                    loading = uiState.isSyncingRemoteBlocks,
                     enabled = !isBusy,
                     isPrimaryAccent = targetForRow != null,
                     onClick = {
-                        if (targetForRow != null) {
-                            showRemoteBlockSyncDialog = true
-                        } else {
-                            scope.launch {
-                                snackbarHostState.showSnackbar("当前未登录在线账号，请先登录目标账号后再确认同步屏蔽名单")
-                            }
-                        }
+                        viewModel.openRemoteBlockSyncDialog(targetForRow)
                     },
                 )
             }
         }
     }
 
-    val currentPending = pendingRestore
+    val currentPending = uiState.pendingRestore
     if (currentPending != null) {
         BackupRestoreConfirmDialog(
             summary = currentPending.summary,
             targetSyncAccount = activeTargetAccount ?: currentPending.summary.targetSyncAccount,
-            selectedStrategy = selectedStrategy,
-            isRestoring = isRestoring,
-            onSelectStrategy = { selectedStrategy = it },
-            onConfirm = {
-                scope.launch {
-                    isRestoring = true
-                    try {
-                        val result = withContext(Dispatchers.IO) {
-                            backupManager.restoreBackup(
-                                rawJson = currentPending.rawJson,
-                                strategy = selectedStrategy,
-                            )
-                        }
-                        result
-                            .onSuccess { outcome ->
-                                pendingRestore = null
-                                lastCompletedRestoreSummary = outcome
-                                val resolvedTarget = activeTargetAccount ?: outcome.targetSyncAccount
-                                if (outcome.hasPendingRemoteBlockSync && resolvedTarget != null) {
-                                    showRemoteBlockSyncDialog = true
-                                } else {
-                                    snackbarHostState.showSnackbar(formatRestoreOutcomeSnackbar(outcome))
-                                }
-                            }
-                            .onFailure { error ->
-                                pendingRestore = null
-                                snackbarHostState.showSnackbar("恢复失败：${error.message ?: "未知错误"}")
-                            }
-                    } finally {
-                        isRestoring = false
-                    }
-                }
-            },
-            onDismiss = {
-                if (!isRestoring) {
-                    pendingRestore = null
-                }
-            },
+            selectedStrategy = uiState.selectedStrategy,
+            isRestoring = uiState.isRestoring,
+            onSelectStrategy = viewModel::selectStrategy,
+            onConfirm = { viewModel.confirmRestore(activeTargetAccount) },
+            onDismiss = viewModel::dismissPendingRestore,
         )
     }
 
     val dialogSyncUsers = pendingRemoteSync?.users
-        ?: lastCompletedRestoreSummary?.pendingRemoteBlockUsers
+        ?: uiState.lastCompletedRestoreSummary?.pendingRemoteBlockUsers
             .orEmpty()
-    val dialogTargetAccount = activeTargetAccount ?: lastCompletedRestoreSummary?.targetSyncAccount
-    if (showRemoteBlockSyncDialog && dialogSyncUsers.isNotEmpty()) {
+    val dialogTargetAccount = activeTargetAccount ?: uiState.lastCompletedRestoreSummary?.targetSyncAccount
+    if (uiState.showRemoteBlockSyncDialog && dialogSyncUsers.isNotEmpty()) {
         RemoteBlocklistSyncConfirmDialog(
             users = dialogSyncUsers,
             targetAccount = dialogTargetAccount,
-            restoreOutcome = lastCompletedRestoreSummary,
-            isSyncing = isSyncingRemoteBlocks,
+            restoreOutcome = uiState.lastCompletedRestoreSummary,
+            isSyncing = uiState.isSyncingRemoteBlocks,
             onConfirmSync = { confirmedAccount ->
-                scope.launch {
-                    isSyncingRemoteBlocks = true
-                    try {
-                        val syncResult = withContext(Dispatchers.IO) {
-                            backupManager.syncBlockedUsersToServer(
-                                expectedAccountUid = confirmedAccount.uid,
-                                expectedUsername = confirmedAccount.username,
-                                users = dialogSyncUsers,
-                            )
-                        }
-                        syncResult
-                            .onSuccess { outcome ->
-                                showRemoteBlockSyncDialog = false
-                                val restorePrefix = lastCompletedRestoreSummary
-                                    ?.let { "${formatLocalRestoreSummaryShort(it)} · " }
-                                    .orEmpty()
-                                lastCompletedRestoreSummary = null
-                                snackbarHostState.showSnackbar(
-                                    restorePrefix + formatRemoteSyncOutcomeSnackbar(outcome),
-                                )
-                            }
-                            .onFailure { error ->
-                                showRemoteBlockSyncDialog = false
-                                snackbarHostState.showSnackbar(
-                                    "远程屏蔽同步未执行：${error.message ?: "未知错误"}",
-                                )
-                            }
-                    } finally {
-                        isSyncingRemoteBlocks = false
-                    }
-                }
+                viewModel.confirmRemoteBlockSync(
+                    confirmedAccount = confirmedAccount,
+                    users = dialogSyncUsers,
+                )
             },
-            onKeepLocalOnly = {
-                if (!isSyncingRemoteBlocks) {
-                    showRemoteBlockSyncDialog = false
-                    backupManager.dismissPendingRemoteBlocklistSync()
-                    val summaryToReport = lastCompletedRestoreSummary
-                    lastCompletedRestoreSummary = null
-                    scope.launch {
-                        if (summaryToReport != null) {
-                            snackbarHostState.showSnackbar(
-                                "${formatLocalRestoreSummaryShort(summaryToReport)}（屏蔽名单仅保留本地，未修改服务端）",
-                            )
-                        } else {
-                            snackbarHostState.showSnackbar("已保留本地屏蔽名单，未向服务端同步")
-                        }
-                    }
-                }
-            },
+            onKeepLocalOnly = viewModel::keepLocalOnly,
         )
     }
 }

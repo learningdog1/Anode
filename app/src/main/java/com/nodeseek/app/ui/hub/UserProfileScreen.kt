@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -483,10 +484,10 @@ fun UserProfileScreen(
                                 }
                             }
                         } else {
-                            items(
+                            itemsIndexed(
                                 items = uiState.replies,
-                                key = { "u_reply_${it.topicId}_${it.floorNumber}_${it.plainTextExcerpt.hashCode()}" },
-                            ) { excerpt ->
+                                key = { index, it -> "u_reply_${it.topicId}_${it.floorNumber}_$index" },
+                            ) { _, excerpt ->
                                 UserReplyExcerptCard(
                                     excerpt = excerpt,
                                     onClick = {
@@ -556,7 +557,7 @@ fun UserProfileScreen(
         )
     }
 
-    if (showSellerTrustSheet && !uiState.isOwnProfile) {
+    if (showSellerTrustSheet) {
         val targetUid = profile?.uid ?: uid
         val targetName = profile?.username?.takeIf { it.isNotBlank() } ?: uiState.usernameHint
         if (targetUid > 0L) {
@@ -571,10 +572,14 @@ fun UserProfileScreen(
                 onOpenUserProfile = { _, _ ->
                     showSellerTrustSheet = false
                 },
-                onStartDm = onOpenDirectMessage?.let { openDm ->
-                    { dmUid, dmName ->
-                        showSellerTrustSheet = false
-                        openDm(dmUid, dmName)
+                onStartDm = if (uiState.isOwnProfile) {
+                    null
+                } else {
+                    onOpenDirectMessage?.let { openDm ->
+                        { dmUid, dmName ->
+                            showSellerTrustSheet = false
+                            openDm(dmUid, dmName)
+                        }
                     }
                 },
                 onDismiss = { showSellerTrustSheet = false },

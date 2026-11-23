@@ -237,6 +237,7 @@ class UserProfileViewModel(
                 val (rawTopics, rawHasMoreTopics) = topicsResult.getOrDefault(state.topics to false)
                 val (rawReplies, rawHasMoreReplies) = repliesResult.getOrDefault(state.replies to false)
                 val deduplicatedTopics = rawTopics.distinctBy { it.id }
+                val deduplicatedReplies = deduplicateUserReplies(rawReplies)
 
                 val totalTopicCap = resolvedProfile?.topicCount
                 val hasMoreTopics = if (totalTopicCap != null && deduplicatedTopics.size >= totalTopicCap) {
@@ -246,7 +247,7 @@ class UserProfileViewModel(
                 }
 
                 val totalReplyCap = resolvedProfile?.replyCount
-                val hasMoreReplies = if (totalReplyCap != null && rawReplies.size >= totalReplyCap) {
+                val hasMoreReplies = if (totalReplyCap != null && deduplicatedReplies.size >= totalReplyCap) {
                     false
                 } else {
                     rawHasMoreReplies
@@ -261,7 +262,7 @@ class UserProfileViewModel(
                     topics = deduplicatedTopics,
                     topicsPage = 1,
                     hasMoreTopics = hasMoreTopics,
-                    replies = rawReplies,
+                    replies = deduplicatedReplies,
                     repliesPage = 1,
                     hasMoreReplies = hasMoreReplies,
                     isRefreshing = false,
@@ -316,10 +317,11 @@ class UserProfileViewModel(
             container.userRepository.getUserReplies(uid = uid, page = nextPage)
                 .onSuccess { (items, hasNext) ->
                     internalState.update { s ->
-                        val merged = s.replies + items
+                        val merged = deduplicateUserReplies(s.replies + items)
                         val totalCap = s.profile?.replyCount
                         val canLoadMore = when {
                             items.isEmpty() -> false
+                            merged.size == s.replies.size -> false
                             totalCap != null && merged.size >= totalCap -> false
                             else -> hasNext
                         }
@@ -336,6 +338,15 @@ class UserProfileViewModel(
                 }
         }
     }
+
+    internal fun deduplicateUserReplies(items: List<UserReplyExcerpt>): List<UserReplyExcerpt> =
+        items.distinctBy { reply ->
+            Triple(
+                reply.topicId,
+                reply.floorNumber,
+                reply.createdAtIso.ifBlank { reply.plainTextExcerpt },
+            )
+        }
 
     fun toggleFollow() {
         val profile = internalState.value.profile ?: return

@@ -52,6 +52,7 @@ class AppUpdateManagerImpl(
     private val currentVersionName: String = BuildConfig.VERSION_NAME,
     private val currentVersionCode: Int = BuildConfig.VERSION_CODE,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val mainDispatcher: CoroutineDispatcher? = null,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
 ) : AppUpdateManager {
 
@@ -78,7 +79,16 @@ class AppUpdateManagerImpl(
     private var downloadJob: Job? = null
 
     @Volatile
+    private var installJob: Job? = null
+
+    @Volatile
     private var pendingAutoInstallAfterPermission: Boolean = false
+
+    @Volatile
+    private var pendingAutoInstallOnForeground: Boolean = false
+
+    @Volatile
+    private var isAppInForeground: Boolean = true
 
     private val _state = MutableStateFlow(
         AppUpdateState(
@@ -98,8 +108,8 @@ class AppUpdateManagerImpl(
                 .map { it.includePrereleaseUpdates }
                 .distinctUntilChanged()
                 .drop(1)
-                .collect {
-                    clearCachedEtag()
+                .collect { includePrerelease ->
+                    clearCachedEtagIfChannelChanged(includePrerelease)
                 }
         }
     }
@@ -291,34 +301,44 @@ class AppUpdateManagerImpl(
                     }
                 }
 
-                val isValidPackage = withContext(ioDispatcher) {
-                    installer.verifyArchivePackageName(apkFile)
-                }
-                if (!isValidPackage) {
-                    apkFile.delete()
+                val validationError = validateDownloadedApk(apkFile)
+                if (validationError != null) {
+                    withContext(ioDispatcher) { apkFile.delete() }
                     _state.update {
                         it.copy(
-                            downloadPhase = UpdateDownloadPhase.Failed("安装包应用包名校验失败，已自动移除以保障安全"),
+                            showUpdatePrompt = true,
+                            downloadPhase = UpdateDownloadPhase.Failed(validationError),
                         )
                     }
                     return@launch
                 }
 
+                val sha256Verified = !asset.sha256.isNullOrBlank()
                 if (installer.canRequestPackageInstalls()) {
                     _state.update {
                         it.copy(
                             downloadPhase = UpdateDownloadPhase.ReadyToInstall(
                                 apkPath = apkFile.absolutePath,
                                 requiresInstallPermission = false,
+                                sha256Verified = sha256Verified,
                             ),
                         )
                     }
-                    val launched = installer.launchInstall(apkFile)
-                    if (!launched) {
-                        _state.update {
-                            it.copy(
-                                downloadPhase = UpdateDownloadPhase.Failed("无法拉起系统安装界面，请稍后重试或通过浏览器下载"),
-                            )
+                    if (isAppInForeground) {
+                        val launched = launchInstallOnTargetDispatcher(apkFile)
+                        if (!launched) {
+                            _state.update {
+                                it.copy(
+                                    showUpdatePrompt = true,
+                                    downloadPhase = UpdateDownloadPhase.Failed("无法拉起系统安装界面，请稍后重试或通过浏览器下载"),
+                                )
+                            }
+                        }
+                    } else {
+                        pendingAutoInstallOnForeground = true
+                        _state.update { it.copy(showUpdatePrompt = true) }
+                        withContext(ioDispatcher) {
+                            installer.notifyUpdateReady(release.versionName)
                         }
                     }
                 } else {
@@ -328,8 +348,14 @@ class AppUpdateManagerImpl(
                             downloadPhase = UpdateDownloadPhase.ReadyToInstall(
                                 apkPath = apkFile.absolutePath,
                                 requiresInstallPermission = true,
+                                sha256Verified = sha256Verified,
                             ),
                         )
+                    }
+                    if (!isAppInForeground) {
+                        withContext(ioDispatcher) {
+                            installer.notifyUpdateReady(release.versionName)
+                        }
                     }
                 }
             } catch (c: CancellationException) {
@@ -358,23 +384,15 @@ class AppUpdateManagerImpl(
     override fun cancelDownload() {
         downloadJob?.cancel()
         downloadJob = null
+        installJob?.cancel()
+        installJob = null
         pendingAutoInstallAfterPermission = false
+        pendingAutoInstallOnForeground = false
         _state.update { it.copy(downloadPhase = UpdateDownloadPhase.Idle) }
     }
 
     override fun installReadyApk(): Boolean {
         val ready = _state.value.downloadPhase as? UpdateDownloadPhase.ReadyToInstall ?: return false
-        val apkFile = File(ready.apkPath)
-        if (!apkFile.isFile || !installer.verifyArchivePackageName(apkFile)) {
-            apkFile.delete()
-            _state.update {
-                it.copy(
-                    downloadPhase = UpdateDownloadPhase.Failed("安装包文件不存在或已失效，请重新下载"),
-                )
-            }
-            return false
-        }
-
         if (!installer.canRequestPackageInstalls()) {
             _state.update {
                 it.copy(
@@ -385,20 +403,14 @@ class AppUpdateManagerImpl(
         }
 
         pendingAutoInstallAfterPermission = false
+        pendingAutoInstallOnForeground = false
         _state.update {
             it.copy(
                 downloadPhase = ready.copy(requiresInstallPermission = false),
             )
         }
-        val launched = installer.launchInstall(apkFile)
-        if (!launched) {
-            _state.update {
-                it.copy(
-                    downloadPhase = UpdateDownloadPhase.Failed("无法拉起系统安装界面，请稍后重试或通过浏览器下载"),
-                )
-            }
-        }
-        return launched
+        verifyAndLaunchInstallAsync(File(ready.apkPath))
+        return true
     }
 
     override fun openUnknownSourcesSettings(): Boolean {
@@ -409,7 +421,12 @@ class AppUpdateManagerImpl(
         return opened
     }
 
+    override fun onAppBackgrounded() {
+        isAppInForeground = false
+    }
+
     override fun onAppResumed() {
+        isAppInForeground = true
         val ready = _state.value.downloadPhase as? UpdateDownloadPhase.ReadyToInstall ?: return
         val hasPermission = installer.canRequestPackageInstalls()
         if (!hasPermission) {
@@ -420,12 +437,73 @@ class AppUpdateManagerImpl(
         }
 
         _state.update { it.copy(downloadPhase = ready.copy(requiresInstallPermission = false)) }
-        if (pendingAutoInstallAfterPermission) {
+        val shouldAutoLaunch = pendingAutoInstallAfterPermission || pendingAutoInstallOnForeground
+        if (shouldAutoLaunch) {
             pendingAutoInstallAfterPermission = false
-            val apkFile = File(ready.apkPath)
-            if (apkFile.isFile && installer.verifyArchivePackageName(apkFile)) {
-                installer.launchInstall(apkFile)
+            pendingAutoInstallOnForeground = false
+            verifyAndLaunchInstallAsync(File(ready.apkPath))
+        }
+    }
+
+    private fun verifyAndLaunchInstallAsync(apkFile: File) {
+        if (installJob?.isActive == true) return
+        installJob = externalScope.launch(ioDispatcher) {
+            try {
+                val validationError = validateDownloadedApk(apkFile)
+                if (validationError != null) {
+                    apkFile.delete()
+                    _state.update {
+                        it.copy(
+                            showUpdatePrompt = true,
+                            downloadPhase = UpdateDownloadPhase.Failed(validationError),
+                        )
+                    }
+                    return@launch
+                }
+                val launched = launchInstallOnTargetDispatcher(apkFile)
+                if (!launched) {
+                    _state.update {
+                        it.copy(
+                            showUpdatePrompt = true,
+                            downloadPhase = UpdateDownloadPhase.Failed("无法拉起系统安装界面，请稍后重试或通过浏览器下载"),
+                        )
+                    }
+                }
+            } finally {
+                installJob = null
             }
+        }
+    }
+
+    private suspend fun validateDownloadedApk(apkFile: File): String? = withContext(ioDispatcher) {
+        if (!apkFile.isFile || apkFile.length() <= 0L) {
+            return@withContext "安装包文件不存在或已失效，请重新下载"
+        }
+        if (!installer.verifyArchivePackageName(apkFile)) {
+            return@withContext "安装包应用包名校验失败，已自动移除以保障安全"
+        }
+        if (!installer.verifyArchiveSignature(apkFile)) {
+            return@withContext "安装包签名证书与当前应用不一致，已自动移除以保障安全"
+        }
+        val archiveVersionCode = installer.getArchiveVersionCode(apkFile)
+        if (archiveVersionCode != null && archiveVersionCode < currentVersionCode.toLong()) {
+            return@withContext "安装包版本号低于当前版本（防降级拦截），已自动移除"
+        }
+        val archiveVersionName = installer.getArchiveVersionName(apkFile)
+        if (archiveVersionName != null &&
+            AppVersionComparator.compare(archiveVersionName, currentVersionName) < 0
+        ) {
+            return@withContext "安装包版本号低于当前版本（防降级拦截），已自动移除"
+        }
+        null
+    }
+
+    private suspend fun launchInstallOnTargetDispatcher(apkFile: File): Boolean {
+        val dispatcher = mainDispatcher
+        return if (dispatcher != null) {
+            withContext(dispatcher) { installer.launchInstall(apkFile) }
+        } else {
+            installer.launchInstall(apkFile)
         }
     }
 
@@ -451,10 +529,10 @@ class AppUpdateManagerImpl(
         }
     }
 
-    private suspend fun clearCachedEtag() {
+    private suspend fun clearCachedEtagIfChannelChanged(newIncludePrerelease: Boolean) {
         diskMutex.withLock {
             ensureDiskLoadedLocked()
-            if (cachedPayload.etag != null) {
+            if (cachedPayload.etag != null && cachedPayload.includePrerelease != newIncludePrerelease) {
                 cachedPayload = cachedPayload.copy(etag = null)
                 writeDiskPayloadLocked(cachedPayload)
             }

@@ -990,8 +990,8 @@ class BackupManagerImpl(
             journalFile: File,
             managerProvider: () -> BackupManager,
         ) {
-            if (journalFile.isFile) {
-                scope.launch {
+            scope.launch {
+                if (journalFile.isFile) {
                     managerProvider().recoverPendingRestoreIfNeeded()
                 }
             }

@@ -135,4 +135,12 @@ class BackupRestoreSettingsTest {
         assertEquals(AwayDigestTriggerMode.DURATION_OR_REOPEN, roundTripped.settings.awayDigestTriggerMode)
         assertEquals(240, roundTripped.settings.awayDigestThresholdMinutes)
     }
+
+    @Test
+    fun `BackupRestoreUiState defaults includeApiKeys to false`() {
+        val state = BackupRestoreUiState()
+        assertFalse(state.includeApiKeys)
+        assertFalse(state.isBusy)
+        assertEquals(RestoreStrategy.MERGE, state.selectedStrategy)
+    }
 }

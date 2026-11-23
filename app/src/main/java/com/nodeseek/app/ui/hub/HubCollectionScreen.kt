@@ -54,9 +54,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.model.ReadHistoryEntry
+import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
@@ -68,7 +74,241 @@ import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import java.time.Instant
+
+data class HubCollectionUiState(
+    val selectedTab: HubCollectionTab = HubCollectionTab.BOOKMARKS,
+    val isRefreshing: Boolean = false,
+    val bookmarks: List<HubBookmarkDisplayItem> = emptyList(),
+    val hasMoreServerBookmarks: Boolean = false,
+    val isLoadingServerBookmarks: Boolean = false,
+    val readHistory: List<ReadHistoryEntry> = emptyList(),
+)
+
+/**
+ * Lightweight ViewModel dedicated to [HubCollectionScreen] that only observes bookmarks and
+ * read history without triggering unrelated Hub check-in, quota, or inbox unread requests.
+ */
+class HubCollectionViewModel(
+    private val container: AppContainer,
+) : ViewModel() {
+
+    private data class CollectionTransientState(
+        val selectedTab: HubCollectionTab = HubCollectionTab.BOOKMARKS,
+        val isRefreshing: Boolean = false,
+        val serverBookmarks: List<TopicSummary> = emptyList(),
+        val serverBookmarksPage: Int = 1,
+        val hasMoreServerBookmarks: Boolean = false,
+        val isLoadingServerBookmarks: Boolean = false,
+    )
+
+    private val transientState = MutableStateFlow(CollectionTransientState())
+
+    private val _events = Channel<String>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
+
+    val uiState: StateFlow<HubCollectionUiState> = combine(
+        container.bookmarkAndHistoryRepository.observeLocalBookmarks(),
+        container.bookmarkAndHistoryRepository.observeReadHistory(),
+        transientState.asStateFlow(),
+    ) { localBookmarks, history, transient ->
+        HubCollectionUiState(
+            selectedTab = transient.selectedTab,
+            isRefreshing = transient.isRefreshing,
+            bookmarks = mergeHubBookmarks(
+                local = localBookmarks,
+                server = transient.serverBookmarks,
+                history = history,
+            ),
+            hasMoreServerBookmarks = transient.hasMoreServerBookmarks,
+            isLoadingServerBookmarks = transient.isLoadingServerBookmarks,
+            readHistory = history,
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Lazily,
+        initialValue = HubCollectionUiState(),
+    )
+
+    init {
+        viewModelScope.launch {
+            var lastUid = Long.MIN_VALUE
+            container.sessionRepository.sessionState.collect { session ->
+                val nextUid = session?.uid ?: 0L
+                if (nextUid != lastUid) {
+                    lastUid = nextUid
+                    if (session != null) {
+                        refreshServerBookmarks(showSpinner = true)
+                    } else {
+                        transientState.update {
+                            it.copy(
+                                serverBookmarks = emptyList(),
+                                serverBookmarksPage = 1,
+                                hasMoreServerBookmarks = false,
+                                isLoadingServerBookmarks = false,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun selectCollectionTab(tab: HubCollectionTab) {
+        transientState.update { it.copy(selectedTab = tab) }
+    }
+
+    fun refreshAll() {
+        viewModelScope.launch {
+            transientState.update { it.copy(isRefreshing = true) }
+            try {
+                if (container.sessionRepository.sessionState.value != null) {
+                    loadServerBookmarksPage(page = 1, append = false)
+                }
+            } finally {
+                transientState.update { it.copy(isRefreshing = false) }
+            }
+        }
+    }
+
+    fun loadMoreServerBookmarks() {
+        val current = transientState.value
+        if (current.isLoadingServerBookmarks || !current.hasMoreServerBookmarks) return
+        if (container.sessionRepository.sessionState.value == null) return
+        viewModelScope.launch {
+            loadServerBookmarksPage(page = current.serverBookmarksPage + 1, append = true)
+        }
+    }
+
+    fun removeBookmark(topicId: Long) {
+        viewModelScope.launch {
+            val isSignedIn = container.sessionRepository.sessionState.value != null
+            if (isSignedIn) {
+                val remoteResult = container.bookmarkAndHistoryRepository
+                    .setTopicBookmarked(topicId, bookmarked = false)
+                if (remoteResult.isFailure) {
+                    val err = remoteResult.exceptionOrNull()
+                    _events.trySend(
+                        err?.message?.takeIf { it.isNotBlank() }
+                            ?: "取消云端收藏失败，请稍后重试",
+                    )
+                    return@launch
+                }
+            }
+            container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId)
+            transientState.update { state ->
+                state.copy(
+                    serverBookmarks = state.serverBookmarks.filterNot { it.id == topicId },
+                )
+            }
+            _events.trySend("已从收藏移除")
+        }
+    }
+
+    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
+        val currentlyBookmarked = uiState.value.bookmarks.any { it.topicId == entry.topicId }
+        if (currentlyBookmarked) {
+            removeBookmark(entry.topicId)
+            return
+        }
+        viewModelScope.launch {
+            val summary = TopicSummary(
+                id = entry.topicId,
+                title = entry.title,
+                categorySlug = entry.categorySlug,
+                categoryName = entry.categoryName,
+                authorName = entry.authorName,
+                authorAvatarUrl = entry.authorAvatarUrl,
+                lastActivityIso = Instant.ofEpochMilli(entry.visitedAtEpochMillis).toString(),
+                lastReadFloor = entry.lastReadFloor.takeIf { it > 0 },
+                isBookmarked = true,
+            )
+            container.bookmarkAndHistoryRepository.saveOfflineBookmark(
+                summary = summary,
+                detailSnapshot = null,
+                syncedWithServer = false,
+            )
+            if (container.sessionRepository.sessionState.value != null) {
+                container.bookmarkAndHistoryRepository.setTopicBookmarked(entry.topicId, bookmarked = true)
+                    .onSuccess {
+                        container.bookmarkAndHistoryRepository.saveOfflineBookmark(
+                            summary = summary,
+                            detailSnapshot = null,
+                            syncedWithServer = true,
+                        )
+                        _events.trySend("已加入我的收藏")
+                    }
+                    .onFailure { err ->
+                        _events.trySend(err.message ?: "云端收藏同步未完成，已保存在本机")
+                    }
+            } else {
+                _events.trySend("已加入我的收藏")
+            }
+        }
+    }
+
+    fun clearReadHistory() {
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.clearReadHistory()
+            _events.trySend("浏览记录已清空")
+        }
+    }
+
+    private fun refreshServerBookmarks(showSpinner: Boolean) {
+        viewModelScope.launch {
+            if (showSpinner) {
+                transientState.update { it.copy(isLoadingServerBookmarks = true) }
+            }
+            loadServerBookmarksPage(page = 1, append = false)
+        }
+    }
+
+    private suspend fun loadServerBookmarksPage(
+        page: Int,
+        append: Boolean,
+    ) {
+        transientState.update { it.copy(isLoadingServerBookmarks = true) }
+        container.bookmarkAndHistoryRepository.getServerBookmarks(page)
+            .onSuccess { (items, hasNext) ->
+                transientState.update { s ->
+                    val merged = if (append) {
+                        (s.serverBookmarks + items).distinctBy { it.id }
+                    } else {
+                        items.distinctBy { it.id }
+                    }
+                    s.copy(
+                        serverBookmarks = merged,
+                        serverBookmarksPage = page,
+                        hasMoreServerBookmarks = hasNext && items.isNotEmpty(),
+                        isLoadingServerBookmarks = false,
+                    )
+                }
+            }
+            .onFailure {
+                transientState.update { it.copy(isLoadingServerBookmarks = false) }
+            }
+    }
+
+    companion object {
+        fun factory(container: AppContainer): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    return HubCollectionViewModel(container) as T
+                }
+            }
+    }
+}
 
 /**
  * Dedicated screen for managing offline/server Bookmarks and floor-resuming Read History.
@@ -83,12 +323,21 @@ fun HubCollectionScreen(
     onOpenCategory: ((slug: String) -> Unit)? = null,
     selectedTopicId: Long? = null,
     previewUiState: PulseHubUiState? = null,
-    viewModel: PulseHubViewModel = viewModel(
-        factory = PulseHubViewModel.factory(LocalAppContainer.current),
+    viewModel: HubCollectionViewModel = viewModel(
+        factory = HubCollectionViewModel.factory(LocalAppContainer.current),
     ),
 ) {
     val observedUiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val uiState = previewUiState ?: observedUiState
+    val uiState = previewUiState?.let { preview ->
+        HubCollectionUiState(
+            selectedTab = preview.selectedTab,
+            isRefreshing = preview.isRefreshing,
+            bookmarks = preview.bookmarks,
+            hasMoreServerBookmarks = preview.hasMoreServerBookmarks,
+            isLoadingServerBookmarks = preview.isLoadingServerBookmarks,
+            readHistory = preview.readHistory,
+        )
+    } ?: observedUiState
     val snackbarHostState = remember { SnackbarHostState() }
     val bookmarkedIds = remember(uiState.bookmarks) {
         uiState.bookmarks.map { it.topicId }.toSet()

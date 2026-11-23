@@ -105,6 +105,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -146,6 +147,7 @@ import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.digest.AwayDurationFormatter
 import com.nodeseek.app.domain.filter.ContentFilterConfig
 import com.nodeseek.app.domain.filter.ContentFilterEngine
+import com.nodeseek.app.domain.filter.ContentFilterPreset
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.AwayDigestTriggerMode
@@ -202,6 +204,14 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.CookieJar
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -219,6 +229,9 @@ data class SettingsUiState(
     val isVerifyingOfficialTradeKey: Boolean = false,
     val officialTradeFeedbackMessage: String? = null,
     val officialTradeFeedbackIsError: Boolean = false,
+    val isVerifyingNodeImageKey: Boolean = false,
+    val nodeImageFeedbackMessage: String? = null,
+    val nodeImageFeedbackIsError: Boolean = false,
 )
 
 class SettingsViewModel(
@@ -237,9 +250,23 @@ class SettingsViewModel(
         val isVerifyingOfficialTradeKey: Boolean = false,
         val officialTradeFeedbackMessage: String? = null,
         val officialTradeFeedbackIsError: Boolean = false,
+        val isVerifyingNodeImageKey: Boolean = false,
+        val nodeImageFeedbackMessage: String? = null,
+        val nodeImageFeedbackIsError: Boolean = false,
     )
 
     private val transient = MutableStateFlow(TransientState())
+    private val contentFilterPresetMutex = Mutex()
+    private val nodeImageVerifyClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10L, TimeUnit.SECONDS)
+            .readTimeout(12L, TimeUnit.SECONDS)
+            .callTimeout(15L, TimeUnit.SECONDS)
+            .build()
+    }
 
     private val _events = Channel<String>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
@@ -274,6 +301,9 @@ class SettingsViewModel(
             isVerifyingOfficialTradeKey = local.isVerifyingOfficialTradeKey,
             officialTradeFeedbackMessage = local.officialTradeFeedbackMessage,
             officialTradeFeedbackIsError = local.officialTradeFeedbackIsError,
+            isVerifyingNodeImageKey = local.isVerifyingNodeImageKey,
+            nodeImageFeedbackMessage = local.nodeImageFeedbackMessage,
+            nodeImageFeedbackIsError = local.nodeImageFeedbackIsError,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -359,7 +389,106 @@ class SettingsViewModel(
     fun saveNodeImageApiKey(apiKey: String) {
         viewModelScope.launch {
             container.settingsRepository.setNodeImageApiKey(apiKey)
+            transient.update {
+                it.copy(
+                    nodeImageFeedbackMessage = null,
+                    nodeImageFeedbackIsError = false,
+                )
+            }
             _events.trySend(if (apiKey.isBlank()) "已清除 NodeImage API Key" else "已保存 NodeImage API Key")
+        }
+    }
+
+    fun clearNodeImageFeedback() {
+        transient.update {
+            if (it.nodeImageFeedbackMessage == null) {
+                it
+            } else {
+                it.copy(nodeImageFeedbackMessage = null, nodeImageFeedbackIsError = false)
+            }
+        }
+    }
+
+    fun verifyNodeImageApiKey(draftKey: String) {
+        if (transient.value.isVerifyingNodeImageKey) return
+        val candidate = draftKey.trim().ifEmpty { container.settingsRepository.settings.value.nodeImageApiKey.trim() }
+        if (candidate.isEmpty()) {
+            transient.update {
+                it.copy(
+                    nodeImageFeedbackMessage = "请先填写 NodeImage API Key 再测试连接",
+                    nodeImageFeedbackIsError = true,
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            transient.update {
+                it.copy(
+                    isVerifyingNodeImageKey = true,
+                    nodeImageFeedbackMessage = null,
+                    nodeImageFeedbackIsError = false,
+                )
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val request = Request.Builder()
+                        .url("https://api.nodeimage.com/api/v1/images")
+                        .get()
+                        .header("X-API-Key", candidate)
+                        .header("Accept", "application/json")
+                        .build()
+                    nodeImageVerifyClient.newCall(request).execute().use { response ->
+                        when (response.code) {
+                            in 200..299 -> Unit
+                            401, 403 -> throw IllegalStateException("API Key 无效或已失效 (HTTP ${response.code})")
+                            in 300..399 -> throw IllegalStateException("图床接口发生异常重定向，已中止以防密钥泄漏")
+                            else -> throw IllegalStateException("图床服务返回异常状态 (HTTP ${response.code})")
+                        }
+                    }
+                }
+            }
+            result
+                .onSuccess {
+                    transient.update {
+                        it.copy(
+                            isVerifyingNodeImageKey = false,
+                            nodeImageFeedbackMessage = "连通性测试通过，API Key 有效",
+                            nodeImageFeedbackIsError = false,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    transient.update {
+                        it.copy(
+                            isVerifyingNodeImageKey = false,
+                            nodeImageFeedbackMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "无法连接 api.nodeimage.com，请检查网络或密钥",
+                            nodeImageFeedbackIsError = true,
+                        )
+                    }
+                }
+        }
+    }
+
+    fun toggleContentFilterPreset(preset: ContentFilterPreset) {
+        viewModelScope.launch {
+            contentFilterPresetMutex.withLock {
+                val latestRules = container.contentFilterRepository.config.value.rules
+                val existing = ContentFilterEngine.findMatchingRuleForPreset(
+                    preset = preset,
+                    rules = latestRules,
+                )
+                if (existing != null) {
+                    if (existing.isEnabled) {
+                        container.contentFilterRepository.removeRule(existing.id)
+                    } else {
+                        container.contentFilterRepository.setRuleEnabled(existing.id, true)
+                    }
+                } else {
+                    container.contentFilterRepository.upsertRule(preset.toRule())
+                }
+            }
         }
     }
 
@@ -609,6 +738,27 @@ class SettingsViewModel(
         viewModelScope.launch {
             container.bookmarkAndHistoryRepository.clearReadHistory()
             _events.trySend("浏览记录已清空")
+        }
+    }
+
+    fun clearImageCache(appContext: Context) {
+        val safeContext = appContext.applicationContext ?: appContext
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val loader = SingletonImageLoader.get(safeContext)
+                    loader.memoryCache?.clear()
+                    loader.diskCache?.clear()
+                }
+            }
+            result
+                .onSuccess {
+                    _events.trySend("图片内存与磁盘缓存已清理")
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    _events.trySend("清理图片缓存失败：${error.message ?: "请稍后重试"}")
+                }
         }
     }
 
@@ -902,7 +1052,10 @@ fun SettingsScreen(
 
                 // ── Group 2: 字号与排版 ──
                 item(key = "settings_typography") {
-                    val pct = (settings.fontScale * 100f).roundToInt()
+                    var sliderFontScale by remember(settings.fontScale) {
+                        mutableFloatStateOf(settings.fontScale.coerceIn(0.85f, 1.30f))
+                    }
+                    val pct = (sliderFontScale * 100f).roundToInt()
                     PulseStaggeredEntrance(index = 1) {
                         SettingsGroupedSection(title = "字号与排版") {
                             Column(
@@ -941,10 +1094,14 @@ fun SettingsScreen(
                                 }
 
                                 Slider(
-                                    value = settings.fontScale,
-                                    onValueChange = viewModel::setFontScale,
+                                    value = sliderFontScale,
+                                    onValueChange = { raw ->
+                                        sliderFontScale = ((raw * 100f).roundToInt() / 100f).coerceIn(0.85f, 1.30f)
+                                    },
+                                    onValueChangeFinished = {
+                                        viewModel.setFontScale(sliderFontScale)
+                                    },
                                     valueRange = 0.85f..1.30f,
-                                    steps = 8,
                                     modifier = Modifier.fillMaxWidth(),
                                 )
 
@@ -958,7 +1115,7 @@ fun SettingsScreen(
                                         1.00f to "100%",
                                         1.15f to "115%",
                                     ).forEach { (scale, label) ->
-                                        val isPresetActive = abs(settings.fontScale - scale) < 0.02f
+                                        val isPresetActive = abs(sliderFontScale - scale) < 0.02f
                                         val chipBg by animateColorAsState(
                                             targetValue = if (isPresetActive) {
                                                 MaterialTheme.colorScheme.primaryContainer
@@ -1128,23 +1285,7 @@ fun SettingsScreen(
                                     appContainer.contentFilterRepository.setEnabled(enabled)
                                 }
                             },
-                            onTogglePreset = { preset ->
-                                settingsScope.launch {
-                                    val existing = ContentFilterEngine.findMatchingRuleForPreset(
-                                        preset = preset,
-                                        rules = contentFilterConfig.rules,
-                                    )
-                                    if (existing != null) {
-                                        if (existing.isEnabled) {
-                                            appContainer.contentFilterRepository.removeRule(existing.id)
-                                        } else {
-                                            appContainer.contentFilterRepository.setRuleEnabled(existing.id, true)
-                                        }
-                                    } else {
-                                        appContainer.contentFilterRepository.upsertRule(preset.toRule())
-                                    }
-                                }
-                            },
+                            onTogglePreset = viewModel::toggleContentFilterPreset,
                             onUpsertRule = { rule ->
                                 settingsScope.launch {
                                     appContainer.contentFilterRepository.upsertRule(rule)
@@ -1239,7 +1380,7 @@ fun SettingsScreen(
 
                                     SettingsIntervalPresetRow(
                                         title = "前台检查间隔",
-                                        optionsMinutes = listOf(1, 2, 5, 10),
+                                        optionsMinutes = listOf(1, 2, 5, 10, 30),
                                         selectedMinutes = radarPollingSettings.foregroundIntervalMinutes,
                                         enabled = radarPollingSettings.isEnabled,
                                         onSelect = { minutes ->
@@ -1295,6 +1436,28 @@ fun SettingsScreen(
                                             settingsScope.launch {
                                                 appContainer.radarRepository.updatePollingSettings {
                                                     it.copy(requireBatteryNotLowInBackground = requireBatteryNotLow)
+                                                }
+                                            }
+                                        },
+                                    )
+
+                                    SettingsGroupDivider()
+
+                                    val quietRangeText = remember(
+                                        radarPollingSettings.quietStartMinuteOfDay,
+                                        radarPollingSettings.quietEndMinuteOfDay,
+                                    ) {
+                                        "${formatMinuteOfDay(radarPollingSettings.quietStartMinuteOfDay)}–${formatMinuteOfDay(radarPollingSettings.quietEndMinuteOfDay)}"
+                                    }
+                                    SettingsSwitchRow(
+                                        icon = Icons.Rounded.DarkMode,
+                                        title = "夜间免打扰 ($quietRangeText)",
+                                        subtitle = "免打扰时段内暂停雷达系统通知弹窗，时段结束后恢复推送",
+                                        checked = radarPollingSettings.quietHoursEnabled,
+                                        onCheckedChange = { quietEnabled ->
+                                            settingsScope.launch {
+                                                appContainer.radarRepository.updatePollingSettings {
+                                                    it.copy(quietHoursEnabled = quietEnabled)
                                                 }
                                             }
                                         },
@@ -1369,14 +1532,7 @@ fun SettingsScreen(
                                 title = "清理图片缓存",
                                 trailingText = "内存与磁盘",
                                 onClick = {
-                                    kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                                        runCatching {
-                                            val loader = SingletonImageLoader.get(context)
-                                            loader.memoryCache?.clear()
-                                            loader.diskCache?.clear()
-                                        }
-                                    }
-                                    viewModel.notifyImageCacheCleared()
+                                    viewModel.clearImageCache(context.applicationContext)
                                 },
                             )
 
@@ -1535,11 +1691,19 @@ fun SettingsScreen(
     if (showNodeImageKeyDialog) {
         NodeImageApiKeyDialog(
             initialApiKey = settings.nodeImageApiKey,
+            isVerifying = uiState.isVerifyingNodeImageKey,
+            feedbackMessage = uiState.nodeImageFeedbackMessage,
+            feedbackIsError = uiState.nodeImageFeedbackIsError,
+            onDraftEdited = viewModel::clearNodeImageFeedback,
+            onVerify = viewModel::verifyNodeImageApiKey,
             onSave = { newKey ->
                 showNodeImageKeyDialog = false
                 viewModel.saveNodeImageApiKey(newKey)
             },
-            onDismiss = { showNodeImageKeyDialog = false },
+            onDismiss = {
+                viewModel.clearNodeImageFeedback()
+                showNodeImageKeyDialog = false
+            },
         )
     }
 
@@ -2432,6 +2596,11 @@ private fun ThemeWireframeCanvas(
 @Composable
 private fun NodeImageApiKeyDialog(
     initialApiKey: String,
+    isVerifying: Boolean,
+    feedbackMessage: String?,
+    feedbackIsError: Boolean,
+    onDraftEdited: () -> Unit,
+    onVerify: (String) -> Unit,
     onSave: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -2446,7 +2615,10 @@ private fun NodeImageApiKeyDialog(
         message = "配置 api.nodeimage.com 的 X-API-Key，可在发帖与回复编辑器中一键上传配图。",
         buttons = {
             if (initialApiKey.isNotBlank()) {
-                TextButton(onClick = { onSave("") }) {
+                TextButton(
+                    onClick = { onSave("") },
+                    enabled = !isVerifying,
+                ) {
                     Text(
                         text = "清除密钥",
                         color = MaterialTheme.colorScheme.error,
@@ -2456,69 +2628,128 @@ private fun NodeImageApiKeyDialog(
                 }
             }
             Spacer(modifier = Modifier.weight(1f))
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isVerifying,
+            ) {
                 Text("取消", maxLines = 1, softWrap = false)
             }
             Button(
                 onClick = { onSave(apiKeyDraft.trim()) },
+                enabled = !isVerifying,
                 shape = CircleShape,
             ) {
                 Text("保存", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
             }
         },
     ) {
-        PulseTextField(
-            value = apiKeyDraft,
-            onValueChange = { apiKeyDraft = it },
-            label = "NodeImage X-API-Key",
-            placeholder = "粘贴您的图床 API Key…",
-            singleLine = true,
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Rounded.Key,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-            },
-            visualTransformation = if (showApiKey) {
-                VisualTransformation.None
-            } else {
-                PasswordVisualTransformation()
-            },
-            trailingIcon = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            val clip = clipboard?.primaryClip
-                            val pasted = if (clip != null && clip.itemCount > 0) {
-                                clip.getItemAt(0)?.coerceToText(context)?.toString()
-                            } else {
-                                null
-                            }
-                            if (!pasted.isNullOrBlank()) {
-                                apiKeyDraft = pasted.trim()
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                    ) {
-                        Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                    }
-                    IconButton(onClick = { showApiKey = !showApiKey }) {
-                        Icon(
-                            imageVector = if (showApiKey) {
-                                Icons.Rounded.VisibilityOff
-                            } else {
-                                Icons.Rounded.Visibility
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            PulseTextField(
+                value = apiKeyDraft,
+                onValueChange = {
+                    apiKeyDraft = it
+                    onDraftEdited()
+                },
+                label = "NodeImage X-API-Key",
+                placeholder = "粘贴您的图床 API Key…",
+                singleLine = true,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                visualTransformation = if (showApiKey) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                val clip = clipboard?.primaryClip
+                                val pasted = if (clip != null && clip.itemCount > 0) {
+                                    clip.getItemAt(0)?.coerceToText(context)?.toString()
+                                } else {
+                                    null
+                                }
+                                if (!pasted.isNullOrBlank()) {
+                                    apiKeyDraft = pasted.trim()
+                                    onDraftEdited()
+                                }
                             },
-                            contentDescription = if (showApiKey) "隐藏密钥" else "显示密钥",
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
+                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
+                        }
+                        IconButton(onClick = { showApiKey = !showApiKey }) {
+                            Icon(
+                                imageVector = if (showApiKey) {
+                                    Icons.Rounded.VisibilityOff
+                                } else {
+                                    Icons.Rounded.Visibility
+                                },
+                                contentDescription = if (showApiKey) "隐藏密钥" else "显示密钥",
+                            )
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                OutlinedButton(
+                    onClick = { onVerify(apiKeyDraft.trim()) },
+                    enabled = !isVerifying && apiKeyDraft.trim().isNotEmpty(),
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                ) {
+                    if (isVerifying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("测试中…", style = MaterialTheme.typography.labelMedium)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.VerifiedUser,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("测试连接", style = MaterialTheme.typography.labelMedium)
                     }
                 }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
+            }
+
+            if (!feedbackMessage.isNullOrBlank()) {
+                Text(
+                    text = feedbackMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (feedbackIsError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+        }
     }
+}
+
+private fun formatMinuteOfDay(minuteOfDay: Int): String {
+    val normalized = ((minuteOfDay % 1440) + 1440) % 1440
+    val hour = normalized / 60
+    val minute = normalized % 60
+    return String.format(Locale.ROOT, "%02d:%02d", hour, minute)
 }
 
 @Composable
@@ -2605,7 +2836,12 @@ private fun BlockedUsersManagerDialog(
                         .heightIn(max = 260.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(blockedUsers, key = { it.uid }) { user ->
+                    items(
+                        items = blockedUsers,
+                        key = { user ->
+                            if (user.uid > 0L) "uid_${user.uid}" else "name_${user.username.lowercase()}"
+                        },
+                    ) { user ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
