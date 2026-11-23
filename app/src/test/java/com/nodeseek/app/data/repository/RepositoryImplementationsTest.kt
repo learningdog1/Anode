@@ -785,14 +785,21 @@ class RepositoryImplementationsTest {
             assertEquals("legacy_nodeimage_key_123", loaded.nodeImageApiKey)
             assertEquals("legacy_seekmail_key_456", loaded.seekMailApiKey)
 
-            // Wait for background plaintext migration to rewrite encrypted envelopes on disk
+            // Wait for background plaintext migration to rewrite encrypted envelopes on disk.
+            // Poll dataStore.data.first() instead of holding a single DataStoreImpl.data collector
+            // across a concurrent edit() to avoid androidx.datastore 1.1.x's version-race flake.
             try {
                 withTimeout(5_000L) {
-                    dataStore.data.first { prefs ->
+                    while (true) {
+                        val prefs = dataStore.data.first()
                         val rawImg = prefs[stringPreferencesKey("node_image_api_key")].orEmpty()
                         val rawMail = prefs[stringPreferencesKey("seek_mail_api_key")].orEmpty()
-                        rawImg.startsWith(SettingsSecretCipher.PREFIX_SW) &&
+                        if (rawImg.startsWith(SettingsSecretCipher.PREFIX_SW) &&
                             rawMail.startsWith(SettingsSecretCipher.PREFIX_SW)
+                        ) {
+                            break
+                        }
+                        kotlinx.coroutines.delay(20L)
                     }
                 }
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
