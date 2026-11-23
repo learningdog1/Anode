@@ -221,7 +221,8 @@ object FleetSalePostBuilder {
             }
             val locationLine = buildList {
                 if (asset.region.isNotBlank()) add(asset.region.trim())
-                if (asset.routeTag.isNotBlank()) add("线路：${asset.routeTag.trim()}")
+                val routeSummary = asset.resolvedRouteTagSummary
+                if (routeSummary.isNotBlank()) add("线路：$routeSummary")
             }.joinToString(" · ")
             if (locationLine.isNotEmpty()) {
                 append("- **机房 / 线路**：").append(locationLine).append("\n")
@@ -278,7 +279,8 @@ object FleetSalePostBuilder {
                     append("- **系统环境**：").append(snapshot.os.trim()).append("\n")
                 }
                 val resourceParts = buildList {
-                    add(String.format(Locale.US, "CPU %.1f%%", snapshot.cpuPercent.coerceIn(0.0, 100.0)))
+                    val safeCpu = snapshot.cpuPercent.takeIf { it.isFinite() }?.coerceIn(0.0, 100.0) ?: 0.0
+                    add(String.format(Locale.US, "CPU %.1f%%", safeCpu))
                     if (snapshot.memTotalBytes > 0L) {
                         add("内存 ${formatBytesBinary(snapshot.memUsedBytes)} / ${formatBytesBinary(snapshot.memTotalBytes)}")
                     }

@@ -91,6 +91,7 @@ class FleetWorkScheduler internal constructor(
 
     private val observerLock = Any()
     private var observerJob: Job? = null
+    private var lastSyncedSignature: ScheduleSignature? = null
 
     private data class ScheduleSignature(
         val shouldSchedule: Boolean,
@@ -197,32 +198,23 @@ class FleetWorkScheduler internal constructor(
         if (!isPersistedStateLoaded) {
             return
         }
-        if (shouldSchedule(settings, hasActiveTargets)) {
-            val request = buildPeriodicWorkRequest(settings)
-            workManagerGateway.enqueueUniquePeriodicWork(
-                uniqueWorkName = UNIQUE_PERIODIC_WORK_NAME,
-                existingPeriodicWorkPolicy = ExistingPeriodicWorkPolicy.UPDATE,
-                request = request,
-            )
-        } else {
-            workManagerGateway.cancelUniqueWork(UNIQUE_PERIODIC_WORK_NAME)
+        val signature = toSignature(settings, hasActiveTargets)
+        synchronized(observerLock) {
+            if (lastSyncedSignature == signature) {
+                return
+            }
+            if (signature.shouldSchedule) {
+                val request = buildPeriodicWorkRequest(settings)
+                workManagerGateway.enqueueUniquePeriodicWork(
+                    uniqueWorkName = UNIQUE_PERIODIC_WORK_NAME,
+                    existingPeriodicWorkPolicy = ExistingPeriodicWorkPolicy.UPDATE,
+                    request = request,
+                )
+            } else {
+                workManagerGateway.cancelUniqueWork(UNIQUE_PERIODIC_WORK_NAME)
+            }
+            lastSyncedSignature = signature
         }
-    }
-
-    fun enqueueImmediateCheck() {
-        val request = OneTimeWorkRequestBuilder<FleetMonitorWorker>()
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
-                    .build(),
-            )
-            .addTag(WORK_TAG)
-            .build()
-        workManagerGateway.enqueueUniqueOneTimeWork(
-            uniqueWorkName = UNIQUE_IMMEDIATE_WORK_NAME,
-            existingWorkPolicy = ExistingWorkPolicy.KEEP,
-            request = request,
-        )
     }
 
     private fun toSignature(
@@ -251,7 +243,7 @@ class FleetWorkScheduler internal constructor(
             assets: List<VpsAssetRecord>,
         ): Boolean =
             panels.any { it.enabled } ||
-                assets.any { it.remindDaysBeforeExpiry > 0 }
+                assets.any { it.remindDaysBeforeExpiry > 0 || it.autoRenew }
 
         fun shouldSchedule(
             settings: FleetMonitorSettings,

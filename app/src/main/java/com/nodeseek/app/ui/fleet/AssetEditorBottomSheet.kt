@@ -57,6 +57,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -127,32 +129,39 @@ internal fun AssetEditorBottomSheet(
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.92f).dp
     val ext = NodePulseThemeTokens.extendedColors
 
-    var nickname by remember(draft) { mutableStateOf(draft.nickname) }
-    var providerName by remember(draft) { mutableStateOf(draft.providerName) }
-    var region by remember(draft) { mutableStateOf(draft.region) }
-    var selectedTags by remember(draft, initialTags) {
+    val stringListSaver = remember {
+        listSaver<List<String>, String>(
+            save = { it.toList() },
+            restore = { it.toList() },
+        )
+    }
+    val draftKey = draft.editingId ?: "new:${draft.linkedProbeKey.orEmpty()}:${draft.purchaseUrl}"
+    var nickname by rememberSaveable(draftKey, draft) { mutableStateOf(draft.nickname) }
+    var providerName by rememberSaveable(draftKey, draft) { mutableStateOf(draft.providerName) }
+    var region by rememberSaveable(draftKey, draft) { mutableStateOf(draft.region) }
+    var selectedTags by rememberSaveable(draftKey, draft, initialTags, stateSaver = stringListSaver) {
         mutableStateOf(
             VpsAssetRecord.normalizeTags(
                 initialTags ?: VpsAssetRecord.parseLegacyTags(draft.routeTag),
             ),
         )
     }
-    var customTagInput by remember(draft) { mutableStateOf("") }
-    var specsSummary by remember(draft) { mutableStateOf(draft.specsSummary) }
-    var renewalAmount by remember(draft) { mutableStateOf(draft.renewalAmount) }
-    var currency by remember(draft) { mutableStateOf(draft.currency) }
-    var cyclePreset by remember(draft) { mutableStateOf(draft.cyclePreset) }
-    var customCycleDays by remember(draft) { mutableStateOf(draft.customCycleDays) }
-    var expiryDateIso by remember(draft) { mutableStateOf(draft.expiryDateIso) }
-    var remindDays by remember(draft) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
-    var autoRenew by remember(draft, initialAutoRenew) { mutableStateOf(initialAutoRenew ?: false) }
-    var monthlyTrafficQuotaGb by remember(draft) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
-    var trafficResetDayText by remember(draft) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
-    var linkedProbeKey by remember(draft) { mutableStateOf(draft.linkedProbeKey) }
-    var purchaseUrl by remember(draft) { mutableStateOf(draft.purchaseUrl) }
-    var panelManageUrl by remember(draft) { mutableStateOf(draft.panelManageUrl) }
-    var autoRenewNote by remember(draft) { mutableStateOf(draft.autoRenewNote) }
-    var notes by remember(draft) { mutableStateOf(draft.notes) }
+    var customTagInput by rememberSaveable(draftKey, draft) { mutableStateOf("") }
+    var specsSummary by rememberSaveable(draftKey, draft) { mutableStateOf(draft.specsSummary) }
+    var renewalAmount by rememberSaveable(draftKey, draft) { mutableStateOf(draft.renewalAmount) }
+    var currency by rememberSaveable(draftKey, draft) { mutableStateOf(draft.currency) }
+    var cyclePreset by rememberSaveable(draftKey, draft) { mutableStateOf(draft.cyclePreset) }
+    var customCycleDays by rememberSaveable(draftKey, draft) { mutableStateOf(draft.customCycleDays) }
+    var expiryDateIso by rememberSaveable(draftKey, draft) { mutableStateOf(draft.expiryDateIso) }
+    var remindDays by rememberSaveable(draftKey, draft) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
+    var autoRenew by rememberSaveable(draftKey, draft, initialAutoRenew) { mutableStateOf(initialAutoRenew ?: false) }
+    var monthlyTrafficQuotaGb by rememberSaveable(draftKey, draft) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
+    var trafficResetDayText by rememberSaveable(draftKey, draft) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
+    var linkedProbeKey by rememberSaveable(draftKey, draft) { mutableStateOf(draft.linkedProbeKey) }
+    var purchaseUrl by rememberSaveable(draftKey, draft) { mutableStateOf(draft.purchaseUrl) }
+    var panelManageUrl by rememberSaveable(draftKey, draft) { mutableStateOf(draft.panelManageUrl) }
+    var autoRenewNote by rememberSaveable(draftKey, draft) { mutableStateOf(draft.autoRenewNote) }
+    var notes by rememberSaveable(draftKey, draft) { mutableStateOf(draft.notes) }
 
     val candidateTags = remember(existingTags) {
         VpsAssetRecord.mergeTags(ROUTE_TAG_PRESETS, existingTags)
@@ -391,7 +400,12 @@ internal fun AssetEditorBottomSheet(
                     horizontalArrangement = Arrangement.spacedBy(7.dp),
                     verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
-                    BillingCyclePreset.entries.forEach { preset ->
+                    val visibleCyclePresets = remember(cyclePreset) {
+                        BillingCyclePreset.entries.filter { preset ->
+                            preset != BillingCyclePreset.CALENDAR_NATURAL || cyclePreset == BillingCyclePreset.CALENDAR_NATURAL
+                        }
+                    }
+                    visibleCyclePresets.forEach { preset ->
                         FleetChoiceChip(
                             label = preset.shortLabel,
                             selected = cyclePreset == preset,

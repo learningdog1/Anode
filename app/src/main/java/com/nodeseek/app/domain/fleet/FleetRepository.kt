@@ -24,6 +24,13 @@ interface FleetRepository {
     val isPersistedStateLoadedFlow: StateFlow<Boolean>
         get() = DEFAULT_PERSISTED_STATE_LOADED_FLOW
 
+    /**
+     * Whether probe API tokens are currently persisted using a local software AES-GCM fallback
+     * key file instead of Android Keystore hardware/system-backed keys.
+     */
+    val isUsingSoftwareTokenFallbackFlow: StateFlow<Boolean>
+        get() = DEFAULT_SOFTWARE_FALLBACK_FLOW
+
     val panelsFlow: StateFlow<List<ProbePanelConfig>>
     val snapshotsFlow: StateFlow<List<ProbeServerSnapshot>>
     val assetsFlow: StateFlow<List<VpsAssetRecord>>
@@ -87,6 +94,8 @@ interface FleetRepository {
     companion object {
         private val DEFAULT_PERSISTED_STATE_LOADED_FLOW: StateFlow<Boolean> =
             MutableStateFlow(true).asStateFlow()
+        private val DEFAULT_SOFTWARE_FALLBACK_FLOW: StateFlow<Boolean> =
+            MutableStateFlow(false).asStateFlow()
         private val DEFAULT_CPU_HISTORY_FLOW: StateFlow<Map<String, List<ProbeDailyCpuBucket>>> =
             MutableStateFlow(emptyMap<String, List<ProbeDailyCpuBucket>>()).asStateFlow()
     }

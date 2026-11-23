@@ -130,6 +130,7 @@ private data class StoredVpsAssetRecord(
     val autoRenew: Boolean = false,
     val autoRenewNote: String = "",
     val notes: String = "",
+    val billingAnchorDay: Int? = null,
     val createdAtEpochMillis: Long = 0L,
     val updatedAtEpochMillis: Long = 0L,
 )
@@ -160,12 +161,15 @@ private data class StoredFleetAlertTracker(
 class FleetRepositoryImpl(
     private val storeFile: File,
     private val probeClient: ProbePanelClient = ProbePanelClient(),
-    private val tokenCipher: FleetTokenCipher = FleetTokenCipherFactory.createDefault(
-        fallbackKeyFile = File(storeFile.absoluteFile.parentFile, FALLBACK_KEY_FILE_NAME),
-    ),
+    tokenCipher: FleetTokenCipher? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
 ) : FleetRepository {
+
+    private data class DecryptedTokenEntry(
+        val plainToken: String?,
+        val decryptionFailed: Boolean,
+    )
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -176,9 +180,28 @@ class FleetRepositoryImpl(
     private val refreshMutex = Mutex()
     private var diskLoaded = false
     private var cachedPayload = FleetStorePayload()
+    private var lastSilentDiskFlushEpochMillis: Long = 0L
+    private val decryptedTokenCache = HashMap<Pair<String, String>, DecryptedTokenEntry>()
 
     private val _isPersistedStateLoadedFlow = MutableStateFlow(false)
     override val isPersistedStateLoadedFlow: StateFlow<Boolean> = _isPersistedStateLoadedFlow.asStateFlow()
+
+    private val _isUsingSoftwareTokenFallbackFlow = MutableStateFlow(
+        tokenCipher?.let { !it.isHardwareBacked } ?: false,
+    )
+    override val isUsingSoftwareTokenFallbackFlow: StateFlow<Boolean> =
+        _isUsingSoftwareTokenFallbackFlow.asStateFlow()
+
+    private val tokenCipherDelegate: Lazy<FleetTokenCipher> = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        val resolved = tokenCipher ?: FleetTokenCipherFactory.createDefault(
+            fallbackKeyFile = File(storeFile.absoluteFile.parentFile, FALLBACK_KEY_FILE_NAME),
+        )
+        _isUsingSoftwareTokenFallbackFlow.value = !resolved.isHardwareBacked
+        resolved
+    }
+
+    private val tokenCipher: FleetTokenCipher
+        get() = tokenCipherDelegate.value
 
     private val _panelsFlow = MutableStateFlow<List<ProbePanelConfig>>(emptyList())
     override val panelsFlow: StateFlow<List<ProbePanelConfig>> = _panelsFlow.asStateFlow()
@@ -221,16 +244,25 @@ class FleetRepositoryImpl(
                 val now = nowMillisProvider()
                 val cleanId = config.id.trim().ifBlank { UUID.randomUUID().toString() }
                 val existing = cachedPayload.panels.firstOrNull { it.id == cleanId }
+                val cleanApiToken = config.apiToken?.trim()?.takeIf { it.isNotEmpty() }
+                val preserveExistingCiphertext =
+                    cleanApiToken == null &&
+                        config.tokenDecryptionFailed &&
+                        !existing?.encryptedApiToken.isNullOrBlank()
                 val normalized = config.copy(
                     id = cleanId,
                     name = config.name.trim().ifBlank { ProbePanelClient.normalizeBaseUrl(config.baseUrl) },
                     baseUrl = ProbePanelClient.normalizeBaseUrl(config.baseUrl),
-                    apiToken = config.apiToken?.trim()?.takeIf { it.isNotEmpty() },
+                    apiToken = cleanApiToken,
+                    tokenDecryptionFailed = preserveExistingCiphertext,
                     createdAtEpochMillis = existing?.createdAtEpochMillis?.takeIf { it > 0L }
                         ?: config.createdAtEpochMillis.takeIf { it > 0L }
                         ?: now,
                 )
-                val stored = normalized.toStored(tokenCipher)
+                val stored = normalized.toStored(
+                    cipher = tokenCipher,
+                    preservedEncryptedToken = if (preserveExistingCiphertext) existing?.encryptedApiToken else null,
+                )
                 val updatedPanels = cachedPayload.panels
                     .filterNot { it.id == cleanId }
                     .plus(stored)
@@ -239,6 +271,7 @@ class FleetRepositoryImpl(
                 val nextPayload = cachedPayload.copy(panels = updatedPanels)
                 writeStoreToDiskLocked(nextPayload)
                 cachedPayload = nextPayload
+                invalidateDecryptedTokenCacheLocked(cleanId)
                 publishStateLocked()
                 normalized
             }
@@ -280,6 +313,7 @@ class FleetRepositoryImpl(
                 )
                 writeStoreToDiskLocked(nextPayload)
                 cachedPayload = nextPayload
+                invalidateDecryptedTokenCacheLocked(panelId)
                 _panelErrorsFlow.value = _panelErrorsFlow.value - panelId
                 publishStateLocked()
             }
@@ -295,14 +329,27 @@ class FleetRepositoryImpl(
         withContext(ioDispatcher) {
             val panel = mutex.withLock {
                 ensureDiskLoadedLocked()
-                cachedPayload.panels.firstOrNull { it.id == panelId }?.toDomain(tokenCipher)
+                cachedPayload.panels.firstOrNull { it.id == panelId }?.toDomainLocked(tokenCipher)
             } ?: return@withContext Result.failure(IllegalArgumentException("未找到探针面板: $panelId"))
+
+            if (panel.tokenDecryptionFailed) {
+                val decryptError = TOKEN_DECRYPT_FAILED_MESSAGE
+                mutex.withLock {
+                    if (cachedPayload.panels.any { it.id == panelId && it.enabled }) {
+                        _panelErrorsFlow.value = _panelErrorsFlow.value + (panelId to decryptError)
+                    }
+                }
+                return@withContext Result.failure(FleetTokenCipherException(decryptError))
+            }
 
             val now = nowMillisProvider()
             try {
                 val fetched = probeClient.fetchPanelServers(panel)
                 mutex.withLock {
                     ensureDiskLoadedLocked()
+                    if (cachedPayload.panels.none { it.id == panelId && it.enabled }) {
+                        return@withLock Result.success(emptyList())
+                    }
                     val updatedPanels = cachedPayload.panels.map { stored ->
                         if (stored.id == panelId) {
                             stored.copy(
@@ -341,8 +388,8 @@ class FleetRepositoryImpl(
                     cachedPayload = nextPayload
                     _panelErrorsFlow.value = _panelErrorsFlow.value - panelId
                     publishStateLocked()
+                    Result.success(fetched.snapshots)
                 }
-                Result.success(fetched.snapshots)
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -350,6 +397,9 @@ class FleetRepositoryImpl(
                 mutex.withLock {
                     runCatching {
                         ensureDiskLoadedLocked()
+                        if (cachedPayload.panels.none { it.id == panelId && it.enabled }) {
+                            return@withLock
+                        }
                         val updatedPanels = cachedPayload.panels.map { stored ->
                             if (stored.id == panelId) stored.copy(lastError = errorMsg) else stored
                         }
@@ -357,8 +407,8 @@ class FleetRepositoryImpl(
                         writeStoreToDiskLocked(errorPayload)
                         cachedPayload = errorPayload
                         publishStateLocked()
+                        _panelErrorsFlow.value = _panelErrorsFlow.value + (panelId to errorMsg)
                     }
-                    _panelErrorsFlow.value = _panelErrorsFlow.value + (panelId to errorMsg)
                 }
                 Result.failure(t)
             }
@@ -379,18 +429,25 @@ class FleetRepositoryImpl(
                 )
             }
             try {
-                return@withContext performRefreshAllPanelsLocked(showRefreshingIndicator = _snapshotsFlow.value.isEmpty())
+                return@withContext performRefreshAllPanelsLocked(
+                    silent = true,
+                    showRefreshingIndicator = _snapshotsFlow.value.isEmpty(),
+                )
             } finally {
                 refreshMutex.unlock()
             }
         }
 
         refreshMutex.withLock {
-            performRefreshAllPanelsLocked(showRefreshingIndicator = true)
+            performRefreshAllPanelsLocked(
+                silent = false,
+                showRefreshingIndicator = true,
+            )
         }
     }
 
     private suspend fun performRefreshAllPanelsLocked(
+        silent: Boolean,
         showRefreshingIndicator: Boolean,
     ): FleetRefreshSummary {
         if (showRefreshingIndicator) {
@@ -399,7 +456,7 @@ class FleetRepositoryImpl(
         try {
             val activePanels = mutex.withLock {
                 ensureDiskLoadedLocked()
-                cachedPayload.panels.map { it.toDomain(tokenCipher) }.filter { it.enabled }
+                cachedPayload.panels.map { it.toDomainLocked(tokenCipher) }.filter { it.enabled }
             }
             val now = nowMillisProvider()
             if (activePanels.isEmpty()) {
@@ -412,8 +469,18 @@ class FleetRepositoryImpl(
                 )
             }
 
+            val errors = LinkedHashMap<String, String>()
+            val fetchablePanels = ArrayList<ProbePanelConfig>(activePanels.size)
+            for (panel in activePanels) {
+                if (panel.tokenDecryptionFailed) {
+                    errors[panel.id] = TOKEN_DECRYPT_FAILED_MESSAGE
+                } else {
+                    fetchablePanels += panel
+                }
+            }
+
             val results = coroutineScope {
-                activePanels.map { panel ->
+                fetchablePanels.map { panel ->
                     async {
                         val outcome = try {
                             Result.success(probeClient.fetchPanelServers(panel))
@@ -427,7 +494,6 @@ class FleetRepositoryImpl(
                 }.awaitAll()
             }
 
-            val errors = LinkedHashMap<String, String>()
             val freshByPanelId = LinkedHashMap<String, ProbePanelFetchResult>()
             for ((panel, outcome) in results) {
                 outcome.fold(
@@ -438,24 +504,50 @@ class FleetRepositoryImpl(
                 )
             }
 
-            val finalSnapshots = mutex.withLock {
+            val mergeOutcome = mutex.withLock {
                 ensureDiskLoadedLocked()
+                val liveEnabledPanelIds = cachedPayload.panels
+                    .asSequence()
+                    .filter { it.enabled }
+                    .map { it.id }
+                    .toSet()
+                val liveFreshByPanelId = freshByPanelId.filterKeys { it in liveEnabledPanelIds }
+                val liveErrors = errors.filterKeys { it in liveEnabledPanelIds }
+
+                var panelsMetadataChanged = false
                 val updatedPanels = cachedPayload.panels.map { stored ->
-                    val fetched = freshByPanelId[stored.id]
-                    val err = errors[stored.id]
+                    val fetched = liveFreshByPanelId[stored.id]
+                    val err = liveErrors[stored.id]
                     when {
-                        fetched != null -> stored.copy(
-                            resolvedPanelType = fetched.detectedPanelType.name,
-                            lastSyncedEpochMillis = now,
-                            lastError = null,
-                        )
-                        err != null -> stored.copy(lastError = err)
+                        fetched != null -> {
+                            val nextType = fetched.detectedPanelType.name
+                            if (stored.resolvedPanelType != nextType || stored.lastError != null) {
+                                panelsMetadataChanged = true
+                            }
+                            stored.copy(
+                                resolvedPanelType = nextType,
+                                lastSyncedEpochMillis = now,
+                                lastError = null,
+                            )
+                        }
+                        err != null -> {
+                            if (stored.lastError != err) {
+                                panelsMetadataChanged = true
+                            }
+                            stored.copy(lastError = err)
+                        }
                         else -> stored
                     }
                 }
-                val retainedSnapshots = cachedPayload.snapshots.filterNot { it.panelId in freshByPanelId.keys }
-                val freshDomainSnapshots = freshByPanelId.values.flatMap { it.snapshots }
+                val previousOnlineByProbeKey = cachedPayload.snapshots.associate {
+                    ProbeServerSnapshot.makeProbeKey(it.panelId, it.remoteServerId) to it.isOnline
+                }
+                val retainedSnapshots = cachedPayload.snapshots.filterNot { it.panelId in liveFreshByPanelId.keys }
+                val freshDomainSnapshots = liveFreshByPanelId.values.flatMap { it.snapshots }
                 val newSnapshots = freshDomainSnapshots.map { it.toStored() }
+                val onlineStateChanged = freshDomainSnapshots.any { snap ->
+                    previousOnlineByProbeKey[snap.probeKey] != snap.isOnline
+                }
                 val seededOnlineMap = cachedPayload.alertTracker.lastKnownOnlineByProbeKey.toMutableMap()
                 freshDomainSnapshots.forEach { snap ->
                     if (snap.isOnline) {
@@ -474,20 +566,30 @@ class FleetRepositoryImpl(
                     alertTracker = cachedPayload.alertTracker.copy(
                         lastKnownOnlineByProbeKey = seededOnlineMap,
                     ),
-                    lastSyncEpochMillis = if (freshByPanelId.isNotEmpty()) now else cachedPayload.lastSyncEpochMillis,
+                    lastSyncEpochMillis = if (liveFreshByPanelId.isNotEmpty()) now else cachedPayload.lastSyncEpochMillis,
                 )
-                writeStoreToDiskLocked(nextPayload)
+                val shouldFlushToDisk = !silent ||
+                    lastSilentDiskFlushEpochMillis == 0L ||
+                    (now - lastSilentDiskFlushEpochMillis) >= SILENT_DISK_FLUSH_INTERVAL_MS ||
+                    panelsMetadataChanged ||
+                    onlineStateChanged
+                if (shouldFlushToDisk) {
+                    writeStoreToDiskLocked(nextPayload, syncToDisk = !silent)
+                    if (silent) {
+                        lastSilentDiskFlushEpochMillis = now
+                    }
+                }
                 cachedPayload = nextPayload
-                _panelErrorsFlow.value = errors.toMap()
+                _panelErrorsFlow.value = liveErrors.toMap()
                 publishStateLocked()
-                _snapshotsFlow.value
+                Triple(_snapshotsFlow.value, liveFreshByPanelId.size, liveErrors)
             }
 
             return FleetRefreshSummary(
                 refreshedPanelCount = activePanels.size,
-                succeededPanelCount = freshByPanelId.size,
-                failedPanelErrors = errors,
-                snapshots = finalSnapshots,
+                succeededPanelCount = mergeOutcome.second,
+                failedPanelErrors = mergeOutcome.third,
+                snapshots = mergeOutcome.first,
                 syncedAtEpochMillis = now,
             )
         } finally {
@@ -512,6 +614,12 @@ class FleetRepositoryImpl(
                 val normalizedTags = preservedExistingTags ?: asset.resolvedTags
                 val normalizedRouteTag = VpsAssetRecord.formatRouteTag(normalizedTags)
                 val normalizedExpiryIso = asset.expiryDateIso.trim()
+                val expiryChanged = existing != null && existing.expiryDateIso.trim() != normalizedExpiryIso
+                val resolvedBillingAnchorDay = when {
+                    asset.billingAnchorDay != null -> asset.billingAnchorDay.coerceIn(1, 31)
+                    expiryChanged -> null
+                    else -> existing?.billingAnchorDay?.takeIf { it in 1..31 }
+                }
                 val normalized = asset.copy(
                     id = cleanId,
                     nickname = asset.nickname.trim().ifBlank { asset.providerName.trim().ifBlank { "未命名 VPS" } },
@@ -530,6 +638,7 @@ class FleetRepositoryImpl(
                     autoRenew = asset.autoRenew,
                     autoRenewNote = asset.autoRenewNote.trim(),
                     notes = asset.notes.trim(),
+                    billingAnchorDay = resolvedBillingAnchorDay,
                     createdAtEpochMillis = existing?.createdAtEpochMillis?.takeIf { it > 0L }
                         ?: asset.createdAtEpochMillis.takeIf { it > 0L }
                         ?: now,
@@ -541,7 +650,6 @@ class FleetRepositoryImpl(
                     .plus(normalized.toStored())
                     .sortedBy { it.createdAtEpochMillis }
 
-                val expiryChanged = existing != null && existing.expiryDateIso.trim() != normalizedExpiryIso
                 val updatedTracker = if (expiryChanged) {
                     val prefix = "$cleanId:"
                     cachedPayload.alertTracker.copy(
@@ -710,7 +818,7 @@ class FleetRepositoryImpl(
     ): FleetMonitorCheckReport = withContext(ioDispatcher) {
         mutex.withLock {
             ensureDiskLoadedLocked()
-            val panels = cachedPayload.panels.map { it.toDomain(tokenCipher) }
+            val panels = cachedPayload.panels.map { it.toDomainLocked(tokenCipher) }
             val snapshots = cachedPayload.snapshots.map { it.toDomain() }
             val assets = cachedPayload.assets.map { it.toDomain() }
             val settings = cachedPayload.monitorSettings.toDomain()
@@ -753,21 +861,45 @@ class FleetRepositoryImpl(
         if (storeFile.exists() && storeFile.isFile) {
             val content = storeFile.readText(Charsets.UTF_8)
             if (content.isNotBlank()) {
-                val loaded = runCatching {
+                val loaded = try {
                     json.decodeFromString<FleetStorePayload>(content)
-                }.getOrNull()
-                if (loaded != null) {
-                    cachedPayload = loaded
+                } catch (parseErr: Throwable) {
+                    val backupFile = backupCorruptedStoreFile(storeFile.absoluteFile)
+                    val backupHint = backupFile?.let { "，已备份至 ${it.name}" }.orEmpty()
+                    throw IOException(
+                        "本地服务器账本文件损坏无法解析$backupHint，已阻止静默清空覆写以保护数据",
+                        parseErr,
+                    )
                 }
+                cachedPayload = loaded
             }
         }
+        // Trigger lazy cipher resolution on ioDispatcher so software-fallback UI status is accurate.
+        tokenCipher
+        decryptedTokenCache.clear()
         diskLoaded = true
         publishStateLocked()
         _isPersistedStateLoadedFlow.value = true
     }
 
+    private fun backupCorruptedStoreFile(sourceFile: File): File? {
+        val parentDir = sourceFile.parentFile ?: return null
+        val backupFile = File(parentDir, "${sourceFile.name}.corrupt.${nowMillisProvider()}")
+        return runCatching {
+            Files.copy(
+                sourceFile.toPath(),
+                backupFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+            backupFile
+        }.getOrNull()
+    }
+
     @Throws(IOException::class)
-    private fun writeStoreToDiskLocked(payload: FleetStorePayload) {
+    private fun writeStoreToDiskLocked(
+        payload: FleetStorePayload,
+        syncToDisk: Boolean = true,
+    ) {
         val targetFile = storeFile.absoluteFile
         val parentDir = targetFile.parentFile
             ?: throw IOException("无法解析本地账本存储目录: ${targetFile.path}")
@@ -797,9 +929,11 @@ class FleetRepositoryImpl(
             FileOutputStream(tmpFile).use { fos ->
                 fos.write(encodedBytes)
                 fos.flush()
-                runCatching { fos.fd.sync() }
+                if (syncToDisk) {
+                    runCatching { fos.fd.sync() }
+                }
             }
-            replaceStoreFileAtomically(tmpFile, targetFile, encodedBytes)
+            replaceStoreFileAtomically(tmpFile, targetFile, encodedBytes, syncToDisk)
         } catch (t: Throwable) {
             runCatching {
                 if (tmpFile.exists() && tmpFile.isFile) {
@@ -816,6 +950,7 @@ class FleetRepositoryImpl(
         tmpFile: File,
         targetFile: File,
         encodedBytes: ByteArray,
+        syncToDisk: Boolean = true,
     ) {
         val tmpPath = tmpFile.toPath()
         val targetPath = targetFile.toPath()
@@ -846,7 +981,9 @@ class FleetRepositoryImpl(
                 FileOutputStream(targetFile).use { fos ->
                     fos.write(encodedBytes)
                     fos.flush()
-                    runCatching { fos.fd.sync() }
+                    if (syncToDisk) {
+                        runCatching { fos.fd.sync() }
+                    }
                 }
                 runCatching { tmpFile.delete() }
             } catch (fallbackErr: IOException) {
@@ -857,7 +994,7 @@ class FleetRepositoryImpl(
     }
 
     private fun publishStateLocked() {
-        val panels = cachedPayload.panels.map { it.toDomain(tokenCipher) }
+        val panels = cachedPayload.panels.map { it.toDomainLocked(tokenCipher) }
         val snapshots = cachedPayload.snapshots.map { it.toDomain() }
         val assets = cachedPayload.assets.map { it.toDomain() }
         _panelsFlow.value = panels
@@ -868,9 +1005,23 @@ class FleetRepositoryImpl(
         _lastSyncEpochMillisFlow.value = cachedPayload.lastSyncEpochMillis
     }
 
-    private fun ProbePanelConfig.toStored(cipher: FleetTokenCipher): StoredProbePanelConfig {
-        val encryptedToken = apiToken?.takeIf { it.isNotBlank() }?.let { plain ->
-            runCatching { cipher.encrypt(plain) }.getOrNull()
+    private fun invalidateDecryptedTokenCacheLocked(panelId: String) {
+        decryptedTokenCache.keys.removeAll { it.first == panelId }
+    }
+
+    @Throws(IOException::class)
+    private fun ProbePanelConfig.toStored(
+        cipher: FleetTokenCipher,
+        preservedEncryptedToken: String? = null,
+    ): StoredProbePanelConfig {
+        val encryptedToken = when {
+            !apiToken.isNullOrBlank() -> try {
+                cipher.encrypt(apiToken)
+            } catch (t: Throwable) {
+                throw FleetTokenCipherException("加密探针 API Token 失败，已中止保存", t)
+            }
+            !preservedEncryptedToken.isNullOrBlank() -> preservedEncryptedToken
+            else -> null
         }
         return StoredProbePanelConfig(
             id = id,
@@ -888,9 +1039,26 @@ class FleetRepositoryImpl(
         )
     }
 
-    private fun StoredProbePanelConfig.toDomain(cipher: FleetTokenCipher): ProbePanelConfig {
-        val decryptedToken = encryptedApiToken?.takeIf { it.isNotBlank() }?.let { enc ->
-            runCatching { cipher.decrypt(enc) }.getOrNull()?.takeIf { it.isNotBlank() }
+    private fun StoredProbePanelConfig.toDomainLocked(cipher: FleetTokenCipher): ProbePanelConfig {
+        val rawEnc = encryptedApiToken?.takeIf { it.isNotBlank() }
+        val decryptedEntry = if (rawEnc == null) {
+            DecryptedTokenEntry(plainToken = null, decryptionFailed = false)
+        } else {
+            val cacheKey = id to rawEnc
+            decryptedTokenCache[cacheKey] ?: run {
+                val computed = try {
+                    val plain = cipher.decrypt(rawEnc).takeIf { it.isNotBlank() }
+                    if (plain != null) {
+                        DecryptedTokenEntry(plainToken = plain, decryptionFailed = false)
+                    } else {
+                        DecryptedTokenEntry(plainToken = null, decryptionFailed = true)
+                    }
+                } catch (_: Throwable) {
+                    DecryptedTokenEntry(plainToken = null, decryptionFailed = true)
+                }
+                decryptedTokenCache[cacheKey] = computed
+                computed
+            }
         }
         return ProbePanelConfig(
             id = id,
@@ -900,13 +1068,14 @@ class FleetRepositoryImpl(
             resolvedPanelType = resolvedPanelType?.let {
                 runCatching { ProbePanelType.valueOf(it) }.getOrNull()
             },
-            apiToken = decryptedToken,
+            apiToken = decryptedEntry.plainToken,
             notifyOnOffline = notifyOnOffline,
             notifyOnRecovery = notifyOnRecovery,
             enabled = enabled,
             createdAtEpochMillis = createdAtEpochMillis,
             lastSyncedEpochMillis = lastSyncedEpochMillis,
             lastError = lastError,
+            tokenDecryptionFailed = decryptedEntry.decryptionFailed,
         )
     }
 
@@ -984,6 +1153,7 @@ class FleetRepositoryImpl(
             autoRenew = autoRenew,
             autoRenewNote = autoRenewNote,
             notes = notes,
+            billingAnchorDay = billingAnchorDay?.takeIf { it in 1..31 },
             createdAtEpochMillis = createdAtEpochMillis,
             updatedAtEpochMillis = updatedAtEpochMillis,
         )
@@ -1019,6 +1189,7 @@ class FleetRepositoryImpl(
             updatedAtEpochMillis = updatedAtEpochMillis,
             tags = migratedTags,
             autoRenew = autoRenew,
+            billingAnchorDay = billingAnchorDay?.takeIf { it in 1..31 },
         )
     }
 
@@ -1083,6 +1254,9 @@ class FleetRepositoryImpl(
     companion object {
         const val STORE_FILE_NAME = "fleet_store.json"
         private const val FALLBACK_KEY_FILE_NAME = ".fleet_token_sw.key"
+        private const val SILENT_DISK_FLUSH_INTERVAL_MS = 30_000L
+        internal const val TOKEN_DECRYPT_FAILED_MESSAGE =
+            "探针 API Token 解密失败，请在探针管理中重新填写并保存"
 
         private val sharedInstances = ConcurrentHashMap<String, FleetRepositoryImpl>()
 

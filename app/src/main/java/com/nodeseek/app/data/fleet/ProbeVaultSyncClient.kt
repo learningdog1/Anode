@@ -723,6 +723,12 @@ class ProbeVaultSyncClient(
         if (nodesResp.isSuccessful) {
             val root = parseJsonOrNull(nodesResp.body)
                 ?: throw IOException("Komari /api/nodes 返回数据非有效 JSON")
+            if (root is JsonObject && root["error"] != null && root["error"] !is JsonNull) {
+                val errMsg = (root["error"] as? JsonObject)?.getFirstString("message")
+                    ?: root["error"]?.stringOrNull()
+                    ?: "RPC 错误"
+                throw IOException("Komari /api/nodes 返回错误：$errMsg")
+            }
             return parseKomariMachines(panelId, panelName, root, hasPanelToken = hasToken)
         }
 
@@ -735,6 +741,12 @@ class ProbeVaultSyncClient(
         if (rpcResp.isSuccessful) {
             val root = parseJsonOrNull(rpcResp.body)
                 ?: throw IOException("Komari /api/rpc2 返回数据非有效 JSON")
+            if (root is JsonObject && root["error"] != null && root["error"] !is JsonNull) {
+                val errMsg = (root["error"] as? JsonObject)?.getFirstString("message")
+                    ?: root["error"]?.stringOrNull()
+                    ?: "RPC 错误"
+                throw IOException("Komari /api/rpc2 返回错误：$errMsg")
+            }
             return parseKomariMachines(panelId, panelName, root, hasPanelToken = hasToken)
         }
         throw IOException("Komari 节点列表请求失败 (HTTP ${nodesResp.code})")
@@ -844,7 +856,8 @@ class ProbeVaultSyncClient(
         if ((first.code == 401 || first.code == 403) &&
             trimmed.isNotEmpty() &&
             !trimmed.startsWith("Bearer ", ignoreCase = true) &&
-            !trimmed.contains('=')
+            !trimmed.startsWith("Basic ", ignoreCase = true) &&
+            !ProbePanelClient.looksLikeCookieHeader(trimmed)
         ) {
             val cookieHeaders = buildNezhaV1Headers(trimmed, asCookie = true)
             val second = executeGet(url, cookieHeaders, expectedOrigin)
@@ -865,7 +878,7 @@ class ProbeVaultSyncClient(
             trimmed.isNotEmpty() &&
             !trimmed.startsWith("Bearer ", ignoreCase = true) &&
             !trimmed.startsWith("Basic ", ignoreCase = true) &&
-            !trimmed.contains('=')
+            !ProbePanelClient.looksLikeCookieHeader(trimmed)
         ) {
             val cookieHeaders = buildKomariHeaders(trimmed, asCookie = true)
             val second = executeGet(url, cookieHeaders, expectedOrigin)
@@ -887,7 +900,7 @@ class ProbeVaultSyncClient(
             trimmed.isNotEmpty() &&
             !trimmed.startsWith("Bearer ", ignoreCase = true) &&
             !trimmed.startsWith("Basic ", ignoreCase = true) &&
-            !trimmed.contains('=')
+            !ProbePanelClient.looksLikeCookieHeader(trimmed)
         ) {
             val cookieHeaders = buildKomariHeaders(trimmed, asCookie = true)
             val second = executePostJson(url, jsonBody, cookieHeaders, expectedOrigin)
@@ -908,9 +921,9 @@ class ProbeVaultSyncClient(
         if (token.isNotEmpty()) {
             when {
                 asCookie -> put("Cookie", "nz-jwt=$token")
-                token.contains('=') -> put("Cookie", token)
                 token.startsWith("Bearer ", ignoreCase = true) ||
                     token.startsWith("Basic ", ignoreCase = true) -> put("Authorization", token)
+                ProbePanelClient.looksLikeCookieHeader(token) -> put("Cookie", token)
                 else -> put("Authorization", "Bearer $token")
             }
         }
@@ -922,13 +935,16 @@ class ProbeVaultSyncClient(
         if (token.isNotEmpty()) {
             when {
                 asCookie -> put("Cookie", "session_token=$token; temp_key=$token")
-                token.contains('=') -> put("Cookie", token)
-                else -> {
-                    val hasBearer = token.startsWith("Bearer ", ignoreCase = true)
-                    val bearer = if (hasBearer) token else "Bearer $token"
-                    val rawKey = if (hasBearer) token.substring("Bearer ".length).trim() else token
-                    put("Authorization", bearer)
+                token.startsWith("Basic ", ignoreCase = true) -> put("Authorization", token)
+                token.startsWith("Bearer ", ignoreCase = true) -> {
+                    put("Authorization", token)
+                    val rawKey = token.substring("Bearer ".length).trim()
                     if (rawKey.isNotEmpty()) put("X-API-Key", rawKey)
+                }
+                ProbePanelClient.looksLikeCookieHeader(token) -> put("Cookie", token)
+                else -> {
+                    put("Authorization", "Bearer $token")
+                    put("X-API-Key", token)
                 }
             }
         }
@@ -1036,7 +1052,12 @@ class ProbeVaultSyncClient(
                         val bodyStr = if (resp.code in REDIRECT_STATUS_CODES) {
                             ""
                         } else {
-                            runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                            try {
+                                ProbePanelClient.readBoundedBodyString(resp)
+                            } catch (e: IOException) {
+                                if (continuation.isActive) continuation.resumeWithException(e)
+                                return
+                            }
                         }
                         if (continuation.isActive) {
                             continuation.resume(
@@ -1123,13 +1144,6 @@ class ProbeVaultSyncClient(
             return trimmed
         }
 
-        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
-            .callTimeout(18, TimeUnit.SECONDS)
-            .build()
+        fun defaultHttpClient(): OkHttpClient = ProbePanelClient.defaultHttpClient()
     }
 }

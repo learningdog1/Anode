@@ -1538,40 +1538,25 @@ private fun ProbeExpandedDetailStrip(
     }
 }
 
-// ── Dense List Mode (1 rounded container, 28dp header, 50dp rows) ──────────────
+// ── Dense List Mode (virtualized header + rows for LazyColumn) ───────────────
 
 @Composable
-internal fun ProbeDenseListCard(
-    snapshots: List<ProbeServerSnapshot>,
-    panelsById: Map<String, ProbePanelConfig>,
-    assetsByProbeKey: Map<String, VpsAssetRecord>,
-    trafficForecastsByProbeKey: Map<String, ServerTrafficForecast>,
-    idleAssessmentsByProbeKey: Map<String, ServerIdleAssessment>,
-    referenceNowEpochMillis: Long,
-    onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
-    onOpenIdleSalePost: (String) -> Unit,
-    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
+internal fun ProbeDenseListHeaderRow(
     modifier: Modifier = Modifier,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    var expandedProbeKey by remember { mutableStateOf<String?>(null) }
-
+    val topShape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                containerColor = ext.cardSurface,
-                borderColor = ext.cardBorder,
-                elevation = PulseElevation.Card,
-            ),
+            .clip(topShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .border(width = 0.9.dp, color = ext.cardBorder, shape = topShape),
     ) {
-        // Header Row (28dp): 节点 | CPU | 内存 | 硬盘 | 网速
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(28.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1620,9 +1605,81 @@ internal fun ProbeDenseListCard(
                 modifier = Modifier.width(60.dp),
             )
         }
+    }
+}
 
-        HorizontalDivider(thickness = 0.9.dp, color = ext.cardBorder)
+@Composable
+internal fun ProbeDenseListVirtualizedItem(
+    snapshot: ProbeServerSnapshot,
+    panel: ProbePanelConfig?,
+    linkedAsset: VpsAssetRecord?,
+    trafficForecast: ServerTrafficForecast?,
+    idleAssessment: ServerIdleAssessment?,
+    referenceNowEpochMillis: Long,
+    expanded: Boolean,
+    isLast: Boolean,
+    onToggleExpand: () -> Unit,
+    onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
+    onOpenIdleSalePost: (String) -> Unit,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val itemShape = if (isLast) {
+        RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
+    } else {
+        RoundedCornerShape(0.dp)
+    }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(itemShape)
+            .background(ext.cardSurface)
+            .border(width = 0.75.dp, color = ext.cardBorder.copy(alpha = 0.85f), shape = itemShape),
+    ) {
+        ProbeDenseListRow(
+            snapshot = snapshot,
+            panel = panel,
+            linkedAsset = linkedAsset,
+            trafficForecast = trafficForecast,
+            idleAssessment = idleAssessment,
+            referenceNowEpochMillis = referenceNowEpochMillis,
+            expanded = expanded,
+            onToggleExpand = onToggleExpand,
+            onAddAssetFromProbe = onAddAssetFromProbe,
+            onOpenIdleSalePost = onOpenIdleSalePost,
+            onOpenLinkedAsset = onOpenLinkedAsset,
+        )
+    }
+}
 
+@Composable
+internal fun ProbeDenseListCard(
+    snapshots: List<ProbeServerSnapshot>,
+    panelsById: Map<String, ProbePanelConfig>,
+    assetsByProbeKey: Map<String, VpsAssetRecord>,
+    trafficForecastsByProbeKey: Map<String, ServerTrafficForecast>,
+    idleAssessmentsByProbeKey: Map<String, ServerIdleAssessment>,
+    referenceNowEpochMillis: Long,
+    onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
+    onOpenIdleSalePost: (String) -> Unit,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    var expandedProbeKey by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .pulseCard(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                containerColor = ext.cardSurface,
+                borderColor = ext.cardBorder,
+                elevation = PulseElevation.Card,
+            ),
+    ) {
+        ProbeDenseListHeaderRow()
         snapshots.forEachIndexed { index, snapshot ->
             val panel = panelsById[snapshot.panelId]
             val linkedAsset = assetsByProbeKey[snapshot.probeKey]
