@@ -64,6 +64,7 @@ data class BoardsUiState(
     val searchPage: Int = 1,
     val searchHasNextPage: Boolean = false,
     val searchErrorMessage: String? = null,
+    val searchNextPageError: String? = null,
     val isSearchChallengeRequired: Boolean = false,
     // Inline board sub-view state (when tapping a Bento tile inside Boards tab)
     val activeInlineBoardSlug: String? = null,
@@ -116,6 +117,7 @@ private data class InternalBoardsState(
     val searchPage: Int = 1,
     val searchHasNextPage: Boolean = false,
     val searchErrorMessage: String? = null,
+    val searchNextPageError: String? = null,
     val isSearchChallengeRequired: Boolean = false,
     val activeInlineBoardSlug: String? = null,
     val inlineBoardSort: FeedSort = FeedSort.LATEST_REPLY,
@@ -228,6 +230,7 @@ class BoardsViewModel(
             searchPage = s.searchPage,
             searchHasNextPage = s.searchHasNextPage,
             searchErrorMessage = s.searchErrorMessage,
+            searchNextPageError = s.searchNextPageError,
             isSearchChallengeRequired = s.isSearchChallengeRequired,
             activeInlineBoardSlug = s.activeInlineBoardSlug,
             inlineBoardSort = s.inlineBoardSort,
@@ -263,13 +266,20 @@ class BoardsViewModel(
         if (initialCategorySlug.isNotBlank()) {
             loadInlineBoard(reset = true, isRefresh = false)
         }
+        var lastHandledAuthEpoch = sessionRepository.authVerifiedEpoch.value
         viewModelScope.launch {
             sessionRepository.authVerifiedEpoch.collect { epoch ->
+                if (epoch == lastHandledAuthEpoch) return@collect
+                lastHandledAuthEpoch = epoch
                 if (epoch > 0L) {
                     forumRepository.clearRssFallbackCache()
                     val cur = _state.value
                     if (cur.isSearchChallengeRequired && cur.submittedQuery.isNotBlank()) {
-                        executeSearch(reset = true)
+                        if (cur.searchNextPageError != null && cur.rawSearchTopics.isNotEmpty()) {
+                            executeSearch(reset = false)
+                        } else {
+                            executeSearch(reset = true)
+                        }
                     }
                     if (!cur.activeInlineBoardSlug.isNullOrBlank() &&
                         (cur.inlineBoardChallengeRequired || cur.inlineBoardIsRssFallback || cur.inlineBoardError != null)
@@ -284,6 +294,10 @@ class BoardsViewModel(
     // ── Search & Pin Controls ────────────────────────────────────────────────────────────────
 
     fun setSearchModeActive(active: Boolean) {
+        if (!active) {
+            searchJob?.cancel()
+            searchJob = null
+        }
         _state.update { current ->
             if (!active) {
                 current.copy(
@@ -292,7 +306,10 @@ class BoardsViewModel(
                     submittedQuery = "",
                     rawSearchTopics = emptyList(),
                     searchUsers = emptyList(),
+                    isSearching = false,
+                    isSearchingNextPage = false,
                     searchErrorMessage = null,
+                    searchNextPageError = null,
                     isSearchChallengeRequired = false,
                 )
             } else {
@@ -312,7 +329,13 @@ class BoardsViewModel(
 
     fun selectSearchScope(scope: SearchScope) {
         if (_state.value.searchScope == scope) return
-        _state.update { it.copy(searchScope = scope, searchErrorMessage = null) }
+        _state.update {
+            it.copy(
+                searchScope = scope,
+                searchErrorMessage = null,
+                searchNextPageError = null,
+            )
+        }
         if (_state.value.queryInput.isNotBlank()) {
             submitSearch()
         }
@@ -389,6 +412,8 @@ class BoardsViewModel(
     // ── Inline Board Feed Sub-View Controls ──────────────────────────────────────────────────
 
     fun openInlineBoard(slug: String) {
+        inlineBoardJob?.cancel()
+        inlineBoardJob = null
         val sort = _state.value.inlineBoardSort
         val rssExpected = (settingsRepository.settings.value.preferRssFallback &&
             sessionRepository.sessionState.value == null &&
@@ -397,14 +422,18 @@ class BoardsViewModel(
         val cached = forumRepository.getCachedFeed(slug, sort)
             ?.takeUnless { it.isFromRssFallback && !rssExpected }
         val fresh = cached != null && forumRepository.isFeedFresh(slug, sort, 90_000L)
+        val cachedPinned = cached?.pinnedTopics.orEmpty().distinctBy { it.id }
+        val pinnedIds = cachedPinned.asSequence().map { it.id }.toHashSet()
+        val cachedRegular = cached?.topics.orEmpty().filterNot { it.id in pinnedIds }.distinctBy { it.id }
         _state.update {
             it.copy(
                 activeInlineBoardSlug = slug,
                 isSearchModeActive = false,
-                rawInlineBoardPinnedTopics = cached?.pinnedTopics.orEmpty(),
-                rawInlineBoardTopics = cached?.topics.orEmpty(),
+                rawInlineBoardPinnedTopics = cachedPinned,
+                rawInlineBoardTopics = cachedRegular,
                 isInlineBoardLoading = cached == null,
                 isInlineBoardRefreshing = false,
+                isInlineBoardLoadingMore = false,
                 inlineBoardPage = 1,
                 inlineBoardHasNextPage = cached?.hasNextPage ?: false,
                 inlineBoardIsRssFallback = cached?.isFromRssFallback ?: false,
@@ -418,11 +447,15 @@ class BoardsViewModel(
 
     fun closeInlineBoard() {
         inlineBoardJob?.cancel()
+        inlineBoardJob = null
         _state.update {
             it.copy(
                 activeInlineBoardSlug = null,
                 rawInlineBoardTopics = emptyList(),
                 rawInlineBoardPinnedTopics = emptyList(),
+                isInlineBoardLoading = false,
+                isInlineBoardRefreshing = false,
+                isInlineBoardLoadingMore = false,
                 inlineBoardError = null,
             )
         }
@@ -431,6 +464,8 @@ class BoardsViewModel(
     fun selectInlineBoardSort(sort: FeedSort) {
         val slug = _state.value.activeInlineBoardSlug ?: return
         if (_state.value.inlineBoardSort == sort) return
+        inlineBoardJob?.cancel()
+        inlineBoardJob = null
         val rssExpected = (settingsRepository.settings.value.preferRssFallback &&
             sessionRepository.sessionState.value == null &&
             slug != "inside") ||
@@ -438,13 +473,17 @@ class BoardsViewModel(
         val cached = forumRepository.getCachedFeed(slug, sort)
             ?.takeUnless { it.isFromRssFallback && !rssExpected }
         val fresh = cached != null && forumRepository.isFeedFresh(slug, sort, 90_000L)
+        val cachedPinned = cached?.pinnedTopics.orEmpty().distinctBy { it.id }
+        val pinnedIds = cachedPinned.asSequence().map { it.id }.toHashSet()
+        val cachedRegular = cached?.topics.orEmpty().filterNot { it.id in pinnedIds }.distinctBy { it.id }
         _state.update {
             it.copy(
                 inlineBoardSort = sort,
-                rawInlineBoardPinnedTopics = cached?.pinnedTopics.orEmpty(),
-                rawInlineBoardTopics = cached?.topics.orEmpty(),
+                rawInlineBoardPinnedTopics = cachedPinned,
+                rawInlineBoardTopics = cachedRegular,
                 isInlineBoardLoading = cached == null,
                 isInlineBoardRefreshing = false,
+                isInlineBoardLoadingMore = false,
                 inlineBoardPage = 1,
                 inlineBoardHasNextPage = cached?.hasNextPage ?: false,
                 inlineBoardIsRssFallback = cached?.isFromRssFallback ?: false,
@@ -490,6 +529,7 @@ class BoardsViewModel(
         viewModelScope.launch {
             val currentlyBookmarked = topic.id in bookmarkedIdsFlow.value || topic.isBookmarked
             val targetBookmarked = !currentlyBookmarked
+            val isSignedIn = sessionRepository.sessionState.value != null
             if (targetBookmarked) {
                 bookmarkAndHistoryRepository.saveOfflineBookmark(
                     summary = topic.copy(isBookmarked = true),
@@ -499,8 +539,24 @@ class BoardsViewModel(
             } else {
                 bookmarkAndHistoryRepository.removeLocalBookmark(topic.id)
             }
-            if (sessionRepository.sessionState.value != null) {
+            if (isSignedIn) {
                 bookmarkAndHistoryRepository.setTopicBookmarked(topic.id, targetBookmarked)
+                    .onFailure { err ->
+                        val fallbackMsg = if (targetBookmarked) {
+                            "云端收藏同步未完成，已保存在本机"
+                        } else {
+                            "取消云端收藏同步未完成，已从本机移除"
+                        }
+                        _state.update {
+                            it.copy(snackbarMessage = err.message ?: fallbackMsg)
+                        }
+                    }
+            } else {
+                _state.update {
+                    it.copy(
+                        snackbarMessage = if (targetBookmarked) "已加入我的收藏" else "已移除收藏",
+                    )
+                }
             }
         }
     }
@@ -511,7 +567,12 @@ class BoardsViewModel(
             if (_state.value.activeInlineBoardSlug != null) {
                 loadInlineBoard(reset = true, isRefresh = true)
             } else if (_state.value.submittedQuery.isNotBlank()) {
-                executeSearch(reset = true)
+                val cur = _state.value
+                if (cur.searchNextPageError != null && cur.rawSearchTopics.isNotEmpty()) {
+                    executeSearch(reset = false)
+                } else {
+                    executeSearch(reset = true)
+                }
             }
         }
     }
@@ -532,24 +593,44 @@ class BoardsViewModel(
                 if (reset) {
                     it.copy(
                         isSearching = true,
+                        isSearchingNextPage = false,
                         searchErrorMessage = null,
+                        searchNextPageError = null,
                         isSearchChallengeRequired = false,
                     )
                 } else {
-                    it.copy(isSearchingNextPage = true)
+                    it.copy(
+                        isSearchingNextPage = true,
+                        searchNextPageError = null,
+                    )
                 }
             }
 
             if (scope == SearchScope.USERS) {
-                userRepository.searchUsers(query).fold(
+                val cleanUserQuery = query.removePrefix("@").trim()
+                if (cleanUserQuery.isEmpty()) {
+                    _state.update {
+                        it.copy(
+                            searchUsers = emptyList(),
+                            isSearching = false,
+                            isSearchingNextPage = false,
+                            searchHasNextPage = false,
+                            searchErrorMessage = null,
+                            searchNextPageError = null,
+                        )
+                    }
+                    return@launch
+                }
+                userRepository.searchUsers(cleanUserQuery).fold(
                     onSuccess = { users ->
                         _state.update {
                             it.copy(
-                                searchUsers = users,
+                                searchUsers = users.distinctBy { member -> member.uid },
                                 isSearching = false,
                                 isSearchingNextPage = false,
                                 searchHasNextPage = false,
                                 searchErrorMessage = null,
+                                searchNextPageError = null,
                             )
                         }
                     },
@@ -559,6 +640,7 @@ class BoardsViewModel(
                                 isSearching = false,
                                 isSearchingNextPage = false,
                                 searchErrorMessage = err.message ?: "搜索用户失败，请重试",
+                                searchNextPageError = null,
                                 isSearchChallengeRequired = err.isWebVerificationNeeded(),
                             )
                         }
@@ -574,7 +656,7 @@ class BoardsViewModel(
                     onSuccess = { result ->
                         _state.update { cur ->
                             val merged = if (reset) {
-                                result.topics
+                                result.topics.distinctBy { it.id }
                             } else {
                                 (cur.rawSearchTopics + result.topics).distinctBy { it.id }
                             }
@@ -585,18 +667,31 @@ class BoardsViewModel(
                                 isSearching = false,
                                 isSearchingNextPage = false,
                                 searchErrorMessage = null,
+                                searchNextPageError = null,
                                 isSearchChallengeRequired = false,
                             )
                         }
                     },
                     onFailure = { err ->
+                        val msg = err.message ?: "站内搜索受限，可使用下方 Google 站内搜索"
+                        val needsWeb = err.isWebVerificationNeeded()
                         _state.update { cur ->
-                            cur.copy(
-                                isSearching = false,
-                                isSearchingNextPage = false,
-                                searchErrorMessage = err.message ?: "站内搜索受限，可使用下方 Google 站内搜索",
-                                isSearchChallengeRequired = err.isWebVerificationNeeded(),
-                            )
+                            if (reset || cur.rawSearchTopics.isEmpty()) {
+                                cur.copy(
+                                    isSearching = false,
+                                    isSearchingNextPage = false,
+                                    searchErrorMessage = msg,
+                                    searchNextPageError = null,
+                                    isSearchChallengeRequired = needsWeb,
+                                )
+                            } else {
+                                cur.copy(
+                                    isSearching = false,
+                                    isSearchingNextPage = false,
+                                    searchNextPageError = msg,
+                                    isSearchChallengeRequired = needsWeb,
+                                )
+                            }
                         }
                     },
                 )
@@ -633,14 +728,14 @@ class BoardsViewModel(
                 onSuccess = { res ->
                     _state.update { cur ->
                         val mergedPinned = if (reset) {
-                            res.pinnedTopics
+                            res.pinnedTopics.distinctBy { it.id }
                         } else {
                             (cur.rawInlineBoardPinnedTopics + res.pinnedTopics).distinctBy { it.id }
                         }
                         val pinnedIds = mergedPinned.asSequence().map { it.id }.toHashSet()
                         val regular = res.topics.filterNot { it.id in pinnedIds }
                         val mergedTopics = if (reset) {
-                            regular
+                            regular.distinctBy { it.id }
                         } else {
                             (cur.rawInlineBoardTopics + regular).distinctBy { it.id }
                         }
