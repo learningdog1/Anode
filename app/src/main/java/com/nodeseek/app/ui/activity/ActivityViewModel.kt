@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.domain.activity.ActivityCounts
 import com.nodeseek.app.domain.activity.ActivityFeedSnapshot
+import com.nodeseek.app.domain.activity.ActivityLotteryClassifier
 import com.nodeseek.app.domain.activity.ActivityRepository
 import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityDetail
@@ -21,7 +22,22 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class ActivityStatusFilter(
+/**
+ * 一级活动分类筛选：明确区分「全部」、「抽奖」（仅包含明确抽奖链接）与「其他活动」（福利/特惠/社区活动等），
+ * 避免非抽奖活动被误解为「已结束」或混入抽奖状态筛选。
+ */
+enum class ActivityCategoryFilter(
+    val label: String,
+) {
+    ALL("全部"),
+    LOTTERY("抽奖"),
+    OTHER("其他活动"),
+}
+
+/**
+ * 二级抽奖开奖状态筛选：仅在选中 [ActivityCategoryFilter.LOTTERY] 时展示并生效。
+ */
+enum class LotteryStatusFilter(
     val label: String,
 ) {
     ALL("全部"),
@@ -30,13 +46,15 @@ enum class ActivityStatusFilter(
     ENDED("已结束"),
     ;
 
-    fun matches(status: ActivityTimeStatus?): Boolean =
-        when (this) {
+    fun matches(status: ActivityTimeStatus?): Boolean {
+        if (status == null) return false
+        return when (this) {
             ALL -> true
             ONGOING -> status == ActivityTimeStatus.ONGOING
             UPCOMING -> status == ActivityTimeStatus.UPCOMING
             ENDED -> status == ActivityTimeStatus.ENDED
         }
+    }
 }
 
 @Immutable
@@ -53,13 +71,17 @@ data class ActivityUiState(
     val isRefreshing: Boolean = false,
     val activities: List<ForumWatchActivityItem> = emptyList(),
     val filteredActivities: List<ForumWatchActivityItem> = emptyList(),
-    val selectedFilter: ActivityStatusFilter = ActivityStatusFilter.ALL,
+    val selectedCategory: ActivityCategoryFilter = ActivityCategoryFilter.ALL,
+    val selectedLotteryStatus: LotteryStatusFilter = LotteryStatusFilter.ALL,
     val counts: ActivityCounts = ActivityCounts(),
     val lastSyncedEpochMillis: Long = 0L,
     val errorMessage: String? = null,
     val nowEpochMillis: Long = System.currentTimeMillis(),
     val detailSheet: ActivityDetailSheetState? = null,
-)
+) {
+    val showLotteryStatusFilters: Boolean
+        get() = selectedCategory == ActivityCategoryFilter.LOTTERY
+}
 
 class ActivityViewModel(
     private val repository: ActivityRepository,
@@ -69,7 +91,8 @@ class ActivityViewModel(
 
     private data class LocalControls(
         val hasBootstrapped: Boolean = false,
-        val selectedFilter: ActivityStatusFilter = ActivityStatusFilter.ALL,
+        val selectedCategory: ActivityCategoryFilter = ActivityCategoryFilter.ALL,
+        val selectedLotteryStatus: LotteryStatusFilter = LotteryStatusFilter.ALL,
         val nowEpochMillis: Long = 0L,
         val detailSheet: ActivityDetailSheetState? = null,
     )
@@ -121,16 +144,48 @@ class ActivityViewModel(
         }
     }
 
-    fun selectFilter(filter: ActivityStatusFilter) {
-        localControls.update { it.copy(selectedFilter = filter, nowEpochMillis = clockMillis()) }
+    fun selectCategory(category: ActivityCategoryFilter) {
+        localControls.update { current ->
+            val nextLotteryStatus = if (category == current.selectedCategory) {
+                current.selectedLotteryStatus
+            } else {
+                LotteryStatusFilter.ALL
+            }
+            current.copy(
+                selectedCategory = category,
+                selectedLotteryStatus = nextLotteryStatus,
+                nowEpochMillis = clockMillis(),
+            )
+        }
+    }
+
+    fun selectLotteryStatus(status: LotteryStatusFilter) {
+        localControls.update { current ->
+            current.copy(
+                selectedCategory = ActivityCategoryFilter.LOTTERY,
+                selectedLotteryStatus = status,
+                nowEpochMillis = clockMillis(),
+            )
+        }
+    }
+
+    fun resetFilters() {
+        localControls.update { current ->
+            current.copy(
+                selectedCategory = ActivityCategoryFilter.ALL,
+                selectedLotteryStatus = LotteryStatusFilter.ALL,
+                nowEpochMillis = clockMillis(),
+            )
+        }
     }
 
     fun openDetailSheet(item: ForumWatchActivityItem) {
         detailLoadJob?.cancel()
+        val normalizedItem = ActivityLotteryClassifier.normalizeItem(item)
         localControls.update {
             it.copy(
                 detailSheet = ActivityDetailSheetState(
-                    item = item,
+                    item = normalizedItem,
                     isLoading = true,
                     detail = null,
                     errorMessage = null,
@@ -138,17 +193,18 @@ class ActivityViewModel(
             )
         }
         detailLoadJob = viewModelScope.launch {
-            val result = repository.getActivityDetail(id = item.id, forceRefresh = false)
+            val result = repository.getActivityDetail(id = normalizedItem.id, forceRefresh = false)
             result.fold(
                 onSuccess = { loaded ->
+                    val normalizedLoaded = ActivityLotteryClassifier.normalizeDetail(loaded)
                     localControls.update { current ->
                         val active = current.detailSheet ?: return@update current
-                        if (active.item.id != item.id) return@update current
+                        if (active.item.id != normalizedItem.id) return@update current
                         current.copy(
                             detailSheet = active.copy(
-                                item = loaded.item,
+                                item = normalizedLoaded.item,
                                 isLoading = false,
-                                detail = loaded,
+                                detail = normalizedLoaded,
                                 errorMessage = null,
                             ),
                         )
@@ -157,7 +213,7 @@ class ActivityViewModel(
                 onFailure = { err ->
                     localControls.update { current ->
                         val active = current.detailSheet ?: return@update current
-                        if (active.item.id != item.id) return@update current
+                        if (active.item.id != normalizedItem.id) return@update current
                         current.copy(
                             detailSheet = active.copy(
                                 isLoading = false,
@@ -183,14 +239,15 @@ class ActivityViewModel(
             val result = repository.getActivityDetail(id = currentTarget.id, forceRefresh = true)
             result.fold(
                 onSuccess = { loaded ->
+                    val normalizedLoaded = ActivityLotteryClassifier.normalizeDetail(loaded)
                     localControls.update { current ->
                         val active = current.detailSheet ?: return@update current
                         if (active.item.id != currentTarget.id) return@update current
                         current.copy(
                             detailSheet = active.copy(
-                                item = loaded.item,
+                                item = normalizedLoaded.item,
                                 isLoading = false,
-                                detail = loaded,
+                                detail = normalizedLoaded,
                                 errorMessage = null,
                             ),
                         )
@@ -223,25 +280,27 @@ class ActivityViewModel(
         controls: LocalControls,
     ): ActivityUiState {
         val now = controls.nowEpochMillis
-        val liveCounts = snap.liveCounts(now)
-        val filtered = if (controls.selectedFilter == ActivityStatusFilter.ALL) {
-            snap.activities
-        } else {
-            snap.activities.filter { item ->
-                controls.selectedFilter.matches(item.resolveLotteryStatusOrNull(now))
+        val normalizedActivities = snap.activities.map(ActivityLotteryClassifier::normalizeItem)
+        val liveCounts = snap.copy(activities = normalizedActivities).liveCounts(now)
+        val filtered = when (controls.selectedCategory) {
+            ActivityCategoryFilter.ALL -> normalizedActivities
+            ActivityCategoryFilter.OTHER -> normalizedActivities.filter { !it.isLottery }
+            ActivityCategoryFilter.LOTTERY -> normalizedActivities.filter { item ->
+                controls.selectedLotteryStatus.matches(item.resolveLotteryStatusOrNull(now))
             }
         }
         val initialLoading = (!controls.hasBootstrapped || snap.isRefreshing) &&
-            snap.activities.isEmpty() &&
+            normalizedActivities.isEmpty() &&
             snap.errorMessage == null &&
             snap.lastSyncedEpochMillis == 0L
 
         return ActivityUiState(
             isInitialLoading = initialLoading,
             isRefreshing = snap.isRefreshing,
-            activities = snap.activities,
+            activities = normalizedActivities,
             filteredActivities = filtered,
-            selectedFilter = controls.selectedFilter,
+            selectedCategory = controls.selectedCategory,
+            selectedLotteryStatus = controls.selectedLotteryStatus,
             counts = liveCounts,
             lastSyncedEpochMillis = snap.lastSyncedEpochMillis,
             errorMessage = snap.errorMessage,

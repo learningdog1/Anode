@@ -318,9 +318,9 @@ fun ActivityNotificationHeaderCard(
             )
             Text(
                 text = if (notificationsEnabled) {
-                    "已开启后台低频巡检，发现新抽奖与福利即时提醒"
+                    "已开启后台低频巡检，发现新抽奖与社区福利即时提醒"
                 } else {
-                    "默认关闭，开启后发现新社区活动自动推送通知"
+                    "默认关闭，开启后发现新抽奖与社区活动自动推送通知"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
