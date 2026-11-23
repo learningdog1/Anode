@@ -45,12 +45,15 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Autorenew
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.EventRepeat
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.Memory
@@ -178,8 +181,10 @@ fun MyServersScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val isInspectionMode = LocalInspectionMode.current
     var pendingDeleteAsset by remember { mutableStateOf<VpsAssetRecord?>(null) }
+    var pendingRenewRequest by remember { mutableStateOf<Pair<VpsAssetRecord, UpcomingRenewalItem?>?>(null) }
 
     val hasEnabledPanels = remember(uiState.panels) { uiState.panels.any { it.enabled } }
+    val existingAssetTags = remember(uiState.assets) { VpsAssetRecord.collectDistinctTags(uiState.assets) }
 
     LaunchedEffect(resolvedViewModel) {
         resolvedViewModel.snackbarMessages.collect { message ->
@@ -282,6 +287,7 @@ fun MyServersScreen(
                         uiState = uiState,
                         onAddAsset = resolvedViewModel::openAddAssetSheet,
                         onEditAsset = resolvedViewModel::openEditAssetSheet,
+                        onRequestRenewAsset = { asset, renewal -> pendingRenewRequest = asset to renewal },
                         onRequestDeleteAsset = { pendingDeleteAsset = it },
                         onBindProbe = resolvedViewModel::openProbeBinder,
                         onOpenSalePost = resolvedViewModel::openSalePostSheet,
@@ -321,6 +327,9 @@ fun MyServersScreen(
             onDismiss = resolvedViewModel::closeAssetEditor,
             saveError = uiState.assetSaveError,
             onClearSaveError = resolvedViewModel::clearAssetSaveError,
+            existingTags = existingAssetTags,
+            initialTags = draft.tags,
+            initialAutoRenew = draft.autoRenew,
         )
     }
 
@@ -350,6 +359,35 @@ fun MyServersScreen(
             probes = uiState.snapshots,
             onSelectProbeKey = { key -> resolvedViewModel.bindAssetToProbe(asset.id, key) },
             onDismiss = resolvedViewModel::closeProbeBinder,
+        )
+    }
+
+    pendingRenewRequest?.let { (asset, renewal) ->
+        val nextIso = renewal?.nextExpiryAfterRenewalIso
+        val cycles = renewal?.cyclesToAdvanceOnRenewal ?: 1
+        val renewMessage = buildString {
+            append("确认将「${asset.nickname}」标记为已续费？")
+            if (nextIso != null) {
+                if (cycles > 1) {
+                    append("\n到期日将按${asset.cyclePreset.shortLabel}周期顺延 $cycles 期：${asset.expiryDateIso} → $nextIso。")
+                } else {
+                    append("\n到期日将按${asset.cyclePreset.shortLabel}周期顺延：${asset.expiryDateIso} → $nextIso。")
+                }
+            } else {
+                append("\n到期日将按${asset.cyclePreset.shortLabel}周期自动顺延。")
+            }
+        }
+        PulseConfirmDialog(
+            onDismissRequest = { pendingRenewRequest = null },
+            title = "确认已完成续费",
+            message = renewMessage,
+            confirmText = "确认已续费",
+            tone = PulseDialogTone.PRIMARY,
+            icon = Icons.Rounded.EventRepeat,
+            onConfirm = {
+                resolvedViewModel.markAssetRenewed(asset.id)
+                pendingRenewRequest = null
+            },
         )
     }
 
@@ -494,8 +532,8 @@ private fun FleetPortfolioHeroCard(
     onOpenMonitorSettings: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val hasExpiredOrCritical = remember(summary.upcomingRenewals) {
-        summary.upcomingRenewals.any {
+    val hasExpiredOrCritical = remember(summary.expiredRenewalCount, summary.dueRenewals) {
+        summary.expiredRenewalCount > 0 || summary.dueRenewals.any {
             it.urgency == AssetExpiryUrgency.EXPIRED || it.urgency == AssetExpiryUrgency.CRITICAL
         }
     }
@@ -512,7 +550,7 @@ private fun FleetPortfolioHeroCard(
     )
     val renewalValueColor = when {
         hasExpiredOrCritical -> MaterialTheme.colorScheme.error
-        summary.dueSoonRenewalCount > 0 -> ext.onDrumstickContainer
+        summary.dueSoonRenewalCount > 0 || summary.dueRenewals.isNotEmpty() -> ext.onDrumstickContainer
         else -> MaterialTheme.colorScheme.onSurface
     }
 
@@ -1669,6 +1707,7 @@ private fun AssetsTabContent(
     uiState: MyServersUiState,
     onAddAsset: () -> Unit,
     onEditAsset: (VpsAssetRecord) -> Unit,
+    onRequestRenewAsset: (VpsAssetRecord, UpcomingRenewalItem?) -> Unit,
     onRequestDeleteAsset: (VpsAssetRecord) -> Unit,
     onBindProbe: (VpsAssetRecord) -> Unit,
     onOpenSalePost: (VpsAssetRecord) -> Unit,
@@ -1765,6 +1804,7 @@ private fun AssetsTabContent(
                     trafficForecast = trafficForecast,
                     idleAssessment = idleAssessment,
                     onEdit = { onEditAsset(asset) },
+                    onMarkRenewed = { onRequestRenewAsset(asset, renewal) },
                     onDelete = { onRequestDeleteAsset(asset) },
                     onBindProbe = { onBindProbe(asset) },
                     onOpenSalePost = { onOpenSalePost(asset) },
@@ -1784,6 +1824,7 @@ private fun VpsAssetCard(
     trafficForecast: ServerTrafficForecast?,
     idleAssessment: ServerIdleAssessment?,
     onEdit: () -> Unit,
+    onMarkRenewed: () -> Unit,
     onDelete: () -> Unit,
     onBindProbe: () -> Unit,
     onOpenSalePost: () -> Unit,
@@ -1794,10 +1835,12 @@ private fun VpsAssetCard(
     val isDark = NodePulseThemeTokens.isDark
     val urgency = renewalItem?.urgency
 
-    val isUrgentDue = urgency == AssetExpiryUrgency.EXPIRED ||
+    val isRenewalDue = renewalItem?.isRenewalDue == true ||
+        urgency == AssetExpiryUrgency.EXPIRED ||
         urgency == AssetExpiryUrgency.CRITICAL ||
-        urgency == AssetExpiryUrgency.WARNING ||
-        renewalItem?.isWithinReminderWindow == true
+        urgency == AssetExpiryUrgency.WARNING
+
+    val displayTags = remember(asset.tags, asset.routeTag) { asset.resolvedTags }
 
     val badgeText = when (urgency) {
         AssetExpiryUrgency.EXPIRED -> {
@@ -1805,52 +1848,55 @@ private fun VpsAssetCard(
             "已过期 ${overdue}天"
         }
         AssetExpiryUrgency.CRITICAL -> {
-            if (renewalItem.daysRemaining == 0L) "今日到期" else "剩 ${renewalItem.daysRemaining} 天"
+            if (renewalItem.daysRemaining == 0L) "今日到期" else "剩 ${renewalItem.daysRemaining} 天 · 待续费"
         }
         AssetExpiryUrgency.WARNING -> "剩 ${renewalItem.daysRemaining} 天 · 待续费"
-        AssetExpiryUrgency.NORMAL -> "剩 ${renewalItem.daysRemaining} 天"
+        AssetExpiryUrgency.NORMAL -> if (isRenewalDue) {
+            "剩 ${renewalItem.daysRemaining} 天 · 待续费"
+        } else {
+            "剩 ${renewalItem.daysRemaining} 天"
+        }
         else -> "日期待补"
     }
-    val badgeIcon: ImageVector? = when (urgency) {
-        AssetExpiryUrgency.EXPIRED -> Icons.Rounded.WarningAmber
-        AssetExpiryUrgency.CRITICAL -> Icons.Rounded.Schedule
-        AssetExpiryUrgency.WARNING -> Icons.Rounded.NotificationsActive
+    val badgeIcon: ImageVector? = when {
+        urgency == AssetExpiryUrgency.EXPIRED -> Icons.Rounded.WarningAmber
+        urgency == AssetExpiryUrgency.CRITICAL -> Icons.Rounded.Schedule
+        isRenewalDue -> Icons.Rounded.NotificationsActive
         else -> null
     }
-    val badgeFg = when (urgency) {
-        AssetExpiryUrgency.EXPIRED,
-        AssetExpiryUrgency.CRITICAL,
-        -> MaterialTheme.colorScheme.onErrorContainer
-        AssetExpiryUrgency.WARNING -> ext.onDrumstickContainer
-        AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.onSecondaryContainer
+    val badgeFg = when {
+        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
+            MaterialTheme.colorScheme.onErrorContainer
+        isRenewalDue -> ext.onDrumstickContainer
+        urgency == AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.onSecondaryContainer
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val badgeBg = when (urgency) {
-        AssetExpiryUrgency.EXPIRED,
-        AssetExpiryUrgency.CRITICAL,
-        -> MaterialTheme.colorScheme.errorContainer
-        AssetExpiryUrgency.WARNING -> ext.drumstickContainer
-        AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.secondaryContainer
+    val badgeBg = when {
+        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
+            MaterialTheme.colorScheme.errorContainer
+        isRenewalDue -> ext.drumstickContainer
+        urgency == AssetExpiryUrgency.NORMAL -> MaterialTheme.colorScheme.secondaryContainer
         else -> MaterialTheme.colorScheme.surfaceContainerHigh
     }
-    val cardAccentColor: Color? = when (urgency) {
-        AssetExpiryUrgency.EXPIRED,
-        AssetExpiryUrgency.CRITICAL,
-        -> MaterialTheme.colorScheme.error
-        AssetExpiryUrgency.WARNING -> ext.onDrumstickContainer
+    val cardAccentColor: Color? = when {
+        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
+            MaterialTheme.colorScheme.error
+        isRenewalDue -> ext.onDrumstickContainer
         else -> null
     }
-    val cardBorderColor = when (urgency) {
-        AssetExpiryUrgency.EXPIRED -> MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.55f else 0.45f)
-        AssetExpiryUrgency.CRITICAL -> MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.42f else 0.34f)
-        AssetExpiryUrgency.WARNING -> ext.onDrumstickContainer.copy(alpha = if (isDark) 0.42f else 0.32f)
+    val cardBorderColor = when {
+        urgency == AssetExpiryUrgency.EXPIRED ->
+            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.55f else 0.45f)
+        urgency == AssetExpiryUrgency.CRITICAL ->
+            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.42f else 0.34f)
+        isRenewalDue ->
+            ext.onDrumstickContainer.copy(alpha = if (isDark) 0.42f else 0.32f)
         else -> ext.cardBorder
     }
-    val expiryTextColor = when (urgency) {
-        AssetExpiryUrgency.EXPIRED,
-        AssetExpiryUrgency.CRITICAL,
-        -> MaterialTheme.colorScheme.error
-        AssetExpiryUrgency.WARNING -> ext.onDrumstickContainer
+    val expiryTextColor = when {
+        urgency == AssetExpiryUrgency.EXPIRED || urgency == AssetExpiryUrgency.CRITICAL ->
+            MaterialTheme.colorScheme.error
+        isRenewalDue -> ext.onDrumstickContainer
         else -> MaterialTheme.colorScheme.onSurface
     }
 
@@ -1910,8 +1956,9 @@ private fun VpsAssetCard(
             )
         }
 
-        // Tags & Metadata Chips
-        val hasMetadataChips = asset.routeTag.isNotBlank() ||
+        // Multi-Select Tags & Metadata Chips
+        val hasMetadataChips = displayTags.isNotEmpty() ||
+            asset.autoRenew ||
             asset.trafficResetDay != null ||
             asset.autoRenewNote.isNotBlank() ||
             idleAssessment?.isIdle == true
@@ -1920,11 +1967,19 @@ private fun VpsAssetCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                if (asset.routeTag.isNotBlank()) {
+                displayTags.forEach { tag ->
                     PulseAccentPill(
-                        text = asset.routeTag,
+                        text = tag,
                         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.72f else 0.85f),
                         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                if (asset.autoRenew) {
+                    PulseAccentPill(
+                        text = "自动续费",
+                        icon = Icons.Rounded.Autorenew,
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = if (isDark) 0.78f else 0.90f),
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
                     )
                 }
                 if (asset.trafficResetDay != null) {
@@ -1937,8 +1992,8 @@ private fun VpsAssetCard(
                 if (asset.autoRenewNote.isNotBlank()) {
                     PulseAccentPill(
                         text = asset.autoRenewNote,
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = if (isDark) 0.72f else 0.85f),
-                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.widthIn(max = 180.dp),
                     )
                 }
@@ -2016,10 +2071,10 @@ private fun VpsAssetCard(
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Text(
-                        text = if (isUrgentDue) "待续费到期日" else "到期日",
+                        text = if (isRenewalDue) "待续费到期日" else "到期日",
                         style = NodePulseThemeTokens.extraTypography.microLabel,
                         fontWeight = FontWeight.Medium,
-                        color = if (isUrgentDue) expiryTextColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (isRenewalDue) expiryTextColor else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         softWrap = false,
                     )
@@ -2055,6 +2110,16 @@ private fun VpsAssetCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+        }
+
+        // Renewal-Due Callout Strip with One-Tap "已续费" Action
+        if (isRenewalDue) {
+            renewalItem?.let { dueRenewal ->
+                AssetRenewalDueStrip(
+                    renewalItem = dueRenewal,
+                    onMarkRenewed = onMarkRenewed,
+                )
             }
         }
 
@@ -2148,7 +2213,7 @@ private fun VpsAssetCard(
 
         PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f))
 
-        // Action Bar: Edit / Bind / Links / Delete + Prominent "不想续了 · 一键出机"
+        // Action Bar: Edit / Bind / Renew (early) / Links / Delete + Prominent "不想续了 · 一键出机"
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -2168,6 +2233,16 @@ private fun VpsAssetCard(
                         tint = if (linkedProbe != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp),
                     )
+                }
+                if (!isRenewalDue) {
+                    IconButton(onClick = onMarkRenewed, modifier = Modifier.size(34.dp)) {
+                        Icon(
+                            Icons.Rounded.EventRepeat,
+                            contentDescription = "标记已续费",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
                 if (asset.panelManageUrl.isNotBlank() || asset.purchaseUrl.isNotBlank()) {
                     IconButton(
@@ -2221,6 +2296,124 @@ private fun VpsAssetCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AssetRenewalDueStrip(
+    renewalItem: UpcomingRenewalItem,
+    onMarkRenewed: () -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val isUrgentError = renewalItem.urgency == AssetExpiryUrgency.EXPIRED ||
+        renewalItem.urgency == AssetExpiryUrgency.CRITICAL
+    val containerColor = if (isUrgentError) {
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f)
+    } else {
+        ext.drumstickContainer.copy(alpha = 0.72f)
+    }
+    val borderColor = if (isUrgentError) {
+        MaterialTheme.colorScheme.error.copy(alpha = 0.28f)
+    } else {
+        ext.onDrumstickContainer.copy(alpha = 0.25f)
+    }
+    val contentColor = if (isUrgentError) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        ext.onDrumstickContainer
+    }
+    val buttonBg = if (isUrgentError) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    val buttonFg = if (isUrgentError) {
+        MaterialTheme.colorScheme.onError
+    } else {
+        MaterialTheme.colorScheme.onPrimary
+    }
+
+    val titleCopy = when (renewalItem.urgency) {
+        AssetExpiryUrgency.EXPIRED -> {
+            val overdue = (-renewalItem.daysRemaining).coerceAtLeast(1L)
+            if (renewalItem.cyclesToAdvanceOnRenewal > 1) {
+                "已逾期 ${overdue} 天（将顺延 ${renewalItem.cyclesToAdvanceOnRenewal} 期）"
+            } else {
+                "已逾期 ${overdue} 天，确认后顺延到期日"
+            }
+        }
+        AssetExpiryUrgency.CRITICAL -> {
+            if (renewalItem.daysRemaining == 0L) "今日到期，续费后自动顺延周期"
+            else "剩余 ${renewalItem.daysRemaining} 天到期，建议及时续费"
+        }
+        else -> "进入续费提醒窗口（剩 ${renewalItem.daysRemaining} 天）"
+    }
+    val nextExpiryHint = renewalItem.nextExpiryAfterRenewalIso?.let { "确认后新到期日：$it" }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(containerColor)
+            .border(0.75.dp, borderColor, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = titleCopy,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (nextExpiryHint != null) {
+                Text(
+                    text = nextExpiryHint,
+                    style = NodePulseThemeTokens.extraTypography.microLabel.withTabularNumbers(),
+                    fontWeight = FontWeight.Medium,
+                    color = contentColor.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(buttonBg)
+                .pulseBouncyClickable(
+                    pressedScale = NodePulseMotion.chipPressScale,
+                    role = Role.Button,
+                    onClickLabel = "已续费",
+                    onClick = onMarkRenewed,
+                )
+                .padding(horizontal = 11.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                Icons.Rounded.CheckCircle,
+                contentDescription = null,
+                tint = buttonFg,
+                modifier = Modifier.size(14.dp),
+            )
+            Text(
+                text = "已续费",
+                style = NodePulseThemeTokens.extraTypography.microLabel,
+                fontWeight = FontWeight.Bold,
+                color = buttonFg,
+                maxLines = 1,
+                softWrap = false,
+            )
         }
     }
 }

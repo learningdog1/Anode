@@ -84,6 +84,7 @@ data class AssetEditorDraft(
     val specsSummary: String = "",
     val region: String = "",
     val routeTag: String = "",
+    val tags: List<String> = emptyList(),
     val renewalAmount: String = "",
     val currency: ValuationCurrency = ValuationCurrency.USD,
     val cyclePreset: BillingCyclePreset = BillingCyclePreset.ANNUAL,
@@ -95,6 +96,7 @@ data class AssetEditorDraft(
     val monthlyTrafficQuotaGb: String = "",
     val trafficResetDay: Int? = null,
     val remindDaysBeforeExpiry: Int = VpsAssetRecord.DEFAULT_REMIND_DAYS_BEFORE_EXPIRY,
+    val autoRenew: Boolean = false,
     val autoRenewNote: String = "",
     val notes: String = "",
     val openSalePostAfterSave: Boolean = false,
@@ -112,7 +114,8 @@ data class AssetEditorDraft(
             providerName = record.providerName,
             specsSummary = record.specsSummary,
             region = record.region,
-            routeTag = record.routeTag,
+            routeTag = record.resolvedRouteTagSummary,
+            tags = record.resolvedTags,
             renewalAmount = record.renewalAmount,
             currency = record.currency,
             cyclePreset = record.cyclePreset,
@@ -126,6 +129,7 @@ data class AssetEditorDraft(
             }.orEmpty(),
             trafficResetDay = record.trafficResetDay,
             remindDaysBeforeExpiry = record.remindDaysBeforeExpiry,
+            autoRenew = record.autoRenew,
             autoRenewNote = record.autoRenewNote,
             notes = record.notes,
         )
@@ -412,6 +416,16 @@ class MyServersViewModel(
         viewModelScope.launch {
             try {
                 fleetRepository.loadPersistedState()
+                try {
+                    val autoRolled = fleetRepository.autoRollExpiredAutoRenewAssets(todayProvider())
+                    if (autoRolled.isNotEmpty()) {
+                        _snackbarChannel.trySend("已自动顺延 ${autoRolled.size} 台自动续费资产的到期日")
+                    }
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (_: Throwable) {
+                    // Best-effort auto-roll must not block ledger loading or probe sync.
+                }
                 syncBackgroundSchedule()
                 if (fleetRepository.panelsFlow.value.any { it.enabled }) {
                     probeRefreshMutex.withLock {
@@ -805,6 +819,34 @@ class MyServersViewModel(
                 throw c
             } catch (t: Throwable) {
                 _snackbarChannel.trySend("删除服务器资产失败：${formatPersistenceError(t)}")
+            }
+        }
+    }
+
+    fun markAssetRenewed(assetId: String) {
+        viewModelScope.launch {
+            try {
+                val result = fleetRepository.markAssetRenewed(
+                    assetId = assetId,
+                    today = todayProvider(),
+                )
+                if (result == null) {
+                    _snackbarChannel.trySend("未找到对应服务器资产")
+                    return@launch
+                }
+                syncBackgroundSchedule()
+                val cycleSuffix = if (result.cyclesAdvanced > 1) {
+                    "（顺延 ${result.cyclesAdvanced} 个周期）"
+                } else {
+                    ""
+                }
+                _snackbarChannel.trySend(
+                    "已确认「${result.updatedAsset.nickname}」续费$cycleSuffix，新到期日：${result.newExpiryDateIso}",
+                )
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _snackbarChannel.trySend("标记已续费失败：${formatPersistenceError(t)}")
             }
         }
     }

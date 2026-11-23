@@ -465,6 +465,7 @@ class MyServersViewModelTest {
 
             val fxRepo = ExchangeRateRepository(
                 cacheFile = File(tempDir, "fx_cache_overlap.json"),
+                endpointUrl = "http://127.0.0.1:1/fx",
                 ioDispatcher = testDispatcher,
             )
             var nowMs = 1_000_000L
@@ -529,5 +530,102 @@ class MyServersViewModelTest {
             testScheduler.runCurrent()
             assertEquals(3, refreshCalls.get())
             assertEquals(1, maxConcurrent.get())
+        }
+
+    @Test
+    fun `markAssetRenewed advances expiry date, auto-rolls autoRenew assets on init, and preserves tags in editor draft`() =
+        runTest(testDispatcher) {
+            val storeFile = File(tempDir, "renewal_vm_store.json")
+            val fleetRepo = FleetRepositoryImpl(
+                storeFile = storeFile,
+                tokenCipher = cipher,
+                ioDispatcher = testDispatcher,
+            )
+            val overdueAsset = fleetRepo.upsertAsset(
+                VpsAssetRecord(
+                    id = "overdue-monthly",
+                    nickname = "HK Monthly",
+                    providerName = "ClawCloud",
+                    specsSummary = "2C / 2G",
+                    region = "香港",
+                    tags = listOf("CN2 GIA", "优化直连"),
+                    renewalAmount = "4.00",
+                    currency = ValuationCurrency.USD,
+                    cyclePreset = BillingCyclePreset.MONTHLY,
+                    expiryDateIso = "2026-09-15",
+                    autoRenew = false,
+                ),
+            )
+            fleetRepo.upsertAsset(
+                VpsAssetRecord(
+                    id = "auto-annual",
+                    nickname = "JP Auto",
+                    providerName = "DMIT",
+                    specsSummary = "1C / 1G",
+                    region = "东京",
+                    tags = listOf("BGP"),
+                    renewalAmount = "39.90",
+                    currency = ValuationCurrency.USD,
+                    cyclePreset = BillingCyclePreset.ANNUAL,
+                    expiryDateIso = "2026-11-10",
+                    autoRenew = true,
+                ),
+            )
+
+            val fxRepo = ExchangeRateRepository(
+                cacheFile = File(tempDir, "fx_cache_renewal.json"),
+                endpointUrl = "http://127.0.0.1:1/fx",
+                ioDispatcher = testDispatcher,
+            )
+            val vm = MyServersViewModel(
+                fleetRepository = fleetRepo,
+                exchangeRateRepository = fxRepo,
+                todayProvider = { LocalDate.of(2026, 11, 20) },
+                initialTab = MyServersTab.ASSETS,
+            )
+            val snackbars = mutableListOf<String>()
+            val snackJob = backgroundScope.launch(testDispatcher) {
+                vm.snackbarMessages.collect { snackbars += it }
+            }
+            advanceUntilIdle()
+
+            // 1. Auto-renew expired asset rolled forward automatically during init
+            val rolledAuto = vm.uiState.value.assets.first { it.id == "auto-annual" }
+            assertEquals("2027-11-10", rolledAuto.expiryDateIso)
+
+            // 2. Editor draft preserves multi-select tags and autoRenew flag
+            vm.openEditAssetSheet(rolledAuto)
+            advanceUntilIdle()
+            val draft = vm.uiState.value.assetEditorDraft
+            assertNotNull(draft)
+            assertEquals(listOf("BGP"), draft!!.tags)
+            assertTrue(draft.autoRenew)
+            vm.closeAssetEditor()
+
+            // 3. markAssetRenewed rolls overdue monthly asset past 2026-11-20 (3 cycles -> 2026-12-15)
+            snackbars.clear()
+            vm.markAssetRenewed(overdueAsset.id)
+            advanceUntilIdle()
+
+            val renewed = vm.uiState.value.assets.first { it.id == overdueAsset.id }
+            assertEquals("2026-12-15", renewed.expiryDateIso)
+            assertTrue(
+                "Expected renewal confirmation snackbar with new date and cycle count, got $snackbars",
+                snackbars.any { it.contains("2026-12-15") && it.contains("3 个周期") },
+            )
+
+            // 4. Read-only store surfaces Chinese error without corrupting state
+            assertTrue(storeFile.setWritable(false))
+            snackbars.clear()
+            vm.markAssetRenewed(overdueAsset.id)
+            testScheduler.runCurrent()
+            advanceUntilIdle()
+            assertEquals("2026-12-15", vm.uiState.value.assets.first { it.id == overdueAsset.id }.expiryDateIso)
+            assertTrue(
+                "Expected failure snackbar, got: $snackbars",
+                snackbars.any { it.contains("标记已续费失败") },
+            )
+
+            snackJob.cancel()
         }
 }
