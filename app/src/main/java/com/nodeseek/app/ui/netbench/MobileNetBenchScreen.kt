@@ -31,7 +31,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -123,6 +122,7 @@ fun MobileNetBenchScreen(
             initialTarget = initialTarget,
             imageHostRepository = LocalAppContainer.current.imageHostRepository,
             settingsRepository = LocalAppContainer.current.settingsRepository,
+            sshVaultRepository = LocalAppContainer.current.sshVaultRepository,
         ),
     ),
 ) {
@@ -136,6 +136,7 @@ fun MobileNetBenchScreen(
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var showVaultHostPicker by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(isDark) {
         viewModel.updateRenderDarkTheme(isDark)
@@ -233,6 +234,10 @@ fun MobileNetBenchScreen(
                         onClearHistory = viewModel::clearHistory,
                         onRefreshEgress = viewModel::refreshClientEgress,
                         onEnableProxyTest = { viewModel.toggleTestViaProxy(true) },
+                        onOpenVaultPicker = {
+                            keyboardController?.hide()
+                            showVaultHostPicker = true
+                        },
                         onSubmit = {
                             keyboardController?.hide()
                             viewModel.startBenchmark()
@@ -389,6 +394,18 @@ fun MobileNetBenchScreen(
         )
     }
 
+    if (showVaultHostPicker && !uiState.isRunning) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                viewModel.applyVaultServer(server)
+            },
+            onDismiss = { showVaultHostPicker = false },
+        )
+    }
+
     NetBenchIperf3DialogsHost(
         showPrepPrompt = uiState.showIperf3ServerPrompt,
         openDirectSshControlTrigger = directSshControlTrigger,
@@ -417,6 +434,7 @@ private fun TargetAndPortConfigCard(
     onClearHistory: () -> Unit,
     onRefreshEgress: () -> Unit,
     onEnableProxyTest: () -> Unit,
+    onOpenVaultPicker: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -429,7 +447,7 @@ private fun TargetAndPortConfigCard(
     ) {
         PulseSectionHeader(
             title = "测试目标与端口",
-            subtitle = "支持 IPv4、IPv6 ([::1])、域名及 URL",
+            subtitle = "支持 IPv4、IPv6 ([::1])、域名或保险库主机",
             icon = Icons.Rounded.NetworkCheck,
             trailing = {
                 uiState.clientNetwork?.let { net ->
@@ -474,14 +492,12 @@ private fun TargetAndPortConfigCard(
             label = { Text("IP / IPv6 / 域名") },
             placeholder = { Text("例如 1.1.1.1 或 [2606:4700::1111] 或 lg.example.com") },
             trailingIcon = {
-                if (uiState.targetInput.isNotEmpty() && !uiState.isRunning) {
-                    IconButton(onClick = { onTargetChange("") }) {
-                        Icon(
-                            imageVector = Icons.Rounded.Clear,
-                            contentDescription = "清空目标",
-                        )
-                    }
-                }
+                NetBenchTargetTrailingActions(
+                    hasText = uiState.targetInput.isNotEmpty(),
+                    enabled = !uiState.isRunning,
+                    onClear = { onTargetChange("") },
+                    onOpenVaultPicker = onOpenVaultPicker,
+                )
             },
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Uri,

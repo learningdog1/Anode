@@ -40,6 +40,8 @@ import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPingProgress
 import com.nodeseek.app.domain.repository.ImageHostRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
+import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -116,6 +118,7 @@ data class MobileNetBenchUiState(
     val iperfUploadProgress: Iperf3Progress? = null,
     val errorMessage: String? = null,
     val recentTargets: List<NetBenchHistoryEntry> = emptyList(),
+    val vaultServers: List<SshServerProfile> = emptyList(),
     val generatedMarkdown: String = "",
     val clientEgress: ClientEgressSnapshot? = null,
     val isRefreshingEgress: Boolean = false,
@@ -161,6 +164,7 @@ class NetBenchSessionController(
     private val renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
     initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+    private val sshVaultRepository: SshVaultRepository? = null,
 ) {
     private val _uiState = MutableStateFlow(
         MobileNetBenchUiState(
@@ -170,6 +174,7 @@ class NetBenchSessionController(
             includeClientNetworkInReport = historyStore.preferences.value.includeClientNetwork,
             includeReportImages = historyStore.preferences.value.includeReportImages,
             recentTargets = historyStore.entries.value,
+            vaultServers = sshVaultRepository?.serversFlow?.value.orEmpty(),
         ),
     )
     val uiState: StateFlow<MobileNetBenchUiState> = _uiState.asStateFlow()
@@ -188,6 +193,15 @@ class NetBenchSessionController(
         scope.launch {
             historyStore.entries.collect { entries ->
                 _uiState.update { it.copy(recentTargets = entries) }
+            }
+        }
+        sshVaultRepository?.let { vault ->
+            scope.launch {
+                vault.serversFlow.collect { servers ->
+                    _uiState.update { state ->
+                        if (state.vaultServers == servers) state else state.copy(vaultServers = servers)
+                    }
+                }
             }
         }
         scope.launch {
@@ -550,6 +564,20 @@ class NetBenchSessionController(
                 errorMessage = null,
             )
         }
+    }
+
+    fun applyVaultServer(server: SshServerProfile): Boolean {
+        val selection = server.toVaultHostSelection() ?: return false
+        _uiState.update { state ->
+            state.copy(
+                targetInput = selection.host,
+                tcpPortText = selection.port.toString(),
+                errorMessage = null,
+            )
+        }
+        val endpoint = formatVaultEndpointForFeedback(selection.host, selection.port)
+        _snackbarChannel.trySend("已填入保险库主机「${selection.displayName}」($endpoint)")
+        return true
     }
 
     fun removeHistoryEntry(entry: NetBenchHistoryEntry) {
@@ -1120,6 +1148,7 @@ class MobileNetBenchViewModel(
     cardImageGenerator: NetBenchCardImageGenerator = AndroidNetBenchCardImageGenerator,
     renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
+    sshVaultRepository: SshVaultRepository? = null,
 ) : ViewModel() {
 
     private val controller = NetBenchSessionController(
@@ -1137,6 +1166,7 @@ class MobileNetBenchViewModel(
         cardImageGenerator = cardImageGenerator,
         renderDispatcher = renderDispatcher,
         initialTarget = initialTarget,
+        sshVaultRepository = sshVaultRepository,
     )
 
     val uiState: StateFlow<MobileNetBenchUiState> = controller.uiState
@@ -1172,6 +1202,7 @@ class MobileNetBenchViewModel(
     fun saveNodeImageApiKeyAndUpload(rawKey: String) = controller.saveNodeImageApiKeyAndUpload(rawKey)
     fun retryUploadReportImages() = controller.retryUploadReportImages()
     fun applyHistoryEntry(entry: NetBenchHistoryEntry) = controller.applyHistoryEntry(entry)
+    fun applyVaultServer(server: SshServerProfile): Boolean = controller.applyVaultServer(server)
     fun removeHistoryEntry(entry: NetBenchHistoryEntry) = controller.removeHistoryEntry(entry)
     fun clearHistory() = controller.clearHistory()
     fun clearResults() = controller.clearResults()
@@ -1189,6 +1220,7 @@ class MobileNetBenchViewModel(
             initialTarget: String = "",
             imageHostRepository: ImageHostRepository? = null,
             settingsRepository: SettingsRepository? = null,
+            sshVaultRepository: SshVaultRepository? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1200,6 +1232,7 @@ class MobileNetBenchViewModel(
                     imageHostRepository = imageHostRepository ?: appContainer?.imageHostRepository,
                     settingsRepository = settingsRepository ?: appContainer?.settingsRepository,
                     initialTarget = initialTarget,
+                    sshVaultRepository = sshVaultRepository ?: appContainer?.sshVaultRepository,
                 ) as T
             }
         }

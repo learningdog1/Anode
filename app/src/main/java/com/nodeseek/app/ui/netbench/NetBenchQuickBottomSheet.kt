@@ -25,7 +25,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -168,6 +167,7 @@ fun NetBenchQuickBottomSheet(
             settingsRepository = appContainer.settingsRepository,
             initialTarget = initialTarget,
             initialMarkdownStyle = initialMarkdownStyle,
+            sshVaultRepository = appContainer.sshVaultRepository,
         )
     }
 
@@ -184,6 +184,7 @@ fun NetBenchQuickBottomSheet(
     val uiState by controller.uiState.collectAsStateWithLifecycle()
     var inlineBanner by remember { mutableStateOf<String?>(null) }
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var showVaultHostPicker by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(controller) {
         controller.snackbarMessages.collect { msg ->
@@ -342,11 +343,15 @@ fun NetBenchQuickBottomSheet(
                     label = { Text("目标 IP / IPv6 / 域名") },
                     placeholder = { Text("如 1.1.1.1 或 lg.example.com:443") },
                     trailingIcon = {
-                        if (uiState.targetInput.isNotEmpty() && !uiState.isRunning) {
-                            IconButton(onClick = { controller.updateTargetInput("") }) {
-                                Icon(Icons.Rounded.Clear, contentDescription = "清空")
-                            }
-                        }
+                        NetBenchTargetTrailingActions(
+                            hasText = uiState.targetInput.isNotEmpty(),
+                            enabled = !uiState.isRunning,
+                            onClear = { controller.updateTargetInput("") },
+                            onOpenVaultPicker = {
+                                keyboardController?.hide()
+                                showVaultHostPicker = true
+                            },
+                        )
                     },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
@@ -380,6 +385,14 @@ fun NetBenchQuickBottomSheet(
                             selected = uiState.effectiveTcpPort == preset.port,
                             enabled = !uiState.isRunning,
                             onClick = { controller.selectPresetPort(preset.port) },
+                        )
+                    }
+                    if (uiState.effectiveTcpPort !in TcpPortPreset.ALL_PORTS) {
+                        NetBenchSelectableChip(
+                            label = uiState.effectiveTcpPort.toString(),
+                            selected = true,
+                            enabled = !uiState.isRunning,
+                            onClick = {},
                         )
                     }
                     // Probe count quick toggle (10 / 20)
@@ -672,6 +685,18 @@ fun NetBenchQuickBottomSheet(
             customMessage = "测机卡片配图使用官方 NodeImage 图床（api.nodeimage.com）生成直链并嵌入完整报告。请粘贴您的 X-API-Key，保存后将自动渲染并上传本次测机卡片。",
             onSaveAndContinue = controller::saveNodeImageApiKeyAndUpload,
             onDismiss = controller::dismissNodeImageApiKeyDialog,
+        )
+    }
+
+    if (showVaultHostPicker && !uiState.isRunning) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                controller.applyVaultServer(server)
+            },
+            onDismiss = { showVaultHostPicker = false },
         )
     }
 
