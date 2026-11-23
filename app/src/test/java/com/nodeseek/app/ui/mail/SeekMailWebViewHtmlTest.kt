@@ -102,4 +102,112 @@ class SeekMailWebViewHtmlTest {
         val spacerTag = normalized.substringAfter("""id="spacer-layout"""").substringBefore(">")
         assertFalse(spacerTag.contains("np-mail-wide-table"))
     }
+
+    @Test
+    fun `wrapNormalizedEmailHtmlDocument applies light, dark, AMOLED tokens and font scaling`() {
+        val lightDoc = wrapNormalizedEmailHtmlDocument(
+            normalizedBodyHtml = "<p>Light Paper</p>",
+            isDark = false,
+            purePitchAmoled = false,
+            fontScale = 1.0f,
+            backgroundHex = "#FAF7F2",
+            surfaceContainerHex = "#F2EDE3",
+            onSurfaceHex = "#1A1B1E",
+            onSurfaceVariantHex = "#555860",
+            primaryHex = "#1E5EFF",
+            outlineHex = "#DDD7CC",
+        )
+        assertTrue(lightDoc.contains("color-scheme: light"))
+        assertTrue(lightDoc.contains("#FAF7F2"))
+        assertTrue(lightDoc.contains("15.5px"))
+
+        val amoledDoc = wrapNormalizedEmailHtmlDocument(
+            normalizedBodyHtml = "<p>AMOLED Body</p>",
+            isDark = true,
+            purePitchAmoled = true,
+            fontScale = 1.2f,
+            backgroundHex = "#07080C",
+            surfaceContainerHex = "#0B0E14",
+            onSurfaceHex = "#E6E8EE",
+            onSurfaceVariantHex = "#9EA5B0",
+            primaryHex = "#5BB98C",
+            outlineHex = "#242A36",
+        )
+        assertTrue(amoledDoc.contains("color-scheme: dark"))
+        assertTrue(amoledDoc.contains("background-color: #000000"))
+        assertTrue(amoledDoc.contains("18.6px"))
+    }
+
+    @Test
+    fun `isAllowedRemoteImageRequestParts enforces subresource GET image-only policy`() {
+        // Main frame navigation is always blocked
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = true,
+                method = "GET",
+                acceptHeader = "image/png",
+                encodedPath = "/logo.png",
+            ),
+        )
+        // Non-GET methods are blocked
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "POST",
+                acceptHeader = "image/png",
+                encodedPath = "/logo.png",
+            ),
+        )
+        // Stylesheet, HTML, and script requests are blocked even if path ends in .png
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "text/css,*/*;q=0.1",
+                encodedPath = "/evil.png",
+            ),
+        )
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "text/html",
+                encodedPath = "/page.png",
+            ),
+        )
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "application/javascript",
+                encodedPath = "/track.png",
+            ),
+        )
+        // Legitimate image Accept header or image file extension is allowed
+        assertTrue(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "image/avif,image/webp,image/png,*/*;q=0.8",
+                encodedPath = "/cdn/avatar",
+            ),
+        )
+        assertTrue(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "*/*",
+                encodedPath = "/assets/banner.webp",
+            ),
+        )
+        // Arbitrary non-image path with generic Accept is blocked
+        assertFalse(
+            isAllowedRemoteImageRequestParts(
+                isForMainFrame = false,
+                method = "GET",
+                acceptHeader = "*/*",
+                encodedPath = "/api/beacon",
+            ),
+        )
+    }
 }

@@ -186,7 +186,18 @@ object VpsBillingMailParser {
             append("|\\bwhmcs\\b|\\bsolusvm\\b|\\bvirtualizor\\b|\\bvirtfusion\\b|\\bproxmox\\b|\\bhostbill\\b|\\bblesta\\b")
             append("|\\bssh\\b|\\bipv4\\b|\\bipv6\\b|\\bhostname\\b|\\broot\\s+password\\b|\\bmain\\s+ip\\b")
             append("|\\bvcpu\\b|\\bnvme\\b|\\bbandwidth\\b|\\bbgp\\b|\\bcn2\\b|\\bcera\\b")
-            append("|服务器|云主机|云服务器|轻量云|独立服务器|实例|节点|机房|带宽|流量|续费|账单|主机名|公网\\s*ip")
+            append("|服务器|云主机|云服务器|轻量云|独立服务器|实例|节点|机房|带宽|流量|主机名|公网\\s*ip|独立\\s*ip|控制面板|重装系统|小鸡")
+            append(")")
+        },
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    private val SUMMARY_HINT_QUICK_GATE_REGEX = Regex(
+        pattern = buildString {
+            append("(?:")
+            append("server|vps|kvm|cloud|instance|whmcs|solusvm|virtualizor|virtfusion|proxmox|root\\s*password")
+            append("|invoice|payment|receipt|renewal|expiring|overdue")
+            append("|开通|激活|续费|账单|支付成功|付款确认|收款确认|服务器|云主机|云服务器|轻量云|密码")
             append(")")
         },
         option = RegexOption.IGNORE_CASE,
@@ -259,7 +270,7 @@ object VpsBillingMailParser {
     // ── Field Extraction Patterns ────────────────────────────────────────────
 
     private val EXCLUDED_IP_LINE_LABEL_REGEX = Regex(
-        """(?:gateway|netmask|subnet\s*mask|broadcast|nameserver|name\s*server|\bns\d*\b|\bdns\d*\b|resolver|网关|子网掩码|掩码|广播地址|域名服务器)""",
+        """(?:gateway|netmask|subnet\s*mask|broadcast|nameserver|name\s*server|\bns\d*\b|\bdns\d*\b|resolver|\bmac\b|mac\s*address|hardware\s*address|网卡地址|物理地址|网关|子网掩码|掩码|广播地址|域名服务器)""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -395,7 +406,7 @@ object VpsBillingMailParser {
     // "2GB KVM VPS - Special (vps1.example.com) (03/15/2026 - 03/15/2027) $10.99 USD"
     // or "LAX.Pro.MALIBU (lax.example.org - 154.17.22.88) (2026-03-15 - 2027-03-15) $49.90 USD"
     private val WHMCS_PERIOD_RANGE_REGEX = Regex(
-        """[(（]\s*([0-9A-Za-z/\-.,\s年月日至]{6,24}?)\s*(?:[-–—~]|至|\bto\b)\s*([0-9A-Za-z/\-.,\s年月日]{6,24}?)\s*[)）]""",
+        """[(（]\s*([0-9A-Za-z/\-.,\s年月日至]{6,24}?)(?:\s+-\s+|(?<=/\d{4})\s*-\s*|\s*(?:[–—~]|至|\bto\b)\s*)([0-9A-Za-z/\-.,\s年月日]{6,24}?)\s*[)）]""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -625,21 +636,62 @@ object VpsBillingMailParser {
 
     /**
      * Fast summary-level recognizer for displaying subtle VPS mail badges in the inbox list.
+     *
+     * Uses a lightweight fast path (quick gate + minimal field extraction) instead of running
+     * the full HTML/SSH/specs/region parser during LazyColumn scrolling.
      */
     fun parseSummaryHint(summary: SeekMailSummary): VpsMailSummaryHint? {
-        val parsed = parse(
-            subject = summary.subject,
-            bodyText = summary.snippet,
-            bodyHtml = "",
-            fromName = summary.fromName,
+        val cleanSubject = summary.subject.replace(INLINE_SPACE_REGEX, " ").trim()
+        val cleanSnippet = summary.snippet.replace(INLINE_SPACE_REGEX, " ").trim()
+        if (cleanSubject.isEmpty() && cleanSnippet.isEmpty()) return null
+
+        val senderDomain = summary.fromAddress.substringAfter('@', "").lowercase(Locale.ROOT)
+        val isKnownProvider = KNOWN_PROVIDER_DOMAINS.keys.any { domain ->
+            senderDomain == domain || senderDomain.endsWith(".$domain")
+        }
+        val combined = if (cleanSnippet.isEmpty()) cleanSubject else "$cleanSubject\n$cleanSnippet"
+        if (!isKnownProvider && !SUMMARY_HINT_QUICK_GATE_REGEX.containsMatchIn(combined)) {
+            return null
+        }
+
+        val mainIpv4 = extractIpv4AndInlinePort(cleanSnippet)?.first
+        val hasPasswordSignal = cleanSnippet.contains("password", ignoreCase = true) ||
+            cleanSnippet.contains("密码")
+        val hasSshPassword = hasPasswordSignal && extractSshPassword(cleanSnippet) != null
+        val invoiceNumber = extractInvoiceNumber(cleanSubject) ?: extractInvoiceNumber(cleanSnippet)
+        val priceResult = extractMoneyAmountAndCurrency(cleanSnippet, cleanSubject)
+        val hasPeriodRange = (cleanSnippet.contains('(') || cleanSnippet.contains('（')) &&
+            extractWhmcsLineItemInfo(
+                body = cleanSnippet,
+                preferDayFirst = inferDayFirstPreference(cleanSubject, cleanSnippet, summary.fromAddress),
+            ) != null
+
+        val mailType = classifyMailType(
+            subject = cleanSubject,
+            body = cleanSnippet,
             fromAddress = summary.fromAddress,
+            hasServerIp = mainIpv4 != null,
+            hasSshPassword = hasSshPassword,
+            hasInvoiceNumber = invoiceNumber != null,
+            hasBillingAmount = priceResult != null,
+            hasPeriodRange = hasPeriodRange,
         ) ?: return null
 
+        val formattedPrice = priceResult?.let { (amount, currency) ->
+            "${currency.symbol}$amount ${currency.code}"
+        }
+        val providerName = extractProviderName(
+            fromName = summary.fromName,
+            fromAddress = summary.fromAddress,
+            subject = cleanSubject,
+            body = cleanSnippet,
+        )
+
         return VpsMailSummaryHint(
-            mailType = parsed.mailType,
-            providerName = parsed.providerName,
-            primaryIp = parsed.mainIpv4 ?: parsed.mainIpv6,
-            formattedPrice = parsed.formattedPrice,
+            mailType = mailType,
+            providerName = providerName,
+            primaryIp = mainIpv4,
+            formattedPrice = formattedPrice,
         )
     }
 
@@ -723,10 +775,13 @@ object VpsBillingMailParser {
             hasPeriodRange = periodInfo != null,
         ) ?: return null
 
-        val explicitCycle = extractBillingCycle(primaryBody)
-            ?: extractBillingCycle(secondaryBody)
-            ?: extractBillingCycle(cleanSubject)
-        val billingCycle = explicitCycle ?: periodInfo?.inferredCycle
+        val explicitCycleLine = extractExplicitBillingCycleLine(primaryBody)
+            ?: extractExplicitBillingCycleLine(secondaryBody)
+        val billingCycle = explicitCycleLine
+            ?: periodInfo?.inferredCycle
+            ?: extractFallbackBillingCycle(primaryBody)
+            ?: extractFallbackBillingCycle(secondaryBody)
+            ?: extractFallbackBillingCycle(cleanSubject)
 
         val explicitExpiryIso = extractLabeledDateIso(EXPLICIT_EXPIRY_LINE_REGEX, primaryBody, preferDayFirst)
             ?: extractLabeledDateIso(EXPLICIT_EXPIRY_LINE_REGEX, secondaryBody, preferDayFirst)
@@ -945,7 +1000,7 @@ object VpsBillingMailParser {
         ).containsMatchIn(subject)
 
         if (!hasExplicitUnpaidSubject && (hasRenewalSubject || hasRenewalBody)) {
-            if (hasInvoiceNumber || hasBillingAmount || hasPeriodRange || hasVpsContext || body.isBlank()) {
+            if (hasVpsContext || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount))) {
                 return VpsMailType.RENEWAL
             }
         }
@@ -953,7 +1008,7 @@ object VpsBillingMailParser {
         // 3. Unpaid / Generated Invoice check
         val hasInvoiceSignal = UNPAID_INVOICE_SIGNAL_REGEX.containsMatchIn(combined) ||
             (Regex("""\binvoice\s*#?\s*\d+|\b账单\s*#?\s*\d+""", RegexOption.IGNORE_CASE).containsMatchIn(subject))
-        if (hasInvoiceSignal && (hasInvoiceNumber || hasBillingAmount || hasPeriodRange || hasVpsContext || body.isBlank())) {
+        if (hasInvoiceSignal && (hasVpsContext || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount)))) {
             return VpsMailType.INVOICE
         }
 
@@ -1149,20 +1204,30 @@ object VpsBillingMailParser {
         val trimmed = raw.trim().trim('[', ']').substringBefore('/').trim()
         if (trimmed.count { it == ':' } < 2) return null
         if (trimmed == "::" || trimmed == "::1") return null
-        // Reject HH:MM:SS clock strings (3 decimal groups of 1-2 digits without '::' and no hex a-f)
-        val groups = trimmed.split(':')
-        if (!trimmed.contains("::") && groups.size == 3 && groups.all { it.length in 1..2 && it.all(Char::isDigit) }) {
-            return null
-        }
-        val nonEmptyGroups = groups.filter { it.isNotEmpty() }
-        if (nonEmptyGroups.isEmpty() || nonEmptyGroups.size > 8) return null
-        if (!nonEmptyGroups.all { group -> group.length in 1..4 && group.all { ch -> ch.isDigit() || ch.lowercaseChar() in 'a'..'f' } }) {
-            return null
-        }
+        if (trimmed.contains(":::")) return null
+
         val lower = trimmed.lowercase(Locale.ROOT)
         if (lower.startsWith("fe80:")) return null
-        // If WHMCS gave a /64 subnet ending in "::" (e.g. "2607:f130:0:ef::"), keep valid address or append '1'?
-        // Wait: preserve exact address reported by provider (only disallowing bare "::").
+
+        val doubleColonParts = lower.split("::")
+        if (doubleColonParts.size > 2) return null
+
+        fun isValidHexGroup(group: String): Boolean =
+            group.length in 1..4 && group.all { ch -> ch.isDigit() || ch in 'a'..'f' }
+
+        if (doubleColonParts.size == 1) {
+            // Without "::" compression, RFC 4291 IPv6 MUST have exactly 8 16-bit hex groups.
+            // This strictly rejects 6-group MAC addresses (52:54:00:ab:cd:ef) and 3-group clocks (12:34:56).
+            val groups = lower.split(':')
+            if (groups.size != 8) return null
+            if (!groups.all(::isValidHexGroup)) return null
+        } else {
+            val left = if (doubleColonParts[0].isEmpty()) emptyList() else doubleColonParts[0].split(':')
+            val right = if (doubleColonParts[1].isEmpty()) emptyList() else doubleColonParts[1].split(':')
+            val totalGroups = left.size + right.size
+            if (totalGroups !in 1..7) return null
+            if (!left.all(::isValidHexGroup) || !right.all(::isValidHexGroup)) return null
+        }
         return lower
     }
 
@@ -1440,13 +1505,23 @@ object VpsBillingMailParser {
         }
     }
 
-    private fun extractBillingCycle(text: String): BillingCyclePreset? {
-        if (text.isBlank()) return null
+    private val BANDWIDTH_MONTHLY_NOISE_REGEX = Regex(
+        """(?:monthly\s+(?:bandwidth|traffic|transfer|data|quota)|(?:bandwidth|traffic|transfer|data)\s*(?:per\s+month|/\s*mo(?:nth)?)|每月.{0,6}(?:流量|带宽|重置)|月流量|月带宽)""",
+        RegexOption.IGNORE_CASE,
+    )
 
+    private fun extractExplicitBillingCycleLine(text: String): BillingCyclePreset? {
+        if (text.isBlank()) return null
         BILLING_CYCLE_LINE_REGEX.find(text)?.groupValues?.getOrNull(1)?.let { lineVal ->
             matchCycleKeywords(lineVal)?.let { return it }
         }
-        return matchCycleKeywords(text)
+        return null
+    }
+
+    private fun extractFallbackBillingCycle(text: String): BillingCyclePreset? {
+        if (text.isBlank()) return null
+        val cleaned = text.replace(BANDWIDTH_MONTHLY_NOISE_REGEX, " ")
+        return matchCycleKeywords(cleaned)
     }
 
     private fun matchCycleKeywords(text: String): BillingCyclePreset? {
@@ -1460,10 +1535,10 @@ object VpsBillingMailParser {
                 BillingCyclePreset.SEMI_ANNUAL
             Regex("""quarterly|every\s*3\s*months?|3\s*months?|/\s*qtr|/\s*季|季付|每季|按季|3\s*个月|三个月""").containsMatchIn(s) ->
                 BillingCyclePreset.QUARTERLY
-            Regex("""\bmonthly\b|1\s*month\b|per\s*month|/\s*mo(?:nth)?\b|/\s*月|月付|每月|按月|1\s*个月|一个月""").containsMatchIn(s) ->
-                BillingCyclePreset.MONTHLY
             Regex("""\bannual(?:ly)?\b|\byearly\b|1\s*year\b|12\s*months?\b|/\s*yr\b|/\s*year\b|/\s*年|年付|每年|按年|1\s*年|一年|12\s*个月""").containsMatchIn(s) ->
                 BillingCyclePreset.ANNUAL
+            Regex("""\bmonthly\b|1\s*month\b|per\s*month|/\s*mo(?:nth)?\b|/\s*月|月付|每月|按月|1\s*个月|一个月""").containsMatchIn(s) ->
+                BillingCyclePreset.MONTHLY
             else -> null
         }
     }

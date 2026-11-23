@@ -32,7 +32,9 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -54,6 +56,7 @@ class SeekMailApiClient(
 ) {
     companion object {
         val DEFAULT_BASE_URL: HttpUrl = "https://seek.li/openapi/v1".toHttpUrl()
+        const val MAX_ATTACHMENT_BYTES: Long = 100L * 1024L * 1024L // 100 MB safety cap
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val EMPTY_BODY: RequestBody = ByteArray(0).toRequestBody(null)
         private val LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1")
@@ -96,19 +99,6 @@ class SeekMailApiClient(
             serializer = MailboxesResponseDto.serializer(),
         )
         return (dto.data ?: emptyList()).map { it.toDomain() }
-    }
-
-    suspend fun getMailbox(apiKey: String, id: Long): SeekMailbox {
-        val dto = executeJsonGet(
-            apiKey = apiKey,
-            url = buildEndpointUrl("mailboxes", id.toString()),
-            serializer = MailboxResponseDto.serializer(),
-        )
-        return dto.data?.toDomain()
-            ?: throw SeekMailException(
-                kind = SeekMailErrorKind.NOT_FOUND,
-                message = "邮箱不存在",
-            )
     }
 
     suspend fun checkMailboxAvailable(apiKey: String, address: String): Boolean {
@@ -244,15 +234,6 @@ class SeekMailApiClient(
         }
     }
 
-    suspend fun getRawMailEml(apiKey: String, mailId: Long): String {
-        val request = buildAuthorizedRequest(
-            apiKey = apiKey,
-            url = buildEndpointUrl("mails", mailId.toString(), "raw"),
-            accept = "text/plain, */*",
-        ).get().build()
-        return executeStringCall(request)
-    }
-
     suspend fun getAttachments(apiKey: String, mailId: Long): List<SeekMailAttachment> {
         val dto = executeJsonGet(
             apiKey = apiKey,
@@ -266,7 +247,26 @@ class SeekMailApiClient(
         apiKey: String,
         mailId: Long,
         attachmentId: String,
+        maxBytes: Long = MAX_ATTACHMENT_BYTES,
     ): ByteArray {
+        val out = ByteArrayOutputStream()
+        downloadAttachmentToStream(
+            apiKey = apiKey,
+            mailId = mailId,
+            attachmentId = attachmentId,
+            outputStream = out,
+            maxBytes = maxBytes,
+        )
+        return out.toByteArray()
+    }
+
+    suspend fun downloadAttachmentToStream(
+        apiKey: String,
+        mailId: Long,
+        attachmentId: String,
+        outputStream: OutputStream,
+        maxBytes: Long = MAX_ATTACHMENT_BYTES,
+    ): Long {
         val cleanId = attachmentId.trim()
         if (cleanId.isEmpty() || cleanId == "." || cleanId == "..") {
             throw SeekMailException(
@@ -279,7 +279,11 @@ class SeekMailApiClient(
             url = buildEndpointUrl("mails", mailId.toString(), "attachments", cleanId),
             accept = "*/*",
         ).get().build()
-        return executeBytesCall(request)
+        return executeStreamCall(
+            request = request,
+            outputStream = outputStream,
+            maxBytes = maxBytes,
+        )
     }
 
     suspend fun getTags(apiKey: String): List<SeekMailTag> {
@@ -443,9 +447,16 @@ class SeekMailApiClient(
         }
     }
 
-    private suspend fun executeBytesCall(request: Request): ByteArray {
+    private suspend fun executeStreamCall(
+        request: Request,
+        outputStream: OutputStream,
+        maxBytes: Long,
+    ): Long {
         return try {
-            httpClient.newCall(request).awaitBytes { status, headers, errorBody ->
+            httpClient.newCall(request).awaitStreamTo(
+                outputStream = outputStream,
+                maxBytes = maxBytes,
+            ) { status, headers, errorBody ->
                 updateRateLimitFromHeaders(headers)
                 validateHttpStatus(statusCode = status, rawBody = errorBody)
             }
@@ -560,9 +571,11 @@ private suspend fun Call.awaitString(
     )
 }
 
-private suspend fun Call.awaitBytes(
+private suspend fun Call.awaitStreamTo(
+    outputStream: OutputStream,
+    maxBytes: Long,
     validator: (statusCode: Int, headers: Headers, errorBody: String) -> Unit,
-): ByteArray = suspendCancellableCoroutine { cont ->
+): Long = suspendCancellableCoroutine { cont ->
     cont.invokeOnCancellation {
         runCatching { cancel() }
     }
@@ -579,15 +592,44 @@ private suspend fun Call.awaitBytes(
                     try {
                         if (resp.code in 200..299) {
                             validator(resp.code, resp.headers, "")
-                            val bytes = resp.body?.bytes() ?: ByteArray(0)
+                            val body = resp.body
+                            val declaredLength = body?.contentLength() ?: -1L
+                            if (declaredLength > maxBytes) {
+                                throw SeekMailException(
+                                    kind = SeekMailErrorKind.SERVER,
+                                    message = "附件体积超过上限（最大 ${maxBytes / (1024L * 1024L)} MB）",
+                                )
+                            }
+                            var totalWritten = 0L
+                            if (body != null) {
+                                val buffer = ByteArray(8192)
+                                body.byteStream().use { input ->
+                                    while (true) {
+                                        if (cont.isCancelled) {
+                                            throw CancellationException("Attachment download cancelled")
+                                        }
+                                        val read = input.read(buffer)
+                                        if (read == -1) break
+                                        totalWritten += read
+                                        if (totalWritten > maxBytes) {
+                                            throw SeekMailException(
+                                                kind = SeekMailErrorKind.SERVER,
+                                                message = "附件体积超过上限（最大 ${maxBytes / (1024L * 1024L)} MB）",
+                                            )
+                                        }
+                                        outputStream.write(buffer, 0, read)
+                                    }
+                                }
+                                outputStream.flush()
+                            }
                             if (!cont.isCompleted) {
-                                cont.resume(bytes)
+                                cont.resume(totalWritten)
                             }
                         } else {
                             val errorText = resp.body?.string().orEmpty()
                             validator(resp.code, resp.headers, errorText)
                             if (!cont.isCompleted) {
-                                cont.resume(ByteArray(0))
+                                cont.resume(0L)
                             }
                         }
                     } catch (t: Throwable) {

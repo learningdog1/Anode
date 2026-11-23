@@ -36,8 +36,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
-import java.net.Inet6Address
-import java.net.InetAddress
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
@@ -135,6 +134,7 @@ class VpsMailAutoIngestServiceImpl(
         ensureFleetStateLoaded()
 
         val allApplied = mutableListOf<RenewalAutoUpdateRecord>()
+        var detailPeeksInBatch = 0
         for ((summary, summaryParsed) in renewalCandidates) {
             val alreadyProcessed = withContext(ioDispatcher) {
                 mutex.withLock {
@@ -156,22 +156,32 @@ class VpsMailAutoIngestServiceImpl(
 
             var effectiveSummary = summary
             var effectiveParsed = summaryParsed
+            var skippedPeekDueToBatchCap = false
 
             if (needsFullDetail) {
                 val shouldPeek = mutex.withLock { summary.id !in peekedUnmatchedSummaryIds }
                 if (shouldPeek) {
-                    val peeked = try {
-                        mailDetailPeeker?.invoke(summary.id)
-                    } catch (c: CancellationException) {
-                        throw c
-                    } catch (_: Throwable) {
-                        null
-                    }
-                    if (peeked != null) {
-                        val detailParsed = VpsBillingMailParser.parseDetail(peeked)
-                        if (detailParsed?.mailType == VpsMailType.RENEWAL) {
-                            effectiveSummary = peeked.summary
-                            effectiveParsed = detailParsed
+                    if (detailPeeksInBatch >= MAX_DETAIL_PEEKS_PER_BATCH) {
+                        skippedPeekDueToBatchCap = true
+                    } else {
+                        detailPeeksInBatch++
+                        val peeked = try {
+                            mailDetailPeeker?.invoke(summary.id)
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (peeked != null) {
+                            val detailParsed = VpsBillingMailParser.parseDetail(peeked)
+                            if (detailParsed?.mailType == VpsMailType.RENEWAL) {
+                                effectiveSummary = peeked.summary
+                                effectiveParsed = detailParsed
+                            } else {
+                                // Full body disproved RENEWAL classification; do not fall back to snippet.
+                                mutex.withLock { peekedUnmatchedSummaryIds.add(summary.id) }
+                                continue
+                            }
                         }
                     }
                 }
@@ -181,7 +191,7 @@ class VpsMailAutoIngestServiceImpl(
                 summary = effectiveSummary,
                 parsed = effectiveParsed,
             )
-            if (applied.isEmpty() && summary.id > 0L) {
+            if (applied.isEmpty() && summary.id > 0L && !skippedPeekDueToBatchCap) {
                 mutex.withLock { peekedUnmatchedSummaryIds.add(summary.id) }
             }
             allApplied += applied
@@ -223,6 +233,7 @@ class VpsMailAutoIngestServiceImpl(
     override suspend fun ingestMail(
         summary: SeekMailSummary?,
         parsed: ParsedVpsBillingMail,
+        overwriteExistingSshCredentials: Boolean,
     ): Result<VpsMailIngestOutcome> = runCatching {
         ensureFleetStateLoaded()
 
@@ -239,7 +250,12 @@ class VpsMailAutoIngestServiceImpl(
                     ?: BillingCyclePreset.ANNUAL
 
                 val mailKeys = buildMailLookupKeys(summary, parsed)
-                val alreadyProcessedRenewal = mailKeys.any { it in processedRenewalKeys }
+                val dedupeKeysToCheck = if (existingAsset != null) {
+                    buildAllDedupeKeysForAsset(summary, parsed, existingAsset.id)
+                } else {
+                    mailKeys
+                }
+                val alreadyProcessedRenewal = dedupeKeysToCheck.any { it in processedRenewalKeys }
 
                 val resolvedExpiryIso = resolveIngestExpiryDateIso(
                     summary = summary,
@@ -291,8 +307,56 @@ class VpsMailAutoIngestServiceImpl(
 
                 val savedAsset = fleetRepository.upsertAsset(assetToSave)
 
-                // If this manual import processed a RENEWAL email that hadn't been recorded yet,
-                // mark its dedupe keys so subsequent refreshes never double-advance the server!
+                var savedSshProfile: SshServerProfile? = null
+                var sshCreated = false
+                var sshPreservedExisting = false
+
+                if (parsed.hasSshCredentials) {
+                    val targetHost = parsed.primaryHost!!.trim()
+                    val targetUser = parsed.sshUsername.trim()
+                        .ifBlank { SshServerProfile.DEFAULT_SSH_USERNAME_FALLBACK }
+                    val existingSsh = matchSshProfileForMail(parsed, sshServers)
+
+                    if (existingSsh != null && !overwriteExistingSshCredentials) {
+                        savedSshProfile = existingSsh
+                        sshCreated = false
+                        sshPreservedExisting = true
+                    } else {
+                        sshCreated = existingSsh == null
+                        val suggestedGroup = existingSsh?.resolvedGroup
+                            ?: mapRegionToSuggestedSshGroup(parsed.region)
+                        val draft = SshVaultCatalogFilter.normalizeDraftForPersistence(
+                            SshServerDraft(
+                                id = existingSsh?.id,
+                                alias = existingSsh?.cleanAlias?.takeIf { it.isNotBlank() }
+                                    ?: buildSuggestedSshAlias(parsed, savedAsset.nickname),
+                                host = targetHost,
+                                port = parsed.sshPort.coerceIn(1, 65535),
+                                username = targetUser,
+                                authMethod = SshAuthMethod.PASSWORD,
+                                secret = parsed.sshPassword.orEmpty(),
+                                keepExistingSecret = false,
+                                jumpHostId = existingSsh?.jumpHostId,
+                                groupTag = suggestedGroup,
+                            ),
+                        )
+                        savedSshProfile = try {
+                            sshVaultRepository.saveServer(draft)
+                        } catch (t: Throwable) {
+                            // Roll back the Fleet write so both stores remain consistent.
+                            runCatching {
+                                if (existingAsset != null) {
+                                    fleetRepository.upsertAsset(existingAsset)
+                                } else {
+                                    fleetRepository.deleteAsset(savedAsset.id)
+                                }
+                            }
+                            throw t
+                        }
+                    }
+                }
+
+                // Mark renewal dedupe keys only after both Fleet and SSH writes have succeeded.
                 if (parsed.mailType == VpsMailType.RENEWAL && !alreadyProcessedRenewal) {
                     val allDedupeKeys = buildAllDedupeKeysForAsset(summary, parsed, savedAsset.id)
                     processedRenewalKeys.addAll(allDedupeKeys)
@@ -316,41 +380,12 @@ class VpsMailAutoIngestServiceImpl(
                     }
                 }
 
-                var savedSshProfile: SshServerProfile? = null
-                var sshCreated = false
-
-                if (parsed.hasSshCredentials) {
-                    val targetHost = parsed.primaryHost!!.trim()
-                    val targetUser = parsed.sshUsername.trim()
-                        .ifBlank { SshServerProfile.DEFAULT_SSH_USERNAME_FALLBACK }
-                    val existingSsh = matchSshProfileForMail(parsed, sshServers)
-                    sshCreated = existingSsh == null
-
-                    val suggestedGroup = existingSsh?.resolvedGroup
-                        ?: mapRegionToSuggestedSshGroup(parsed.region)
-                    val draft = SshVaultCatalogFilter.normalizeDraftForPersistence(
-                        SshServerDraft(
-                            id = existingSsh?.id,
-                            alias = existingSsh?.cleanAlias?.takeIf { it.isNotBlank() }
-                                ?: buildSuggestedSshAlias(parsed, savedAsset.nickname),
-                            host = targetHost,
-                            port = parsed.sshPort.coerceIn(1, 65535),
-                            username = targetUser,
-                            authMethod = SshAuthMethod.PASSWORD,
-                            secret = parsed.sshPassword.orEmpty(),
-                            keepExistingSecret = false,
-                            jumpHostId = existingSsh?.jumpHostId,
-                            groupTag = suggestedGroup,
-                        ),
-                    )
-                    savedSshProfile = sshVaultRepository.saveServer(draft)
-                }
-
                 val summaryMessage = buildIngestFeedbackMessage(
                     asset = savedAsset,
                     assetCreated = assetCreated,
                     sshProfile = savedSshProfile,
                     sshCreated = sshCreated,
+                    sshPreservedExisting = sshPreservedExisting,
                 )
 
                 VpsMailIngestOutcome(
@@ -362,7 +397,7 @@ class VpsMailAutoIngestServiceImpl(
                 )
             }
         }
-    }
+    }.onFailure { if (it is CancellationException) throw it }
 
     // ── Renewal Auto-Update Engine ───────────────────────────────────────────
 
@@ -382,7 +417,8 @@ class VpsMailAutoIngestServiceImpl(
             val currentAssets = fleetRepository.assetsFlow.value
             val currentSsh = sshVaultRepository.serversFlow.value
             val matchedAssets = matchAssetsForMail(parsed, currentAssets, currentSsh)
-            if (matchedAssets.isEmpty()) {
+            // Only auto-advance when a single unambiguous asset is matched.
+            if (matchedAssets.size != 1) {
                 return@withLock
             }
 
@@ -603,9 +639,11 @@ class VpsMailAutoIngestServiceImpl(
     private fun providerMatches(asset: VpsAssetRecord, targetProviderNorm: String): Boolean {
         val assetProv = normalizeIdentity(asset.providerName)
         val assetNick = normalizeIdentity(asset.nickname)
-        if (assetProv.isNotEmpty() && (assetProv == targetProviderNorm ||
-                assetProv.contains(targetProviderNorm) ||
-                targetProviderNorm.contains(assetProv))
+        if (assetProv.isNotEmpty() && (
+                assetProv == targetProviderNorm ||
+                    (assetProv.length >= 3 && targetProviderNorm.length >= 3 &&
+                        (assetProv.contains(targetProviderNorm) || targetProviderNorm.contains(assetProv)))
+            )
         ) {
             return true
         }
@@ -639,18 +677,90 @@ class VpsMailAutoIngestServiceImpl(
             .lowercase(Locale.ROOT)
             .replace(Regex("""[\s\-_./|·:()\[\]【】]+"""), "")
 
-    private fun canonicalizeIpv6(raw: String?): String? {
-        val clean = raw?.trim()?.trim('[', ']')?.substringBefore('/')?.trim()
-            ?.takeIf { it.count { c -> c == ':' } >= 2 }
-            ?: return null
-        return runCatching {
-            val addr = InetAddress.getByName(clean)
-            if (addr is Inet6Address) {
-                addr.address.joinToString(":") { b -> String.format(Locale.US, "%02x", b.toInt() and 0xFF) }
-            } else {
-                clean.lowercase(Locale.ROOT)
+    /**
+     * Pure-Kotlin RFC 4291 IPv6 canonicalizer. Never triggers DNS resolution and strictly
+     * rejects non-IPv6 inputs (such as 6-group MAC addresses, timestamps, or hostnames).
+     */
+    internal fun canonicalizeIpv6(raw: String?): String? {
+        val trimmed = raw?.trim() ?: return null
+        val slashIndex = trimmed.indexOf('/')
+        val rawAddrPart = if (slashIndex >= 0) {
+            val prefixStr = trimmed.substring(slashIndex + 1).trim()
+            val prefix = prefixStr.toIntOrNull()
+            if (prefix == null || prefix !in 0..128) return null
+            trimmed.substring(0, slashIndex)
+        } else {
+            trimmed
+        }
+        val addrPart = rawAddrPart.trim().trim('[', ']')
+        if (addrPart.length < 2 || !addrPart.contains(':')) return null
+        if (addrPart.any { it.isWhitespace() }) return null
+
+        // Handle optional IPv4-mapped suffix (e.g. ::ffff:192.0.2.128)
+        val normalizedInput = if (addrPart.contains('.')) {
+            val lastColon = addrPart.lastIndexOf(':')
+            if (lastColon < 0) return null
+            val ipv4Part = addrPart.substring(lastColon + 1)
+            val octets = ipv4Part.split('.')
+            if (octets.size != 4) return null
+            val parsedOctets = octets.map { part ->
+                if (part.isEmpty() || (part.length > 1 && part.startsWith('0'))) return null
+                part.toIntOrNull()?.takeIf { it in 0..255 } ?: return null
             }
-        }.getOrElse { clean.lowercase(Locale.ROOT) }
+            val high = (parsedOctets[0] shl 8) or parsedOctets[1]
+            val low = (parsedOctets[2] shl 8) or parsedOctets[3]
+            addrPart.substring(0, lastColon + 1) +
+                String.format(Locale.US, "%x:%x", high, low)
+        } else {
+            addrPart
+        }
+
+        val doubleColonIdx = normalizedInput.indexOf("::")
+        val groups: List<Int> = if (doubleColonIdx >= 0) {
+            // At most one "::" allowed
+            if (normalizedInput.indexOf("::", doubleColonIdx + 2) >= 0) return null
+            val leftStr = normalizedInput.substring(0, doubleColonIdx)
+            val rightStr = normalizedInput.substring(doubleColonIdx + 2)
+            if (leftStr.startsWith(':') || leftStr.endsWith(':') ||
+                rightStr.startsWith(':') || rightStr.endsWith(':')
+            ) {
+                return null
+            }
+            val leftGroups = if (leftStr.isEmpty()) emptyList() else parseHexGroups(leftStr) ?: return null
+            val rightGroups = if (rightStr.isEmpty()) emptyList() else parseHexGroups(rightStr) ?: return null
+            val missing = 8 - (leftGroups.size + rightGroups.size)
+            if (missing < 1) return null
+            leftGroups + List(missing) { 0 } + rightGroups
+        } else {
+            if (normalizedInput.startsWith(':') || normalizedInput.endsWith(':')) return null
+            val parsedGroups = parseHexGroups(normalizedInput) ?: return null
+            if (parsedGroups.size != 8) return null
+            parsedGroups
+        }
+
+        return groups.joinToString(":") { value ->
+            String.format(Locale.US, "%04x", value)
+        }
+    }
+
+    private fun parseHexGroups(segment: String): List<Int>? {
+        val parts = segment.split(':')
+        val result = ArrayList<Int>(parts.size)
+        for (part in parts) {
+            if (part.isEmpty() || part.length > 4) return null
+            var value = 0
+            for (ch in part) {
+                val digit = when (ch) {
+                    in '0'..'9' -> ch - '0'
+                    in 'a'..'f' -> ch - 'a' + 10
+                    in 'A'..'F' -> ch - 'A' + 10
+                    else -> return null
+                }
+                value = (value shl 4) or digit
+            }
+            result.add(value)
+        }
+        return result
     }
 
     // ── Expiry Date & Notes Formatting ───────────────────────────────────────
@@ -692,25 +802,49 @@ class VpsMailAutoIngestServiceImpl(
         existingNotes: String,
         parsed: ParsedVpsBillingMail,
     ): String {
-        // Strip previous managed metadata lines so re-importing never duplicates lines!
-        val keptUserLines = existingNotes
-            .lines()
-            .map { it.trim() }
-            .filter { line ->
-                line.isNotEmpty() &&
-                    !line.startsWith(MANAGED_NOTE_PREFIX) &&
-                    !Regex("""^(?:IP|IPv6|Hostname|SSH|产品|最近账单)\s*[:：]""", RegexOption.IGNORE_CASE).containsMatchIn(line)
-            }
+        val existingManagedFields = LinkedHashMap<String, String>()
+        val keptUserLines = mutableListOf<String>()
 
-        val managedTokens = buildList {
-            parsed.mainIpv4?.takeIf { it.isNotBlank() }?.let { add("IP: $it") }
-            parsed.mainIpv6?.takeIf { it.isNotBlank() }?.let { add("IPv6: $it") }
-            parsed.hostname.takeIf { it.isNotBlank() }?.let { add("Hostname: $it") }
-            if (parsed.hasSshCredentials || parsed.sshPort != ParsedVpsBillingMail.DEFAULT_SSH_PORT) {
-                add("SSH: ${parsed.sshUsername}@${parsed.primaryHost ?: "-"}:${parsed.sshPort}")
+        for (rawLine in existingNotes.lines()) {
+            val line = rawLine.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith(MANAGED_NOTE_PREFIX)) {
+                val body = line.removePrefix(MANAGED_NOTE_PREFIX).trim()
+                for (segment in body.split("|")) {
+                    val token = segment.trim()
+                    val colonIdx = token.indexOf(':')
+                    if (colonIdx > 0) {
+                        val key = token.substring(0, colonIdx).trim()
+                        val value = token.substring(colonIdx + 1).trim()
+                        if (key.isNotEmpty() && value.isNotEmpty()) {
+                            existingManagedFields[key] = value
+                        }
+                    }
+                }
+            } else {
+                keptUserLines += line
             }
-            parsed.productName.takeIf { it.isNotBlank() }?.let { add("套餐: $it") }
-            parsed.invoiceNumber?.takeIf { it.isNotBlank() }?.let { add("账单: #$it") }
+        }
+
+        // Merge newly parsed non-blank fields over prior managed metadata so renewal/invoice
+        // emails never erase IP/IPv6/Hostname/SSH saved from an earlier welcome email.
+        parsed.mainIpv4?.takeIf { it.isNotBlank() }?.let { existingManagedFields["IP"] = it }
+        parsed.mainIpv6?.takeIf { it.isNotBlank() }?.let { existingManagedFields["IPv6"] = it }
+        parsed.hostname.takeIf { it.isNotBlank() }?.let { existingManagedFields["Hostname"] = it }
+        if (parsed.hasSshCredentials || parsed.sshPort != ParsedVpsBillingMail.DEFAULT_SSH_PORT) {
+            existingManagedFields["SSH"] = "${parsed.sshUsername}@${parsed.primaryHost ?: "-"}:${parsed.sshPort}"
+        }
+        parsed.productName.takeIf { it.isNotBlank() }?.let { existingManagedFields["套餐"] = it }
+        parsed.invoiceNumber?.takeIf { it.isNotBlank() }?.let { existingManagedFields["账单"] = "#$it" }
+
+        val orderedKeys = listOf("IP", "IPv6", "Hostname", "SSH", "套餐", "账单")
+        val managedTokens = buildList {
+            for (key in orderedKeys) {
+                existingManagedFields[key]?.let { value -> add("$key: $value") }
+            }
+            for ((key, value) in existingManagedFields) {
+                if (key !in orderedKeys) add("$key: $value")
+            }
         }
 
         val managedLine = if (managedTokens.isNotEmpty()) {
@@ -770,8 +904,11 @@ class VpsMailAutoIngestServiceImpl(
         assetCreated: Boolean,
         sshProfile: SshServerProfile?,
         sshCreated: Boolean,
+        sshPreservedExisting: Boolean = false,
     ): String {
         return when {
+            sshPreservedExisting ->
+                "已同步账本：「${asset.nickname}」（保留现有 SSH 认证配置）"
             sshProfile != null && assetCreated && sshCreated ->
                 "已入库账本与 SSH：「${asset.nickname}」(${sshProfile.displayAddress})"
             sshProfile != null && !assetCreated && !sshCreated ->
@@ -925,9 +1062,17 @@ class VpsMailAutoIngestServiceImpl(
             stateFile.parentFile?.mkdirs()
             val encoded = json.encodeToString(StoredVpsMailIngestState.serializer(), payload)
             val tempFile = File(stateFile.parentFile, "${stateFile.name}.tmp")
-            tempFile.writeText(encoded, Charsets.UTF_8)
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(encoded.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
             if (!tempFile.renameTo(stateFile)) {
-                stateFile.writeText(encoded, Charsets.UTF_8)
+                FileOutputStream(stateFile).use { fos ->
+                    fos.write(encoded.toByteArray(Charsets.UTF_8))
+                    fos.flush()
+                    runCatching { fos.fd.sync() }
+                }
                 tempFile.delete()
             }
         }
@@ -938,7 +1083,7 @@ class VpsMailAutoIngestServiceImpl(
         private const val MANAGED_NOTE_PREFIX: String = "[SeekMail]"
         private const val MAX_STORED_RECORDS: Int = 200
         private const val MAX_PROCESSED_KEYS: Int = 2_000
-        private const val SshServerProfile_DEFAULT_USER: String = "root"
+        private const val MAX_DETAIL_PEEKS_PER_BATCH: Int = 3
 
         fun advanceDateByCycle(
             baseDate: LocalDate,

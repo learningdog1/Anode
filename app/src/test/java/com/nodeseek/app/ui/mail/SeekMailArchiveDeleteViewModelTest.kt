@@ -15,8 +15,10 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import java.io.OutputStream
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -332,10 +334,129 @@ class SeekMailArchiveDeleteViewModelTest {
         }
     }
 
+    @Test
+    fun `UNREAD mode filters locally read mails immediately and batch archive undo preserves already archived mails`() = runTest {
+        val mail1 = sampleMail(id = 31L, mailboxId = 10L, subject = "Unread A", isRead = false, receivedAt = "2026-11-23T10:01:00Z")
+        val mail2 = sampleMail(id = 32L, mailboxId = 10L, subject = "Unread B", isRead = false, receivedAt = "2026-11-23T10:02:00Z")
+        val mail3 = sampleMail(id = 33L, mailboxId = 20L, subject = "Other Box", isRead = false, receivedAt = "2026-11-23T10:03:00Z")
+
+        val repo = FakeSeekMailRepository(
+            mailboxes = listOf(
+                SeekMailbox(id = 10L, address = "a@seek.li"),
+                SeekMailbox(id = 20L, address = "b@seek.li"),
+            ),
+            allMails = listOf(mail3, mail2, mail1),
+        )
+        val settings = FakeSettingsRepository().apply {
+            setSeekMailApiKey("sk_live_test_key_1234567890")
+        }
+
+        val vm = SeekMailViewModel(seekMailRepository = repo, settingsRepository = settings)
+        val snackbars = mutableListOf<SeekMailSnackbarEvent>()
+        val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
+        val snackbarJob = launch(testDispatcher) { vm.snackbarEvents.collect { snackbars += it } }
+
+        try {
+            // Switch to UNREAD mode and mark mail1 read via batch action -> disappears immediately
+            vm.selectFilterMode(SeekMailFilterMode.UNREAD)
+            assertEquals(listOf(33L, 32L, 31L), vm.uiState.value.mails.map { it.id })
+
+            vm.toggleMailSelection(31L)
+            vm.markSelectedMailsRead()
+            assertEquals(listOf(33L, 32L), vm.uiState.value.mails.map { it.id })
+
+            // Tag mail1 (mailbox 10), mail2 (mailbox 10), and mail3 (mailbox 20) with the same tag
+            vm.selectFilterMode(SeekMailFilterMode.ALL)
+            vm.createAndAttachLocalTag(mailId = 31L, name = "重要", colorHex = "#2563EB")
+            val tagId = vm.uiState.value.localTags.single().id
+            vm.toggleLocalTagForMail(mailId = 32L, tagId = tagId)
+            vm.toggleLocalTagForMail(mailId = 33L, tagId = tagId)
+            assertEquals(3, vm.uiState.value.localTagCounts[tagId])
+
+            // Selecting mailbox 10 scopes localTagCounts to mailbox 10 (only mail1 & mail2)
+            vm.selectMailbox(10L)
+            assertEquals(2, vm.uiState.value.localTagCounts[tagId])
+
+            // Archive mail1 first, then filter by local tag (shows both archived mail1 and unarchived mail2)
+            vm.archiveMail(mail1)
+            vm.toggleLocalTagFilter(tagId)
+            assertEquals(listOf(32L, 31L), vm.uiState.value.mails.map { it.id })
+
+            // Select both mail1 (already archived) and mail2 (unarchived), then batch archive + undo
+            vm.toggleSelectAllVisible()
+            vm.archiveSelectedMails()
+            assertEquals("已存档 1 封邮件", snackbars.last().message)
+            assertTrue(31L in vm.uiState.value.archivedMailIds)
+            assertTrue(32L in vm.uiState.value.archivedMailIds)
+
+            // Undo must unarchive ONLY mail2 and keep originally-archived mail1 archived!
+            snackbars.last().onAction!!.invoke()
+            assertTrue("Originally archived mail1 must stay archived after undo", 31L in vm.uiState.value.archivedMailIds)
+            assertFalse("Newly archived mail2 must be unarchived after undo", 32L in vm.uiState.value.archivedMailIds)
+        } finally {
+            stateJob.cancel()
+            snackbarJob.cancel()
+        }
+    }
+
+    @Test
+    fun `switching mailbox clears stale list immediately and replacing API key resets contacts and filters`() = runTest {
+        val mailBox10 = sampleMail(id = 41L, mailboxId = 10L, subject = "Box 10 Mail")
+        val mailBox20 = sampleMail(id = 42L, mailboxId = 20L, subject = "Box 20 Mail")
+
+        val gate = CompletableDeferred<Unit>()
+        val repo = FakeSeekMailRepository(
+            mailboxes = listOf(
+                SeekMailbox(id = 10L, address = "box10@seek.li"),
+                SeekMailbox(id = 20L, address = "box20@seek.li"),
+            ),
+            allMails = listOf(mailBox10, mailBox20),
+            contacts = listOf(SeekMailContact(id = 1L, name = "Key A Contact", email = "a@example.com")),
+        )
+        val settings = FakeSettingsRepository().apply {
+            setSeekMailApiKey("sk_live_key_a_1234567890")
+        }
+
+        val vm = SeekMailViewModel(seekMailRepository = repo, settingsRepository = settings)
+        val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
+
+        try {
+            assertEquals(listOf(41L, 42L), vm.uiState.value.mails.map { it.id })
+
+            // Load contacts and search under Key A
+            vm.openContactsSheet()
+            assertEquals(1, vm.uiState.value.contacts.size)
+            vm.dismissContactsSheet()
+
+            // Gate next getMails call and switch to mailbox 20 -> stale list clears & isLoadingMails becomes true
+            repo.mailsGate = gate
+            vm.selectMailbox(20L)
+            assertTrue("Stale mails must clear immediately on mailbox switch", vm.uiState.value.mails.isEmpty())
+            assertTrue("Loading indicator must show while new mailbox loads", vm.uiState.value.isLoadingMails)
+            gate.complete(Unit)
+            assertEquals(listOf(42L), vm.uiState.value.mails.map { it.id })
+            assertFalse(vm.uiState.value.isLoadingMails)
+
+            // Replace Key A with Key B -> Key A contacts and selectedMailboxId must be reset
+            repo.mailsGate = null
+            repo.verifyMailboxesOverride = listOf(SeekMailbox(id = 99L, address = "keyb@seek.li"))
+            vm.verifyAndSaveApiKey("sk_live_key_b_9876543210")
+            assertTrue("Key A contacts must be cleared after switching to Key B", vm.uiState.value.contacts.isEmpty())
+            assertNull("Selected mailbox from Key A must be cleared after switching to Key B", vm.uiState.value.selectedMailboxId)
+            assertEquals(listOf(99L), vm.uiState.value.mailboxes.map { it.id })
+        } finally {
+            stateJob.cancel()
+        }
+    }
+
     private class FakeSeekMailRepository(
         private val mailboxes: List<SeekMailbox>,
         private val allMails: List<SeekMailSummary>,
+        private val contacts: List<SeekMailContact> = emptyList(),
     ) : SeekMailRepository {
+        var mailsGate: CompletableDeferred<Unit>? = null
+        var verifyMailboxesOverride: List<SeekMailbox>? = null
+
         private val _locallyReadMailIds = MutableStateFlow<Set<Long>>(emptySet())
         override val locallyReadMailIds: StateFlow<Set<Long>> = _locallyReadMailIds.asStateFlow()
 
@@ -352,13 +473,10 @@ class SeekMailArchiveDeleteViewModelTest {
             private set
 
         override suspend fun verifyApiKey(candidateKey: String?): Result<SeekMailConnectionStatus> =
-            Result.success(SeekMailConnectionStatus(mailboxes = mailboxes))
+            Result.success(SeekMailConnectionStatus(mailboxes = verifyMailboxesOverride ?: mailboxes))
 
         override suspend fun getMailboxes(forceRefresh: Boolean): Result<List<SeekMailbox>> =
-            Result.success(mailboxes)
-
-        override suspend fun getMailbox(id: Long): Result<SeekMailbox> =
-            Result.success(mailboxes.first { it.id == id })
+            Result.success(verifyMailboxesOverride ?: mailboxes)
 
         override suspend fun checkMailboxAvailable(address: String): Result<Boolean> =
             Result.success(true)
@@ -374,6 +492,7 @@ class SeekMailArchiveDeleteViewModelTest {
             offset: Int,
             forceRefresh: Boolean,
         ): Result<SeekMailPage> {
+            mailsGate?.await()
             getMailsCallCount++
             val filtered = allMails.filter { mail ->
                 (mailboxId == null || mail.mailboxId == mailboxId) &&
@@ -414,19 +533,23 @@ class SeekMailArchiveDeleteViewModelTest {
             )
         }
 
-        override suspend fun getRawMailEml(mailId: Long): Result<String> = Result.success("")
-
         override suspend fun getAttachments(mailId: Long): Result<List<SeekMailAttachment>> =
             Result.success(emptyList())
 
         override suspend fun downloadAttachmentBytes(mailId: Long, attachmentId: String): Result<ByteArray> =
             Result.success(ByteArray(0))
 
+        override suspend fun downloadAttachmentToStream(
+            mailId: Long,
+            attachmentId: String,
+            outputStream: OutputStream,
+        ): Result<Long> = Result.success(0L)
+
         override suspend fun getTags(forceRefresh: Boolean): Result<List<SeekMailTag>> =
             Result.success(emptyList())
 
         override suspend fun getContacts(limit: Int, forceRefresh: Boolean): Result<List<SeekMailContact>> =
-            Result.success(emptyList())
+            Result.success(contacts)
 
         override suspend fun markMailReadLocally(mailId: Long) {
             _locallyReadMailIds.update { it + mailId }
@@ -440,13 +563,20 @@ class SeekMailArchiveDeleteViewModelTest {
             return Result.success(created)
         }
 
-        override suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) {
+        override suspend fun toggleLocalTagForMail(mailId: Long, tagId: String, mailboxId: Long?) {
             _localTagStore.update { current ->
                 val ids = current.mailTagIds[mailId].orEmpty()
                 val next = if (tagId in ids) ids - tagId else ids + tagId
                 val nextMap = current.mailTagIds.toMutableMap()
-                if (next.isEmpty()) nextMap.remove(mailId) else nextMap[mailId] = next
-                current.copy(mailTagIds = nextMap)
+                val nextBoxes = current.mailMailboxIds.toMutableMap()
+                if (next.isEmpty()) {
+                    nextMap.remove(mailId)
+                    nextBoxes.remove(mailId)
+                } else {
+                    nextMap[mailId] = next
+                    if (mailboxId != null && mailboxId > 0L) nextBoxes[mailId] = mailboxId
+                }
+                current.copy(mailTagIds = nextMap, mailMailboxIds = nextBoxes)
             }
         }
 

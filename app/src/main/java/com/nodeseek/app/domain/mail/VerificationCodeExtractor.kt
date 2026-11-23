@@ -86,6 +86,12 @@ object VerificationCodeExtractor {
         RegexOption.IGNORE_CASE,
     )
 
+    // Segmented OTP formats commonly used by Google, GitHub, Cloudflare, etc.:
+    // e.g. "482-910", "482 910", "4829-1038", "G-123456".
+    private val SEGMENTED_OTP_REGEX = Regex(
+        """(?:^|[^A-Za-z0-9#-])(?:[A-Z]-(\d{5,6})|(\d{3})[-\s](\d{3})|(\d{4})-(\d{4}))(?=$|[^A-Za-z0-9-])""",
+    )
+
     private val BLOCKED_TOKENS = setOf(
         "UTF8",
         "UTF16",
@@ -128,8 +134,15 @@ object VerificationCodeExtractor {
         val cleanSubject = sanitizeForOtpScan(subject)
         val cleanBody = sanitizeForOtpScan(bodyText)
 
-        extractBestCandidate(cleanSubject)?.let { return it.code }
-        extractBestCandidate(cleanBody)?.let { return it.code }
+        val subjectBest = extractBestCandidate(cleanSubject)
+        if (subjectBest != null && subjectBest.hasDirectLabel) return subjectBest.code
+        extractDirectSegmentedCode(subject)?.let { return it }
+        if (subjectBest != null) return subjectBest.code
+
+        val bodyBest = extractBestCandidate(cleanBody)
+        if (bodyBest != null && bodyBest.hasDirectLabel) return bodyBest.code
+        extractDirectSegmentedCode(bodyText)?.let { return it }
+        if (bodyBest != null) return bodyBest.code
 
         // Handle messages whose subject states the OTP label and body begins directly with the code.
         if (cleanSubject.isNotEmpty() && cleanBody.isNotEmpty() && KEYWORD_REGEX.containsMatchIn(cleanSubject)) {
@@ -137,14 +150,19 @@ object VerificationCodeExtractor {
             if (LEADING_BODY_CONNECTOR_REGEX.containsMatchIn(head)) {
                 extractBestCandidate("$cleanSubject $head")?.let { return it.code }
             }
+            val rawHead = sanitizeForOtpScan(bodyText, stripPhoneLike = false).take(BRIDGED_BODY_HEAD_CHARS)
+            extractDirectSegmentedCode("$cleanSubject $rawHead")?.let { return it }
         }
 
         return null
     }
 
-    private fun sanitizeForOtpScan(raw: String): String {
+    private fun sanitizeForOtpScan(
+        raw: String,
+        stripPhoneLike: Boolean = true,
+    ): String {
         if (raw.isBlank()) return ""
-        return raw
+        var cleaned = raw
             .replace(URL_REGEX, " ")
             .replace(EMAIL_REGEX, " ")
             .replace(HTML_ENTITY_REGEX, " ")
@@ -152,15 +170,55 @@ object VerificationCodeExtractor {
             .replace(UUID_REGEX, " ")
             .replace(DATE_REGEX, " ")
             .replace(TIME_REGEX, " ")
-            .replace(PHONE_LIKE_REGEX, " ")
+        if (stripPhoneLike) {
+            cleaned = cleaned.replace(PHONE_LIKE_REGEX, " ")
+        }
+        return cleaned
             .replace(WHITESPACE_REGEX, " ")
             .trim()
+    }
+
+    private fun extractDirectSegmentedCode(raw: String): String? {
+        val text = sanitizeForOtpScan(raw, stripPhoneLike = false)
+        if (text.isEmpty() || !KEYWORD_REGEX.containsMatchIn(text)) return null
+
+        for (match in SEGMENTED_OTP_REGEX.findAll(text)) {
+            val (code, start, end) = when {
+                match.groups[1] != null -> {
+                    val g = match.groups[1]!!
+                    Triple(g.value, (g.range.first - 2).coerceAtLeast(0), g.range.last + 1)
+                }
+                match.groups[2] != null && match.groups[3] != null -> {
+                    val g2 = match.groups[2]!!
+                    val g3 = match.groups[3]!!
+                    Triple("${g2.value}${g3.value}", g2.range.first, g3.range.last + 1)
+                }
+                match.groups[4] != null && match.groups[5] != null -> {
+                    val g4 = match.groups[4]!!
+                    val g5 = match.groups[5]!!
+                    Triple("${g4.value}${g5.value}", g4.range.first, g5.range.last + 1)
+                }
+                else -> continue
+            }
+
+            val beforeSlice = text.substring((start - DIRECT_LABEL_PREFIX_CHARS).coerceAtLeast(0), start)
+            val afterSlice = text.substring(end, (end + DIRECT_LABEL_SUFFIX_CHARS).coerceAtMost(text.length))
+            val hasDirectLabel = DIRECT_PREFIX_LABEL_REGEX.containsMatchIn(beforeSlice) ||
+                DIRECT_SUFFIX_LABEL_REGEX.containsMatchIn(afterSlice)
+            if (!hasDirectLabel) continue
+
+            val afterShort = text.substring(end, (end + 16).coerceAtMost(text.length))
+            if (UNIT_SUFFIX_REGEX.containsMatchIn(afterShort)) continue
+            return code
+        }
+        return null
     }
 
     private data class ScoredCandidate(
         val code: String,
         val score: Int,
         val index: Int,
+        val hasDirectLabel: Boolean,
     )
 
     private fun extractBestCandidate(text: String): ScoredCandidate? {
@@ -188,7 +246,12 @@ object VerificationCodeExtractor {
             val score = computeScore(token, minDistance, hasDirectLabel)
 
             if (best == null || score > best.score || (score == best.score && start < best.index)) {
-                best = ScoredCandidate(code = token, score = score, index = start)
+                best = ScoredCandidate(
+                    code = token,
+                    score = score,
+                    index = start,
+                    hasDirectLabel = hasDirectLabel,
+                )
             }
         }
         return best

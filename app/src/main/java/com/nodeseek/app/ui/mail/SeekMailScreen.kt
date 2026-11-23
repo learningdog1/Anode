@@ -1,8 +1,12 @@
 package com.nodeseek.app.ui.mail
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
+import android.os.PersistableBundle
+import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -198,6 +202,7 @@ import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -244,7 +249,6 @@ fun SeekMailScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var pendingExportTarget by remember { mutableStateOf<PendingExportTarget?>(null) }
     var pendingExternalUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
     val openApiKeyDialog: () -> Unit = {
@@ -255,28 +259,44 @@ fun SeekMailScreen(
     val createDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*"),
     ) { destinationUri ->
-        val target = pendingExportTarget
-        pendingExportTarget = null
-        if (destinationUri != null && target != null) {
-            coroutineScope.launch {
-                val bytesResult = viewModel.fetchExportBytes(target)
-                bytesResult.onSuccess { bytes ->
-                    val writeResult = withContext(Dispatchers.IO) {
-                        runCatching {
-                            context.contentResolver.openOutputStream(destinationUri)?.use { output ->
-                                output.write(bytes)
-                                output.flush()
-                            } ?: error("无法打开文件输出流")
+        val target = viewModel.consumePendingExportTarget()
+        when {
+            destinationUri != null && target != null -> {
+                coroutineScope.launch {
+                    val streamResult = withContext(Dispatchers.IO) {
+                        try {
+                            val output = context.contentResolver.openOutputStream(destinationUri)
+                                ?: return@withContext Result.failure<Long>(IllegalStateException("无法打开文件输出流"))
+                            output.use { stream ->
+                                viewModel.exportToOutputStream(target, stream)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            Result.failure(t)
                         }
                     }
-                    writeResult.onSuccess {
+                    streamResult.onSuccess {
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         snackbarHostState.showSnackbar("已保存：${target.suggestedFileName}")
                     }.onFailure { err ->
-                        snackbarHostState.showSnackbar("保存失败：${err.message ?: "写入异常"}")
+                        withContext(Dispatchers.IO) {
+                            runCatching {
+                                DocumentsContract.deleteDocument(context.contentResolver, destinationUri)
+                            }
+                        }
+                        snackbarHostState.showSnackbar("导出失败：${err.message ?: "请稍后重试"}")
                     }
-                }.onFailure { err ->
-                    snackbarHostState.showSnackbar("下载失败：${err.message ?: "请稍后重试"}")
+                }
+            }
+            destinationUri != null -> {
+                coroutineScope.launch {
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            DocumentsContract.deleteDocument(context.contentResolver, destinationUri)
+                        }
+                    }
+                    snackbarHostState.showSnackbar("导出目标已失效，请重新点击附件导出")
                 }
             }
         }
@@ -284,16 +304,17 @@ fun SeekMailScreen(
 
     val startExport: (PendingExportTarget) -> Unit = { target ->
         if (uiState.exportingKey == null) {
-            pendingExportTarget = target
+            viewModel.stageExportTarget(target)
             createDocumentLauncher.launch(target.suggestedFileName)
         }
     }
 
-    val copyWithFeedback: (label: String, value: String, message: String) -> Unit = { label, value, message ->
-        copyTextToClipboard(context, label, value)
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        coroutineScope.launch { snackbarHostState.showSnackbar(message) }
-    }
+    val copyWithFeedback: (label: String, value: String, message: String, isSensitive: Boolean) -> Unit =
+        { label, value, message, isSensitive ->
+            copyTextToClipboard(context, label, value, isSensitive = isSensitive)
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            coroutineScope.launch { snackbarHostState.showSnackbar(message) }
+        }
 
     LaunchedEffect(viewModel) {
         viewModel.snackbarEvents.collectLatest { event ->
@@ -402,7 +423,7 @@ fun SeekMailScreen(
                         isLoading = uiState.isLoadingMailboxes,
                         onSelectMailbox = viewModel::selectMailbox,
                         onCopyAddress = { address ->
-                            copyWithFeedback("Seek 邮箱地址", address, "已复制邮箱：$address")
+                            copyWithFeedback("Seek 邮箱地址", address, "已复制邮箱：$address", false)
                         },
                         onCreateMailbox = viewModel::openCreateMailboxSheet,
                     )
@@ -411,7 +432,7 @@ fun SeekMailScreen(
                         SeekMailboxMetadataStrip(
                             mailbox = selected,
                             onCopyAddress = {
-                                copyWithFeedback("Seek 邮箱地址", selected.address, "已复制邮箱：${selected.address}")
+                                copyWithFeedback("Seek 邮箱地址", selected.address, "已复制邮箱：${selected.address}", false)
                             },
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         )
@@ -454,7 +475,7 @@ fun SeekMailScreen(
                         onLongClickMail = viewModel::openMailActionSheet,
                         onToggleSelection = viewModel::toggleMailSelection,
                         onCopyCode = { code ->
-                            copyWithFeedback("验证码", code, "已复制验证码：$code")
+                            copyWithFeedback("验证码", code, "已复制验证码：$code", true)
                         },
                         bottomContentPadding = bottomContentPadding,
                         modifier = Modifier
@@ -493,10 +514,10 @@ fun SeekMailScreen(
                 },
                 onDeleteMail = { summary -> viewModel.requestDeleteMail(summary) },
                 onCopyCode = { code ->
-                    copyWithFeedback("验证码", code, "已复制验证码：$code")
+                    copyWithFeedback("验证码", code, "已复制验证码：$code", true)
                 },
-                onCopyText = { label, text, toast ->
-                    copyWithFeedback(label, text, toast)
+                onCopyText = { label, text, toast, isSensitive ->
+                    copyWithFeedback(label, text, toast, isSensitive)
                 },
                 onDownloadAttachment = { attachment ->
                     val mailId = uiState.openedMailId ?: return@SeekMailDetailReaderPane
@@ -586,7 +607,7 @@ fun SeekMailScreen(
             onRefresh = viewModel::refreshContacts,
             onSelectContact = viewModel::filterMailsByContact,
             onCopyEmail = { email ->
-                copyWithFeedback("联系人邮箱", email, "已复制邮箱：$email")
+                copyWithFeedback("联系人邮箱", email, "已复制邮箱：$email", false)
             },
             onDismiss = viewModel::dismissContactsSheet,
         )
@@ -692,6 +713,40 @@ fun SeekMailScreen(
         )
     }
 
+    if (uiState.showSshOverwriteConfirm) {
+        val existingAlias = uiState.openedVpsInsight?.matchStatus?.matchedSshProfile?.displayName
+            ?.takeIf { it.isNotBlank() } ?: "现有主机"
+        PulseAlertDialog(
+            onDismissRequest = viewModel::dismissSshOverwriteConfirm,
+            icon = Icons.Rounded.WarningAmber,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            title = "保留现有 SSH 私钥？",
+            message = "SSH 终端库中的「$existingAlias」当前使用私钥认证。邮件中包含明文密码，是否保留原有私钥仅更新账本，或改为使用邮件密码覆盖？",
+            buttons = {
+                TextButton(onClick = viewModel::dismissSshOverwriteConfirm) {
+                    Text("取消", maxLines = 1, softWrap = false)
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { viewModel.confirmIngestOpenedVpsMail(overwriteExistingSshCredentials = true) },
+                ) {
+                    Text(
+                        text = "覆盖为密码",
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+                Button(
+                    onClick = { viewModel.confirmIngestOpenedVpsMail(overwriteExistingSshCredentials = false) },
+                    shape = CircleShape,
+                ) {
+                    Text("仅更新账本", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                }
+            },
+        )
+    }
+
     if (showApiKeyDialog && uiState.hasConfiguredKey) {
         SeekMailApiKeyDialog(
             maskedKeyHint = uiState.apiKeyMaskedHint,
@@ -751,7 +806,7 @@ fun SeekMailScreen(
                     )
                     FilledTonalButton(
                         onClick = {
-                            copyWithFeedback("外部链接", targetUrl, "已复制链接地址")
+                            copyWithFeedback("外部链接", targetUrl, "已复制链接地址", false)
                         },
                         shape = CircleShape,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
@@ -957,8 +1012,8 @@ private fun SeekMailOnboardingView(
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    var draftKey by rememberSaveable { mutableStateOf("") }
-    var showKey by rememberSaveable { mutableStateOf(false) }
+    var draftKey by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -1206,9 +1261,10 @@ private fun SeekMailApiKeyDialog(
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    var draftKey by rememberSaveable { mutableStateOf("") }
-    var showKey by rememberSaveable { mutableStateOf(false) }
+    var draftKey by remember { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
     var submittedReplacement by remember { mutableStateOf(false) }
+    var showDisconnectConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(isVerifying, errorMessage) {
         if (submittedReplacement && !isVerifying) {
@@ -1221,6 +1277,22 @@ private fun SeekMailApiKeyDialog(
         }
     }
 
+    if (showDisconnectConfirm) {
+        PulseConfirmDialog(
+            onDismissRequest = { showDisconnectConfirm = false },
+            icon = Icons.Rounded.WarningAmber,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            title = "断开当前 Seek 邮箱密钥？",
+            message = "将移除本机保存的 API Key（$maskedKeyHint），并清除该密钥对应的本地缓存、标签与存档记录（不影响 seek.li 服务器原件）。",
+            confirmText = "确认断开",
+            dismissText = "取消",
+            onConfirm = {
+                showDisconnectConfirm = false
+                onDisconnect()
+            },
+        )
+    }
+
     PulseAlertDialog(
         onDismissRequest = onDismiss,
         icon = Icons.Rounded.Key,
@@ -1228,7 +1300,7 @@ private fun SeekMailApiKeyDialog(
         message = "当前已连接：$maskedKeyHint",
         buttons = {
             TextButton(
-                onClick = onDisconnect,
+                onClick = { showDisconnectConfirm = true },
                 enabled = !isVerifying,
             ) {
                 Text(
@@ -2146,6 +2218,7 @@ private fun SeekMailListPane(
                     } else {
                         null
                     },
+                    secondaryActionLoading = uiState.isLoadingMore,
                     modifier = Modifier
                         .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
                         .padding(bottom = bottomContentPadding),
@@ -2787,6 +2860,7 @@ private fun SeekMailEmptyStateCard(
     modifier: Modifier = Modifier,
     secondaryActionLabel: String? = null,
     onSecondaryAction: (() -> Unit)? = null,
+    secondaryActionLoading: Boolean = false,
 ) {
     Box(
         modifier = modifier
@@ -2842,10 +2916,20 @@ private fun SeekMailEmptyStateCard(
                     if (!secondaryActionLabel.isNullOrBlank() && onSecondaryAction != null) {
                         OutlinedButton(
                             onClick = onSecondaryAction,
+                            enabled = !secondaryActionLoading,
                             shape = CircleShape,
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                         ) {
-                            Text(secondaryActionLabel, maxLines = 1, softWrap = false)
+                            if (secondaryActionLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("加载中…", maxLines = 1, softWrap = false)
+                            } else {
+                                Text(secondaryActionLabel, maxLines = 1, softWrap = false)
+                            }
                         }
                     }
                     FilledTonalButton(
@@ -2885,7 +2969,7 @@ private fun SeekMailDetailReaderPane(
     onToggleArchive: (SeekMailSummary) -> Unit,
     onDeleteMail: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
-    onCopyText: (label: String, text: String, toast: String) -> Unit,
+    onCopyText: (label: String, text: String, toast: String, isSensitive: Boolean) -> Unit,
     onDownloadAttachment: (SeekMailAttachment) -> Unit,
     onExternalUrlClick: (String) -> Unit,
 ) {
@@ -3031,7 +3115,7 @@ private fun SeekMailDetailReaderPane(
                         expanded = headersExpanded,
                         onToggleExpanded = { headersExpanded = !headersExpanded },
                         onCopyAddress = { addr ->
-                            onCopyText("邮箱地址", addr, "已复制地址：$addr")
+                            onCopyText("邮箱地址", addr, "已复制地址：$addr", false)
                         },
                     )
                 }
@@ -3131,7 +3215,7 @@ private fun SeekMailDetailReaderPane(
                                 PlainTextReaderView(
                                     bodyText = detail.bodyText,
                                     onCopyPlainText = {
-                                        onCopyText("邮件正文", detail.bodyText, "已复制纯文本正文")
+                                        onCopyText("邮件正文", detail.bodyText, "已复制纯文本正文", false)
                                     },
                                 )
                             }
@@ -3350,7 +3434,7 @@ private fun DetailVpsMailInsightCard(
     insight: VpsMailInsightUiState,
     onTogglePasswordVisibility: () -> Unit,
     onIngest: () -> Unit,
-    onCopyText: (label: String, text: String, toast: String) -> Unit,
+    onCopyText: (label: String, text: String, toast: String, isSensitive: Boolean) -> Unit,
 ) {
     val parsed = insight.parsed
     val matchStatus = insight.matchStatus
@@ -3525,7 +3609,7 @@ private fun DetailVpsMailInsightCard(
                     label = "IPv4",
                     value = endpointDisplay,
                     monospace = true,
-                    onClick = { onCopyText("服务器 IPv4", ipv4, "已复制 IP：$ipv4") },
+                    onClick = { onCopyText("服务器 IPv4", ipv4, "已复制 IP：$ipv4", false) },
                 )
             }
 
@@ -3534,7 +3618,7 @@ private fun DetailVpsMailInsightCard(
                     label = "IPv6",
                     value = ipv6,
                     monospace = true,
-                    onClick = { onCopyText("服务器 IPv6", ipv6, "已复制 IPv6：$ipv6") },
+                    onClick = { onCopyText("服务器 IPv6", ipv6, "已复制 IPv6：$ipv6", false) },
                 )
             }
 
@@ -3544,7 +3628,7 @@ private fun DetailVpsMailInsightCard(
                     value = "${parsed.sshUsername} · 端口 ${parsed.sshPort}",
                     monospace = true,
                     onClick = {
-                        onCopyText("SSH 用户名", parsed.sshUsername, "已复制用户名：${parsed.sshUsername}")
+                        onCopyText("SSH 用户名", parsed.sshUsername, "已复制用户名：${parsed.sshUsername}", false)
                     },
                 )
             }
@@ -3620,7 +3704,7 @@ private fun DetailVpsMailInsightCard(
                     )
                 }
                 IconButton(
-                    onClick = { onCopyText("SSH 密码", password, "已复制 SSH 密码") },
+                    onClick = { onCopyText("SSH 密码", password, "已复制 SSH 密码", true) },
                     modifier = Modifier.size(28.dp),
                 ) {
                     Icon(
@@ -4124,7 +4208,10 @@ private fun AttachmentsRailSection(
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(attachments, key = { it.id }) { attachment ->
+                    itemsIndexed(
+                        items = attachments,
+                        key = { index, attachment -> "${attachment.id}_$index" },
+                    ) { _, attachment ->
                         val isDownloading = exportingKey == "att:${mailId}:${attachment.id}"
                         Row(
                             modifier = Modifier
@@ -4136,7 +4223,7 @@ private fun AttachmentsRailSection(
                                     shape = RoundedCornerShape(12.dp),
                                 )
                                 .pulseBouncyClickable(
-                                    enabled = exportingKey == null,
+                                    enabled = exportingKey == null && attachment.id.isNotBlank(),
                                     pressedScale = NodePulseMotion.chipPressScale,
                                     onClick = { onDownload(attachment) },
                                 )
@@ -4642,9 +4729,16 @@ private fun copyTextToClipboard(
     context: Context,
     label: String,
     text: String,
+    isSensitive: Boolean = false,
 ) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-    clipboard?.setPrimaryClip(ClipData.newPlainText(label, text))
+    val clip = ClipData.newPlainText(label, text)
+    if (isSensitive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clip.description.extras = PersistableBundle().apply {
+            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        }
+    }
+    clipboard?.setPrimaryClip(clip)
 }
 
 private fun readClipboardText(context: Context): String? {

@@ -22,6 +22,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import java.io.ByteArrayOutputStream
 import org.junit.Before
 import org.junit.Test
 
@@ -141,7 +142,7 @@ class SeekMailApiClientTest {
     }
 
     @Test
-    fun `getMailboxes, getMailbox, checkMailboxAvailable, createMailbox, and 400 EMAIL_ADDRESS_UNAVAILABLE`() = runTest {
+    fun `getMailboxes, checkMailboxAvailable, createMailbox, and 400 EMAIL_ADDRESS_UNAVAILABLE`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -179,11 +180,6 @@ class SeekMailApiClientTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""{"data":{"id":10,"address":"alpha@seek.li","status":1}}"""),
-        )
-        server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
                 .setBody("""{"data":{"available":true}}"""),
         )
         server.enqueue(
@@ -213,10 +209,6 @@ class SeekMailApiClientTest {
         assertEquals(3, box.archiveCount)
         assertEquals(50, box.archiveLimit)
         assertEquals("/openapi/v1/mailboxes", server.takeRequest().path)
-
-        val singleBox = client.getMailbox(dummyApiKey, 10L)
-        assertEquals(10L, singleBox.id)
-        assertEquals("/openapi/v1/mailboxes/10", server.takeRequest().path)
 
         val available = client.checkMailboxAvailable(dummyApiKey, "fresh@nodeseek.org")
         assertTrue(available)
@@ -330,7 +322,7 @@ class SeekMailApiClientTest {
     }
 
     @Test
-    fun `getUnreadMails, getMailDetail, getRawMailEml, attachments, tags, and contacts decode accurately`() = runTest {
+    fun `getUnreadMails, getMailDetail, attachments, tags, and contacts decode accurately`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -395,11 +387,6 @@ class SeekMailApiClientTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("From: security@seek.li\r\nSubject: Raw\r\n\r\nRaw EML Body"),
-        )
-        server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
                 .setBody(
                     """{"data":[{"id":"att_1","filename":"invoice.pdf","contentType":"application/pdf","size":1024},{"attachmentId":42,"name":"audit.txt","mimeType":"text/plain","sizeBytes":512}]}""",
                 ),
@@ -444,10 +431,6 @@ class SeekMailApiClientTest {
         assertEquals(12, detail.authTelemetry!!.finalScore)
         assertEquals("inbox", detail.authTelemetry!!.decision)
         assertEquals("/openapi/v1/mails/301", server.takeRequest().path)
-
-        val rawEml = client.getRawMailEml(apiKey = dummyApiKey, mailId = 301L)
-        assertTrue(rawEml.contains("Raw EML Body"))
-        assertEquals("/openapi/v1/mails/301/raw", server.takeRequest().path)
 
         val attachments = client.getAttachments(apiKey = dummyApiKey, mailId = 301L)
         assertEquals(2, attachments.size)
@@ -533,7 +516,7 @@ class SeekMailApiClientTest {
         }
 
         try {
-            client.getMailbox(dummyApiKey, 999L)
+            client.getMailDetail(dummyApiKey, 999L)
             fail("Expected 400 string error SeekMailException")
         } catch (e: SeekMailException) {
             assertEquals(SeekMailErrorKind.SERVER, e.kind)
@@ -550,7 +533,7 @@ class SeekMailApiClientTest {
         }
 
         try {
-            client.getMailbox(dummyApiKey, 404L)
+            client.getMailDetail(dummyApiKey, 404L)
             fail("Expected 404 SeekMailException")
         } catch (e: SeekMailException) {
             assertEquals(SeekMailErrorKind.NOT_FOUND, e.kind)
@@ -572,5 +555,53 @@ class SeekMailApiClientTest {
             assertEquals(SeekMailErrorKind.SERVER, e.kind)
             assertEquals(502, e.httpStatus)
         }
+    }
+
+    @Test
+    fun `downloadAttachmentToStream streams bytes, enforces maxBytes cap, and rejects unsafe attachment IDs`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("STREAMED_PAYLOAD_1234"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("EXCEEDS_MAX_LIMIT_PAYLOAD"))
+
+        val output = ByteArrayOutputStream()
+        val written = client.downloadAttachmentToStream(
+            apiKey = dummyApiKey,
+            mailId = 301L,
+            attachmentId = "att_stream_1",
+            outputStream = output,
+            maxBytes = 1024L,
+        )
+        assertEquals("STREAMED_PAYLOAD_1234".length.toLong(), written)
+        assertArrayEquals("STREAMED_PAYLOAD_1234".toByteArray(), output.toByteArray())
+        assertEquals("/openapi/v1/mails/301/attachments/att_stream_1", server.takeRequest().path)
+
+        try {
+            client.downloadAttachmentToStream(
+                apiKey = dummyApiKey,
+                mailId = 301L,
+                attachmentId = "att_huge",
+                outputStream = ByteArrayOutputStream(),
+                maxBytes = 8L,
+            )
+            fail("Expected SeekMailException when attachment exceeds maxBytes")
+        } catch (e: SeekMailException) {
+            assertEquals(SeekMailErrorKind.SERVER, e.kind)
+        }
+        server.takeRequest()
+
+        val requestsBeforeInvalid = server.requestCount
+        for (badId in listOf("", "   ", ".", "..")) {
+            try {
+                client.downloadAttachmentToStream(
+                    apiKey = dummyApiKey,
+                    mailId = 301L,
+                    attachmentId = badId,
+                    outputStream = ByteArrayOutputStream(),
+                )
+                fail("Expected SeekMailException for invalid attachmentId '$badId'")
+            } catch (e: SeekMailException) {
+                assertEquals(SeekMailErrorKind.NOT_FOUND, e.kind)
+            }
+        }
+        assertEquals(requestsBeforeInvalid, server.requestCount)
     }
 }
