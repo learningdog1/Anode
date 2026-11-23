@@ -204,7 +204,7 @@ class RadarRepositoryImpl(
     }
 
     override suspend fun markAlertsReadForTopic(topicId: Long) {
-        radarDao.markAlertsReadForTopic(topicId)
+        radarDao.markAlertsAndTrackedRepliesReadForTopic(topicId)
     }
 
     override suspend fun markAllAlertsRead() {

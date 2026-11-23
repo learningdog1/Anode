@@ -166,15 +166,75 @@ class FeedCacheAndRateLimitTest {
             cache.persistNowForTest(0L, "info", FeedSort.LATEST_REPLY, snapshotFor(3L, "info", 3_000L))
 
             val coldRestartCache = FeedDiskCache(cacheDir = dir, maxEntries = 2)
-            assertNull(coldRestartCache.get(0L, "daily", FeedSort.LATEST_REPLY))
+            assertNull(coldRestartCache.getOrLoadFromDisk(0L, "daily", FeedSort.LATEST_REPLY))
 
-            val techRestored = coldRestartCache.get(0L, "tech", FeedSort.LATEST_REPLY)
+            val techRestored = coldRestartCache.getOrLoadFromDisk(0L, "tech", FeedSort.LATEST_REPLY)
             assertNotNull(techRestored)
             assertEquals("帖子 #2", techRestored!!.result.topics.single().title)
 
-            val infoRestored = coldRestartCache.get(0L, "info", FeedSort.LATEST_REPLY)
+            val infoRestored = coldRestartCache.getOrLoadFromDisk(0L, "info", FeedSort.LATEST_REPLY)
             assertNotNull(infoRestored)
             assertEquals("帖子 #3", infoRestored!!.result.topics.single().title)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `feedDiskCache get is memory-only, isolates includeBlocked keys, and orders clear before subsequent put`() = runBlocking {
+        val dir = Files.createTempDirectory("feed_disk_cache_fifo_blocked").toFile()
+        try {
+            fun snapshotFor(id: Long, title: String) = CachedFeedSnapshot(
+                fetchedAtEpochMillis = id * 1_000L,
+                result = FeedPageResult(
+                    topics = listOf(
+                        TopicSummary(
+                            id = id,
+                            title = title,
+                            categorySlug = "tech",
+                            categoryName = "技术",
+                            authorName = "Tester",
+                        ),
+                    ),
+                    currentPage = 1,
+                    hasNextPage = true,
+                ),
+            )
+
+            // 1. includeBlocked=false vs includeBlocked=true must never collide on memory or disk
+            val cache = FeedDiskCache(cacheDir = dir, maxEntries = 8)
+            cache.put(0L, "tech", FeedSort.LATEST_REPLY, snapshotFor(10L, "不含屏蔽"), includeBlocked = false)
+            cache.put(0L, "tech", FeedSort.LATEST_REPLY, snapshotFor(20L, "含屏蔽"), includeBlocked = true)
+            cache.flushForTest()
+
+            assertEquals(10L, cache.get(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = false)?.result?.topics?.single()?.id)
+            assertEquals(20L, cache.get(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = true)?.result?.topics?.single()?.id)
+
+            // 2. Synchronous get() on a cold cache with a cancelled background scope returns null without disk I/O,
+            //    while suspend getOrLoadFromDisk() loads the persisted entry from disk.
+            val deadScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() })
+            val coldNoWarmup = FeedDiskCache(cacheDir = dir, ioScope = deadScope, maxEntries = 8)
+            assertNull(coldNoWarmup.get(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = false))
+            assertEquals(
+                10L,
+                coldNoWarmup.getOrLoadFromDisk(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = false)?.result?.topics?.single()?.id,
+            )
+            assertEquals(
+                20L,
+                coldNoWarmup.getOrLoadFromDisk(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = true)?.result?.topics?.single()?.id,
+            )
+
+            // 3. FIFO ordering: clear() followed immediately by put() must NOT delete the newer put on disk
+            cache.clear()
+            cache.put(0L, "daily", FeedSort.LATEST_REPLY, snapshotFor(99L, "清空后新写入"), includeBlocked = false)
+            cache.flushForTest()
+
+            val coldAfterClearPut = FeedDiskCache(cacheDir = dir, ioScope = deadScope, maxEntries = 8)
+            assertNull(coldAfterClearPut.getOrLoadFromDisk(0L, "tech", FeedSort.LATEST_REPLY, includeBlocked = false))
+            assertEquals(
+                99L,
+                coldAfterClearPut.getOrLoadFromDisk(0L, "daily", FeedSort.LATEST_REPLY, includeBlocked = false)?.result?.topics?.single()?.id,
+            )
         } finally {
             dir.deleteRecursively()
         }
@@ -382,9 +442,10 @@ class FeedCacheAndRateLimitTest {
         assertNotNull(forumRepository.getCachedFeed("tech", FeedSort.LATEST_REPLY))
 
         // Cold restart disk cache must NOT contain the RSS fallback snapshot for "tech", while "daily" HTML remains
+        feedDiskCache.flushForTest()
         val coldRestartCache = FeedDiskCache(cacheDir = cacheDir)
-        assertNull(coldRestartCache.get(0L, "tech", FeedSort.LATEST_REPLY))
-        assertNotNull(coldRestartCache.get(0L, "daily", FeedSort.LATEST_REPLY))
+        assertNull(coldRestartCache.getOrLoadFromDisk(0L, "tech", FeedSort.LATEST_REPLY))
+        assertNotNull(coldRestartCache.getOrLoadFromDisk(0L, "daily", FeedSort.LATEST_REPLY))
 
         // Clearing challenge makes RSS fallback no longer fresh or cached
         sessionRepository.clearChallengeRequired()

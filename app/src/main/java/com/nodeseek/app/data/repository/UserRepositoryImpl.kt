@@ -42,7 +42,7 @@ class UserRepositoryImpl(
             coroutineScope {
                 val blockedIdsDeferred = async {
                     if (activeSession != null && !isSelfSession) {
-                        runCatching {
+                        runSuspendCatching {
                             apiClientProvider().listBlockedUsers().data.map { it.blockMemberId }.toSet()
                         }.getOrDefault(emptySet())
                     } else {
@@ -137,7 +137,7 @@ class UserRepositoryImpl(
             val rows = response.resolvedDiscussions
             val resolver = knownTopicsResolver
             val knownById = if (rows.isNotEmpty() && resolver != null) {
-                runCatching { resolver.invoke(rows.map { it.postId }) }.getOrDefault(emptyMap())
+                runSuspendCatching { resolver.invoke(rows.map { it.postId }) }.getOrDefault(emptyMap())
             } else {
                 emptyMap()
             }
@@ -191,7 +191,7 @@ class UserRepositoryImpl(
 
     override suspend fun searchUsers(keyword: String): Result<List<FloorAuthor>> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            val trimmed = keyword.trim()
+            val trimmed = keyword.trim().removePrefix("@").trim()
             if (trimmed.isEmpty()) return@runDomainCatching emptyList()
             apiClientProvider().searchUsers(trimmed).memberList.map { member ->
                 FloorAuthor(

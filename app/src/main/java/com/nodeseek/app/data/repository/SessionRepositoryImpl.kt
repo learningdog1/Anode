@@ -92,6 +92,7 @@ class SessionRepositoryImpl(
     var embeddedCategoriesListener: ((List<CategoryDto>, Long) -> Unit)? = null
     var onVerifiedCallback: (() -> Unit)? = null
     var onChallengeClearedOrAuthenticated: (() -> Unit)? = null
+    var onSignedOutCallback: (() -> Unit)? = null
 
     internal fun hasStoredSessionCookie(): Boolean =
         cookieBridge.hasSessionCookie() || cookieBridge.hasAnyAuthCookie()
@@ -138,7 +139,7 @@ class SessionRepositoryImpl(
 
     override suspend fun refreshSession(): Result<AccountSession?> =
         runDomainCatching(onChallengeDetected = ::reportChallengeRequired) {
-            val config = apiClientProvider().fetchSessionConfig()
+            val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
             onConfigPayloadObserved(config)
             _sessionState.value
         }
@@ -164,7 +165,7 @@ class SessionRepositoryImpl(
             cookieBridge.flush()
             onVerifiedCallback?.invoke()
             _challengeRequired.value = false
-            val config = apiClientProvider().fetchSessionConfig()
+            val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
             onConfigPayloadObserved(config)
             if (config.user == null) {
                 throw NodeSeekApiException("登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
@@ -194,7 +195,7 @@ class SessionRepositoryImpl(
             cookieBridge.flush()
             onVerifiedCallback?.invoke()
             _challengeRequired.value = false
-            val config = apiClientProvider().fetchSessionConfig()
+            val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
             onConfigPayloadObserved(config)
             if (config.user == null) {
                 throw NodeSeekApiException("两步验证通过但登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
@@ -245,7 +246,9 @@ class SessionRepositoryImpl(
         apiClientProvider().clearTransportSessionContext()
 
         if (remoteSignOutResult.isSuccess) {
-            val verifiedConfig = runCatching { apiClientProvider().fetchSessionConfig() }.getOrNull()
+            val verifiedConfig = runSuspendCatching {
+                apiClientProvider().fetchSessionConfig(notifyObserver = false)
+            }.getOrNull()
             if (verifiedConfig?.user != null) {
                 cookieBridge.clearSessionCookies(includeClearance = true)
             }
@@ -267,5 +270,6 @@ class SessionRepositoryImpl(
         _sessionState.value = null
         sessionSnapshotStore?.clear()
         unreadCountListener?.invoke(0)
+        onSignedOutCallback?.invoke()
     }
 }

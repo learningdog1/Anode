@@ -32,7 +32,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -91,20 +90,46 @@ class ForumRepositoryImpl(
 
     fun onEmbeddedCategoriesObserved(dtos: List<CategoryDto>, accountUid: Long) {
         backgroundScope.launch {
-            runCatching {
+            runSuspendCatching {
                 val existing = categoryDao.getCategories(accountUid)
-                if (existing.isEmpty()) {
-                    val mapped = mergeWithAllCategory(dtos)
-                    if (mapped.size > 1) {
-                        val now = clockMillis()
-                        val entities = mapped.mapIndexed { index, cat ->
-                            cat.toEntity(accountUid = accountUid, sortOrder = index, syncedAtEpochMillis = now)
-                        }
+                val existingBySlug = existing.associateBy { it.slug }
+                val mapped = mergeWithAllCategory(dtos, existingBySlug = existingBySlug)
+                if (mapped.size > 1) {
+                    val now = clockMillis()
+                    val preservedSyncedAt = existing.maxOfOrNull { it.syncedAtEpochMillis } ?: now
+                    val entities = mapped.mapIndexed { index, cat ->
+                        cat.toEntity(
+                            accountUid = accountUid,
+                            sortOrder = index,
+                            syncedAtEpochMillis = if (existing.isEmpty()) now else preservedSyncedAt,
+                        )
+                    }
+                    if (existing.isEmpty() || hasCategoryMetadataChange(existing, entities)) {
                         categoryDao.replaceForAccount(accountUid, entities)
                     }
                 }
             }
         }
+    }
+
+    private fun hasCategoryMetadataChange(
+        existing: List<CategoryEntity>,
+        updated: List<CategoryEntity>,
+    ): Boolean {
+        if (existing.size != updated.size) return true
+        for (i in existing.indices) {
+            val a = existing[i]
+            val b = updated[i]
+            if (a.slug != b.slug ||
+                a.name != b.name ||
+                a.isCustomizable != b.isCustomizable ||
+                a.visibleOnHome != b.visibleOnHome ||
+                a.isAdminOnly != b.isAdminOnly
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     override fun observeCategories(): Flow<List<Category>> =
@@ -159,7 +184,8 @@ class ForumRepositoryImpl(
                     return@runDomainCatching fallback.ifEmpty { Category.DEFAULT_CATEGORIES }
                 }
 
-                val merged = mergeWithAllCategory(response.data)
+                val existingBySlug = categoryDao.getCategories(targetUid).associateBy { it.slug }
+                val merged = mergeWithAllCategory(response.data, existingBySlug = existingBySlug)
                 val now = clockMillis()
                 val entities = merged.mapIndexed { index, cat ->
                     cat.toEntity(accountUid = targetUid, sortOrder = index, syncedAtEpochMillis = now)
@@ -220,10 +246,11 @@ class ForumRepositoryImpl(
 
         // 2. Check cached feed snapshots (including persisted disk snapshots for trade & home feeds).
         val uid = currentUid
-        runCatching {
-            getSnapshot(uid, "trade", FeedSort.LATEST_REPLY)
-            getSnapshot(uid, "trade", FeedSort.NEWEST_TOPIC)
-            getSnapshot(uid, "", FeedSort.LATEST_REPLY)
+        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
+        runSuspendCatching {
+            getOrLoadSnapshot(uid, "trade", FeedSort.LATEST_REPLY, includeBlocked)
+            getOrLoadSnapshot(uid, "trade", FeedSort.NEWEST_TOPIC, includeBlocked)
+            getOrLoadSnapshot(uid, "", FeedSort.LATEST_REPLY, includeBlocked)
         }
         for (snapshot in memoryFeedSnapshots.values) {
             for (topic in snapshot.result.pinnedTopics + snapshot.result.topics) {
@@ -239,8 +266,8 @@ class ForumRepositoryImpl(
         // 3. Check local read history and bookmarks in Room for any remaining topic IDs.
         val missingIds = uniqueIds.filterNot(resolved::containsKey)
         if (missingIds.isNotEmpty()) {
-            runCatching {
-                readHistoryDao.observeByTopicIds(uid, missingIds.take(500)).first().forEach { entity ->
+            runSuspendCatching {
+                readHistoryDao.getByTopicIds(uid, missingIds.take(500)).forEach { entity ->
                     val slug = entity.categorySlug.trim()
                     val name = entity.categoryName.trim()
                     if (slug.isNotEmpty() || name.isNotEmpty()) {
@@ -257,7 +284,7 @@ class ForumRepositoryImpl(
             }
             val stillMissing = missingIds.filterNot(resolved::containsKey)
             for (id in stillMissing) {
-                val bookmark = runCatching { bookmarkDao.getBookmark(uid, id) }.getOrNull() ?: continue
+                val bookmark = runSuspendCatching { bookmarkDao.getBookmark(uid, id) }.getOrNull() ?: continue
                 val slug = bookmark.categorySlug.trim()
                 val name = bookmark.categoryName.trim()
                 if (slug.isNotEmpty() || name.isNotEmpty()) {
@@ -286,10 +313,12 @@ class ForumRepositoryImpl(
         sort: FeedSort,
     ): FeedPageResult? {
         val trimmed = categorySlug.trim()
-        val snap = getSnapshot(
+        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
+        val snap = getMemorySnapshot(
             uid = currentUid,
             categorySlug = trimmed,
             sort = sort,
+            includeBlocked = includeBlocked,
         ) ?: return null
         if (snap.result.isFromRssFallback &&
             !shouldPreferRssForPage1(trimmed) &&
@@ -306,10 +335,12 @@ class ForumRepositoryImpl(
         maxAgeMillis: Long,
     ): Boolean {
         val trimmed = categorySlug.trim()
-        val snap = getSnapshot(
+        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
+        val snap = getMemorySnapshot(
             uid = currentUid,
             categorySlug = trimmed,
             sort = sort,
+            includeBlocked = includeBlocked,
         ) ?: return false
         if (snap.result.isFromRssFallback) {
             val rssStillExpected = shouldPreferRssForPage1(trimmed) ||
@@ -342,7 +373,12 @@ class ForumRepositoryImpl(
         val usePreferredRss = safePage == 1 && shouldPreferRssForPage1(trimmedSlug)
 
         if (safePage == 1) {
-            val cached = getSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort)
+            val cached = getOrLoadSnapshot(
+                uid = uid,
+                categorySlug = trimmedSlug,
+                sort = sort,
+                includeBlocked = effectiveIncludeBlocked,
+            )
             val cacheFreshEnoughForForceCooldown = cached != null &&
                 (now - cached.fetchedAtEpochMillis) in 0L until MIN_FORCE_REFRESH_INTERVAL_MS &&
                 (!cached.result.isFromRssFallback || usePreferredRss)
@@ -354,7 +390,12 @@ class ForumRepositoryImpl(
 
         if (now < rateLimitedUntilEpochMillis) {
             if (!forceRefresh && safePage == 1) {
-                getSnapshot(uid = uid, categorySlug = trimmedSlug, sort = sort)?.let { cached ->
+                getOrLoadSnapshot(
+                    uid = uid,
+                    categorySlug = trimmedSlug,
+                    sort = sort,
+                    includeBlocked = effectiveIncludeBlocked,
+                )?.let { cached ->
                     return Result.success(reEnrichFeedResult(cached.result))
                 }
             }
@@ -388,6 +429,7 @@ class ForumRepositoryImpl(
                         categorySlug = trimmedSlug,
                         sort = sort,
                         result = result,
+                        includeBlocked = effectiveIncludeBlocked,
                         persistToDisk = false,
                     )
                     result
@@ -409,7 +451,13 @@ class ForumRepositoryImpl(
                 )
                 val result = parsed.toEnrichedFeedResult(sort = sort)
                 if (safePage == 1) {
-                    saveSnapshot(uid = currentUid, categorySlug = trimmedSlug, sort = sort, result = result)
+                    saveSnapshot(
+                        uid = currentUid,
+                        categorySlug = trimmedSlug,
+                        sort = sort,
+                        result = result,
+                        includeBlocked = effectiveIncludeBlocked,
+                    )
                 }
                 Result.success(result)
             } catch (c: CancellationException) {
@@ -418,7 +466,7 @@ class ForumRepositoryImpl(
                 sessionRepository.reportChallengeRequired()
                 val isSignedOutGuest = sessionRepository.sessionState.value == null
                 if (isSignedOutGuest && safePage == 1 && trimmedSlug != "inside") {
-                    val rssFallback = runCatching {
+                    val rssFallback = runSuspendCatching {
                         fetchAndFilterRssFallback(
                             categorySlug = trimmedSlug,
                             sort = sort,
@@ -431,6 +479,7 @@ class ForumRepositoryImpl(
                             categorySlug = trimmedSlug,
                             sort = sort,
                             result = rssFallback,
+                            includeBlocked = effectiveIncludeBlocked,
                             persistToDisk = false,
                         )
                         return@singleFlightFeed Result.success(rssFallback)
@@ -451,9 +500,15 @@ class ForumRepositoryImpl(
         val safePage = page.coerceAtLeast(1)
         val uid = currentUid
         val now = clockMillis()
+        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
 
         if (safePage == 1 && forceRefresh) {
-            val cached = getSnapshot(uid = uid, categorySlug = "", sort = FeedSort.CURATED)
+            val cached = getOrLoadSnapshot(
+                uid = uid,
+                categorySlug = "",
+                sort = FeedSort.CURATED,
+                includeBlocked = includeBlocked,
+            )
             if (cached != null && (now - cached.fetchedAtEpochMillis) in 0L until MIN_FORCE_REFRESH_INTERVAL_MS) {
                 return Result.success(reEnrichFeedResult(cached.result))
             }
@@ -461,7 +516,12 @@ class ForumRepositoryImpl(
 
         if (now < rateLimitedUntilEpochMillis) {
             if (!forceRefresh && safePage == 1) {
-                getSnapshot(uid = uid, categorySlug = "", sort = FeedSort.CURATED)?.let { cached ->
+                getOrLoadSnapshot(
+                    uid = uid,
+                    categorySlug = "",
+                    sort = FeedSort.CURATED,
+                    includeBlocked = includeBlocked,
+                )?.let { cached ->
                     return Result.success(reEnrichFeedResult(cached.result))
                 }
             }
@@ -473,7 +533,6 @@ class ForumRepositoryImpl(
             )
         }
 
-        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
         val requestKey = FeedRequestKey(
             accountUid = uid,
             categorySlug = "",
@@ -491,7 +550,13 @@ class ForumRepositoryImpl(
                 )
                 val result = parsed.toEnrichedFeedResult(sort = FeedSort.CURATED)
                 if (safePage == 1) {
-                    saveSnapshot(uid = currentUid, categorySlug = "", sort = FeedSort.CURATED, result = result)
+                    saveSnapshot(
+                        uid = currentUid,
+                        categorySlug = "",
+                        sort = FeedSort.CURATED,
+                        result = result,
+                        includeBlocked = includeBlocked,
+                    )
                 }
                 Result.success(result)
             } catch (c: CancellationException) {
@@ -651,7 +716,7 @@ class ForumRepositoryImpl(
             cachedRssFeed = null
         }
         if (topicId != null && topicId > 0L) {
-            runCatching {
+            runSuspendCatching {
                 bookmarkDao.updateOfflineSnapshot(
                     accountUid = currentUid,
                     topicId = topicId,
@@ -728,14 +793,28 @@ class ForumRepositoryImpl(
         }
     }
 
-    private fun getSnapshot(
+    private fun getMemorySnapshot(
         uid: Long,
         categorySlug: String,
         sort: FeedSort,
+        includeBlocked: Boolean = false,
     ): CachedFeedSnapshot? {
-        val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort)
+        val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort, includeBlocked)
         memoryFeedSnapshots[key]?.let { return it }
-        return feedDiskCache?.get(uid, categorySlug, sort)?.also { loaded ->
+        return feedDiskCache?.get(uid, categorySlug, sort, includeBlocked)?.also { loaded ->
+            memoryFeedSnapshots[key] = loaded
+        }
+    }
+
+    private suspend fun getOrLoadSnapshot(
+        uid: Long,
+        categorySlug: String,
+        sort: FeedSort,
+        includeBlocked: Boolean = false,
+    ): CachedFeedSnapshot? {
+        val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort, includeBlocked)
+        memoryFeedSnapshots[key]?.let { return it }
+        return feedDiskCache?.getOrLoadFromDisk(uid, categorySlug, sort, includeBlocked)?.also { loaded ->
             memoryFeedSnapshots[key] = loaded
         }
     }
@@ -745,16 +824,17 @@ class ForumRepositoryImpl(
         categorySlug: String,
         sort: FeedSort,
         result: FeedPageResult,
+        includeBlocked: Boolean = false,
         persistToDisk: Boolean = !result.isFromRssFallback,
     ) {
         val snapshot = CachedFeedSnapshot(
             fetchedAtEpochMillis = clockMillis(),
             result = result,
         )
-        val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort)
+        val key = FeedDiskCache.buildCacheKey(uid, categorySlug, sort, includeBlocked)
         memoryFeedSnapshots[key] = snapshot
         if (persistToDisk) {
-            feedDiskCache?.put(uid, categorySlug, sort, snapshot)
+            feedDiskCache?.put(uid, categorySlug, sort, snapshot, includeBlocked = includeBlocked)
         }
     }
 
@@ -773,12 +853,12 @@ class ForumRepositoryImpl(
         }.distinct().take(900)
         if (allIds.isEmpty()) return result
 
-        val readMap = runCatching {
-            readHistoryDao.observeByTopicIds(uid, allIds).first()
+        val readMap = runSuspendCatching {
+            readHistoryDao.getByTopicIds(uid, allIds)
                 .associate { it.topicId to it.toDomain() }
         }.getOrDefault(emptyMap())
-        val bookmarkedIds = runCatching {
-            bookmarkDao.observeBookmarkedTopicIds(uid).first().toSet()
+        val bookmarkedIds = runSuspendCatching {
+            bookmarkDao.getBookmarkedTopicIds(uid).toSet()
         }.getOrDefault(emptySet())
 
         fun TopicSummary.withFreshState(): TopicSummary {
@@ -837,14 +917,14 @@ class ForumRepositoryImpl(
         val readMap = if (allIds.isEmpty()) {
             emptyMap()
         } else {
-            runCatching {
-                readHistoryDao.observeByTopicIds(uid, allIds).first()
+            runSuspendCatching {
+                readHistoryDao.getByTopicIds(uid, allIds)
                     .associate { it.topicId to it.toDomain() }
             }.getOrDefault(emptyMap())
         }
 
-        val bookmarkedIds = runCatching {
-            bookmarkDao.observeBookmarkedTopicIds(uid).first().toSet()
+        val bookmarkedIds = runSuspendCatching {
+            bookmarkDao.getBookmarkedTopicIds(uid).toSet()
         }.getOrDefault(emptySet())
 
         val mappedPinned = pinnedTopics.map { dto ->
@@ -881,31 +961,58 @@ class ForumRepositoryImpl(
     }
 
     private fun cacheDetailAsSummary(detail: TopicDetailPage) {
-        bookmarkAndHistoryRepository?.cacheTopicSummaries(listOf(detail.toTopicSummary()))
+        val existing = bookmarkAndHistoryRepository?.getCachedTopicSummary(detail.topicId)
+        val mergedSummary = detail.toTopicSummary(existing)
+        bookmarkAndHistoryRepository?.cacheTopicSummaries(listOf(mergedSummary))
     }
 
-    private fun TopicDetailPage.toTopicSummary(): TopicSummary = TopicSummary(
-        id = topicId,
-        title = title,
-        categorySlug = categorySlug,
-        categoryName = categoryName,
-        authorId = author.uid,
-        authorName = author.username,
-        authorAvatarUrl = author.avatarUrl,
-        viewCount = viewCount,
-        replyCount = estimatedTotalFloors,
-        lastActivityIso = createdAtIso.orEmpty(),
-        requiredViewLevel = requiredViewLevel.takeIf { it > 0 },
-        isLocked = isLocked,
-        isBookmarked = isBookmarked == true,
-        authorLevel = author.level,
-        drumstickCount = openingFloor?.drumstickCount ?: 0,
-    )
+    private fun TopicDetailPage.toTopicSummary(existing: TopicSummary? = null): TopicSummary {
+        val isExactFloorCount = currentPage >= totalPages || totalPages <= 1
+        val resolvedReplyCount = when {
+            isExactFloorCount -> maxOf(estimatedTotalFloors, existing?.replyCount ?: 0)
+            existing != null && existing.replyCount > 0 -> existing.replyCount
+            else -> estimatedTotalFloors
+        }
+        val resolvedActivityIso = existing?.lastActivityIso?.takeIf { it.isNotBlank() }
+            ?: replies.lastOrNull()?.createdAtIso?.takeIf { it.isNotBlank() }
+            ?: createdAtIso.orEmpty()
+        return TopicSummary(
+            id = topicId,
+            title = title,
+            categorySlug = categorySlug.ifBlank { existing?.categorySlug.orEmpty() },
+            categoryName = categoryName.ifBlank { existing?.categoryName.orEmpty() },
+            authorId = author.uid.takeIf { it > 0L } ?: existing?.authorId,
+            authorName = author.username.ifBlank { existing?.authorName.orEmpty() },
+            authorAvatarUrl = author.avatarUrl.ifBlank { existing?.authorAvatarUrl.orEmpty() },
+            viewCount = maxOf(viewCount, existing?.viewCount ?: 0),
+            replyCount = resolvedReplyCount,
+            lastActivityIso = resolvedActivityIso,
+            requiredViewLevel = requiredViewLevel.takeIf { it > 0 } ?: existing?.requiredViewLevel,
+            isLocked = isLocked,
+            isBookmarked = isBookmarked == true,
+            authorLevel = author.level ?: existing?.authorLevel,
+            drumstickCount = maxOf(openingFloor?.drumstickCount ?: 0, existing?.drumstickCount ?: 0),
+        )
+    }
 
-    private fun mergeWithAllCategory(dtos: List<CategoryDto>): List<Category> {
+    private fun mergeWithAllCategory(
+        dtos: List<CategoryDto>,
+        existingBySlug: Map<String, CategoryEntity> = emptyMap(),
+    ): List<Category> {
         val seen = HashSet<String>()
-        val dynamic = dtos.mapNotNull { it.toDomainCategoryOrNull() }
-            .filter { seen.add(it.slug) }
+        val dynamic = dtos.mapNotNull { dto ->
+            val mapped = dto.toDomainCategoryOrNull() ?: return@mapNotNull null
+            val existing = existingBySlug[mapped.slug]
+            if (existing != null) {
+                mapped.copy(
+                    isCustomizable = dto.customizable ?: existing.isCustomizable,
+                    visibleOnHome = dto.showInIndex ?: existing.visibleOnHome,
+                    isAdminOnly = dto.adminOnly ?: existing.isAdminOnly,
+                )
+            } else {
+                mapped
+            }
+        }.filter { seen.add(it.slug) }
         return listOf(Category.DEFAULT_CATEGORIES.first()) + dynamic
     }
 

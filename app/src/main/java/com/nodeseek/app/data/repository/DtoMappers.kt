@@ -197,6 +197,18 @@ internal fun Throwable.mapToDomainThrowable(onChallengeDetected: () -> Unit): Th
     else -> this
 }
 
+internal suspend inline fun <T> runSuspendCatching(
+    crossinline block: suspend () -> T,
+): Result<T> {
+    return try {
+        Result.success(block())
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        Result.failure(t)
+    }
+}
+
 internal suspend inline fun <T> runDomainCatching(
     crossinline onChallengeDetected: () -> Unit,
     crossinline block: suspend () -> T,
