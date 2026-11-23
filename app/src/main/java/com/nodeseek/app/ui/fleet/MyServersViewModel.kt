@@ -33,6 +33,8 @@ import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -41,6 +43,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -51,6 +56,7 @@ import java.math.BigDecimal
 import java.time.Clock
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 enum class MyServersTab(val label: String) {
@@ -160,6 +166,8 @@ data class MyServersUiState(
     val panelManagerInitialSection: PanelManagerSection = PanelManagerSection.PANELS,
     val panelTestState: PanelTestUiState = PanelTestUiState.Idle,
     val panelSaveError: String? = null,
+    val panelSaveSuccessVersion: Long = 0L,
+    val isUsingSoftwareTokenFallback: Boolean = false,
     val assetEditorDraft: AssetEditorDraft? = null,
     val assetSaveError: String? = null,
     val salePostAsset: VpsAssetRecord? = null,
@@ -176,6 +184,7 @@ class MyServersViewModel(
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
     private val idleThresholdConfig: FleetIdleThresholdConfig = FleetIdleThresholdConfig(),
     initialTab: MyServersTab = MyServersTab.PROBES,
+    private val computationDispatcher: CoroutineDispatcher? = null,
 ) : ViewModel() {
 
     private val _selectedTab = MutableStateFlow(initialTab)
@@ -185,6 +194,7 @@ class MyServersViewModel(
     private val _panelManagerInitialSection = MutableStateFlow(PanelManagerSection.PANELS)
     private val _panelTestState = MutableStateFlow<PanelTestUiState>(PanelTestUiState.Idle)
     private val _panelSaveError = MutableStateFlow<String?>(null)
+    private val _panelSaveSuccessVersion = MutableStateFlow(0L)
     private val _assetEditorDraft = MutableStateFlow<AssetEditorDraft?>(null)
     private val _assetSaveError = MutableStateFlow<String?>(null)
     private val _salePostAsset = MutableStateFlow<VpsAssetRecord?>(null)
@@ -209,6 +219,7 @@ class MyServersViewModel(
         val editorDraft: AssetEditorDraft?,
         val assetSaveError: String?,
         val panelSaveError: String?,
+        val panelSaveSuccessVersion: Long,
         val saleAsset: VpsAssetRecord?,
         val bindingAsset: VpsAssetRecord?,
     )
@@ -222,6 +233,7 @@ class MyServersViewModel(
         val isRefreshing: Boolean,
         val lastSyncEpochMillis: Long,
         val panelErrors: Map<String, String>,
+        val isUsingSoftwareTokenFallback: Boolean,
     )
 
     private val navFilterFlow = combine(
@@ -251,16 +263,26 @@ class MyServersViewModel(
     }
 
     private val modalFlow = combine(
-        _assetEditorDraft,
-        _assetSaveError,
-        _panelSaveError,
-        _salePostAsset,
-        _bindingProbeAsset,
-    ) { draft, assetErr, panelErr, saleAsset, bindingAsset ->
+        combine(
+            _assetEditorDraft,
+            _assetSaveError,
+            _panelSaveError,
+        ) { draft, assetErr, panelErr ->
+            Triple(draft, assetErr, panelErr)
+        },
+        combine(
+            _panelSaveSuccessVersion,
+            _salePostAsset,
+            _bindingProbeAsset,
+        ) { saveVer, saleAsset, bindingAsset ->
+            Triple(saveVer, saleAsset, bindingAsset)
+        },
+    ) { (draft, assetErr, panelErr), (saveVer, saleAsset, bindingAsset) ->
         SheetModalState(
             editorDraft = draft,
             assetSaveError = assetErr,
             panelSaveError = panelErr,
+            panelSaveSuccessVersion = saveVer,
             saleAsset = saleAsset,
             bindingAsset = bindingAsset,
         )
@@ -280,10 +302,11 @@ class MyServersViewModel(
             fleetRepository.isRefreshingFlow,
             fleetRepository.lastSyncEpochMillisFlow,
             fleetRepository.panelErrorsFlow,
-        ) { cpuHistory, refreshing, lastSync, errors ->
-            Quad(cpuHistory, refreshing, lastSync, errors)
+            fleetRepository.isUsingSoftwareTokenFallbackFlow,
+        ) { cpuHistory, refreshing, lastSync, errors, swFallback ->
+            Quint(cpuHistory, refreshing, lastSync, errors, swFallback)
         },
-    ) { (panels, snapshots, assets, settings), (cpuHistory, refreshing, lastSync, errors) ->
+    ) { (panels, snapshots, assets, settings), (cpuHistory, refreshing, lastSync, errors, swFallback) ->
         RepoCollections(
             panels = panels,
             snapshots = snapshots,
@@ -293,15 +316,41 @@ class MyServersViewModel(
             isRefreshing = refreshing,
             lastSyncEpochMillis = lastSync,
             panelErrors = errors,
+            isUsingSoftwareTokenFallback = swFallback,
         )
     }
 
-    val uiState: StateFlow<MyServersUiState> = combine(
-        repoFlow,
+    // Decoupled from 2s probe CPU/net ticks: only recomputes BigDecimal CNY costs & renewals when
+    // assets, FX rates, or probe node total/online counts actually change.
+    private val probeOnlineCountsFlow = fleetRepository.snapshotsFlow
+        .map { snaps -> snaps.size to snaps.count { it.isOnline } }
+        .distinctUntilChanged()
+
+    private val portfolioSummaryFlow: Flow<Pair<FxRatesState?, FleetPortfolioSummary>> = combine(
+        fleetRepository.assetsFlow,
         exchangeRateRepository.state,
+        probeOnlineCountsFlow,
+    ) { assets, fxState, (totalNodes, onlineNodes) ->
+        val base = FleetPortfolioCalculator.summarize(
+            assets = assets,
+            snapshots = emptyList(),
+            fxRatesState = fxState,
+            today = todayProvider(),
+        )
+        val offlineNodes = (totalNodes - onlineNodes).coerceAtLeast(0)
+        fxState to base.copy(
+            totalProbeNodeCount = totalNodes,
+            onlineProbeCount = onlineNodes,
+            offlineProbeCount = offlineNodes,
+        )
+    }
+
+    private val rawUiStateFlow: Flow<MyServersUiState> = combine(
+        repoFlow,
+        portfolioSummaryFlow,
         navFilterFlow,
         modalFlow,
-    ) { repo, fxState, nav, modals ->
+    ) { repo, (fxState, summary), nav, modals ->
         val effectivePanelFilter = nav.panelIdFilter?.takeIf { id ->
             repo.panels.any { it.id == id }
         }
@@ -371,13 +420,6 @@ class MyServersViewModel(
                     .thenBy { it.probeKey },
             )
 
-        val summary = FleetPortfolioCalculator.summarize(
-            assets = repo.assets,
-            snapshots = repo.snapshots,
-            fxRatesState = fxState,
-            today = today,
-        )
-
         MyServersUiState(
             selectedTab = nav.tab,
             probeFilter = nav.probeFilter,
@@ -401,12 +443,22 @@ class MyServersViewModel(
             panelManagerInitialSection = nav.panelManagerInitialSection,
             panelTestState = nav.panelTestState,
             panelSaveError = modals.panelSaveError,
+            panelSaveSuccessVersion = modals.panelSaveSuccessVersion,
+            isUsingSoftwareTokenFallback = repo.isUsingSoftwareTokenFallback,
             assetEditorDraft = modals.editorDraft,
             assetSaveError = modals.assetSaveError,
             salePostAsset = modals.saleAsset,
             bindingProbeAsset = modals.bindingAsset,
         )
-    }.stateIn(
+    }
+
+    val uiState: StateFlow<MyServersUiState> = (
+        if (computationDispatcher != null) {
+            rawUiStateFlow.flowOn(computationDispatcher)
+        } else {
+            rawUiStateFlow
+        }
+        ).stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
         initialValue = MyServersUiState(selectedTab = initialTab),
@@ -513,6 +565,7 @@ class MyServersViewModel(
             try {
                 val saved = fleetRepository.upsertPanel(config)
                 _panelSaveError.value = null
+                _panelSaveSuccessVersion.value += 1L
                 syncBackgroundSchedule()
                 _snackbarChannel.trySend("已保存探针面板「${saved.name}」")
                 fleetRepository.refreshPanel(saved.id).onFailure { err ->
@@ -695,7 +748,9 @@ class MyServersViewModel(
             if (snapshot.diskTotalBytes > 0L) add(formatBytesBinary(snapshot.diskTotalBytes))
         }
         val quotaGb = snapshot.trafficLimitBytes?.takeIf { it > 0L }?.let { bytes ->
-            (bytes / (1024.0 * 1024.0 * 1024.0)).toInt().toString()
+            val gb = bytes / (1024.0 * 1024.0 * 1024.0)
+            val formatted = String.format(Locale.US, "%.1f", gb)
+            if (formatted.endsWith(".0")) formatted.dropLast(2) else formatted
         }.orEmpty()
 
         _assetSaveError.value = null
@@ -984,6 +1039,7 @@ class MyServersViewModel(
     }
 
     private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+    private data class Quint<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 
     companion object {
         const val DEFAULT_FOREGROUND_POLL_INTERVAL_MS = 2_000L
@@ -1003,6 +1059,7 @@ class MyServersViewModel(
                     exchangeRateRepository = exchangeRateRepository,
                     workScheduler = workScheduler,
                     initialTab = initialTab,
+                    computationDispatcher = Dispatchers.Default,
                 ) as T
             }
         }

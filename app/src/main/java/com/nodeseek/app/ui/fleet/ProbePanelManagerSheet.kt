@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
@@ -54,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -63,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +73,8 @@ import androidx.compose.ui.unit.dp
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
+import com.nodeseek.app.ui.components.PulseConfirmDialog
+import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -102,24 +107,29 @@ internal fun ProbePanelManagerSheet(
     saveError: String? = null,
     onClearSaveError: () -> Unit = {},
     initialSection: PanelManagerSection = PanelManagerSection.PANELS,
+    panelSaveSuccessVersion: Long = 0L,
+    isUsingSoftwareTokenFallback: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.90f).dp
     val ext = NodePulseThemeTokens.extendedColors
     val scrollState = rememberScrollState()
 
-    var editingPanelId by remember { mutableStateOf<String?>(null) }
-    var showForm by remember(panels.isEmpty(), initialSection) {
+    var editingPanelId by rememberSaveable { mutableStateOf<String?>(null) }
+    var editingPanelDecryptionFailed by rememberSaveable { mutableStateOf(false) }
+    var showForm by rememberSaveable(panels.isEmpty(), initialSection) {
         mutableStateOf(panels.isEmpty() && initialSection == PanelManagerSection.PANELS)
     }
-    var pendingSavedPanelId by remember { mutableStateOf<String?>(null) }
-    var nameInput by remember { mutableStateOf("") }
-    var urlInput by remember { mutableStateOf("") }
-    var panelType by remember { mutableStateOf(ProbePanelType.AUTO) }
+    var awaitingSaveVersion by remember { mutableStateOf<Long?>(null) }
+    var pendingDeletePanel by remember { mutableStateOf<ProbePanelConfig?>(null) }
+    var nameInput by rememberSaveable { mutableStateOf("") }
+    var urlInput by rememberSaveable { mutableStateOf("") }
+    var panelType by rememberSaveable { mutableStateOf(ProbePanelType.AUTO) }
+    // Security: never persist plaintext API token / Cookie into savedInstanceState Bundle.
     var tokenInput by remember { mutableStateOf("") }
     var showToken by remember { mutableStateOf(false) }
-    var notifyOnOffline by remember { mutableStateOf(true) }
-    var notifyOnRecovery by remember { mutableStateOf(false) }
+    var notifyOnOffline by rememberSaveable { mutableStateOf(true) }
+    var notifyOnRecovery by rememberSaveable { mutableStateOf(false) }
 
     var hasAutoScrolledToMonitor by remember(initialSection) { mutableStateOf(false) }
 
@@ -134,13 +144,13 @@ internal fun ProbePanelManagerSheet(
         }
     }
 
-    LaunchedEffect(panels, saveError, pendingSavedPanelId) {
-        val targetId = pendingSavedPanelId ?: return@LaunchedEffect
+    LaunchedEffect(panelSaveSuccessVersion, saveError, awaitingSaveVersion) {
+        val targetVersion = awaitingSaveVersion ?: return@LaunchedEffect
         if (saveError != null) {
-            pendingSavedPanelId = null
+            awaitingSaveVersion = null
             showForm = true
-        } else if (panels.any { it.id == targetId }) {
-            pendingSavedPanelId = null
+        } else if (panelSaveSuccessVersion > targetVersion) {
+            awaitingSaveVersion = null
             showForm = false
             onClearTestState()
         }
@@ -148,7 +158,8 @@ internal fun ProbePanelManagerSheet(
 
     fun resetFormForNew() {
         editingPanelId = null
-        pendingSavedPanelId = null
+        editingPanelDecryptionFailed = false
+        awaitingSaveVersion = null
         nameInput = ""
         urlInput = ""
         panelType = ProbePanelType.AUTO
@@ -163,7 +174,8 @@ internal fun ProbePanelManagerSheet(
 
     fun loadPanelIntoForm(panel: ProbePanelConfig) {
         editingPanelId = panel.id
-        pendingSavedPanelId = null
+        editingPanelDecryptionFailed = panel.tokenDecryptionFailed
+        awaitingSaveVersion = null
         nameInput = panel.name
         urlInput = panel.baseUrl
         panelType = panel.panelType
@@ -181,16 +193,18 @@ internal fun ProbePanelManagerSheet(
             ?.result
             ?.takeIf { it.success }
             ?.detectedPanelType
+        val cleanToken = tokenInput.trim().takeIf { it.isNotEmpty() }
         return ProbePanelConfig(
             id = editingPanelId ?: UUID.randomUUID().toString(),
             name = nameInput.trim().ifBlank { urlInput.trim() },
             baseUrl = urlInput.trim(),
             panelType = panelType,
             resolvedPanelType = detectedType,
-            apiToken = tokenInput.trim().takeIf { it.isNotEmpty() },
+            apiToken = cleanToken,
             notifyOnOffline = notifyOnOffline,
             notifyOnRecovery = notifyOnRecovery,
             enabled = true,
+            tokenDecryptionFailed = editingPanelDecryptionFailed && cleanToken == null,
         )
     }
 
@@ -223,7 +237,11 @@ internal fun ProbePanelManagerSheet(
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        text = "支持哪吒 v0 / 哪吒 v1 / Komari · Token Keystore 加密存储",
+                        text = if (isUsingSoftwareTokenFallback) {
+                            "支持哪吒 v0 / 哪吒 v1 / Komari · Token 已降级为本地软件加密"
+                        } else {
+                            "支持哪吒 v0 / 哪吒 v1 / Komari · Token Keystore 加密存储"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -267,7 +285,7 @@ internal fun ProbePanelManagerSheet(
                         PanelListCard(
                             panel = panel,
                             onEdit = { loadPanelIntoForm(panel) },
-                            onDelete = { onDeletePanel(panel.id) },
+                            onDelete = { pendingDeletePanel = panel },
                             onToggleOfflineAlert = { enabled -> onToggleOfflineAlert(panel, enabled) },
                         )
                     }
@@ -364,8 +382,16 @@ internal fun ProbePanelManagerSheet(
                                 onClearTestState()
                             },
                             label = "API Token / Cookie（公开可留空）",
-                            placeholder = "哪吒 API Token / JWT / Komari Key",
+                            placeholder = if (editingPanelDecryptionFailed) {
+                                "原 Token 解密失败，请重新输入新 Token"
+                            } else {
+                                "哪吒 API Token / JWT / Komari Key"
+                            },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false,
+                            ),
                             visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
                             trailingIcon = {
                                 IconButton(onClick = { showToken = !showToken }) {
@@ -376,17 +402,31 @@ internal fun ProbePanelManagerSheet(
                                 }
                             },
                             supportingContent = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp),
-                                        tint = MaterialTheme.colorScheme.primary,
-                                    )
-                                    Text("令牌经 Android Keystore AES-GCM 加密保存在本地")
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    if (editingPanelDecryptionFailed && tokenInput.isBlank()) {
+                                        Text(
+                                            text = "旧 Token 无法解密；直接保存其他字段将保留原密文，或在此重新输入覆盖",
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.Lock,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(12.dp),
+                                            tint = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            if (isUsingSoftwareTokenFallback) {
+                                                "当前设备 Keystore 不可用，令牌已降级使用本地软件 AES-GCM 加密保存"
+                                            } else {
+                                                "令牌经 Android Keystore AES-GCM 加密保存在本地"
+                                            },
+                                        )
+                                    }
                                 }
                             },
                             containerColor = ext.cardSurface,
@@ -526,7 +566,7 @@ internal fun ProbePanelManagerSheet(
                                 onClick = {
                                     onClearSaveError()
                                     val candidate = buildCandidateConfig()
-                                    pendingSavedPanelId = candidate.id
+                                    awaitingSaveVersion = panelSaveSuccessVersion
                                     onSavePanel(candidate)
                                 },
                                 enabled = urlInput.isNotBlank(),
@@ -627,6 +667,36 @@ internal fun ProbePanelManagerSheet(
                                     },
                                 )
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("仅电量充足时后台巡检", style = MaterialTheme.typography.bodySmall)
+                                Switch(
+                                    checked = monitorSettings.requireBatteryNotLowInBackground,
+                                    onCheckedChange = { batteryNotLow ->
+                                        onUpdateMonitorSettings(
+                                            monitorSettings.copy(requireBatteryNotLowInBackground = batteryNotLow),
+                                        )
+                                    },
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("全局节点恢复在线通知", style = MaterialTheme.typography.bodySmall)
+                                Switch(
+                                    checked = monitorSettings.notifyOnRecovery,
+                                    onCheckedChange = { notifyRecovery ->
+                                        onUpdateMonitorSettings(
+                                            monitorSettings.copy(notifyOnRecovery = notifyRecovery),
+                                        )
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -634,6 +704,25 @@ internal fun ProbePanelManagerSheet(
                 Spacer(modifier = Modifier.height(12.dp))
             }
         }
+    }
+
+    pendingDeletePanel?.let { targetPanel ->
+        PulseConfirmDialog(
+            onDismissRequest = { pendingDeletePanel = null },
+            title = "移除探针面板",
+            message = "确定要移除「${targetPanel.name}」吗？该面板下的实时快照、30 天 CPU 统计与资产探针绑定关系将一并清除。",
+            confirmText = "确认移除",
+            tone = PulseDialogTone.DESTRUCTIVE,
+            icon = Icons.Rounded.DeleteOutline,
+            onConfirm = {
+                if (editingPanelId == targetPanel.id) {
+                    editingPanelId = null
+                    showForm = false
+                }
+                onDeletePanel(targetPanel.id)
+                pendingDeletePanel = null
+            },
+        )
     }
 }
 
@@ -718,9 +807,17 @@ private fun PanelListCard(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = if (!panel.apiToken.isNullOrBlank()) "已加密保存 Token" else "公开模式（无 Token）",
+                text = when {
+                    panel.tokenDecryptionFailed -> "Token 解密失败（请编辑重新填写）"
+                    !panel.apiToken.isNullOrBlank() -> "已加密保存 Token"
+                    else -> "公开模式（无 Token）"
+                },
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (panel.tokenDecryptionFailed) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier

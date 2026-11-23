@@ -1385,11 +1385,11 @@ private fun TicketPrimaryActionPill(
             onClick = onOpenSalePost,
         )
         AssetTicketVisualTone.CRITICAL_OR_EXPIRED -> PillActionSpec(
-            label = "出机",
-            icon = Icons.Rounded.LocalOffer,
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            onClick = onOpenSalePost,
+            label = "已续费",
+            icon = Icons.Rounded.Check,
+            containerColor = MaterialTheme.colorScheme.error,
+            contentColor = MaterialTheme.colorScheme.onError,
+            onClick = onMarkRenewed,
         )
         AssetTicketVisualTone.NORMAL,
         AssetTicketVisualTone.UNKNOWN,
@@ -1766,7 +1766,7 @@ private fun AssetTicketOverflowMenu(
                 onMarkRenewed()
             },
         )
-        if (tone == AssetTicketVisualTone.RENEWAL_DUE) {
+        if (tone == AssetTicketVisualTone.RENEWAL_DUE || tone == AssetTicketVisualTone.CRITICAL_OR_EXPIRED) {
             DropdownMenuItem(
                 text = { Text("生成出售帖（出机）") },
                 leadingIcon = { Icon(Icons.Rounded.LocalOffer, contentDescription = null, modifier = Modifier.size(18.dp)) },

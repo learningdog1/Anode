@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -141,17 +142,23 @@ internal fun FleetSalePostSheet(
             ?: BigDecimal.ZERO
     }
 
-    var askingPriceText by remember(asset.id, baselineRemainingValue) {
+    var hasUserEditedAskingPrice by rememberSaveable(asset.id) { mutableStateOf(false) }
+    var askingPriceText by rememberSaveable(asset.id) {
         mutableStateOf(baselineRemainingValue.setScale(2, RoundingMode.HALF_UP).toPlainString())
     }
-    var pushFeeText by remember(asset.id) { mutableStateOf("0") }
-    var pushFeeBearer by remember(asset.id) { mutableStateOf(PushFeeBearer.BUYER) }
-    var deliveryMethod by remember(asset.id) { mutableStateOf(FleetDeliveryMethod.PUSH) }
-    var includeProbeTelemetry by remember(asset.id) { mutableStateOf(linkedProbe != null) }
-    var extraNote by remember(asset.id) { mutableStateOf(asset.notes) }
-    var markdownStyle by remember { mutableStateOf(ValuationMarkdownStyle.THREE_COLUMN_TABLE) }
-    var showRawMarkdown by remember { mutableStateOf(false) }
-    var customTitleOverride by remember(asset.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(baselineRemainingValue) {
+        if (!hasUserEditedAskingPrice) {
+            askingPriceText = baselineRemainingValue.setScale(2, RoundingMode.HALF_UP).toPlainString()
+        }
+    }
+    var pushFeeText by rememberSaveable(asset.id) { mutableStateOf("0") }
+    var pushFeeBearer by rememberSaveable(asset.id) { mutableStateOf(PushFeeBearer.BUYER) }
+    var deliveryMethod by rememberSaveable(asset.id) { mutableStateOf(FleetDeliveryMethod.PUSH) }
+    var includeProbeTelemetry by rememberSaveable(asset.id) { mutableStateOf(linkedProbe != null) }
+    var extraNote by rememberSaveable(asset.id) { mutableStateOf(asset.notes) }
+    var markdownStyle by rememberSaveable { mutableStateOf(ValuationMarkdownStyle.THREE_COLUMN_TABLE) }
+    var showRawMarkdown by rememberSaveable { mutableStateOf(false) }
+    var customTitleOverride by rememberSaveable(asset.id) { mutableStateOf<String?>(null) }
     var copiedRecently by remember { mutableStateOf(false) }
 
     LaunchedEffect(copiedRecently) {
@@ -347,6 +354,7 @@ internal fun FleetSalePostSheet(
                 PulseTextField(
                     value = askingPriceText,
                     onValueChange = {
+                        hasUserEditedAskingPrice = true
                         askingPriceText = sanitizeAssetDecimal(it)
                         customTitleOverride = null
                     },
@@ -372,6 +380,7 @@ internal fun FleetSalePostSheet(
                             label = label,
                             selected = parsedAsking?.compareTo(target.setScale(2, RoundingMode.HALF_UP)) == 0,
                             onClick = {
+                                hasUserEditedAskingPrice = label != "平出 (残值)"
                                 askingPriceText = target.setScale(2, RoundingMode.HALF_UP).toPlainString()
                                 customTitleOverride = null
                             },

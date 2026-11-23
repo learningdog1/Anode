@@ -36,6 +36,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -92,6 +94,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalUriHandler
@@ -160,6 +163,7 @@ fun MyServersScreen(
     previewUiState: MyServersUiState? = null,
     viewModel: MyServersViewModel? = null,
     previewProbeViewMode: ProbeViewMode? = null,
+    initialHighlightAssetId: String? = null,
 ) {
     val context = LocalContext.current
     val resolvedViewModel: MyServersViewModel = viewModel ?: run {
@@ -183,9 +187,21 @@ fun MyServersScreen(
     val isInspectionMode = LocalInspectionMode.current
     var pendingDeleteAsset by remember { mutableStateOf<VpsAssetRecord?>(null) }
     var pendingRenewRequest by remember { mutableStateOf<Pair<VpsAssetRecord, UpcomingRenewalItem?>?>(null) }
+    var pendingHighlightAssetId by remember(initialHighlightAssetId) {
+        mutableStateOf(initialHighlightAssetId?.trim()?.takeIf { it.isNotEmpty() })
+    }
 
     val hasEnabledPanels = remember(uiState.panels) { uiState.panels.any { it.enabled } }
     val existingAssetTags = remember(uiState.assets) { VpsAssetRecord.collectDistinctTags(uiState.assets) }
+    val hasActiveModalSheet = uiState.showPanelManagerSheet ||
+        uiState.assetEditorDraft != null ||
+        uiState.salePostAsset != null ||
+        uiState.bindingProbeAsset != null
+    val shouldRunLivePolling = !isInspectionMode &&
+        previewUiState == null &&
+        hasEnabledPanels &&
+        uiState.selectedTab == MyServersTab.PROBES &&
+        !hasActiveModalSheet
 
     LaunchedEffect(resolvedViewModel) {
         resolvedViewModel.snackbarMessages.collect { message ->
@@ -193,9 +209,16 @@ fun MyServersScreen(
         }
     }
 
-    // Foreground-only 2-second live telemetry loop; cancels immediately on ON_PAUSE/leave.
-    LaunchedEffect(lifecycleOwner, resolvedViewModel, previewUiState, isInspectionMode, hasEnabledPanels) {
-        if (!isInspectionMode && previewUiState == null && hasEnabledPanels) {
+    LaunchedEffect(pendingHighlightAssetId) {
+        if (pendingHighlightAssetId != null) {
+            resolvedViewModel.selectTab(MyServersTab.ASSETS)
+        }
+    }
+
+    // Foreground-only 2-second live telemetry loop; active only on Probes tab with no modal sheet
+    // open, and cancels immediately on ON_PAUSE/leave or tab/sheet switch.
+    LaunchedEffect(lifecycleOwner, resolvedViewModel, shouldRunLivePolling) {
+        if (shouldRunLivePolling) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 resolvedViewModel.runForegroundProbeAutoRefresh()
             }
@@ -289,6 +312,8 @@ fun MyServersScreen(
                 MyServersTab.ASSETS -> {
                     AssetsTabContent(
                         uiState = uiState,
+                        highlightAssetId = pendingHighlightAssetId,
+                        onHighlightConsumed = { pendingHighlightAssetId = null },
                         onAddAsset = resolvedViewModel::openAddAssetSheet,
                         onEditAsset = resolvedViewModel::openEditAssetSheet,
                         onRequestRenewAsset = { asset, renewal -> pendingRenewRequest = asset to renewal },
@@ -320,6 +345,8 @@ fun MyServersScreen(
             saveError = uiState.panelSaveError,
             onClearSaveError = resolvedViewModel::clearPanelSaveError,
             initialSection = uiState.panelManagerInitialSection,
+            panelSaveSuccessVersion = uiState.panelSaveSuccessVersion,
+            isUsingSoftwareTokenFallback = uiState.isUsingSoftwareTokenFallback,
         )
     }
 
@@ -787,18 +814,20 @@ private fun ProbesTabContent(
         }.toMap()
     }
     val (viewMode, onSelectViewMode) = rememberPersistedProbeViewMode(overrideMode = previewViewMode)
+    var expandedDenseProbeKey by remember { mutableStateOf<String?>(null) }
 
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
         onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
     ) {
+        val isDenseList = viewMode == ProbeViewMode.DENSE_LIST
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(if (isDenseList) 0.dp else 8.dp),
         ) {
             // Single-row Filter Bar: All/Online/Offline + Panel Dropdown (with 管理面板) + Cards/List toggle
             item(key = "probe_filter_bar", contentType = "filter_bar") {
@@ -813,7 +842,7 @@ private fun ProbesTabContent(
                     onSelectPanelFilter = onSelectPanelFilter,
                     onOpenPanelManager = onOpenPanelManager,
                     onSelectViewMode = onSelectViewMode,
-                    modifier = Modifier.padding(bottom = 2.dp),
+                    modifier = Modifier.padding(bottom = if (isDenseList) 8.dp else 2.dp),
                 )
             }
 
@@ -823,6 +852,7 @@ private fun ProbesTabContent(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(bottom = if (isDenseList) 8.dp else 0.dp)
                             .clip(PulseArchitecturalShapes.EditorialCard)
                             .background(MaterialTheme.colorScheme.errorContainer)
                             .padding(12.dp),
@@ -884,18 +914,37 @@ private fun ProbesTabContent(
                         },
                     )
                 }
-            } else if (viewMode == ProbeViewMode.DENSE_LIST) {
-                item(key = "probe_dense_list", contentType = "probe_dense_list") {
-                    ProbeDenseListCard(
-                        snapshots = uiState.filteredSnapshots,
-                        panelsById = panelsById,
-                        assetsByProbeKey = assetsByProbeKey,
-                        trafficForecastsByProbeKey = uiState.trafficForecastsByProbeKey,
-                        idleAssessmentsByProbeKey = uiState.idleAssessmentsByProbeKey,
+            } else if (isDenseList) {
+                item(key = "probe_dense_header", contentType = "probe_dense_header") {
+                    ProbeDenseListHeaderRow()
+                }
+                val lastIndex = uiState.filteredSnapshots.lastIndex
+                itemsIndexed(
+                    items = uiState.filteredSnapshots,
+                    key = { _, snap -> "dense_${snap.probeKey}" },
+                    contentType = { _, _ -> "probe_dense_row" },
+                ) { index, snapshot ->
+                    val panel = panelsById[snapshot.panelId]
+                    val linkedAsset = assetsByProbeKey[snapshot.probeKey]
+                    val trafficForecast = uiState.trafficForecastsByProbeKey[snapshot.probeKey]
+                    val idleAssessment = uiState.idleAssessmentsByProbeKey[snapshot.probeKey]
+                    val isExpanded = expandedDenseProbeKey == snapshot.probeKey
+                    ProbeDenseListVirtualizedItem(
+                        snapshot = snapshot,
+                        panel = panel,
+                        linkedAsset = linkedAsset,
+                        trafficForecast = trafficForecast,
+                        idleAssessment = idleAssessment,
                         referenceNowEpochMillis = uiState.lastSyncEpochMillis,
+                        expanded = isExpanded,
+                        isLast = index == lastIndex,
+                        onToggleExpand = {
+                            expandedDenseProbeKey = if (isExpanded) null else snapshot.probeKey
+                        },
                         onAddAssetFromProbe = onAddAssetFromProbe,
                         onOpenIdleSalePost = onOpenIdleSalePost,
                         onOpenLinkedAsset = onOpenLinkedAsset,
+                        modifier = Modifier.animateItem(),
                     )
                 }
             } else {
@@ -927,49 +976,6 @@ private fun ProbesTabContent(
 }
 
 @Composable
-private fun FleetActionPill(
-    label: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    Row(
-        modifier = modifier
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .border(
-                width = 0.8.dp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.34f else 0.20f),
-                shape = CircleShape,
-            )
-            .pulseBouncyClickable(
-                pressedScale = NodePulseMotion.chipPressScale,
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .padding(horizontal = 11.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.size(14.dp),
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            maxLines = 1,
-            softWrap = false,
-        )
-    }
-}
-
-@Composable
 private fun ProbeServerCard(
     snapshot: ProbeServerSnapshot,
     panel: ProbePanelConfig?,
@@ -993,49 +999,6 @@ private fun ProbeServerCard(
         onOpenIdleSalePost = onOpenIdleSalePost,
         onOpenLinkedAsset = onOpenLinkedAsset,
         modifier = modifier,
-    )
-}
-
-@Composable
-private fun SmoothMetricProgressBar(
-    progress: Float,
-    barColor: Color,
-    modifier: Modifier = Modifier,
-    trackColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
-    height: Dp = 5.dp,
-) {
-    val animatedProgress = animateFloatAsState(
-        targetValue = progress.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing),
-        label = "fleetMetricProgress",
-    )
-    val animatedColor = animateColorAsState(
-        targetValue = barColor,
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "fleetMetricColor",
-    )
-
-    Spacer(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(height)
-            .drawBehind {
-                val radius = CornerRadius(size.height / 2f, size.height / 2f)
-                drawRoundRect(
-                    color = trackColor,
-                    size = size,
-                    cornerRadius = radius,
-                )
-                val fraction = animatedProgress.value.coerceIn(0f, 1f)
-                if (fraction > 0.001f) {
-                    val fillWidth = (size.width * fraction).coerceAtLeast(size.height)
-                    drawRoundRect(
-                        color = animatedColor.value,
-                        size = Size(fillWidth.coerceAtMost(size.width), size.height),
-                        cornerRadius = radius,
-                    )
-                }
-            },
     )
 }
 
@@ -1078,6 +1041,8 @@ private fun LivePulseDot(
 @Composable
 private fun AssetsTabContent(
     uiState: MyServersUiState,
+    highlightAssetId: String?,
+    onHighlightConsumed: () -> Unit,
     onAddAsset: () -> Unit,
     onEditAsset: (VpsAssetRecord) -> Unit,
     onRequestRenewAsset: (VpsAssetRecord, UpcomingRenewalItem?) -> Unit,
@@ -1087,6 +1052,7 @@ private fun AssetsTabContent(
     onOpenIdleSalePost: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
 ) {
+    val listState = rememberLazyListState()
     val renewalsByAssetId = remember(uiState.portfolioSummary.upcomingRenewals) {
         uiState.portfolioSummary.upcomingRenewals.associateBy { it.asset.id }
     }
@@ -1101,8 +1067,19 @@ private fun AssetsTabContent(
         )
     }
 
+    LaunchedEffect(highlightAssetId, sortedAssets) {
+        val targetId = highlightAssetId ?: return@LaunchedEffect
+        val idx = sortedAssets.indexOfFirst { it.id == targetId }
+        if (idx >= 0) {
+            // +1 accounts for the renewal timeline header item at index 0
+            listState.animateScrollToItem(idx + 1)
+            onHighlightConsumed()
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .navigationBarsPadding(),
@@ -1204,6 +1181,7 @@ private fun ProbeBindBottomSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.78f).dp
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1213,6 +1191,7 @@ private fun ProbeBindBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = maxHeight)
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1229,59 +1208,71 @@ private fun ProbeBindBottomSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                Row(
+                LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(PulseArchitecturalShapes.MediumBadge)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .clickable { onSelectProbeKey(null) }
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                        .weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 12.dp),
                 ) {
-                    Text("不绑定探针", style = MaterialTheme.typography.bodyMedium)
-                    if (asset.linkedProbeKey == null) {
-                        Icon(Icons.Rounded.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                probes.forEach { snap ->
-                    val selected = asset.linkedProbeKey == snap.probeKey
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(PulseArchitecturalShapes.MediumBadge)
-                            .background(
-                                if (selected) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceContainerHigh,
-                            )
-                            .clickable { onSelectProbeKey(snap.probeKey) }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            val codePrefix = snap.countryCode.trim().uppercase(Locale.US)
-                                .takeIf { it.isNotBlank() }
-                                ?.let { "[$it] " }
-                                .orEmpty()
-                            Text(
-                                text = "$codePrefix${snap.name}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                            )
-                            Text(
-                                text = "${if (snap.isOnline) "在线" else "离线"} · ${snap.os.ifBlank { snap.remoteServerId }}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                    item(key = "unbind_probe") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(PulseArchitecturalShapes.MediumBadge)
+                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                .clickable { onSelectProbeKey(null) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("不绑定探针", style = MaterialTheme.typography.bodyMedium)
+                            if (asset.linkedProbeKey == null) {
+                                Icon(Icons.Rounded.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
                         }
-                        if (selected) {
-                            Icon(Icons.Rounded.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    }
+                    items(
+                        items = probes,
+                        key = { snap -> snap.probeKey },
+                    ) { snap ->
+                        val selected = asset.linkedProbeKey == snap.probeKey
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(PulseArchitecturalShapes.MediumBadge)
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                )
+                                .clickable { onSelectProbeKey(snap.probeKey) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                val codePrefix = snap.countryCode.trim().uppercase(Locale.US)
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let { "[$it] " }
+                                    .orEmpty()
+                                Text(
+                                    text = "$codePrefix${snap.name}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                )
+                                Text(
+                                    text = "${if (snap.isOnline) "在线" else "离线"} · ${snap.os.ifBlank { snap.remoteServerId }}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (selected) {
+                                Icon(Icons.Rounded.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
                         }
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }
@@ -1336,292 +1327,4 @@ private fun FleetEmptyStateCard(
             Text(actionLabel)
         }
     }
-}
-
-@Composable
-private fun TrafficThresholdWarningBanner(
-    forecasts: List<ServerTrafficForecast>,
-    snapshotsByKey: Map<String, ProbeServerSnapshot>,
-    assetsByProbeKey: Map<String, VpsAssetRecord>,
-) {
-    if (forecasts.isEmpty()) return
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(PulseArchitecturalShapes.EditorialCard)
-            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                Icons.Rounded.NotificationsActive,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.size(16.dp),
-            )
-            Text(
-                text = "流量 80% 预警 (${forecasts.size} 台)",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-        }
-        forecasts.take(3).forEach { fc ->
-            val name = assetsByProbeKey[fc.probeKey]?.nickname?.takeIf { it.isNotBlank() }
-                ?: snapshotsByKey[fc.probeKey]?.name
-                ?: fc.probeKey
-            val pct = ((fc.usageRatio ?: 0.8) * 100.0).toInt()
-            val forecastPart = fc.exhaustionForecastText?.let { " · $it" }.orEmpty()
-            Text(
-                text = "• $name：已用 ${pct}%$forecastPart（每月 ${fc.anchorResetDay} 号重置）",
-                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun TrafficForecastCaptionRow(
-    forecast: ServerTrafficForecast,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val resetLabel = "重置日：每月 ${forecast.anchorResetDay} 号"
-    val (rightText, rightColor, rightBold) = when {
-        forecast.isExhausted -> Triple("本周期流量已用完", MaterialTheme.colorScheme.error, true)
-        !forecast.exhaustionForecastText.isNullOrBlank() -> Triple(
-            forecast.exhaustionForecastText,
-            if (forecast.isAtOrAboveAlertThreshold) MaterialTheme.colorScheme.error else ext.onDrumstickContainer,
-            true,
-        )
-        forecast.isAtOrAboveAlertThreshold -> {
-            val pct = ((forecast.usageRatio ?: 0.8) * 100.0).toInt()
-            Triple("已达 80% 流量预警 (${pct}%)", ext.onDrumstickContainer, true)
-        }
-        else -> Triple(
-            "下次重置 ${forecast.nextResetDate.monthValue}月${forecast.nextResetDate.dayOfMonth}日",
-            MaterialTheme.colorScheme.onSurfaceVariant,
-            false,
-        )
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = resetLabel,
-            style = NodePulseThemeTokens.extraTypography.microLabel,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            softWrap = false,
-        )
-        Text(
-            text = rightText,
-            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-            fontWeight = if (rightBold) FontWeight.SemiBold else FontWeight.Normal,
-            color = rightColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .padding(start = 8.dp),
-        )
-    }
-}
-
-@Composable
-private fun IdleServerCalloutStrip(
-    assessment: ServerIdleAssessment,
-    actionLabel: String,
-    onAction: () -> Unit,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(ext.drumstickContainer.copy(alpha = 0.72f))
-            .border(0.75.dp, ext.onDrumstickContainer.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = assessment.recommendationText ?: "30天 CPU 与流量占用较低，建议出掉回血",
-            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-            fontWeight = FontWeight.Medium,
-            color = ext.onDrumstickContainer,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f)
-                .padding(end = 8.dp),
-        )
-        Row(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary)
-                .pulseBouncyClickable(
-                    pressedScale = NodePulseMotion.chipPressScale,
-                    role = Role.Button,
-                    onClick = onAction,
-                )
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                Icons.Rounded.LocalOffer,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(13.dp),
-            )
-            Text(
-                text = actionLabel,
-                style = NodePulseThemeTokens.extraTypography.microLabel,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimary,
-                maxLines = 1,
-                softWrap = false,
-            )
-        }
-    }
-}
-
-@Composable
-private fun IdleFleetSummaryBanner(
-    idleServers: List<ServerIdleAssessment>,
-    onOpenIdleSalePost: (String) -> Unit,
-) {
-    if (idleServers.isEmpty()) return
-    val ext = NodePulseThemeTokens.extendedColors
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .pulseCard(
-                shape = PulseArchitecturalShapes.EditorialCard,
-                containerColor = ext.drumstickContainer.copy(alpha = 0.55f),
-                borderColor = ext.onDrumstickContainer.copy(alpha = 0.28f),
-                elevation = PulseElevation.Subtle,
-            )
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                PulseAccentPill(
-                    text = "闲置识别",
-                    containerColor = ext.drumstickContainer,
-                    contentColor = ext.onDrumstickContainer,
-                )
-                Text(
-                    text = "发现 ${idleServers.size} 台吃灰机器 · 建议出掉回血",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-
-        idleServers.take(3).forEach { item ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(PulseArchitecturalShapes.SmallChip)
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.78f))
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text(
-                        text = item.serverName,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = item.recommendationText ?: "30天 CPU 与流量占用较低，建议出掉",
-                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .pulseBouncyClickable(
-                            pressedScale = NodePulseMotion.chipPressScale,
-                            role = Role.Button,
-                            onClick = { onOpenIdleSalePost(item.probeKey) },
-                        )
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        Icons.Rounded.LocalOffer,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(13.dp),
-                    )
-                    Text(
-                        text = if (item.linkedAsset != null) "生成出售帖" else "录入并出机",
-                        style = NodePulseThemeTokens.extraTypography.microLabel,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun formatBytesCompact(bytes: Long): String {
-    val safe = bytes.coerceAtLeast(0L)
-    if (safe < 1024L) return "${safe}B"
-    val kb = safe / 1024.0
-    if (kb < 1024.0) return String.format(Locale.US, "%.0fK", kb)
-    val mb = kb / 1024.0
-    if (mb < 1024.0) {
-        return if (mb >= 100.0) String.format(Locale.US, "%.0fM", mb)
-        else String.format(Locale.US, "%.1fM", mb)
-    }
-    val gb = mb / 1024.0
-    if (gb < 1024.0) {
-        return if (gb >= 100.0) String.format(Locale.US, "%.0fG", gb)
-        else String.format(Locale.US, "%.1fG", gb)
-    }
-    val tb = gb / 1024.0
-    return String.format(Locale.US, "%.2fT", tb)
 }
