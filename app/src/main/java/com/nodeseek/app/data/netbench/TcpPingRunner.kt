@@ -25,9 +25,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.ConnectionPool
+import okhttp3.Dns
 import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.MediaType.Companion.toMediaType
@@ -47,6 +51,8 @@ import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.math.sqrt
 
 /**
@@ -228,6 +234,7 @@ class DohCleanDirectDnsFallback(
                 currentCoroutineContext().ensureActive()
                 val collected = mutableListOf<InetAddress>()
                 for (qtype in qtypes) {
+                    currentCoroutineContext().ensureActive()
                     val queryBytes = runCatching { DnsWireMessageCodec.encodeQuery(host, qtype) }.getOrNull() ?: continue
                     val request = Request.Builder()
                         .url(endpointUrl)
@@ -235,15 +242,20 @@ class DohCleanDirectDnsFallback(
                         .header("Accept", "application/dns-message")
                         .header("User-Agent", "Anode-NetBench/1.0")
                         .build()
-                    val decoded = runCatching {
-                        client.newCall(request).execute().use { resp ->
-                            if (!resp.isSuccessful) emptyList()
-                            else {
+                    val decoded = try {
+                        executeCancellableCall(client, request) { resp ->
+                            if (!resp.isSuccessful) {
+                                emptyList()
+                            } else {
                                 val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
                                 DnsWireMessageCodec.decodeAddressRecords(bodyBytes, qtype)
                             }
                         }
-                    }.getOrDefault(emptyList())
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
                     collected += decoded
                 }
                 if (collected.isNotEmpty()) {
@@ -709,7 +721,7 @@ class TcpPingRunner(
         for (seq in 1..plannedCount) {
             currentCoroutineContext().ensureActive()
 
-            val sample = executeSingleProbe(
+            val probeOutcome = executeSingleProbe(
                 seq = seq,
                 endpoint = endpoint,
                 timeoutMs = timeoutMs,
@@ -717,6 +729,7 @@ class TcpPingRunner(
                 activeChannel = activeChannel,
                 onChannelSwitched = { nextChannel -> activeChannel = nextChannel },
             )
+            val sample = probeOutcome.sample
 
             samples.add(sample)
             val snapshot = samples.toList()
@@ -725,8 +738,13 @@ class TcpPingRunner(
                 port = endpoint.effectivePort,
                 samples = snapshot,
             )
-            val isFinalZeroRecv = seq == plannedCount && summary.received == 0
-            val lastFail = if (isFinalZeroRecv) samples.lastOrNull { !it.success } else null
+            val isFinishedNow = seq == plannedCount || probeOutcome.isPermanentLockdown
+            val isFinalZeroRecv = isFinishedNow && summary.received == 0
+            val lastFail = if (isFinalZeroRecv || probeOutcome.isPermanentLockdown) {
+                samples.lastOrNull { !it.success }
+            } else {
+                null
+            }
             emit(
                 TcpPingProgress(
                     resolvedTarget = endpoint.resolvedTarget,
@@ -735,18 +753,27 @@ class TcpPingRunner(
                     latestSample = sample,
                     samples = snapshot,
                     summary = summary,
-                    isFinished = seq == plannedCount,
+                    isFinished = isFinishedNow,
                     errorMessage = lastFail?.errorMessage,
                     errorCategory = lastFail?.errorCategory,
                     rawDiagnostic = lastFail?.rawDiagnostic,
                 ),
             )
 
+            if (probeOutcome.isPermanentLockdown) {
+                break
+            }
+
             if (seq < plannedCount && intervalMs > 0L) {
                 delay(intervalMs)
             }
         }
     }.flowOn(ioDispatcher)
+
+    private data class SingleTcpProbeOutcome(
+        val sample: TcpPingSample,
+        val isPermanentLockdown: Boolean = false,
+    )
 
     private suspend fun executeSingleProbe(
         seq: Int,
@@ -755,7 +782,7 @@ class TcpPingRunner(
         useProxy: Boolean,
         activeChannel: NetBenchSocketChannel,
         onChannelSwitched: (NetBenchSocketChannel) -> Unit,
-    ): TcpPingSample {
+    ): SingleTcpProbeOutcome {
         var currentChannel = activeChannel
         for (attempt in 0..1) {
             try {
@@ -773,21 +800,25 @@ class TcpPingRunner(
                         timeoutMs = timeoutMs,
                     )
                 }
-                return TcpPingSample(
-                    seq = seq,
-                    success = true,
-                    rttMs = rttMs,
+                return SingleTcpProbeOutcome(
+                    TcpPingSample(
+                        seq = seq,
+                        success = true,
+                        rttMs = rttMs,
+                    ),
                 )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (e: SocketTimeoutException) {
                 val category = NetBenchErrorCategory.CONNECTION_TIMEOUT
-                return TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = category.publicLabel,
-                    errorCategory = category,
-                    rawDiagnostic = "${NetBenchDiagnosticClassifier.formatRawDiagnostic(e)} (${timeoutMs}ms)",
+                return SingleTcpProbeOutcome(
+                    TcpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = category.publicLabel,
+                        errorCategory = category,
+                        rawDiagnostic = "${NetBenchDiagnosticClassifier.formatRawDiagnostic(e)} (${timeoutMs}ms)",
+                    ),
                 )
             } catch (e: ConnectException) {
                 if (!useProxy && connector is BoundTcpProbeConnector && attempt == 0) {
@@ -799,12 +830,15 @@ class TcpPingRunner(
                     )
                     if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
                         val lockdownMsg = "${reason.userHint}；请开启「经由代理测试」"
-                        return TcpPingSample(
-                            seq = seq,
-                            success = false,
-                            errorMessage = lockdownMsg,
-                            errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
-                            rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                        return SingleTcpProbeOutcome(
+                            sample = TcpPingSample(
+                                seq = seq,
+                                success = false,
+                                errorMessage = lockdownMsg,
+                                errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
+                                rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                            ),
+                            isPermanentLockdown = true,
                         )
                     }
                     val nextChannel = refreshed.directChannel
@@ -818,21 +852,25 @@ class TcpPingRunner(
                     }
                 }
                 val category = NetBenchDiagnosticClassifier.classifyThrowable(e, useProxy = useProxy)
-                return TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = category.publicLabel,
-                    errorCategory = category,
-                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                return SingleTcpProbeOutcome(
+                    TcpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = category.publicLabel,
+                        errorCategory = category,
+                        rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                    ),
                 )
             } catch (e: NoRouteToHostException) {
                 val category = NetBenchErrorCategory.NETWORK_UNREACHABLE
-                return TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = category.publicLabel,
-                    errorCategory = category,
-                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                return SingleTcpProbeOutcome(
+                    TcpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = category.publicLabel,
+                        errorCategory = category,
+                        rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                    ),
                 )
             } catch (e: SecurityException) {
                 val refreshed = networkBridge.inspectCurrentNetworks()
@@ -842,19 +880,23 @@ class TcpPingRunner(
                     hasDirectCandidate = refreshed.plan.hasDirectCandidate,
                 )
                 val category = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED
-                return TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = if (!useProxy && refreshed.plan.isVpnActive) {
-                        "${reason.userHint}；请开启「经由代理测试」"
-                    } else {
-                        category.publicLabel
-                    },
-                    errorCategory = category,
-                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                val isLockdown = !useProxy && (refreshed.plan.isVpnActive || reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED)
+                return SingleTcpProbeOutcome(
+                    sample = TcpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = if (!useProxy && refreshed.plan.isVpnActive) {
+                            "${reason.userHint}；请开启「经由代理测试」"
+                        } else {
+                            category.publicLabel
+                        },
+                        errorCategory = category,
+                        rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                    ),
+                    isPermanentLockdown = isLockdown,
                 )
             } catch (e: IOException) {
-                val refreshed = if (!useProxy && connector is BoundTcpProbeConnector) {
+                val refreshed = if (!useProxy) {
                     networkBridge.inspectCurrentNetworks()
                 } else {
                     null
@@ -866,12 +908,15 @@ class TcpPingRunner(
                         hasDirectCandidate = refreshed.plan.hasDirectCandidate,
                     )
                     if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
-                        return TcpPingSample(
-                            seq = seq,
-                            success = false,
-                            errorMessage = "${reason.userHint}；请开启「经由代理测试」",
-                            errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
-                            rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                        return SingleTcpProbeOutcome(
+                            sample = TcpPingSample(
+                                seq = seq,
+                                success = false,
+                                errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                                errorCategory = NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED,
+                                rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                            ),
+                            isPermanentLockdown = true,
                         )
                     }
                     val nextChannel = refreshed.directChannel
@@ -891,20 +936,24 @@ class TcpPingRunner(
                     hasDirectCandidate = refreshed?.plan?.hasDirectCandidate == true,
                     useProxy = useProxy,
                 )
-                return TcpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = category.publicLabel,
-                    errorCategory = category,
-                    rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                return SingleTcpProbeOutcome(
+                    TcpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = category.publicLabel,
+                        errorCategory = category,
+                        rawDiagnostic = NetBenchDiagnosticClassifier.formatRawDiagnostic(e),
+                    ),
                 )
             }
         }
-        return TcpPingSample(
-            seq = seq,
-            success = false,
-            errorMessage = NetBenchErrorCategory.REQUEST_FAILED.publicLabel,
-            errorCategory = NetBenchErrorCategory.REQUEST_FAILED,
+        return SingleTcpProbeOutcome(
+            TcpPingSample(
+                seq = seq,
+                success = false,
+                errorMessage = NetBenchErrorCategory.REQUEST_FAILED.publicLabel,
+                errorCategory = NetBenchErrorCategory.REQUEST_FAILED,
+            ),
         )
     }
 
@@ -988,6 +1037,41 @@ internal fun computeRttStats(rtts: List<Double>): ComputedRttStats? {
     )
 }
 
+internal suspend fun <T> executeCancellableCall(
+    client: OkHttpClient,
+    request: Request,
+    onResponseTransform: (Response) -> T,
+): T = suspendCancellableCoroutine { cont ->
+    val call = client.newCall(request)
+    cont.invokeOnCancellation {
+        runCatching { call.cancel() }
+    }
+    call.enqueue(
+        object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) {
+                    cont.resumeWithException(e)
+                }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    response.use { res ->
+                        val value = onResponseTransform(res)
+                        if (cont.isActive) {
+                            cont.resume(value)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    if (cont.isActive) {
+                        cont.resumeWithException(t)
+                    }
+                }
+            }
+        },
+    )
+}
+
 /**
  * Lightweight HTTP/HTTPS latency probe measuring TLS handshake, TTFB, and total response time.
  */
@@ -995,12 +1079,18 @@ class HttpLatencyRunner(
     private val baseHttpClient: OkHttpClient = defaultHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val networkBridge: NetBenchNetworkBridge = SystemDefaultNetworkBridge,
+    private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(
+        ioDispatcher = ioDispatcher,
+        networkBridge = networkBridge,
+    ),
 ) {
     suspend fun probe(
         rawTarget: String,
         port: Int = 443,
         timeoutMs: Int = 5_000,
         useProxy: Boolean = false,
+        preferredFamily: PreferredIpFamily = PreferredIpFamily.AUTO,
+        preResolvedAddresses: List<InetAddress>? = null,
     ): HttpLatencyResult = withContext(ioDispatcher) {
         val parsed = NetBenchTargetParser.parse(rawTarget)
             ?: return@withContext HttpLatencyResult(
@@ -1035,22 +1125,29 @@ class HttpLatencyRunner(
             }
         }
 
+        val cleanedPreResolved = preResolvedAddresses?.filterNotNull().orEmpty()
         executeRequest(
             url = url,
             method = "HEAD",
+            effectivePort = effectivePort,
             timeoutMs = timeoutMs,
             channel = channel,
             binding = binding,
             useProxy = useProxy,
+            preferredFamily = preferredFamily,
+            preResolvedAddresses = cleanedPreResolved,
         ).let { headResult ->
             if (headResult.statusCode == 405) {
                 executeRequest(
                     url = url,
                     method = "GET",
+                    effectivePort = effectivePort,
                     timeoutMs = timeoutMs,
                     channel = channel,
                     binding = binding,
                     useProxy = useProxy,
+                    preferredFamily = preferredFamily,
+                    preResolvedAddresses = cleanedPreResolved,
                 )
             } else {
                 headResult
@@ -1058,13 +1155,16 @@ class HttpLatencyRunner(
         }
     }
 
-    private fun executeRequest(
+    private suspend fun executeRequest(
         url: String,
         method: String,
+        effectivePort: Int,
         timeoutMs: Int,
         channel: NetBenchSocketChannel,
         binding: ResolvedNetworkBinding,
         useProxy: Boolean,
+        preferredFamily: PreferredIpFamily,
+        preResolvedAddresses: List<InetAddress>,
     ): HttpLatencyResult {
         var callStartNanos = 0L
         var tlsStartNanos = 0L
@@ -1089,6 +1189,34 @@ class HttpLatencyRunner(
             }
         }
 
+        val parentJob = currentCoroutineContext()[Job]
+        val customDns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                if (preResolvedAddresses.isNotEmpty()) {
+                    return preResolvedAddresses
+                }
+                val lookupJob = Job(parentJob)
+                return try {
+                    val resolved = runBlocking(lookupJob) {
+                        targetResolver.resolve(
+                            rawTarget = hostname,
+                            defaultPort = effectivePort,
+                            preferredFamily = preferredFamily,
+                            useProxy = useProxy,
+                        )
+                    }.getOrElse { err ->
+                        throw (err as? UnknownHostException)
+                            ?: UnknownHostException(err.message ?: "DNS 解析失败：无法解析 $hostname").apply {
+                                initCause(err)
+                            }
+                    }
+                    listOf(resolved.address)
+                } finally {
+                    lookupJob.cancel()
+                }
+            }
+        }
+
         val needsCustomChannel = channel.isDirectPhysical || channel.bypassSystemHttpProxy
         val tempPool = if (needsCustomChannel) ConnectionPool(1, 5, TimeUnit.SECONDS) else null
         val client = baseHttpClient.newBuilder()
@@ -1098,6 +1226,7 @@ class HttpLatencyRunner(
             .callTimeout((timeoutMs * 2L).coerceAtMost(12_000L), TimeUnit.MILLISECONDS)
             .followRedirects(false)
             .bindToChannel(channel, tempPool)
+            .dns(customDns)
             .build()
 
         return try {
@@ -1108,7 +1237,7 @@ class HttpLatencyRunner(
                 .header("Connection", "close")
                 .build()
             val wallStart = System.nanoTime()
-            client.newCall(request).execute().use { response: Response ->
+            executeCancellableCall(client, request) { response: Response ->
                 val endNanos = System.nanoTime()
                 val startRef = if (callStartNanos > 0L) callStartNanos else wallStart
                 val totalMs = ((endNanos - startRef) / 1_000_000.0).coerceAtLeast(0.1)

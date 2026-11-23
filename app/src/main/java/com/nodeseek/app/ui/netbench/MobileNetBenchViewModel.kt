@@ -60,6 +60,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Current execution phase of the Mobile Network Tester pipeline.
@@ -155,7 +156,10 @@ class NetBenchSessionController(
     private val targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
     private val icmpPingRunner: IcmpPingRunner = IcmpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
-    private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
+    private val httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(
+        networkBridge = networkBridge,
+        targetResolver = targetResolver,
+    ),
     private val iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
     private val ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
     private val imageHostRepository: ImageHostRepository? = null,
@@ -163,13 +167,16 @@ class NetBenchSessionController(
     private val cardImageGenerator: NetBenchCardImageGenerator = AndroidNetBenchCardImageGenerator,
     private val renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
-    initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
+    initialMarkdownStyle: NetBenchMarkdownStyle? = null,
     private val sshVaultRepository: SshVaultRepository? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    private val persistMarkdownStylePreference: Boolean = initialMarkdownStyle == null
+
     private val _uiState = MutableStateFlow(
         MobileNetBenchUiState(
             targetInput = initialTarget.trim(),
-            markdownStyle = initialMarkdownStyle,
+            markdownStyle = initialMarkdownStyle ?: historyStore.preferences.value.markdownStyle,
             maskTargetIpInReport = historyStore.preferences.value.maskTargetIp,
             includeClientNetworkInReport = historyStore.preferences.value.includeClientNetwork,
             includeReportImages = historyStore.preferences.value.includeReportImages,
@@ -185,11 +192,16 @@ class NetBenchSessionController(
     private var activeJob: Job? = null
     private var egressJob: Job? = null
     private var imageUploadJob: Job? = null
+    private val benchmarkGeneration = AtomicLong(0L)
+    private val imageUploadGeneration = AtomicLong(0L)
     private val uploadedUrlCache = ConcurrentHashMap<String, String>()
     private var cachedEgressSnapshot: ClientEgressSnapshot? = null
     private var lastAppliedInitialTarget: String = initialTarget.trim()
 
     init {
+        scope.launch {
+            historyStore.reload()
+        }
         scope.launch {
             historyStore.entries.collect { entries ->
                 _uiState.update { it.copy(recentTargets = entries) }
@@ -207,13 +219,16 @@ class NetBenchSessionController(
         scope.launch {
             historyStore.preferences.collect { prefs ->
                 _uiState.update { state ->
+                    val targetStyle = if (persistMarkdownStylePreference) prefs.markdownStyle else state.markdownStyle
                     if (state.maskTargetIpInReport == prefs.maskTargetIp &&
                         state.includeClientNetworkInReport == prefs.includeClientNetwork &&
-                        state.includeReportImages == prefs.includeReportImages
+                        state.includeReportImages == prefs.includeReportImages &&
+                        state.markdownStyle == targetStyle
                     ) {
                         state
                     } else {
                         state.copy(
+                            markdownStyle = targetStyle,
                             maskTargetIpInReport = prefs.maskTargetIp,
                             includeClientNetworkInReport = prefs.includeClientNetwork,
                             includeReportImages = prefs.includeReportImages,
@@ -228,12 +243,20 @@ class NetBenchSessionController(
         scope.launch {
             networkBridge.observeNetworkChanges().collectLatest {
                 delay(450L)
-                val currentFp = networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                val currentFp = withContext(ioDispatcher) {
+                    networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                }
                 if (cachedEgressSnapshot?.networkFingerprint != currentFp) {
                     refreshClientEgress()
                 }
             }
         }
+    }
+
+    private fun cancelActiveImageUpload() {
+        imageUploadGeneration.incrementAndGet()
+        imageUploadJob?.cancel()
+        imageUploadJob = null
     }
 
     fun refreshClientEgress() {
@@ -260,7 +283,7 @@ class NetBenchSessionController(
     }
 
     fun toggleTestViaProxy(useProxy: Boolean) {
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         _uiState.update { state ->
             val updatedNetwork = state.clientEgress?.activeNetworkForTest(useProxy) ?: state.clientNetwork
             state.copy(
@@ -275,7 +298,7 @@ class NetBenchSessionController(
 
     fun updateRenderDarkTheme(isDark: Boolean) {
         if (_uiState.value.renderDarkTheme == isDark) return
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         _uiState.update { state ->
             state.copy(
                 renderDarkTheme = isDark,
@@ -413,7 +436,7 @@ class NetBenchSessionController(
 
     fun selectMarkdownStyle(style: NetBenchMarkdownStyle) {
         if (style != NetBenchMarkdownStyle.FULL_TABLE) {
-            imageUploadJob?.cancel()
+            cancelActiveImageUpload()
         }
         _uiState.update { state ->
             state.copy(
@@ -423,8 +446,10 @@ class NetBenchSessionController(
                 reportImagesError = if (style == NetBenchMarkdownStyle.FULL_TABLE) state.reportImagesError else null,
             ).withRegeneratedMarkdown()
         }
-        scope.launch {
-            historyStore.updatePreferences { it.copy(markdownStyle = style) }
+        if (persistMarkdownStylePreference) {
+            scope.launch {
+                historyStore.updatePreferences { it.copy(markdownStyle = style) }
+            }
         }
         if (style == NetBenchMarkdownStyle.FULL_TABLE) {
             syncReportImagesIfNeeded(promptForMissingKey = false)
@@ -432,7 +457,7 @@ class NetBenchSessionController(
     }
 
     fun toggleMaskTargetIp(mask: Boolean) {
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         _uiState.update { state ->
             state.copy(
                 maskTargetIpInReport = mask,
@@ -448,7 +473,7 @@ class NetBenchSessionController(
     }
 
     fun toggleIncludeClientNetwork(include: Boolean) {
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         _uiState.update { state ->
             state.copy(
                 includeClientNetworkInReport = include,
@@ -465,7 +490,7 @@ class NetBenchSessionController(
 
     fun toggleIncludeReportImages(include: Boolean) {
         if (!include) {
-            imageUploadJob?.cancel()
+            cancelActiveImageUpload()
             _uiState.update { state ->
                 state.copy(
                     includeReportImages = false,
@@ -595,7 +620,7 @@ class NetBenchSessionController(
 
     fun clearResults() {
         stopBenchmark(silent = true)
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         _uiState.update { state ->
             state.copy(
                 activePhase = NetBenchPhase.IDLE,
@@ -634,8 +659,9 @@ class NetBenchSessionController(
             return
         }
 
+        val runGen = benchmarkGeneration.incrementAndGet()
         activeJob?.cancel()
-        imageUploadJob?.cancel()
+        cancelActiveImageUpload()
         val effectiveTcpPort = parsed.effectivePort(snapshot.effectiveTcpPort)
         val effectiveIperfPort = snapshot.effectiveIperfPort
 
@@ -664,7 +690,9 @@ class NetBenchSessionController(
         activeJob = scope.launch {
             try {
                 // Re-detect client egress if uncached or network topology changed (e.g. Wi-Fi <-> Cellular / VPN)
-                val currentFp = networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                val currentFp = withContext(ioDispatcher) {
+                    networkBridge.inspectCurrentNetworks().plan.networkFingerprint
+                }
                 val clientEgressDeferred = if (cachedEgressSnapshot != null &&
                     cachedEgressSnapshot?.networkFingerprint == currentFp
                 ) {
@@ -683,15 +711,17 @@ class NetBenchSessionController(
                     useProxy = snapshot.testViaProxy,
                 )
                 val endpoint = resolvedResult.getOrElse { err ->
-                    val errMsg = err.message ?: "无法解析目标主机"
-                    _uiState.update {
-                        it.copy(
-                            isRunning = false,
-                            activePhase = NetBenchPhase.ERROR,
-                            errorMessage = errMsg,
-                        )
+                    if (benchmarkGeneration.get() == runGen) {
+                        val errMsg = err.message ?: "无法解析目标主机"
+                        _uiState.update {
+                            it.copy(
+                                isRunning = false,
+                                activePhase = NetBenchPhase.ERROR,
+                                errorMessage = errMsg,
+                            )
+                        }
+                        _snackbarChannel.trySend(errMsg)
                     }
-                    _snackbarChannel.trySend(errMsg)
                     return@launch
                 }
 
@@ -751,6 +781,8 @@ class NetBenchSessionController(
                         rawTarget = rawInput,
                         port = effectiveTcpPort,
                         useProxy = snapshot.testViaProxy,
+                        preferredFamily = snapshot.preferredFamily,
+                        preResolvedAddresses = listOf(endpoint.address),
                     )
                     _uiState.update { state ->
                         state.copy(httpLatencyResult = httpRes).withRegeneratedMarkdown()
@@ -810,7 +842,8 @@ class NetBenchSessionController(
                                 ),
                             )
                             _uiState.update { state ->
-                                state.copy(iperfDownloadProgress = enriched).withRegeneratedMarkdown()
+                                val next = state.copy(iperfDownloadProgress = enriched)
+                                if (enriched.finalResult != null) next.withRegeneratedMarkdown() else next
                             }
                         }
                     }
@@ -841,13 +874,15 @@ class NetBenchSessionController(
                                 ),
                             )
                             _uiState.update { state ->
-                                state.copy(iperfUploadProgress = enriched).withRegeneratedMarkdown()
+                                val next = state.copy(iperfUploadProgress = enriched)
+                                if (enriched.finalResult != null) next.withRegeneratedMarkdown() else next
                             }
                         }
                     }
                 }
 
                 // Persist to recent history
+                if (benchmarkGeneration.get() != runGen) return@launch
                 val finalState = _uiState.value
                 val intel = finalState.ipIntelligence
                 val regionSummary = intel?.takeIf { it.hasCoreInfo }?.let {
@@ -874,41 +909,48 @@ class NetBenchSessionController(
                     ),
                 )
 
-                _uiState.update { state ->
-                    state.copy(
-                        isRunning = false,
-                        activePhase = NetBenchPhase.COMPLETED,
-                    ).withRegeneratedMarkdown()
+                if (benchmarkGeneration.get() == runGen) {
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = NetBenchPhase.COMPLETED,
+                        ).withRegeneratedMarkdown()
+                    }
+                    syncReportImagesIfNeeded(promptForMissingKey = true)
                 }
-                syncReportImagesIfNeeded(promptForMissingKey = true)
             } catch (ce: CancellationException) {
-                _uiState.update { state ->
-                    state.copy(
-                        isRunning = false,
-                        activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
-                    ).withRegeneratedMarkdown()
+                if (benchmarkGeneration.get() == runGen) {
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
+                        ).withRegeneratedMarkdown()
+                    }
                 }
                 throw ce
             } catch (t: Throwable) {
-                val msg = t.message ?: "测机过程出现异常"
-                _uiState.update { state ->
-                    state.copy(
-                        isRunning = false,
-                        activePhase = NetBenchPhase.ERROR,
-                        errorMessage = msg,
-                    ).withRegeneratedMarkdown()
+                if (benchmarkGeneration.get() == runGen) {
+                    val msg = t.message ?: "测机过程出现异常"
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = NetBenchPhase.ERROR,
+                            errorMessage = msg,
+                        ).withRegeneratedMarkdown()
+                    }
+                    _snackbarChannel.trySend(msg)
                 }
-                _snackbarChannel.trySend(msg)
             }
         }
     }
 
     fun stopBenchmark(silent: Boolean = false) {
         val wasRunning = activeJob?.isActive == true
+        benchmarkGeneration.incrementAndGet()
         activeJob?.cancel()
         activeJob = null
         if (silent) {
-            imageUploadJob?.cancel()
+            cancelActiveImageUpload()
         }
         _uiState.update { state ->
             state.copy(
@@ -983,12 +1025,14 @@ class NetBenchSessionController(
             return
         }
 
+        val uploadGen = imageUploadGeneration.incrementAndGet()
         imageUploadJob?.cancel()
         val maskTargetIp = snapshot.maskTargetIpInReport
         val includeClientNet = snapshot.includeClientNetworkInReport
         val darkTheme = snapshot.renderDarkTheme
 
         imageUploadJob = scope.launch {
+            if (imageUploadGeneration.get() != uploadGen) return@launch
             _uiState.update {
                 it.copy(
                     isUploadingReportImages = true,
@@ -1001,6 +1045,7 @@ class NetBenchSessionController(
                 var firstError: String? = null
 
                 for ((kind, cacheKey) in missing) {
+                    if (imageUploadGeneration.get() != uploadGen) return@launch
                     _uiState.update {
                         it.copy(
                             isUploadingReportImages = true,
@@ -1032,7 +1077,9 @@ class NetBenchSessionController(
                         onSuccess = { url ->
                             uploadedUrlCache[cacheKey] = url
                             uploadedSoFar++
-                            _uiState.update { current -> current.withRegeneratedMarkdown() }
+                            if (imageUploadGeneration.get() == uploadGen) {
+                                _uiState.update { current -> current.withRegeneratedMarkdown() }
+                            }
                         },
                         onFailure = { err ->
                             if (firstError == null) {
@@ -1042,31 +1089,37 @@ class NetBenchSessionController(
                     )
                 }
 
-                _uiState.update { current ->
-                    current.copy(
-                        isUploadingReportImages = false,
-                        reportImagesProgressText = null,
-                        reportImagesError = firstError,
-                    ).withRegeneratedMarkdown()
-                }
-                if (firstError == null) {
-                    _snackbarChannel.trySend("已上传 ${planned.size} 张测机配图至 NodeImage 图床")
+                if (imageUploadGeneration.get() == uploadGen) {
+                    _uiState.update { current ->
+                        current.copy(
+                            isUploadingReportImages = false,
+                            reportImagesProgressText = null,
+                            reportImagesError = firstError,
+                        ).withRegeneratedMarkdown()
+                    }
+                    if (firstError == null) {
+                        _snackbarChannel.trySend("已上传 ${planned.size} 张测机配图至 NodeImage 图床")
+                    }
                 }
             } catch (ce: CancellationException) {
-                _uiState.update { current ->
-                    current.copy(
-                        isUploadingReportImages = false,
-                        reportImagesProgressText = null,
-                    )
+                if (imageUploadGeneration.get() == uploadGen) {
+                    _uiState.update { current ->
+                        current.copy(
+                            isUploadingReportImages = false,
+                            reportImagesProgressText = null,
+                        )
+                    }
                 }
                 throw ce
             } catch (t: Throwable) {
-                _uiState.update { current ->
-                    current.copy(
-                        isUploadingReportImages = false,
-                        reportImagesProgressText = null,
-                        reportImagesError = t.message ?: "生成或上传配图失败",
-                    ).withRegeneratedMarkdown()
+                if (imageUploadGeneration.get() == uploadGen) {
+                    _uiState.update { current ->
+                        current.copy(
+                            isUploadingReportImages = false,
+                            reportImagesProgressText = null,
+                            reportImagesError = t.message ?: "生成或上传配图失败",
+                        ).withRegeneratedMarkdown()
+                    }
                 }
             }
         }
@@ -1099,20 +1152,23 @@ class NetBenchSessionController(
             )
         }
         val report = toNetBenchReport()
-        val planned = cardImageGenerator.planCards(
-            report = report,
-            maskTargetIp = maskTargetIpInReport,
-            includeClientNetwork = includeClientNetworkInReport,
-            darkTheme = renderDarkTheme,
-        )
         var resolvedImages = NetBenchUploadedImages()
-        if (includeReportImages && markdownStyle == NetBenchMarkdownStyle.FULL_TABLE) {
+        val plannedCount = if (includeReportImages && markdownStyle == NetBenchMarkdownStyle.FULL_TABLE) {
+            val planned = cardImageGenerator.planCards(
+                report = report,
+                maskTargetIp = maskTargetIpInReport,
+                includeClientNetwork = includeClientNetworkInReport,
+                darkTheme = renderDarkTheme,
+            )
             for ((kind, cacheKey) in planned) {
                 val cachedUrl = uploadedUrlCache[cacheKey]
                 if (!cachedUrl.isNullOrBlank()) {
                     resolvedImages = resolvedImages.withUrl(kind, cachedUrl)
                 }
             }
+            planned.size
+        } else {
+            estimatePlannedCardCount(report)
         }
         val md = NetBenchMarkdownFormatter.format(
             report = report,
@@ -1126,8 +1182,21 @@ class NetBenchSessionController(
         return copy(
             generatedMarkdown = md,
             uploadedReportImages = resolvedImages,
-            plannedReportCardCount = planned.size,
+            plannedReportCardCount = plannedCount,
         )
+    }
+
+    private fun estimatePlannedCardCount(report: NetBenchReport): Int {
+        var count = 0
+        if (report.ipIntelligence?.let { it.hasCoreInfo || it.originType != com.nodeseek.app.domain.netbench.IpOriginType.UNKNOWN } == true) {
+            count++
+        }
+        if (report.icmpPingSummary != null) count++
+        if (report.tcpPingSummary != null) count++
+        if (report.iperfDownloadResult?.success == true || report.iperfUploadResult?.success == true) {
+            count++
+        }
+        return count
     }
 }
 
@@ -1140,7 +1209,10 @@ class MobileNetBenchViewModel(
     targetResolver: NetBenchTargetResolver = NetBenchTargetResolver(networkBridge = networkBridge),
     icmpPingRunner: IcmpPingRunner = IcmpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
     tcpPingRunner: TcpPingRunner = TcpPingRunner(resolver = targetResolver, networkBridge = networkBridge),
-    httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(networkBridge = networkBridge),
+    httpLatencyRunner: HttpLatencyRunner = HttpLatencyRunner(
+        networkBridge = networkBridge,
+        targetResolver = targetResolver,
+    ),
     iperf3ClientRunner: Iperf3ClientRunner = Iperf3ClientRunner(resolver = targetResolver, networkBridge = networkBridge),
     ipIntelligenceClient: IpIntelligenceClient = IpIntelligenceClient(networkBridge = networkBridge),
     imageHostRepository: ImageHostRepository? = null,

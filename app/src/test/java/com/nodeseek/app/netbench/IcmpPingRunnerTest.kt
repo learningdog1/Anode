@@ -27,8 +27,10 @@ import com.nodeseek.app.domain.netbench.NetBenchTransportKind
 import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1622,5 +1624,90 @@ class IcmpPingRunnerTest {
         override val socketFactory: SocketFactory = SocketFactory.getDefault()
         override fun createSocket(): Socket = Socket()
         override fun resolveAllByName(hostname: String): List<InetAddress> = onDns(hostname)
+    }
+
+    @Test
+    fun `SystemPingProcessExecutor destroys blocking subprocess immediately on coroutine cancellation`() = runBlocking {
+        val startedAt = System.nanoTime()
+        val job = launch(Dispatchers.IO) {
+            SystemPingProcessExecutor.execute(
+                PingProcessRequest(
+                    command = listOf("sh", "-c", "exec sleep 30"),
+                    timeoutMs = 30_000L,
+                ),
+            ).collect {}
+        }
+        delay(150L)
+        job.cancel()
+        job.join()
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+        assertTrue(
+            "Expected cancelled ping subprocess to terminate within 2500ms, took ${elapsedMs}ms",
+            elapsedMs < 2_500L,
+        )
+    }
+
+    @Test
+    fun `KernelBoundIcmpDirectProber short-circuits on VPN lockdown EPERM without probing remaining count`() = runBlocking {
+        val sendCalls = AtomicInteger(0)
+        val epermOps = object : IcmpKernelDatagramOps {
+            override fun openIcmpDatagramSocket(ipFamily: IpFamily): FileDescriptor = FileDescriptor()
+            override fun enableReceiveTtlBestEffort(fd: FileDescriptor, ipFamily: IpFamily): Boolean = false
+            override fun sendTo(fd: FileDescriptor, packet: ByteArray, address: InetAddress) {
+                sendCalls.incrementAndGet()
+                throw java.net.SocketException("sendto failed: EPERM (Operation not permitted)")
+            }
+            override fun pollReadable(fd: FileDescriptor, timeoutMs: Int): Boolean = false
+            override fun receivePacket(fd: FileDescriptor, buffer: ByteArray, ipFamily: IpFamily, tryReadTtl: Boolean): IcmpRawDatagram? = null
+            override fun closeQuietly(fd: FileDescriptor) {}
+        }
+
+        val prober = KernelBoundIcmpDirectProber(ops = epermOps)
+        val wifiChannel: NetBenchSocketChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-1"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val supportsFileDescriptorBind: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun bindDatagramFileDescriptor(fd: FileDescriptor) = Unit
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val vpnChannel: NetBenchSocketChannel = fakeChannel(id = "vpn-1", label = "VPN", isVpn = true)
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(vpnChannel, "vpn-1", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(wifiChannel, "wifi-1", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI), interfaceName = "wlan0"),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, wifiChannel, vpnChannel)
+            }
+        }
+
+        val runner = IcmpPingRunner(
+            directProber = prober,
+            networkBridge = bridge,
+            ioDispatcher = Dispatchers.IO,
+        )
+        val finalProgress = runner.run(
+            IcmpPingConfig(
+                target = "127.0.0.1",
+                probeCount = 10,
+                timeoutMs = 1_500,
+                intervalMs = 500L,
+                useProxy = false,
+            ),
+        ).toList().last()
+
+        assertTrue(finalProgress.isFinished)
+        assertEquals("Expected immediate short-circuit on packet #1 EPERM", 1, sendCalls.get())
+        assertEquals(1, finalProgress.samples.size)
+        assertEquals(1, finalProgress.summary.sent)
+        assertEquals(0, finalProgress.summary.received)
+        assertNotNull(finalProgress.errorMessage)
     }
 }

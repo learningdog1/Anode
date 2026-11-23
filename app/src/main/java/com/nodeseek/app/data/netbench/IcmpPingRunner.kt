@@ -20,7 +20,9 @@ import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.ResolvedTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -78,6 +80,19 @@ object SystemPingProcessExecutor : PingProcessExecutor {
             return@channelFlow
         }
 
+        val finishedNormally = AtomicBoolean(false)
+        val cancelWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                if (!finishedNormally.get()) {
+                    runCatching { process.destroyForcibly() }
+                    runCatching { process.inputStream.close() }
+                    runCatching { process.errorStream.close() }
+                }
+            }
+        }
+
         val timedOut = AtomicBoolean(false)
         val stderrJob = launch(Dispatchers.IO) {
             runCatching {
@@ -124,8 +139,12 @@ object SystemPingProcessExecutor : PingProcessExecutor {
                     -1
                 }
             }
+            finishedNormally.set(true)
+            cancelWatcher.cancel()
             send(PingExecutionEvent.Exited(exitCode))
         } finally {
+            finishedNormally.set(true)
+            cancelWatcher.cancel()
             watchdogJob.cancel()
             stderrJob.cancel()
             runCatching { process.outputStream.close() }
@@ -1225,6 +1244,7 @@ sealed class IcmpDirectProbeOutcome {
     data class Completed(
         val samples: List<IcmpPingSample>,
         val boundInterfaceName: String?,
+        val abortedEarlyOnLockdown: Boolean = false,
     ) : IcmpDirectProbeOutcome()
 
     data class Unavailable(
@@ -1327,11 +1347,12 @@ class KernelBoundIcmpDirectProber(
                 .let { if (it == 0) 0x4E50 else it }
             val recvBuffer = ByteArray(512)
             val samples = ArrayList<IcmpPingSample>(plannedCount)
+            var abortedOnLockdown = false
 
             for (seq in 1..plannedCount) {
                 currentCoroutineContext().ensureActive()
 
-                val sample = executeSingleEcho(
+                val outcome = executeSingleEcho(
                     seq = seq,
                     ipFamily = ipFamily,
                     targetAddress = endpoint.address,
@@ -1352,8 +1373,13 @@ class KernelBoundIcmpDirectProber(
                     },
                 )
 
-                samples += sample
-                onSample(sample, samples.toList(), currentInterfaceName)
+                samples += outcome.sample
+                onSample(outcome.sample, samples.toList(), currentInterfaceName)
+
+                if (outcome.isPermanentLockdown) {
+                    abortedOnLockdown = true
+                    break
+                }
 
                 if (seq < plannedCount && intervalMs > 0L) {
                     delay(intervalMs)
@@ -1363,11 +1389,17 @@ class KernelBoundIcmpDirectProber(
             return IcmpDirectProbeOutcome.Completed(
                 samples = samples.toList(),
                 boundInterfaceName = currentInterfaceName,
+                abortedEarlyOnLockdown = abortedOnLockdown,
             )
         } finally {
             ops.closeQuietly(activeFd)
         }
     }
+
+    private data class SingleEchoOutcome(
+        val sample: IcmpPingSample,
+        val isPermanentLockdown: Boolean = false,
+    )
 
     private suspend fun executeSingleEcho(
         seq: Int,
@@ -1382,7 +1414,7 @@ class KernelBoundIcmpDirectProber(
         currentChannel: () -> NetBenchSocketChannel,
         tryReadTtl: () -> Boolean,
         onSwitchFdAndChannel: (FileDescriptor, NetBenchSocketChannel, String?, Boolean) -> Unit,
-    ): IcmpPingSample {
+    ): SingleEchoOutcome {
         var sendStartNanos = 0L
         var sentOk = false
 
@@ -1411,10 +1443,13 @@ class KernelBoundIcmpDirectProber(
                     hasDirectCandidate = refreshed.plan.hasDirectCandidate,
                 )
                 if (reason == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED) {
-                    return IcmpPingSample(
-                        seq = seq,
-                        success = false,
-                        errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                    return SingleEchoOutcome(
+                        sample = IcmpPingSample(
+                            seq = seq,
+                            success = false,
+                            errorMessage = "${reason.userHint}；请开启「经由代理测试」",
+                        ),
+                        isPermanentLockdown = true,
                     )
                 }
                 val nextChannel = refreshed.directChannel
@@ -1445,16 +1480,18 @@ class KernelBoundIcmpDirectProber(
                     DirectBindFailureReason.NO_UNDERLYING_NETWORK -> reason.userHint
                     else -> "发送 ICMP 请求失败 (${t.message?.take(48) ?: t.javaClass.simpleName})"
                 }
-                return IcmpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = errLabel,
+                return SingleEchoOutcome(
+                    sample = IcmpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = errLabel,
+                    ),
                 )
             }
         }
 
         if (!sentOk) {
-            return IcmpPingSample(seq = seq, success = false, errorMessage = "发送 ICMP 请求失败")
+            return SingleEchoOutcome(IcmpPingSample(seq = seq, success = false, errorMessage = "发送 ICMP 请求失败"))
         }
 
         val deadlineNanos = sendStartNanos + timeoutMs.coerceAtLeast(100) * 1_000_000L
@@ -1465,11 +1502,13 @@ class KernelBoundIcmpDirectProber(
             currentCoroutineContext().ensureActive()
             val remainingNanos = deadlineNanos - System.nanoTime()
             if (remainingNanos <= 0L) {
-                return IcmpPingSample(
-                    seq = seq,
-                    success = false,
-                    rttMs = null,
-                    errorMessage = "请求超时",
+                return SingleEchoOutcome(
+                    IcmpPingSample(
+                        seq = seq,
+                        success = false,
+                        rttMs = null,
+                        errorMessage = "请求超时",
+                    ),
                 )
             }
 
@@ -1479,10 +1518,12 @@ class KernelBoundIcmpDirectProber(
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                return IcmpPingSample(
-                    seq = seq,
-                    success = false,
-                    errorMessage = "接收等待异常 (${t.message?.take(40) ?: t.javaClass.simpleName})",
+                return SingleEchoOutcome(
+                    IcmpPingSample(
+                        seq = seq,
+                        success = false,
+                        errorMessage = "接收等待异常 (${t.message?.take(40) ?: t.javaClass.simpleName})",
+                    ),
                 )
             }
 
@@ -1493,14 +1534,18 @@ class KernelBoundIcmpDirectProber(
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                return IcmpPingSample(
-                    seq = seq,
-                    success = false,
-                    rttMs = null,
-                    errorMessage = classifyReceiveError(
-                        throwable = t,
-                        isVpnActive = isVpnActive,
+                val (msg, isLockdown) = classifyReceiveErrorDetailed(
+                    throwable = t,
+                    isVpnActive = isVpnActive,
+                )
+                return SingleEchoOutcome(
+                    sample = IcmpPingSample(
+                        seq = seq,
+                        success = false,
+                        rttMs = null,
+                        errorMessage = msg,
                     ),
+                    isPermanentLockdown = isLockdown,
                 )
             } ?: continue
 
@@ -1518,28 +1563,32 @@ class KernelBoundIcmpDirectProber(
 
             val rawRttMs = (recvEndNanos - sendStartNanos) / 1_000_000.0
             if (!rawRttMs.isFinite() || rawRttMs < 0.0 || rawRttMs > IcmpPingParser.MAX_VALID_RTT_MS) {
-                return IcmpPingSample(
-                    seq = seq,
-                    success = true,
-                    rttMs = null,
-                    ttl = datagram.ttl,
-                    errorMessage = "RTT 异常已忽略",
+                return SingleEchoOutcome(
+                    IcmpPingSample(
+                        seq = seq,
+                        success = true,
+                        rttMs = null,
+                        ttl = datagram.ttl,
+                        errorMessage = "RTT 异常已忽略",
+                    ),
                 )
             }
 
-            return IcmpPingSample(
-                seq = seq,
-                success = true,
-                rttMs = rawRttMs.coerceAtLeast(0.01),
-                ttl = datagram.ttl,
+            return SingleEchoOutcome(
+                IcmpPingSample(
+                    seq = seq,
+                    success = true,
+                    rttMs = rawRttMs.coerceAtLeast(0.01),
+                    ttl = datagram.ttl,
+                ),
             )
         }
     }
 
-    private fun classifyReceiveError(
+    private fun classifyReceiveErrorDetailed(
         throwable: Throwable,
         isVpnActive: Boolean,
-    ): String {
+    ): Pair<String, Boolean> {
         val errno = extractPosixErrno(throwable) ?: 0
         val errnos = PosixErrnoTable()
         val combined = generateSequence(throwable) { it.cause }
@@ -1554,9 +1603,9 @@ class KernelBoundIcmpDirectProber(
             "permission denied" in combined
         if (isPermDenied) {
             return if (isVpnActive) {
-                "${DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED.userHint}；请开启「经由代理测试」"
+                "${DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED.userHint}；请开启「经由代理测试」" to true
             } else {
-                "ICMP 接收权限受限"
+                "ICMP 接收权限受限" to false
             }
         }
 
@@ -1565,14 +1614,14 @@ class KernelBoundIcmpDirectProber(
             "no route to host" in combined ||
             "host unreachable" in combined
         if (isHostUnreach) {
-            return "目标主机不可达"
+            return "目标主机不可达" to false
         }
 
         val isNetUnreach = (errno != 0 && errno == errnos.enetunreach) ||
             "enetunreach" in combined ||
             "network is unreachable" in combined
         if (isNetUnreach) {
-            return "底层网络不可达"
+            return "底层网络不可达" to false
         }
 
         val isRefused = (errno != 0 && errno == errnos.econnrefused) ||
@@ -1582,10 +1631,10 @@ class KernelBoundIcmpDirectProber(
             "prohibited" in combined ||
             "filtered" in combined
         if (isRefused) {
-            return "目标拒绝或过滤 ICMP 请求"
+            return "目标拒绝或过滤 ICMP 请求" to false
         }
 
-        return "接收 ICMP 响应失败 (${throwable.message?.take(48) ?: throwable.javaClass.simpleName})"
+        return "接收 ICMP 响应失败 (${throwable.message?.take(48) ?: throwable.javaClass.simpleName})" to false
     }
 
     companion object {
@@ -1693,10 +1742,15 @@ class IcmpPingRunner(
 
             when (directOutcome) {
                 is IcmpDirectProbeOutcome.Completed -> {
-                    val finalSamples = IcmpPingParser.reconcileSamples(directOutcome.samples, plannedCount)
+                    val finalSamples = if (directOutcome.abortedEarlyOnLockdown) {
+                        directOutcome.samples
+                    } else {
+                        IcmpPingParser.reconcileSamples(directOutcome.samples, plannedCount)
+                    }
+                    val effectiveSent = finalSamples.size.coerceAtLeast(1)
                     val receivedCount = finalSamples.count { it.success }
-                    val finalError = if (receivedCount == 0) {
-                        val specific = directOutcome.samples.firstOrNull {
+                    val finalError = if (receivedCount == 0 || directOutcome.abortedEarlyOnLockdown) {
+                        val specific = directOutcome.samples.lastOrNull {
                             !it.errorMessage.isNullOrBlank() && it.errorMessage != "请求超时"
                         }?.errorMessage
                         specific ?: "全部请求超时或目标禁 Ping（100% 丢包）"
@@ -1707,9 +1761,9 @@ class IcmpPingRunner(
                         resolvedTarget = endpoint.resolvedTarget,
                         samples = finalSamples,
                         packetStats = IcmpPingParser.PingPacketStats(
-                            sent = plannedCount,
+                            sent = effectiveSent,
                             received = receivedCount,
-                            lossPercent = ((plannedCount - receivedCount) * 100.0) / plannedCount.toDouble(),
+                            lossPercent = ((effectiveSent - receivedCount) * 100.0) / effectiveSent.toDouble(),
                         ),
                         bindingMode = IcmpNetworkBindingMode.PHYSICAL_NETWORK_BOUND,
                         boundInterfaceName = directOutcome.boundInterfaceName,

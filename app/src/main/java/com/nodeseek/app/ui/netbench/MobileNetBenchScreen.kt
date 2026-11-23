@@ -114,6 +114,7 @@ fun MobileNetBenchScreen(
     initialTarget: String = "",
     onInsertMarkdown: ((String) -> Unit)? = null,
     onOpenLiteSshIperf3Setup: ((targetHost: String, port: Int) -> Unit)? = null,
+    onNavigateToVault: (() -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
     initialListItemIndex: Int = 0,
     previewUiState: MobileNetBenchUiState? = null,
@@ -404,6 +405,8 @@ fun MobileNetBenchScreen(
                 viewModel.applyVaultServer(server)
             },
             onDismiss = { showVaultHostPicker = false },
+            onNavigateToVault = onNavigateToVault
+                ?: onOpenLiteSshIperf3Setup?.let { openSsh -> { openSsh("", 0) } },
         )
     }
 
@@ -847,7 +850,7 @@ private fun TestModulesConfigCard(
             subtitle = if (uiState.testViaProxy) {
                 "Ping / TCPing / HTTP / iperf3 将通过当前代理/VPN 链路测试"
             } else {
-                "TCPing / HTTP / iperf3 绑定非 VPN 底层真实网络；ping 子进程受限可能走默认路由"
+                "Ping / TCPing / HTTP / iperf3 均优先绑定非 VPN 底层真实物理网络（仅降级子进程受限时回退默认路由）"
             },
             icon = Icons.Rounded.VpnLock,
             checked = uiState.testViaProxy,

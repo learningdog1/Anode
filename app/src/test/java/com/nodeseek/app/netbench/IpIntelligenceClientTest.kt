@@ -660,4 +660,66 @@ class IpIntelligenceClientTest {
         assertEquals("58.16.*.*", snapshot.directNetwork!!.maskedIp)
         assertEquals("蜂窝移动", snapshot.directNetwork!!.transportLabel)
     }
+
+    @Test
+    fun `hedged direct egress probing recovers quickly via domestic ipip fallback when primary overseas endpoint stalls`() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/slow-overseas" -> MockResponse()
+                    .setResponseCode(200)
+                    .setHeadersDelay(2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .setBody("""{"success":true,"ip":"114.240.88.123","country_code":"CN","connection":{"asn":4134}}""")
+                "/fast-ipip" -> MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"ret":"ok","data":{"ip":"58.16.14.220","location":["中国","贵州","贵阳","","联通"]}}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        val workingWifi: NetBenchSocketChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-1"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(workingWifi, "wifi-1", isVpn = false, hasInternet = true, isValidated = true, isForeground = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, workingWifi, workingWifi)
+            }
+        }
+
+        val base = server.url("/").toString().trimEnd('/')
+        val client = IpIntelligenceClient(
+            httpClient = OkHttpClient(),
+            endpoints = IpIntelligenceEndpoints(
+                clientSelfUrls = listOf("ipwho.is" to "$base/slow-overseas"),
+                clientDirectUrls = listOf(
+                    "ipwho.is" to "$base/slow-overseas",
+                    "ipip.net" to "$base/fast-ipip",
+                ),
+            ),
+            ioDispatcher = Dispatchers.IO,
+            networkBridge = bridge,
+        )
+
+        val startedNanos = System.nanoTime()
+        val snapshot = client.detectClientEgress()
+        val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000L
+
+        assertNotNull(snapshot.directNetwork)
+        assertEquals(ClientCarrier.CHINA_UNICOM, snapshot.directNetwork!!.carrier)
+        assertTrue(
+            "Expected hedged direct probe to recover via ipip.net well under 2s overseas stall, took ${elapsedMs}ms",
+            elapsedMs < 1_500L,
+        )
+    }
 }

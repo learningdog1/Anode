@@ -601,4 +601,42 @@ class NetBenchMarkdownFormatterTest {
         )
         assertTrue(boundMd.contains("物理网卡直连 `wlan0`"))
     }
+
+    @Test
+    fun `renders download retransmits in reply card and verdict and uses exact serverBytesTransferred in SUM`() {
+        val base = sampleReport()
+        val reportWithServerStats = base.copy(
+            iperfDownloadResult = base.iperfDownloadResult!!.copy(
+                retransmits = 7L,
+                serverBytesTransferred = 52_428_800L, // exact 50.0 MiB
+                serverDurationSec = 4.0,
+            ),
+            iperfUploadResult = base.iperfUploadResult!!.copy(
+                retransmits = null,
+                serverBytesTransferred = 26_214_400L, // exact 25.0 MiB
+                serverDurationSec = 4.0,
+            ),
+        )
+
+        val replyMd = NetBenchMarkdownFormatter.format(
+            report = reportWithServerStats,
+            options = NetBenchMarkdownOptions(
+                style = NetBenchMarkdownStyle.REPLY_CARD,
+                timestampLabel = "2026-11-23 22:00",
+            ),
+        )
+        assertTrue("Reply card download summary should display server retransmits", replyMd.contains("重传 `7`"))
+        assertTrue("Interval log sender (server) should use exact serverBytesTransferred (50.0 MBytes)", replyMd.contains("50.0 MBytes"))
+        assertTrue("Interval log receiver (server) should use exact serverBytesTransferred (25.0 MBytes)", replyMd.contains("25.0 MBytes"))
+        assertTrue("Download [SUM] sender line should show 7 Retr", replyMd.contains("7 Retr"))
+
+        val fullMd = NetBenchMarkdownFormatter.format(
+            report = reportWithServerStats,
+            options = NetBenchMarkdownOptions(
+                style = NetBenchMarkdownStyle.FULL_TABLE,
+                timestampLabel = "2026-11-23 22:00",
+            ),
+        )
+        assertTrue("Comprehensive verdict should include download TCP retransmits", fullMd.contains("TCP 重传 `7` 次"))
+    }
 }

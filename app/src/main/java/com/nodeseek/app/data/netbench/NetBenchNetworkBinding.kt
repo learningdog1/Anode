@@ -446,7 +446,11 @@ class AndroidNetBenchNetworkBridge(
         val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         val isNotRestricted = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
         val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        val isForeground = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)
+        val isForeground = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)
+        } else {
+            activeHandle != null && activeHandle == handle
+        }
         val isNotSuspended = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
         } else {
@@ -597,6 +601,10 @@ class AndroidNetBenchNetworkBridge(
                     if (requested) {
                         requestCallback = activeReqCallback
                         latch.await(130L, TimeUnit.MILLISECONDS)
+                    } else if (registeredListen) {
+                        // Fallback when CHANGE_NETWORK_STATE is denied on restricted ROMs:
+                        // give the passive registerNetworkCallback listener a slightly wider window.
+                        latch.await(120L, TimeUnit.MILLISECONDS)
                     }
                 }
             } finally {
@@ -631,28 +639,8 @@ class AndroidNetBenchNetworkBridge(
                 cachedDirectEntries.remove(handle)
             }
 
-            val directPhysicalCallback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    recordNetwork(network)
-                    trySend(Unit)
-                }
-
-                override fun onLost(network: Network) {
-                    evictNetwork(network)
-                    trySend(Unit)
-                }
-
-                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    recordNetwork(network)
-                    trySend(Unit)
-                }
-
-                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
-                    recordNetwork(network, linkProperties)
-                    trySend(Unit)
-                }
-            }
-
+            // Single superset callback (INTERNET with NOT_VPN removed) covers both physical
+            // and VPN networks without duplicating events or consuming an extra system callback slot.
             val allInternetCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     recordNetwork(network)
@@ -693,19 +681,11 @@ class AndroidNetBenchNetworkBridge(
                 }
             }
 
-            val notVpnRequest = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                .build()
-
             val allRequest = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .build()
 
-            val registeredDirect = runCatching {
-                cm.registerNetworkCallback(notVpnRequest, directPhysicalCallback)
-            }.isSuccess
             val registeredAll = runCatching {
                 cm.registerNetworkCallback(allRequest, allInternetCallback)
             }.isSuccess
@@ -714,9 +694,6 @@ class AndroidNetBenchNetworkBridge(
             }.isSuccess
 
             awaitClose {
-                if (registeredDirect) {
-                    runCatching { cm.unregisterNetworkCallback(directPhysicalCallback) }
-                }
                 if (registeredAll) {
                     runCatching { cm.unregisterNetworkCallback(allInternetCallback) }
                 }

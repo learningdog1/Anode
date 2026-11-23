@@ -91,8 +91,10 @@ import com.nodeseek.app.domain.netbench.EgressRouteKind
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IcmpPingProgress
 import com.nodeseek.app.domain.netbench.IpClassificationEngine
+import com.nodeseek.app.domain.netbench.IpFamily
 import com.nodeseek.app.domain.netbench.IpIntelligenceReport
 import com.nodeseek.app.domain.netbench.IpOriginType
+import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.IpUsageType
 import com.nodeseek.app.domain.netbench.Iperf3Direction
 import com.nodeseek.app.domain.netbench.Iperf3IntervalSample
@@ -293,9 +295,9 @@ internal fun NetBenchClientEgressBanner(
     testViaProxy: Boolean,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
     onEnableProxyTest: (() -> Unit)? = null,
     compact: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     val direct = egress?.directNetwork
     val proxy = egress?.proxyNetwork
@@ -550,8 +552,8 @@ internal fun NetBenchRecentTargetsStrip(
     entries: List<NetBenchHistoryEntry>,
     onSelect: (NetBenchHistoryEntry) -> Unit,
     onRemove: (NetBenchHistoryEntry) -> Unit,
-    onClearAll: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onClearAll: (() -> Unit)? = null,
 ) {
     if (entries.isEmpty()) return
     val isDark = NodePulseThemeTokens.isDark
@@ -619,8 +621,16 @@ internal fun NetBenchRecentTargetsStrip(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        val endpointLabel = if (
+                            entry.ipFamily == IpFamily.IPV6 ||
+                            NetBenchTargetParser.isIpv6Literal(entry.host)
+                        ) {
+                            "[${entry.host}]:${entry.port}"
+                        } else {
+                            "${entry.host}:${entry.port}"
+                        }
                         Text(
-                            text = "${entry.host}:${entry.port}",
+                            text = endpointLabel,
                             style = NodePulseThemeTokens.extraTypography.codeLabel,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -871,8 +881,8 @@ internal fun TcpPingLatencyChart(
 @Composable
 internal fun NetBenchIcmpPingCard(
     progress: IcmpPingProgress,
-    compact: Boolean = false,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     val summary = progress.summary
     val points = remember(progress.samples) {
@@ -911,9 +921,9 @@ internal fun NetBenchIcmpPingCard(
 @Composable
 internal fun NetBenchTcpPingCard(
     progress: TcpPingProgress,
+    modifier: Modifier = Modifier,
     httpResult: HttpLatencyResult? = null,
     compact: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     val summary = progress.summary
     val points = remember(progress.samples) {
@@ -1268,9 +1278,9 @@ internal fun NetBenchIperf3Card(
     downloadProgress: Iperf3Progress?,
     uploadProgress: Iperf3Progress?,
     iperfPort: Int,
+    modifier: Modifier = Modifier,
     compact: Boolean = false,
     onOpenIperf3ServerSetup: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     if (downloadProgress == null && uploadProgress == null) return
 
@@ -1589,8 +1599,8 @@ private fun Iperf3IntervalBreakdownPanel(
 internal fun NetBenchIpIntelligenceCard(
     report: IpIntelligenceReport,
     clientNetwork: ClientNetworkInfo?,
-    compact: Boolean = false,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
     clientEgress: ClientEgressSnapshot? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -1783,6 +1793,10 @@ internal fun NetBenchMarkdownReportCard(
     markdown: String,
     selectedStyle: NetBenchMarkdownStyle,
     maskTargetIp: Boolean,
+    onSelectStyle: (NetBenchMarkdownStyle) -> Unit,
+    onToggleMaskTargetIp: (Boolean) -> Unit,
+    onCopyMarkdown: () -> Unit,
+    modifier: Modifier = Modifier,
     includeClientNetwork: Boolean = true,
     includeReportImages: Boolean = false,
     isUploadingReportImages: Boolean = false,
@@ -1790,17 +1804,13 @@ internal fun NetBenchMarkdownReportCard(
     reportImagesError: String? = null,
     uploadedImageCount: Int = 0,
     plannedImageCount: Int = 0,
-    onSelectStyle: (NetBenchMarkdownStyle) -> Unit,
-    onToggleMaskTargetIp: (Boolean) -> Unit,
     onToggleIncludeClientNetwork: (Boolean) -> Unit = {},
     onToggleIncludeReportImages: ((Boolean) -> Unit)? = null,
     onRetryUploadReportImages: (() -> Unit)? = null,
     onConfigureNodeImageApiKey: (() -> Unit)? = null,
-    onCopyMarkdown: () -> Unit,
     onInsertMarkdown: ((String) -> Unit)? = null,
     insertActionLabel: String = "插入回帖/发帖",
     compact: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     if (markdown.isBlank()) return
     var showRawSource by rememberSaveable { mutableStateOf(false) }

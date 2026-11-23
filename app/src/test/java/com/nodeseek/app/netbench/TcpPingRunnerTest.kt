@@ -22,7 +22,9 @@ import com.nodeseek.app.domain.netbench.NetworkDescriptor
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -911,5 +913,116 @@ class TcpPingRunnerTest {
         out.write(rdata.size and 0xFF)
         out.write(rdata)
         return out.toByteArray()
+    }
+
+    @Test
+    fun `TcpPingRunner short-circuits immediately on VPN lockdown EPERM without retrying remaining probes`() = runBlocking {
+        val attempts = AtomicInteger(0)
+        val directChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "wifi-1"
+            override val transportLabel: String = "Wi-Fi"
+            override val isVpn: Boolean = false
+            override val isDirectPhysical: Boolean = true
+            override val bypassSystemHttpProxy: Boolean = true
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val vpnChannel = object : NetBenchSocketChannel {
+            override val networkId: String = "vpn-1"
+            override val transportLabel: String = "VPN"
+            override val isVpn: Boolean = true
+            override val isDirectPhysical: Boolean = false
+            override val bypassSystemHttpProxy: Boolean = false
+            override val socketFactory: SocketFactory = SocketFactory.getDefault()
+            override fun createSocket(): Socket = Socket()
+            override fun resolveAllByName(hostname: String): List<InetAddress> = listOf(InetAddress.getByName("127.0.0.1"))
+        }
+        val bridge = object : NetBenchNetworkBridge {
+            override fun inspectCurrentNetworks(): ResolvedNetworkBinding {
+                val plan = NetBenchNetworkSelector.selectNetworkPlan(
+                    listOf(
+                        NetworkDescriptor(vpnChannel, "vpn-1", isVpn = true, hasInternet = true, isActiveDefault = true, transports = setOf(NetBenchTransportKind.VPN)),
+                        NetworkDescriptor(directChannel, "wifi-1", isVpn = false, hasInternet = true, isValidated = true, transports = setOf(NetBenchTransportKind.WIFI)),
+                    ),
+                )
+                return ResolvedNetworkBinding(plan, directChannel, vpnChannel)
+            }
+        }
+        val resolver = NetBenchTargetResolver(
+            dnsResolver = NetBenchDnsResolver { listOf(InetAddress.getByName("127.0.0.1")) },
+            networkBridge = bridge,
+            ioDispatcher = Dispatchers.IO,
+        )
+        val runner = TcpPingRunner(
+            resolver = resolver,
+            connector = TcpProbeConnector { _, _, _ ->
+                attempts.incrementAndGet()
+                throw SocketException("bind failed: EPERM (Operation not permitted)")
+            },
+            networkBridge = bridge,
+            ioDispatcher = Dispatchers.IO,
+        )
+
+        val finalProgress = runner.run(
+            TcpPingConfig(
+                target = "127.0.0.1",
+                port = 443,
+                probeCount = 10,
+                intervalMs = 500L,
+                useProxy = false,
+            ),
+        ).toList().last()
+
+        assertTrue(finalProgress.isFinished)
+        assertEquals("Should short-circuit after first EPERM probe", 1, attempts.get())
+        assertEquals(1, finalProgress.samples.size)
+        assertEquals(NetBenchErrorCategory.VPN_OR_PERMISSION_RESTRICTED, finalProgress.summary.errorCategory)
+    }
+
+    @Test
+    fun `HttpLatencyRunner honors preResolvedAddresses and cancels hanging HTTP call promptly`() = runBlocking {
+        val mockServer = MockWebServer()
+        mockServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = when (request.path) {
+                "/slow" -> MockResponse()
+                    .setResponseCode(200)
+                    .setBodyDelay(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .setBody("too late")
+                else -> MockResponse().setResponseCode(200).setBody("ok")
+            }
+        }
+        mockServer.start()
+        try {
+            val runner = HttpLatencyRunner(ioDispatcher = Dispatchers.IO)
+
+            // 1. Pre-resolved loopback address allows probing synthetic hostname without real DNS
+            val okResult = runner.probe(
+                rawTarget = "http://synthetic-netbench.invalid:${mockServer.port}/fast",
+                port = mockServer.port,
+                timeoutMs = 3_000,
+                preferredFamily = PreferredIpFamily.IPV4_ONLY,
+                preResolvedAddresses = listOf(InetAddress.getByName("127.0.0.1")),
+            )
+            assertTrue("Expected HTTP probe to succeed via preResolvedAddresses: $okResult", okResult.success)
+            assertEquals(200, okResult.statusCode)
+
+            // 2. Cancelling coroutine during a 15s slow HTTP response aborts promptly
+            val startNanos = System.nanoTime()
+            val slowJob = launch(Dispatchers.IO) {
+                runner.probe(
+                    rawTarget = "http://127.0.0.1:${mockServer.port}/slow",
+                    port = mockServer.port,
+                    timeoutMs = 15_000,
+                )
+            }
+            delay(150L)
+            slowJob.cancel()
+            slowJob.join()
+            val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
+            assertTrue("Expected cancelled HTTP probe to exit within 2500ms, took ${elapsedMs}ms", elapsedMs < 2_500L)
+        } finally {
+            mockServer.shutdown()
+        }
     }
 }

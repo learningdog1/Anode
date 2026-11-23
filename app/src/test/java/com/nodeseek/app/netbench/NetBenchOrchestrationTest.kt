@@ -646,4 +646,70 @@ class NetBenchOrchestrationTest {
             runCatching { server.close() }
         }
     }
+
+    @Test
+    fun `rapid restart does not let cancelled run overwrite running state and standalone controller persists markdownStyle`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val file = File(tempFolder.root, "race_style_${NetBenchHistoryStore.HISTORY_FILE_NAME}")
+            val historyStore = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+            val resolver = NetBenchTargetResolver(ioDispatcher = Dispatchers.IO)
+            val probeCalls = AtomicInteger(0)
+            val slowTcpRunner = TcpPingRunner(
+                resolver = resolver,
+                connector = TcpProbeConnector { _, _, _ ->
+                    val n = probeCalls.incrementAndGet()
+                    Thread.sleep(if (n == 1) 180L else 20L)
+                    15.0
+                },
+                ioDispatcher = Dispatchers.IO,
+            )
+            val offlineIpClient = IpIntelligenceClient(
+                endpoints = IpIntelligenceEndpoints(clientSelfUrls = emptyList()),
+                ioDispatcher = Dispatchers.IO,
+            )
+
+            val controller = NetBenchSessionController(
+                scope = scope,
+                historyStore = historyStore,
+                targetResolver = resolver,
+                tcpPingRunner = slowTcpRunner,
+                ipIntelligenceClient = offlineIpClient,
+            )
+
+            // Default style is FULL_TABLE; switching to REPLY_CARD persists and reloads in a new controller
+            assertEquals(NetBenchMarkdownStyle.FULL_TABLE, controller.uiState.value.markdownStyle)
+            controller.selectMarkdownStyle(NetBenchMarkdownStyle.REPLY_CARD)
+            delay(80)
+            val reloadedStore = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+            val controller2 = NetBenchSessionController(
+                scope = scope,
+                historyStore = reloadedStore,
+                targetResolver = resolver,
+                tcpPingRunner = slowTcpRunner,
+                ipIntelligenceClient = offlineIpClient,
+            )
+            assertEquals(NetBenchMarkdownStyle.REPLY_CARD, controller2.uiState.value.markdownStyle)
+
+            // Rapid start -> immediate restart: cancelled first run must NOT overwrite second run's active/completed state
+            controller2.toggleIcmpPing(false)
+            controller2.toggleIpCheck(false)
+            controller2.updateTargetInput("127.0.0.1")
+            controller2.updateProbeCount(4)
+            controller2.startBenchmark()
+            delay(40)
+            controller2.startBenchmark()
+            assertTrue("Second run must stay running right after restart", controller2.uiState.value.isRunning)
+
+            var tries = 0
+            while (controller2.uiState.value.activePhase != NetBenchPhase.COMPLETED && tries < 80) {
+                delay(40)
+                tries++
+            }
+            assertEquals(NetBenchPhase.COMPLETED, controller2.uiState.value.activePhase)
+            assertFalse(controller2.uiState.value.isRunning)
+        } finally {
+            scope.cancel()
+        }
+    }
 }

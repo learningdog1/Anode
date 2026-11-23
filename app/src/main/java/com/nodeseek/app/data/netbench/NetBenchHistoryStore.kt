@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
 data class NetBenchReportPreferences(
     val maskTargetIp: Boolean = true,
     val includeClientNetwork: Boolean = true,
-    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
+    val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
     val includeReportImages: Boolean = false,
 )
 
@@ -42,6 +42,7 @@ class NetBenchHistoryStore(
     private val historyFile: File,
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    eagerLoadOnInit: Boolean = true,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -50,18 +51,29 @@ class NetBenchHistoryStore(
     }
 
     private val mutex = Mutex()
-    private val initialPayload = readPayloadFromDiskSafely()
+    private var diskLoaded: Boolean = eagerLoadOnInit
+    private val initialPayload = if (eagerLoadOnInit) readPayloadFromDiskSafely() else NetBenchHistoryPayload()
     private val _entries = MutableStateFlow<List<NetBenchHistoryEntry>>(initialPayload.entries)
     val entries: StateFlow<List<NetBenchHistoryEntry>> = _entries.asStateFlow()
 
     private val _preferences = MutableStateFlow<NetBenchReportPreferences>(initialPayload.preferences)
     val preferences: StateFlow<NetBenchReportPreferences> = _preferences.asStateFlow()
 
+    private fun ensureLoadedLocked() {
+        if (!diskLoaded) {
+            val loaded = readPayloadFromDiskSafely()
+            _entries.value = loaded.entries
+            _preferences.value = loaded.preferences
+            diskLoaded = true
+        }
+    }
+
     suspend fun reload(): List<NetBenchHistoryEntry> = withContext(ioDispatcher) {
         mutex.withLock {
             val loaded = readPayloadFromDiskSafely()
             _entries.value = loaded.entries
             _preferences.value = loaded.preferences
+            diskLoaded = true
             loaded.entries
         }
     }
@@ -71,6 +83,7 @@ class NetBenchHistoryStore(
         if (cleanHost.isEmpty()) return@withContext _entries.value
 
         mutex.withLock {
+            ensureLoadedLocked()
             val normalized = entry.copy(
                 host = cleanHost,
                 port = entry.port.coerceIn(1, 65535),
@@ -90,6 +103,7 @@ class NetBenchHistoryStore(
 
     suspend fun remove(host: String, port: Int): List<NetBenchHistoryEntry> = withContext(ioDispatcher) {
         mutex.withLock {
+            ensureLoadedLocked()
             val updated = _entries.value.filterNot {
                 it.host.equals(host.trim(), ignoreCase = true) && it.port == port
             }
@@ -101,6 +115,7 @@ class NetBenchHistoryStore(
 
     suspend fun clear(): Unit = withContext(ioDispatcher) {
         mutex.withLock {
+            ensureLoadedLocked()
             _entries.value = emptyList()
             writeToDiskSafely(entries = emptyList(), preferences = _preferences.value)
         }
@@ -110,6 +125,7 @@ class NetBenchHistoryStore(
         transform: (NetBenchReportPreferences) -> NetBenchReportPreferences,
     ): NetBenchReportPreferences = withContext(ioDispatcher) {
         mutex.withLock {
+            ensureLoadedLocked()
             val next = transform(_preferences.value)
             _preferences.value = next
             writeToDiskSafely(entries = _entries.value, preferences = next)
@@ -163,7 +179,7 @@ class NetBenchHistoryStore(
             val appCtx = context.applicationContext ?: context
             val file = File(appCtx.filesDir, HISTORY_FILE_NAME)
             return instances.getOrPut(file.absolutePath) {
-                NetBenchHistoryStore(historyFile = file)
+                NetBenchHistoryStore(historyFile = file, eagerLoadOnInit = false)
             }
         }
     }
