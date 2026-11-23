@@ -26,6 +26,8 @@ import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.mail.VpsMailMatchStatus
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.repository.SettingsRepository
+import com.nodeseek.app.domain.ssh.SshAuthMethod
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -40,7 +42,9 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.OutputStream
 import java.util.Locale
 
 enum class SeekMailFilterMode(val label: String) {
@@ -182,6 +186,7 @@ data class SeekMailUiState(
     val attachmentsErrorMessage: String? = null,
     val allowRemoteImages: Boolean = false,
     val openedVpsInsight: VpsMailInsightUiState? = null,
+    val showSshOverwriteConfirm: Boolean = false,
     val exportingKey: String? = null,
     val rateLimit: SeekMailRateLimit? = null,
     val fontScale: Float = AppSettings.DEFAULT_FONT_SCALE,
@@ -284,8 +289,10 @@ class SeekMailViewModel(
         val isLoadingAttachments: Boolean = false,
         val attachmentsErrorMessage: String? = null,
         val allowedRemoteImageMailIds: Set<Long> = emptySet(),
+        val openedParsedVpsMail: ParsedVpsBillingMail? = null,
         val isVpsPasswordRevealed: Boolean = false,
         val isIngestingVpsMail: Boolean = false,
+        val showSshOverwriteConfirm: Boolean = false,
         val exportingKey: String? = null,
     )
 
@@ -311,6 +318,7 @@ class SeekMailViewModel(
 
     private var lastHandledApiKey: String? = null
     private var pendingInitialMailId: Long? = initialMailId.takeIf { it > 0L }
+    private var pendingExportTarget: PendingExportTarget? = null
 
     private var workspaceLoadJob: Job? = null
     private var mailLoadJob: Job? = null
@@ -376,12 +384,28 @@ class SeekMailViewModel(
                 if (resolved.isEmpty()) null else mailId to resolved
             }.toMap()
         }
+        val selectedMailboxId = state.selectedMailboxId
         val localTagCounts = if (localTagStore.tags.isEmpty() || localTagStore.mailTagIds.isEmpty()) {
             emptyMap()
         } else {
+            val knownMailboxByMailId = if (selectedMailboxId != null) {
+                HashMap<Long, Long>().apply {
+                    putAll(localTagStore.mailMailboxIds)
+                    state.mails.forEach { if (it.mailboxId > 0L) put(it.id, it.mailboxId) }
+                    archiveStore.archivedMails.values.forEach { if (it.mailboxId > 0L) put(it.id, it.mailboxId) }
+                }
+            } else {
+                emptyMap()
+            }
             val counts = HashMap<String, Int>(localTagStore.tags.size)
             localTagStore.mailTagIds.forEach { (mailId, ids) ->
                 if (mailId in deletedIds) return@forEach
+                if (selectedMailboxId != null) {
+                    val mailMailboxId = knownMailboxByMailId[mailId]
+                    if (mailMailboxId != null && mailMailboxId != selectedMailboxId) {
+                        return@forEach
+                    }
+                }
                 ids.forEach { tagId ->
                     if (tagId in localTagById) {
                         counts[tagId] = (counts[tagId] ?: 0) + 1
@@ -418,10 +442,20 @@ class SeekMailViewModel(
                     effectiveSelectedLocalTagId in localTagStore.mailTagIds[mail.id].orEmpty()
                 }
             }
+            state.filterMode == SeekMailFilterMode.UNREAD -> {
+                activeInboxMails.filter { !it.isRead }
+            }
             else -> activeInboxMails
         }
         val isArchivedMode = state.filterMode == SeekMailFilterMode.ARCHIVED
-        val hiddenLoadedCount = state.mails.count { it.id in deletedIds || it.id in archivedIds }
+        val hiddenLoadedCount = when {
+            state.filterMode == SeekMailFilterMode.UNREAD && effectiveSelectedLocalTagId == null -> {
+                state.mails.count { mail ->
+                    mail.id in deletedIds || mail.id in archivedIds || mail.isRead || mail.id in readIds
+                }
+            }
+            else -> state.mails.count { it.id in deletedIds || it.id in archivedIds }
+        }
         val effectiveTotalMailCount = when {
             isArchivedMode || effectiveSelectedLocalTagId != null -> visibleMails.size
             !state.hasMoreMails -> visibleMails.size
@@ -457,16 +491,7 @@ class SeekMailViewModel(
         }
 
         val activeSummary = overlaidDetail?.summary ?: overlaidPreview
-        val parsedVpsMail = when {
-            overlaidDetail != null -> VpsBillingMailParser.parseDetail(overlaidDetail)
-            overlaidPreview != null -> VpsBillingMailParser.parse(
-                subject = overlaidPreview.subject,
-                bodyText = overlaidPreview.snippet,
-                fromName = overlaidPreview.fromName,
-                fromAddress = overlaidPreview.fromAddress,
-            )
-            else -> null
-        }
+        val parsedVpsMail = state.openedParsedVpsMail
         val openedVpsInsight = parsedVpsMail?.let { parsed ->
             val matchStatus = vpsMailAutoIngestService.resolveMatchStatus(
                 summary = activeSummary,
@@ -546,6 +571,7 @@ class SeekMailViewModel(
             attachmentsErrorMessage = state.attachmentsErrorMessage,
             allowRemoteImages = state.openedMailId != null && state.openedMailId in state.allowedRemoteImageMailIds,
             openedVpsInsight = openedVpsInsight,
+            showSshOverwriteConfirm = state.showSshOverwriteConfirm,
             exportingKey = state.exportingKey,
             rateLimit = rateLimit,
             fontScale = settings.fontScale,
@@ -620,6 +646,7 @@ class SeekMailViewModel(
         detailLoadJob?.cancel()
         attachmentsLoadJob?.cancel()
         contactsLoadJob?.cancel()
+        pendingExportTarget = null
         mailLoadGeneration++
     }
 
@@ -659,7 +686,10 @@ class SeekMailViewModel(
         verifiedKey: String,
         status: SeekMailConnectionStatus,
     ) {
+        val previousKey = lastHandledApiKey
+        val keyChanged = previousKey != null && previousKey != verifiedKey
         lastHandledApiKey = verifiedKey
+        cancelActiveNetworkJobs()
         settingsRepository.setSeekMailApiKey(verifiedKey)
         withTimeoutOrNull(2_000L) {
             settingsRepository.settings.first { it.seekMailApiKey.trim() == verifiedKey }
@@ -667,19 +697,32 @@ class SeekMailViewModel(
 
         val sortedMailboxes = sortMailboxes(status.mailboxes)
         val domains = buildAvailableDomains(sortedMailboxes)
+        val defaultDomain = domains.firstOrNull() ?: SeekMailUiState.DEFAULT_DOMAINS.first()
         _internalState.update { current ->
-            val keepSelected = current.selectedMailboxId?.takeIf { id ->
-                sortedMailboxes.any { it.id == id }
+            if (keyChanged) {
+                val preserveInitialMailbox = previousKey.isNullOrEmpty() && initialMailboxId > 0L
+                val initialSelected = initialMailboxId
+                    .takeIf { preserveInitialMailbox }
+                    ?.takeIf { id -> sortedMailboxes.any { it.id == id } }
+                InternalState(
+                    mailboxes = sortedMailboxes,
+                    selectedMailboxId = initialSelected,
+                    createDomain = defaultDomain,
+                )
+            } else {
+                val keepSelected = current.selectedMailboxId?.takeIf { id ->
+                    sortedMailboxes.any { it.id == id }
+                }
+                current.copy(
+                    isVerifyingApiKey = false,
+                    apiKeyErrorMessage = null,
+                    mailboxes = sortedMailboxes,
+                    isLoadingMailboxes = false,
+                    mailboxErrorMessage = null,
+                    selectedMailboxId = keepSelected,
+                    createDomain = defaultDomain,
+                )
             }
-            current.copy(
-                isVerifyingApiKey = false,
-                apiKeyErrorMessage = null,
-                mailboxes = sortedMailboxes,
-                isLoadingMailboxes = false,
-                mailboxErrorMessage = null,
-                selectedMailboxId = keepSelected,
-                createDomain = domains.firstOrNull() ?: SeekMailUiState.DEFAULT_DOMAINS.first(),
-            )
         }
         emitSnackbar("Seek 邮箱连接成功（共 ${sortedMailboxes.size} 个邮箱）")
         loadWorkspace(forceRefresh = false, skipMailboxesFetch = true)
@@ -693,8 +736,8 @@ class SeekMailViewModel(
     fun disconnectApiKey() {
         if (_internalState.value.isVerifyingApiKey) return
         viewModelScope.launch {
+            seekMailRepository.clearCacheForCurrentKey()
             settingsRepository.setSeekMailApiKey("")
-            seekMailRepository.clearCache()
             emitSnackbar("已断开 Seek 邮箱密钥")
         }
     }
@@ -901,14 +944,22 @@ class SeekMailViewModel(
     }
 
     fun archiveSelectedMails() {
-        val targets = resolveSelectedVisibleMails()
-        if (targets.isEmpty()) return
+        val archiveStore = seekMailRepository.localArchiveStore.value
+        val targets = resolveSelectedVisibleMails().filter { !archiveStore.isArchived(it.id) }
+        if (targets.isEmpty()) {
+            exitSelectionMode()
+            return
+        }
         archiveMailsBatch(targets = targets, showUndoSnackbar = true)
     }
 
     fun unarchiveSelectedMails() {
-        val targets = resolveSelectedVisibleMails()
-        if (targets.isEmpty()) return
+        val archiveStore = seekMailRepository.localArchiveStore.value
+        val targets = resolveSelectedVisibleMails().filter { archiveStore.isArchived(it.id) }
+        if (targets.isEmpty()) {
+            exitSelectionMode()
+            return
+        }
         unarchiveMailsBatch(targets = targets, showUndoSnackbar = true)
     }
 
@@ -1074,13 +1125,20 @@ class SeekMailViewModel(
         val targets = _internalState.value.batchTaggingMails
         if (targets.isEmpty() || tagId.isBlank()) return
         val targetIds = targets.map { it.id }
+        val mailboxIdsByMailId = targets
+            .filter { it.mailboxId > 0L }
+            .associate { it.id to it.mailboxId }
         viewModelScope.launch {
             val tagMap = seekMailRepository.localTagStore.value.mailTagIds
             val allHaveTag = targetIds.all { mailId -> tagId in tagMap[mailId].orEmpty() }
             if (allHaveTag) {
                 seekMailRepository.removeLocalTagFromMails(targetIds, tagId)
             } else {
-                seekMailRepository.addLocalTagToMails(targetIds, tagId)
+                seekMailRepository.addLocalTagToMails(
+                    mailIds = targetIds,
+                    tagId = tagId,
+                    mailboxIdsByMailId = mailboxIdsByMailId,
+                )
             }
         }
     }
@@ -1090,10 +1148,17 @@ class SeekMailViewModel(
         val targets = _internalState.value.batchTaggingMails
         if (trimmed.isEmpty() || targets.isEmpty()) return
         val targetIds = targets.map { it.id }
+        val mailboxIdsByMailId = targets
+            .filter { it.mailboxId > 0L }
+            .associate { it.id to it.mailboxId }
         viewModelScope.launch {
             seekMailRepository.createLocalTag(name = trimmed, colorHex = colorHex)
                 .onSuccess { created ->
-                    seekMailRepository.addLocalTagToMails(targetIds, created.id)
+                    seekMailRepository.addLocalTagToMails(
+                        mailIds = targetIds,
+                        tagId = created.id,
+                        mailboxIdsByMailId = mailboxIdsByMailId,
+                    )
                     emitSnackbar("已为 ${targets.size} 封邮件打上标签「${created.name}」")
                 }
                 .onFailure { err ->
@@ -1270,13 +1335,14 @@ class SeekMailViewModel(
     }
 
     private fun mergeMailBackIntoInboxIfCompatible(summary: SeekMailSummary) {
+        val isLocallyRead = summary.id in seekMailRepository.locallyReadMailIds.value
         _internalState.update { current ->
             if (!current.hasLoadedServerPage) return@update current
             if (current.mails.any { it.id == summary.id }) return@update current
             val mailboxMatches = current.loadedServerMailboxId == null ||
                 current.loadedServerMailboxId == summary.mailboxId
             val modeMatches = current.loadedServerFilterMode == SeekMailFilterMode.ALL ||
-                (current.loadedServerFilterMode == SeekMailFilterMode.UNREAD && !summary.isRead)
+                (current.loadedServerFilterMode == SeekMailFilterMode.UNREAD && !summary.isRead && !isLocallyRead)
             val tagMatches = current.loadedServerTagId == null ||
                 summary.tags.any { it.id == current.loadedServerTagId }
             val queryMatches = current.loadedServerSearchQuery.isBlank() ||
@@ -1294,6 +1360,15 @@ class SeekMailViewModel(
         }
     }
 
+    private fun resolveKnownMailboxId(mailId: Long): Long? {
+        val state = _internalState.value
+        return state.taggingTargetMail?.takeIf { it.id == mailId }?.mailboxId?.takeIf { it > 0L }
+            ?: state.openedDetail?.summary?.takeIf { it.id == mailId }?.mailboxId?.takeIf { it > 0L }
+            ?: state.openedPreviewSummary?.takeIf { it.id == mailId }?.mailboxId?.takeIf { it > 0L }
+            ?: state.mails.firstOrNull { it.id == mailId }?.mailboxId?.takeIf { it > 0L }
+            ?: seekMailRepository.localArchiveStore.value.archivedMails[mailId]?.mailboxId?.takeIf { it > 0L }
+    }
+
     fun openMailTagSheet(summary: SeekMailSummary) {
         _internalState.update { it.copy(taggingTargetMail = summary) }
     }
@@ -1303,20 +1378,30 @@ class SeekMailViewModel(
     }
 
     fun toggleLocalTagForMail(mailId: Long, tagId: String) {
+        val mailboxId = resolveKnownMailboxId(mailId)
         viewModelScope.launch {
-            seekMailRepository.toggleLocalTagForMail(mailId = mailId, tagId = tagId)
+            seekMailRepository.toggleLocalTagForMail(
+                mailId = mailId,
+                tagId = tagId,
+                mailboxId = mailboxId,
+            )
         }
     }
 
     fun createAndAttachLocalTag(mailId: Long, name: String, colorHex: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
+        val mailboxId = resolveKnownMailboxId(mailId)
         viewModelScope.launch {
             seekMailRepository.createLocalTag(name = trimmed, colorHex = colorHex)
                 .onSuccess { created ->
                     val currentIds = seekMailRepository.localTagStore.value.mailTagIds[mailId].orEmpty()
                     if (created.id !in currentIds) {
-                        seekMailRepository.toggleLocalTagForMail(mailId = mailId, tagId = created.id)
+                        seekMailRepository.toggleLocalTagForMail(
+                            mailId = mailId,
+                            tagId = created.id,
+                            mailboxId = mailboxId,
+                        )
                     }
                     emitSnackbar("已打上标签「${created.name}」")
                 }
@@ -1456,15 +1541,37 @@ class SeekMailViewModel(
             snapshot.activeSearchQuery.trim().takeIf { it.isNotEmpty() }
         }
 
+        val normalizedSearch = searchQuery.orEmpty()
+        val queryChanged = !snapshot.hasLoadedServerPage ||
+            snapshot.loadedServerFilterMode != requestedServerMode ||
+            snapshot.loadedServerMailboxId != mailboxId ||
+            snapshot.loadedServerTagId != tagId ||
+            snapshot.loadedServerSearchQuery != normalizedSearch
+
         _internalState.update {
             if (reset) {
-                it.copy(
-                    isLoadingMails = !isRefresh && it.mails.isEmpty(),
-                    isRefreshing = isRefresh,
-                    isLoadingMore = false,
-                    mailsErrorMessage = null,
-                    mailsErrorKind = null,
-                )
+                if (!isRefresh && queryChanged) {
+                    it.copy(
+                        mails = emptyList(),
+                        totalMailCount = 0,
+                        nextOffset = 0,
+                        nextUnreadCursor = "",
+                        hasMoreMails = false,
+                        isLoadingMails = true,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        mailsErrorMessage = null,
+                        mailsErrorKind = null,
+                    )
+                } else {
+                    it.copy(
+                        isLoadingMails = !isRefresh && it.mails.isEmpty(),
+                        isRefreshing = isRefresh,
+                        isLoadingMore = false,
+                        mailsErrorMessage = null,
+                        mailsErrorKind = null,
+                    )
+                }
             } else {
                 it.copy(
                     isLoadingMore = true,
@@ -1550,9 +1657,6 @@ class SeekMailViewModel(
                 mailsErrorKind = null,
             )
         }
-        viewModelScope.launch {
-            runCatching { vpsMailAutoIngestService.processIncomingSummaries(page.items) }
-        }
     }
 
     private fun applyUnreadPage(
@@ -1590,9 +1694,6 @@ class SeekMailViewModel(
                 mailsErrorMessage = null,
                 mailsErrorKind = null,
             )
-        }
-        viewModelScope.launch {
-            runCatching { vpsMailAutoIngestService.processIncomingSummaries(page.items) }
         }
     }
 
@@ -1886,6 +1987,7 @@ class SeekMailViewModel(
                 openedMailId = mailId,
                 openedPreviewSummary = previewSummary,
                 openedDetail = null,
+                openedParsedVpsMail = null,
                 isLoadingDetail = true,
                 detailErrorMessage = null,
                 readerMode = SeekMailReaderMode.HTML,
@@ -1894,14 +1996,37 @@ class SeekMailViewModel(
                 attachmentsErrorMessage = null,
                 isVpsPasswordRevealed = false,
                 isIngestingVpsMail = false,
+                showSshOverwriteConfirm = false,
             )
         }
 
         detailLoadJob = viewModelScope.launch {
+            if (previewSummary != null) {
+                launch {
+                    val previewParsed = withContext(Dispatchers.Default) {
+                        VpsBillingMailParser.parse(
+                            subject = previewSummary.subject,
+                            bodyText = previewSummary.snippet,
+                            fromName = previewSummary.fromName,
+                            fromAddress = previewSummary.fromAddress,
+                        )
+                    }
+                    _internalState.update { current ->
+                        if (current.openedMailId == mailId && current.openedDetail == null) {
+                            current.copy(openedParsedVpsMail = previewParsed)
+                        } else {
+                            current
+                        }
+                    }
+                }
+            }
             seekMailRepository.getMailDetail(mailId = mailId, forceRefresh = forceRefresh)
                 .onSuccess { detail ->
                     if (_internalState.value.openedMailId != mailId) return@onSuccess
-                    runCatching { vpsMailAutoIngestService.processMailDetail(detail) }
+                    val parsedDetail = withContext(Dispatchers.Default) {
+                        VpsBillingMailParser.parseDetail(detail)
+                    }
+                    if (_internalState.value.openedMailId != mailId) return@onSuccess
                     val preferredMode = if (
                         detail.sanitizedBodyHtml.isBlank() && detail.bodyText.isNotBlank()
                     ) {
@@ -1917,6 +2042,7 @@ class SeekMailViewModel(
                             mails = updatedMails,
                             openedPreviewSummary = detail.summary,
                             openedDetail = detail,
+                            openedParsedVpsMail = parsedDetail,
                             isLoadingDetail = false,
                             detailErrorMessage = null,
                             readerMode = preferredMode,
@@ -1999,6 +2125,7 @@ class SeekMailViewModel(
                 openedMailId = null,
                 openedPreviewSummary = null,
                 openedDetail = null,
+                openedParsedVpsMail = null,
                 isLoadingDetail = false,
                 detailErrorMessage = null,
                 attachments = emptyList(),
@@ -2006,6 +2133,7 @@ class SeekMailViewModel(
                 attachmentsErrorMessage = null,
                 isVpsPasswordRevealed = false,
                 isIngestingVpsMail = false,
+                showSshOverwriteConfirm = false,
             )
         }
     }
@@ -2018,23 +2146,38 @@ class SeekMailViewModel(
         val current = _internalState.value
         if (current.isIngestingVpsMail) return
 
-        val detail = current.openedDetail
-        val summary = detail?.summary ?: current.openedPreviewSummary
-        val parsed = when {
-            detail != null -> VpsBillingMailParser.parseDetail(detail)
-            summary != null -> VpsBillingMailParser.parse(
-                subject = summary.subject,
-                bodyText = summary.snippet,
-                fromName = summary.fromName,
-                fromAddress = summary.fromAddress,
-            )
-            else -> null
-        } ?: return
+        val parsed = current.openedParsedVpsMail ?: return
+        val existingSsh = uiState.value.openedVpsInsight?.matchStatus?.matchedSshProfile
+        if (parsed.hasSshCredentials && existingSsh != null && existingSsh.authMethod == SshAuthMethod.PRIVATE_KEY) {
+            _internalState.update { it.copy(showSshOverwriteConfirm = true) }
+            return
+        }
+        executeIngestOpenedVpsMail(overwriteExistingSshCredentials = true)
+    }
+
+    fun dismissSshOverwriteConfirm() {
+        _internalState.update { it.copy(showSshOverwriteConfirm = false) }
+    }
+
+    fun confirmIngestOpenedVpsMail(overwriteExistingSshCredentials: Boolean) {
+        _internalState.update { it.copy(showSshOverwriteConfirm = false) }
+        executeIngestOpenedVpsMail(overwriteExistingSshCredentials = overwriteExistingSshCredentials)
+    }
+
+    private fun executeIngestOpenedVpsMail(overwriteExistingSshCredentials: Boolean) {
+        val current = _internalState.value
+        if (current.isIngestingVpsMail) return
+        val summary = current.openedDetail?.summary ?: current.openedPreviewSummary
+        val parsed = current.openedParsedVpsMail ?: return
 
         viewModelScope.launch {
             _internalState.update { it.copy(isIngestingVpsMail = true) }
             try {
-                vpsMailAutoIngestService.ingestMail(summary = summary, parsed = parsed)
+                vpsMailAutoIngestService.ingestMail(
+                    summary = summary,
+                    parsed = parsed,
+                    overwriteExistingSshCredentials = overwriteExistingSshCredentials,
+                )
                     .onSuccess { outcome ->
                         emitSnackbar(outcome.summaryMessage)
                     }
@@ -2045,6 +2188,42 @@ class SeekMailViewModel(
                     }
             } finally {
                 _internalState.update { it.copy(isIngestingVpsMail = false) }
+            }
+        }
+    }
+
+    fun stageExportTarget(target: PendingExportTarget) {
+        pendingExportTarget = target
+    }
+
+    fun consumePendingExportTarget(): PendingExportTarget? {
+        val target = pendingExportTarget
+        pendingExportTarget = null
+        return target
+    }
+
+    suspend fun exportToOutputStream(
+        target: PendingExportTarget,
+        outputStream: OutputStream,
+    ): Result<Long> {
+        _internalState.update { it.copy(exportingKey = target.exportKey) }
+        return try {
+            when (target) {
+                is PendingExportTarget.Attachment -> {
+                    seekMailRepository.downloadAttachmentToStream(
+                        mailId = target.mailId,
+                        attachmentId = target.attachment.id,
+                        outputStream = outputStream,
+                    )
+                }
+            }
+        } finally {
+            _internalState.update { current ->
+                if (current.exportingKey == target.exportKey) {
+                    current.copy(exportingKey = null)
+                } else {
+                    current
+                }
             }
         }
     }

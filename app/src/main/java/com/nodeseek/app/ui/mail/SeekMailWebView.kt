@@ -19,11 +19,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -166,8 +166,21 @@ fun SeekMailWebView(
         return
     }
 
+    val normalizedBodyHtml by produceState<String?>(
+        initialValue = if (sanitizedBodyHtml.isBlank()) "" else null,
+        key1 = sanitizedBodyHtml,
+    ) {
+        value = if (sanitizedBodyHtml.isBlank()) {
+            ""
+        } else {
+            withContext(Dispatchers.Default) {
+                normalizeEmailHtmlForMobileViewport(sanitizedBodyHtml)
+            }
+        }
+    }
+
     val themedHtml = remember(
-        sanitizedBodyHtml,
+        normalizedBodyHtml,
         isDark,
         purePitchAmoled,
         fontScale,
@@ -178,18 +191,20 @@ fun SeekMailWebView(
         primaryColor,
         outlineColor,
     ) {
-        buildThemedEmailHtmlDocument(
-            sanitizedFragmentHtml = sanitizedBodyHtml,
-            isDark = isDark,
-            purePitchAmoled = purePitchAmoled,
-            fontScale = fontScale,
-            backgroundHex = backgroundColor.toCssHex(),
-            surfaceContainerHex = surfaceContainerColor.toCssHex(),
-            onSurfaceHex = onSurfaceColor.toCssHex(),
-            onSurfaceVariantHex = onSurfaceVariantColor.toCssHex(),
-            primaryHex = primaryColor.toCssHex(),
-            outlineHex = outlineColor.toCssHex(),
-        )
+        normalizedBodyHtml?.let { bodyHtml ->
+            wrapNormalizedEmailHtmlDocument(
+                normalizedBodyHtml = bodyHtml,
+                isDark = isDark,
+                purePitchAmoled = purePitchAmoled,
+                fontScale = fontScale,
+                backgroundHex = backgroundColor.toCssHex(),
+                surfaceContainerHex = surfaceContainerColor.toCssHex(),
+                onSurfaceHex = onSurfaceColor.toCssHex(),
+                onSurfaceVariantHex = onSurfaceVariantColor.toCssHex(),
+                primaryHex = primaryColor.toCssHex(),
+                outlineHex = outlineColor.toCssHex(),
+            )
+        }
     }
 
     val bridgeState = remember {
@@ -201,28 +216,15 @@ fun SeekMailWebView(
     bridgeState.allowRemoteImages = allowRemoteImages
     bridgeState.onExternalUrlClick = onExternalUrlClick
 
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            webViewRef?.apply {
-                stopLoading()
-                loadUrl("about:blank")
-                clearHistory()
-                removeAllViews()
-                destroy()
-            }
-            webViewRef = null
-        }
-    }
-
     val targetSignature = remember(themedHtml, allowRemoteImages, isDark, backgroundColor) {
-        SeekMailWebRenderSignature(
-            themedHtml = themedHtml,
-            allowRemoteImages = allowRemoteImages,
-            isDark = isDark,
-            backgroundArgb = backgroundColor.toArgb(),
-        )
+        themedHtml?.let { html ->
+            SeekMailWebRenderSignature(
+                themedHtml = html,
+                allowRemoteImages = allowRemoteImages,
+                isDark = isDark,
+                backgroundArgb = backgroundColor.toArgb(),
+            )
+        }
     }
 
     AndroidView(
@@ -249,6 +251,7 @@ fun SeekMailWebView(
                     allowFileAccess = false
                     allowContentAccess = false
                     domStorageEnabled = false
+                    cacheMode = WebSettings.LOAD_NO_CACHE
                     setSupportMultipleWindows(false)
                     javaScriptCanOpenWindowsAutomatically = false
                     mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -311,16 +314,17 @@ fun SeekMailWebView(
                     }
                 }
 
-                bridgeState.lastSignature = targetSignature
-                webViewRef = this
-                loadDataWithBaseURL("about:blank", themedHtml, "text/html", "utf-8", null)
+                if (targetSignature != null) {
+                    bridgeState.lastSignature = targetSignature
+                    loadDataWithBaseURL("about:blank", targetSignature.themedHtml, "text/html", "utf-8", null)
+                }
             }
         },
         update = { webView ->
             bridgeState.allowRemoteImages = allowRemoteImages
             bridgeState.onExternalUrlClick = onExternalUrlClick
 
-            if (bridgeState.lastSignature != targetSignature) {
+            if (targetSignature != null && bridgeState.lastSignature != targetSignature) {
                 bridgeState.lastSignature = targetSignature
                 webView.setBackgroundColor(targetSignature.backgroundArgb)
                 webView.settings.apply {
@@ -330,8 +334,15 @@ fun SeekMailWebView(
                 if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
                     WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
                 }
-                webView.loadDataWithBaseURL("about:blank", themedHtml, "text/html", "utf-8", null)
+                webView.loadDataWithBaseURL("about:blank", targetSignature.themedHtml, "text/html", "utf-8", null)
             }
+        },
+        onRelease = { webView ->
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.clearHistory()
+            webView.removeAllViews()
+            webView.destroy()
         },
     )
 }
@@ -348,15 +359,42 @@ internal fun buildThemedEmailHtmlDocument(
     primaryHex: String,
     outlineHex: String,
 ): String {
-    val clampedScale = fontScale.coerceIn(0.85f, 1.35f)
-    val baseFontPx = (15.5f * clampedScale)
-    val resolvedBg = if (isDark && purePitchAmoled) "#000000" else backgroundHex
-    val colorSchemeValue = if (isDark) "dark" else "light"
     val bodyContent = if (sanitizedFragmentHtml.isBlank()) {
         ""
     } else {
         normalizeEmailHtmlForMobileViewport(sanitizedFragmentHtml)
     }
+    return wrapNormalizedEmailHtmlDocument(
+        normalizedBodyHtml = bodyContent,
+        isDark = isDark,
+        purePitchAmoled = purePitchAmoled,
+        fontScale = fontScale,
+        backgroundHex = backgroundHex,
+        surfaceContainerHex = surfaceContainerHex,
+        onSurfaceHex = onSurfaceHex,
+        onSurfaceVariantHex = onSurfaceVariantHex,
+        primaryHex = primaryHex,
+        outlineHex = outlineHex,
+    )
+}
+
+internal fun wrapNormalizedEmailHtmlDocument(
+    normalizedBodyHtml: String,
+    isDark: Boolean,
+    purePitchAmoled: Boolean,
+    fontScale: Float,
+    backgroundHex: String,
+    surfaceContainerHex: String,
+    onSurfaceHex: String,
+    onSurfaceVariantHex: String,
+    primaryHex: String,
+    outlineHex: String,
+): String {
+    val clampedScale = fontScale.coerceIn(0.85f, 1.35f)
+    val baseFontPx = (15.5f * clampedScale)
+    val resolvedBg = if (isDark && purePitchAmoled) "#000000" else backgroundHex
+    val colorSchemeValue = if (isDark) "dark" else "light"
+    val bodyContent = normalizedBodyHtml
 
     return """
         <!DOCTYPE html>
@@ -895,31 +933,43 @@ private fun toApproxPx(value: Float, unit: String): Float = when (unit) {
 }
 
 private fun isAllowedRemoteImageRequest(request: WebResourceRequest): Boolean {
-    if (request.isForMainFrame) return false
-    val method = request.method?.trim().orEmpty()
-    if (method.isNotEmpty() && !method.equals("GET", ignoreCase = true)) {
-        return false
-    }
-
     val acceptHeader = request.requestHeaders
         ?.entries
         ?.firstOrNull { it.key.equals("Accept", ignoreCase = true) }
         ?.value
-        ?.lowercase(Locale.US)
-        .orEmpty()
+    return isAllowedRemoteImageRequestParts(
+        isForMainFrame = request.isForMainFrame,
+        method = request.method,
+        acceptHeader = acceptHeader,
+        encodedPath = request.url?.encodedPath,
+    )
+}
 
+internal fun isAllowedRemoteImageRequestParts(
+    isForMainFrame: Boolean,
+    method: String?,
+    acceptHeader: String?,
+    encodedPath: String?,
+): Boolean {
+    if (isForMainFrame) return false
+    val trimmedMethod = method?.trim().orEmpty()
+    if (trimmedMethod.isNotEmpty() && !trimmedMethod.equals("GET", ignoreCase = true)) {
+        return false
+    }
+
+    val normalizedAccept = acceptHeader?.lowercase(Locale.US).orEmpty()
     if (
-        acceptHeader.contains("text/css") ||
-        acceptHeader.contains("text/html") ||
-        acceptHeader.contains("javascript")
+        normalizedAccept.contains("text/css") ||
+        normalizedAccept.contains("text/html") ||
+        normalizedAccept.contains("javascript")
     ) {
         return false
     }
-    if (acceptHeader.contains("image/")) {
+    if (normalizedAccept.contains("image/")) {
         return true
     }
 
-    val path = request.url?.encodedPath?.lowercase(Locale.US).orEmpty()
+    val path = encodedPath?.lowercase(Locale.US).orEmpty()
     val extension = path.substringAfterLast('/', "").substringAfterLast('.', "")
     return extension in ALLOWED_IMAGE_EXTENSIONS
 }
