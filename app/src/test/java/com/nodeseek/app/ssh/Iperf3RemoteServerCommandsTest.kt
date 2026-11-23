@@ -282,6 +282,25 @@ class Iperf3RemoteServerCommandsTest {
         assertEquals("sudo iptables -I INPUT -p tcp --dport 15201 -j ACCEPT", fwHints.iptablesCommand)
     }
 
+    @Test
+    fun `firewall commands guard non-root sudo with sudo -n and never invoke bare interactive sudo`() {
+        val startScript = Iperf3RemoteServerCommands.buildCheckAndStartScript(
+            port = 5201,
+            autoOpenFirewall = true,
+        )
+        assertTrue(startScript.contains("sudo -n true"))
+        assertTrue(startScript.contains("""FW_PREFIX="sudo -n """"))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX ufw status"""))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX ufw allow"""))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX firewall-cmd --state"""))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX firewall-cmd --add-port"""))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX iptables -S INPUT"""))
+        assertTrue(startScript.contains("""${'$'}FW_PREFIX iptables -I INPUT"""))
+        assertFalse(startScript.contains("""${'$'}SUDO ufw status"""))
+        assertFalse(startScript.contains("""${'$'}SUDO firewall-cmd --state"""))
+        assertFalse(startScript.contains("""${'$'}SUDO iptables -S INPUT"""))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `buildStopScript rejects pid without startTime`() {
         Iperf3RemoteServerCommands.buildStopScript(port = 5201, expectedPid = 1234L, expectedStartTime = null)

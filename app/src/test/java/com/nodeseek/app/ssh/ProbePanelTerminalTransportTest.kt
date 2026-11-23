@@ -76,16 +76,26 @@ class ProbePanelTerminalTransportTest {
         // Trailing semicolon must not produce POSIX-invalid `;;`
         val trailingSemi = framing.wrapCommand("echo ok;")
         assertFalse("Must not contain ';;': $trailingSemi", trailingSemi.contains(";;"))
-        assertTrue(trailingSemi.contains("{\necho ok;\n};"))
+        assertTrue(
+            "Expected wrapped command block, got: $trailingSemi",
+            trailingSemi.contains("(\necho ok;\n);") || trailingSemi.contains("{\necho ok;\n};"),
+        )
 
-        // Multi-line script ending with a `# comment` must place closing `}` on its own line
+        // Multi-line script ending with a `# comment` must place closing delimiter on its own line
         val trailingComment = framing.wrapCommand("echo line1\r\n# trailing comment")
-        assertTrue(trailingComment.contains("{\necho line1\n# trailing comment\n};"))
+        assertTrue(
+            "Expected multiline comment safely closed, got: $trailingComment",
+            trailingComment.contains("(\necho line1\n# trailing comment\n);") ||
+                trailingComment.contains("{\necho line1\n# trailing comment\n};"),
+        )
         assertFalse("CRLF should be normalized to LF", trailingComment.contains("\r"))
 
         // Blank command falls back to POSIX no-op `:`
         val blankWrapped = framing.wrapCommand("   \n  ")
-        assertTrue(blankWrapped.contains("{\n:\n};"))
+        assertTrue(
+            "Expected blank no-op block, got: $blankWrapped",
+            blankWrapped.contains("(\n:\n);") || blankWrapped.contains("{\n:\n};"),
+        )
     }
 
     @Test

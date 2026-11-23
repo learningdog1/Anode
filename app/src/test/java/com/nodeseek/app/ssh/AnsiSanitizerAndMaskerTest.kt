@@ -133,4 +133,50 @@ class AnsiSanitizerAndMaskerTest {
         val masked = IpPrivacyMasker.mask(text, knownServerHost = "192.168.50.88")
         assertEquals("Connected to 192.168.*.* from 192.168.1.1", masked)
     }
+
+    @Test
+    fun `IpPrivacyMasker masks label-colon IPv6 and IPv4-mapped IPv6 while preserving loopback and trailing punctuation`() {
+        val input = buildString {
+            append("IPv6:2a01:4f8:c012:1234::1\n")
+            append("IP:2001:db8:85a3::8a2e:370:7334\n")
+            append("Mapped: ::ffff:203.0.113.42 and full 0:0:0:0:0:ffff:198.51.100.77\n")
+            append("LoopbackMapped: ::ffff:127.0.0.1 PrivateMapped: ::ffff:192.168.1.10\n")
+            append("Sentence end 2a01:4f8:c012::1. Done\n")
+        }
+
+        val masked = IpPrivacyMasker.mask(input)
+
+        assertTrue("Expected label-colon IPv6 masked, got:\n$masked", masked.contains("IPv6:2a01:4f8:*:*"))
+        assertTrue("Expected IP: IPv6 masked, got:\n$masked", masked.contains("IP:2001:db8:*:*"))
+        assertTrue("Expected ::ffff: IPv4-mapped masked, got:\n$masked", masked.contains("Mapped: ::ffff:203.0.*.*"))
+        assertTrue("Expected full IPv4-mapped masked, got:\n$masked", masked.contains("0:0:0:0:0:ffff:198.51.*.*"))
+        assertFalse(masked.contains("203.0.113.42"))
+        assertFalse(masked.contains("198.51.100.77"))
+        // Loopback & private IPv4-mapped addresses must remain preserved without corruption
+        assertTrue(masked.contains("LoopbackMapped: ::ffff:127.0.0.1"))
+        assertTrue(masked.contains("PrivateMapped: ::ffff:192.168.1.10"))
+        // Trailing sentence period after IPv6 preserved
+        assertTrue(masked.contains("Sentence end 2a01:4f8:*:*. Done"))
+    }
+
+    @Test
+    fun `AnsiStreamSanitizer honors CSI 2J and 3J only when handleFullScreenClear is enabled`() {
+        // Default (benchmark mode): CSI 2J is ignored so full benchmark logs are never wiped
+        val benchSanitizer = AnsiStreamSanitizer()
+        benchSanitizer.append("Banner Line 1\n\u001B[2J\u001B[HAfter Clear\n")
+        assertTrue(benchSanitizer.snapshot().contains("Banner Line 1"))
+        assertTrue(benchSanitizer.snapshot().contains("After Clear"))
+
+        // Interactive shell mode: CSI 2J / 3J clears previous terminal screen lines
+        val shellSanitizer = AnsiStreamSanitizer(handleFullScreenClear = true)
+        shellSanitizer.append("Old Output 1\nOld Output 2\n")
+        assertTrue(shellSanitizer.snapshot().contains("Old Output 1"))
+        shellSanitizer.append("\u001B[2J\u001B[Hroot@vps:~# ")
+        assertFalse(shellSanitizer.snapshot().contains("Old Output 1"))
+        assertEquals("root@vps:~# ", shellSanitizer.snapshot())
+
+        shellSanitizer.append("ls\nfile.txt\n\u001B[3J\u001B[Hfresh")
+        assertFalse(shellSanitizer.snapshot().contains("file.txt"))
+        assertEquals("fresh", shellSanitizer.snapshot())
+    }
 }
