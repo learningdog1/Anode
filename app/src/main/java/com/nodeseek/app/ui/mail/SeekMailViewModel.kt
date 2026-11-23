@@ -50,7 +50,6 @@ enum class SeekMailFilterMode(val label: String) {
 enum class SeekMailReaderMode(val label: String) {
     HTML("HTML 视图"),
     TEXT("纯文本"),
-    RAW_EML("原始源码 (.eml)"),
 }
 
 @Immutable
@@ -69,22 +68,6 @@ sealed interface PendingExportTarget {
 
         override val exportKey: String
             get() = "att:${mailId}:${attachment.id}"
-    }
-
-    data class RawEml(
-        val mailId: Long,
-        val subject: String,
-    ) : PendingExportTarget {
-        override val suggestedFileName: String
-            get() {
-                val safeSubject = sanitizeExportFileName(subject)
-                    .take(44)
-                    .ifBlank { "mail" }
-                return "${safeSubject}_${mailId}.eml"
-            }
-
-        override val exportKey: String
-            get() = "eml:$mailId"
     }
 }
 
@@ -174,9 +157,6 @@ data class SeekMailUiState(
     val attachments: List<SeekMailAttachment> = emptyList(),
     val isLoadingAttachments: Boolean = false,
     val attachmentsErrorMessage: String? = null,
-    val rawEml: String? = null,
-    val isLoadingRawEml: Boolean = false,
-    val rawEmlErrorMessage: String? = null,
     val allowRemoteImages: Boolean = false,
     val openedVpsInsight: VpsMailInsightUiState? = null,
     val exportingKey: String? = null,
@@ -252,9 +232,6 @@ class SeekMailViewModel(
         val attachments: List<SeekMailAttachment> = emptyList(),
         val isLoadingAttachments: Boolean = false,
         val attachmentsErrorMessage: String? = null,
-        val rawEml: String? = null,
-        val isLoadingRawEml: Boolean = false,
-        val rawEmlErrorMessage: String? = null,
         val allowedRemoteImageMailIds: Set<Long> = emptySet(),
         val isVpsPasswordRevealed: Boolean = false,
         val isIngestingVpsMail: Boolean = false,
@@ -275,7 +252,6 @@ class SeekMailViewModel(
     private var mailLoadGeneration: Int = 0
     private var detailLoadJob: Job? = null
     private var attachmentsLoadJob: Job? = null
-    private var rawEmlLoadJob: Job? = null
     private var contactsLoadJob: Job? = null
 
     private val vpsSyncContextFlow = combine(
@@ -392,9 +368,6 @@ class SeekMailViewModel(
             attachments = state.attachments,
             isLoadingAttachments = state.isLoadingAttachments,
             attachmentsErrorMessage = state.attachmentsErrorMessage,
-            rawEml = state.rawEml,
-            isLoadingRawEml = state.isLoadingRawEml,
-            rawEmlErrorMessage = state.rawEmlErrorMessage,
             allowRemoteImages = state.openedMailId != null && state.openedMailId in state.allowedRemoteImageMailIds,
             openedVpsInsight = openedVpsInsight,
             exportingKey = state.exportingKey,
@@ -470,7 +443,6 @@ class SeekMailViewModel(
         mailLoadJob?.cancel()
         detailLoadJob?.cancel()
         attachmentsLoadJob?.cancel()
-        rawEmlLoadJob?.cancel()
         contactsLoadJob?.cancel()
         mailLoadGeneration++
     }
@@ -1137,7 +1109,6 @@ class SeekMailViewModel(
     ) {
         detailLoadJob?.cancel()
         attachmentsLoadJob?.cancel()
-        rawEmlLoadJob?.cancel()
 
         _internalState.update {
             it.copy(
@@ -1150,9 +1121,6 @@ class SeekMailViewModel(
                 attachments = emptyList(),
                 isLoadingAttachments = previewSummary?.hasAttachments == true,
                 attachmentsErrorMessage = null,
-                rawEml = null,
-                isLoadingRawEml = false,
-                rawEmlErrorMessage = null,
                 isVpsPasswordRevealed = false,
                 isIngestingVpsMail = false,
             )
@@ -1238,46 +1206,6 @@ class SeekMailViewModel(
 
     fun selectReaderMode(mode: SeekMailReaderMode) {
         _internalState.update { it.copy(readerMode = mode) }
-        if (mode == SeekMailReaderMode.RAW_EML) {
-            val mailId = _internalState.value.openedMailId ?: return
-            if (_internalState.value.rawEml == null && !_internalState.value.isLoadingRawEml) {
-                loadRawEml(mailId)
-            }
-        }
-    }
-
-    fun retryRawEml() {
-        val mailId = _internalState.value.openedMailId ?: return
-        loadRawEml(mailId)
-    }
-
-    private fun loadRawEml(mailId: Long) {
-        rawEmlLoadJob?.cancel()
-        rawEmlLoadJob = viewModelScope.launch {
-            _internalState.update {
-                it.copy(isLoadingRawEml = true, rawEmlErrorMessage = null)
-            }
-            seekMailRepository.getRawMailEml(mailId)
-                .onSuccess { eml ->
-                    if (_internalState.value.openedMailId != mailId) return@onSuccess
-                    _internalState.update {
-                        it.copy(
-                            rawEml = eml,
-                            isLoadingRawEml = false,
-                            rawEmlErrorMessage = null,
-                        )
-                    }
-                }
-                .onFailure { err ->
-                    if (_internalState.value.openedMailId != mailId) return@onFailure
-                    _internalState.update {
-                        it.copy(
-                            isLoadingRawEml = false,
-                            rawEmlErrorMessage = mapSeekMailError(err),
-                        )
-                    }
-                }
-        }
     }
 
     fun toggleAllowRemoteImages() {
@@ -1295,7 +1223,6 @@ class SeekMailViewModel(
     fun closeMailDetail() {
         detailLoadJob?.cancel()
         attachmentsLoadJob?.cancel()
-        rawEmlLoadJob?.cancel()
         _internalState.update {
             it.copy(
                 openedMailId = null,
@@ -1306,9 +1233,6 @@ class SeekMailViewModel(
                 attachments = emptyList(),
                 isLoadingAttachments = false,
                 attachmentsErrorMessage = null,
-                rawEml = null,
-                isLoadingRawEml = false,
-                rawEmlErrorMessage = null,
                 isVpsPasswordRevealed = false,
                 isIngestingVpsMail = false,
             )
@@ -1363,22 +1287,6 @@ class SeekMailViewModel(
                         mailId = target.mailId,
                         attachmentId = target.attachment.id,
                     )
-                }
-
-                is PendingExportTarget.RawEml -> {
-                    val state = _internalState.value
-                    val cached = if (state.openedMailId == target.mailId) state.rawEml else null
-                    if (cached != null) {
-                        Result.success(cached.toByteArray(Charsets.UTF_8))
-                    } else {
-                        seekMailRepository.getRawMailEml(target.mailId)
-                            .map { eml ->
-                                if (_internalState.value.openedMailId == target.mailId) {
-                                    _internalState.update { it.copy(rawEml = eml) }
-                                }
-                                eml.toByteArray(Charsets.UTF_8)
-                            }
-                    }
                 }
             }
         } finally {

@@ -18,7 +18,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -424,7 +423,6 @@ fun SeekMailScreen(
                 onBack = viewModel::closeMailDetail,
                 onRetryDetail = viewModel::retryMailDetail,
                 onSelectReaderMode = viewModel::selectReaderMode,
-                onRetryRawEml = viewModel::retryRawEml,
                 onRetryAttachments = viewModel::retryAttachments,
                 onToggleRemoteImages = viewModel::toggleAllowRemoteImages,
                 onToggleVpsPasswordVisibility = viewModel::toggleVpsPasswordVisibility,
@@ -438,12 +436,6 @@ fun SeekMailScreen(
                 onDownloadAttachment = { attachment ->
                     val mailId = uiState.openedMailId ?: return@SeekMailDetailReaderPane
                     startExport(PendingExportTarget.Attachment(mailId = mailId, attachment = attachment))
-                },
-                onSaveRawEml = {
-                    val mailId = uiState.openedMailId ?: return@SeekMailDetailReaderPane
-                    val subject = uiState.openedDetail?.summary?.subject
-                        ?: uiState.openedPreviewSummary?.subject.orEmpty()
-                    startExport(PendingExportTarget.RawEml(mailId = mailId, subject = subject))
                 },
                 onExternalUrlClick = { url -> pendingExternalUrl = url },
             )
@@ -2377,7 +2369,6 @@ private fun SeekMailDetailReaderPane(
     onBack: () -> Unit,
     onRetryDetail: () -> Unit,
     onSelectReaderMode: (SeekMailReaderMode) -> Unit,
-    onRetryRawEml: () -> Unit,
     onRetryAttachments: () -> Unit,
     onToggleRemoteImages: () -> Unit,
     onToggleVpsPasswordVisibility: () -> Unit,
@@ -2385,7 +2376,6 @@ private fun SeekMailDetailReaderPane(
     onCopyCode: (String) -> Unit,
     onCopyText: (label: String, text: String, toast: String) -> Unit,
     onDownloadAttachment: (SeekMailAttachment) -> Unit,
-    onSaveRawEml: () -> Unit,
     onExternalUrlClick: (String) -> Unit,
 ) {
     val detail = uiState.openedDetail
@@ -2397,7 +2387,7 @@ private fun SeekMailDetailReaderPane(
         color = MaterialTheme.colorScheme.background,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // ── Reader Glass TopBar + 3-Way Segmented Mode Switcher ──
+            // ── Reader Glass TopBar + 2-Way Segmented Mode Switcher ──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2564,20 +2554,16 @@ private fun SeekMailDetailReaderPane(
                                         icon = Icons.Rounded.Code,
                                         title = "此邮件不包含 HTML 富文本正文",
                                         subtitle = if (detail.bodyText.isNotBlank()) {
-                                            "您可以切换至「纯文本」或「原始源码 (.eml)」查看完整内容。"
+                                            "您可以切换至「纯文本」查看完整内容。"
                                         } else {
-                                            "邮件正文为空，您可以查看原始 MIME 源码确认详情。"
+                                            "该邮件正文为空，暂无可展示的内容。"
                                         },
-                                        actionLabel = if (detail.bodyText.isNotBlank()) "切换至纯文本" else "查看原始源码",
+                                        actionLabel = if (detail.bodyText.isNotBlank()) "切换至纯文本" else null,
                                         actionIcon = null,
                                         onAction = {
-                                            onSelectReaderMode(
-                                                if (detail.bodyText.isNotBlank()) {
-                                                    SeekMailReaderMode.TEXT
-                                                } else {
-                                                    SeekMailReaderMode.RAW_EML
-                                                },
-                                            )
+                                            if (detail.bodyText.isNotBlank()) {
+                                                onSelectReaderMode(SeekMailReaderMode.TEXT)
+                                            }
                                         },
                                     )
                                 } else {
@@ -2598,20 +2584,6 @@ private fun SeekMailDetailReaderPane(
                                     onCopyPlainText = {
                                         onCopyText("邮件正文", detail.bodyText, "已复制纯文本正文")
                                     },
-                                )
-                            }
-
-                            SeekMailReaderMode.RAW_EML -> {
-                                RawEmlReaderView(
-                                    rawEml = uiState.rawEml,
-                                    isLoading = uiState.isLoadingRawEml,
-                                    errorMessage = uiState.rawEmlErrorMessage,
-                                    isExporting = uiState.exportingKey == "eml:${detail.summary.id}",
-                                    onRetry = onRetryRawEml,
-                                    onCopy = { eml ->
-                                        onCopyText("原始 EML 源码", eml, "已复制原始 .eml 源码")
-                                    },
-                                    onSave = onSaveRawEml,
                                 )
                             }
                         }
@@ -3665,7 +3637,7 @@ private fun PlainTextReaderView(
         SeekMailEmptyStateCard(
             icon = Icons.Rounded.Mail,
             title = "无纯文本内容",
-            subtitle = "该邮件未包含纯文本部分，可切换至 HTML 视图或原始源码查看。",
+            subtitle = "该邮件未包含纯文本部分，可切换至 HTML 视图查看。",
             actionLabel = null,
             actionIcon = null,
             onAction = {},
@@ -3705,133 +3677,6 @@ private fun PlainTextReaderView(
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-    }
-}
-
-@Composable
-private fun RawEmlReaderView(
-    rawEml: String?,
-    isLoading: Boolean,
-    errorMessage: String?,
-    isExporting: Boolean,
-    onRetry: () -> Unit,
-    onCopy: (String) -> Unit,
-    onSave: () -> Unit,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val extraType = NodePulseThemeTokens.extraTypography
-
-    when {
-        isLoading -> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    CircularProgressIndicator()
-                    Text(
-                        text = "正在获取原始 MIME 源码…",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        errorMessage != null && rawEml == null -> {
-            SeekMailEmptyStateCard(
-                icon = Icons.Rounded.ErrorOutline,
-                title = "无法加载原始源码",
-                subtitle = errorMessage,
-                actionLabel = "重新获取",
-                actionIcon = Icons.Rounded.Refresh,
-                onAction = onRetry,
-            )
-        }
-
-        rawEml != null -> {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                ) {
-                    FilledTonalButton(
-                        onClick = { onCopy(rawEml) },
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ContentCopy,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "复制源码",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-
-                    Button(
-                        onClick = onSave,
-                        enabled = !isExporting,
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    ) {
-                        if (isExporting) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Rounded.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "保存 .eml",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clip(PulseArchitecturalShapes.CodeBlock)
-                        .background(ext.codeSurface)
-                        .border(width = 1.dp, color = ext.codeBorder, shape = PulseArchitecturalShapes.CodeBlock)
-                        .verticalScroll(rememberScrollState())
-                        .horizontalScroll(rememberScrollState())
-                        .padding(12.dp),
-                ) {
-                    SelectionContainer {
-                        Text(
-                            text = rawEml,
-                            style = extraType.codeBody,
-                            color = ext.onCodeSurface,
-                        )
-                    }
-                }
-            }
         }
     }
 }
