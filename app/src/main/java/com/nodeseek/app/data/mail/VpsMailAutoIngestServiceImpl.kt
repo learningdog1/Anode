@@ -254,6 +254,7 @@ class VpsMailAutoIngestServiceImpl(
                     parsed = parsed,
                 )
 
+                val existingTags = existingAsset?.resolvedTags.orEmpty()
                 val assetToSave = VpsAssetRecord(
                     id = existingAsset?.id ?: idGenerator(),
                     nickname = existingAsset?.nickname?.takeIf { it.isNotBlank() }
@@ -261,7 +262,7 @@ class VpsMailAutoIngestServiceImpl(
                     providerName = parsed.providerName.ifBlank { existingAsset?.providerName.orEmpty() },
                     specsSummary = parsed.specsSummary.ifBlank { existingAsset?.specsSummary.orEmpty() },
                     region = parsed.region.ifBlank { existingAsset?.region.orEmpty() },
-                    routeTag = existingAsset?.routeTag.orEmpty(),
+                    routeTag = VpsAssetRecord.formatRouteTag(existingTags),
                     renewalAmount = parsed.billingAmount?.takeIf { it.isNotBlank() }
                         ?: existingAsset?.renewalAmount.orEmpty(),
                     currency = if (!parsed.billingAmount.isNullOrBlank()) {
@@ -284,6 +285,8 @@ class VpsMailAutoIngestServiceImpl(
                     notes = mergedNotes,
                     createdAtEpochMillis = existingAsset?.createdAtEpochMillis ?: 0L,
                     updatedAtEpochMillis = nowMillisProvider(),
+                    tags = existingTags,
+                    autoRenew = existingAsset?.autoRenew == true,
                 )
 
                 val savedAsset = fleetRepository.upsertAsset(assetToSave)

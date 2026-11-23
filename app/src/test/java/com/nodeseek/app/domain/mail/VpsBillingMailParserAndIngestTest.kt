@@ -949,4 +949,88 @@ class VpsBillingMailParserAndIngestTest {
             mockServer.shutdown()
         }
     }
+
+    @Test
+    fun `ingestMail preserves existing asset multi-select tags and autoRenew flag on update`() =
+        runTest {
+            val dispatcher = UnconfinedTestDispatcher(testScheduler)
+            val fleetStoreFile = File(tempDir, "preserve_tags_autorenew_fleet.json")
+            val fleetRepo = FleetRepositoryImpl(
+                storeFile = fleetStoreFile,
+                tokenCipher = fleetCipher,
+                ioDispatcher = dispatcher,
+            )
+            val sshVault = SshServerVault(
+                vaultFile = File(tempDir, "preserve_tags_autorenew_ssh.json"),
+                cipher = sshCipher,
+                ioDispatcher = dispatcher,
+            )
+            val existing = fleetRepo.upsertAsset(
+                VpsAssetRecord(
+                    id = "existing-auto",
+                    nickname = "DMIT LAX Auto",
+                    providerName = "DMIT",
+                    specsSummary = "2C / 2G",
+                    region = "洛杉矶",
+                    routeTag = "CN2 GIA · IPv4/IPv6",
+                    renewalAmount = "49.90",
+                    currency = ValuationCurrency.USD,
+                    cyclePreset = BillingCyclePreset.ANNUAL,
+                    expiryDateIso = "2026-11-25",
+                    notes = "IP: 198.51.100.77",
+                    tags = listOf("CN2 GIA", "IPv4/IPv6"),
+                    autoRenew = true,
+                ),
+            )
+
+            val service = VpsMailAutoIngestServiceImpl(
+                fleetRepository = fleetRepo,
+                sshVaultRepository = sshVault,
+                stateFile = File(tempDir, "preserve_tags_autorenew_ingest.json"),
+                ioDispatcher = dispatcher,
+                todayProvider = { LocalDate.of(2026, 11, 20) },
+            )
+
+            val renewalDetail = SeekMailDetail(
+                summary = SeekMailSummary(
+                    id = 901L,
+                    mailboxId = 1L,
+                    fromAddress = "billing@dmit.io",
+                    fromName = "DMIT",
+                    toAddress = "me@seek.li",
+                    subject = "Invoice Payment Confirmation #77410",
+                    snippet = "Payment received for 198.51.100.77",
+                    messageId = "<inv-77410@dmit.io>",
+                ),
+                bodyText = """
+                    Invoice Payment Confirmation
+                    Invoice #77410
+                    IP Address: 198.51.100.77
+                    Amount Paid: $49.90 USD
+                    Next Due Date: 2027-11-25
+                """.trimIndent(),
+            )
+            val parsed = VpsBillingMailParser.parseDetail(renewalDetail)
+            assertNotNull(parsed)
+
+            val outcome = service.ingestMail(
+                summary = renewalDetail.summary,
+                parsed = parsed!!,
+            ).getOrThrow()
+            assertFalse(outcome.assetCreated)
+            assertEquals(existing.id, outcome.asset.id)
+            assertEquals("2027-11-25", outcome.asset.expiryDateIso)
+            assertEquals(listOf("CN2 GIA", "IPv4/IPv6"), outcome.asset.tags)
+            assertTrue("Existing autoRenew flag must be preserved on mail ingest update", outcome.asset.autoRenew)
+
+            val reopened = FleetRepositoryImpl(
+                storeFile = fleetStoreFile,
+                tokenCipher = fleetCipher,
+                ioDispatcher = dispatcher,
+            )
+            reopened.loadPersistedState()
+            val persisted = reopened.assetsFlow.value.single()
+            assertEquals(listOf("CN2 GIA", "IPv4/IPv6"), persisted.tags)
+            assertTrue(persisted.autoRenew)
+        }
 }
