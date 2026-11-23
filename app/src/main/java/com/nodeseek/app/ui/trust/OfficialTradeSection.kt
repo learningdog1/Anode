@@ -4,6 +4,11 @@ package com.nodeseek.app.ui.trust
 
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +31,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GppBad
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Key
@@ -43,10 +50,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +78,11 @@ import com.nodeseek.app.domain.trust.OfficialTradeRoleStat
 import com.nodeseek.app.domain.trust.OfficialTradeUserStats
 import com.nodeseek.app.domain.trust.TrustRiskLevel
 import com.nodeseek.app.ui.components.PulseAlertDialog
+import com.nodeseek.app.ui.components.PulseConfirmDialog
+import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
+import com.nodeseek.app.ui.components.PulseDialogSecondaryButton
+import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.formatCompactCount
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -1236,13 +1248,772 @@ private fun OfficialRoleStatChip(
     }
 }
 
+/**
+ * Verification & connection state for the device-local Official Trade API Key shown in Settings.
+ */
+enum class OfficialTradeKeyStatus {
+    UNCONFIGURED,
+    CONFIGURED,
+    VERIFIED,
+    INVALID,
+}
+
+/**
+ * Settings card content for NodeSeek Official Trade Platform API Key management.
+ *
+ * When a key is already configured, displays a compact "已连接" status row (masked key,
+ * verification status, quick verify, 更换 / 移除 actions) and hides the large input field
+ * until the user explicitly taps "更换". When unconfigured, displays the input form directly.
+ */
+@Composable
+fun OfficialTradeSettingsCardContent(
+    isConfigured: Boolean,
+    maskedApiKey: String?,
+    keyStatus: OfficialTradeKeyStatus,
+    isSaving: Boolean,
+    isVerifying: Boolean,
+    feedbackMessage: String?,
+    feedbackIsError: Boolean,
+    onDraftEdited: () -> Unit,
+    onSaveKey: (rawKey: String, onSavedClearDraft: () -> Unit) -> Unit,
+    onVerifyKey: (draftKey: String) -> Unit,
+    onClearKey: (onClearedDraft: () -> Unit) -> Unit,
+    onOpenPortal: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
+    var keyDraft by rememberSaveable { mutableStateOf("") }
+    var showKey by rememberSaveable { mutableStateOf(false) }
+    var isReplacingKey by rememberSaveable { mutableStateOf(false) }
+    var showRemoveConfirm by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isConfigured) {
+        if (!isConfigured) {
+            isReplacingKey = false
+        }
+    }
+
+    val isBusy = isSaving || isVerifying
+    val isInvalidKey = isConfigured && keyStatus == OfficialTradeKeyStatus.INVALID
+    val isVerifiedKey = isConfigured && keyStatus == OfficialTradeKeyStatus.VERIFIED
+    val canSave = !isBusy && keyDraft.isNotBlank()
+    val canVerifyDraft = !isBusy && keyDraft.isNotBlank()
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // Header row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(
+                        when {
+                            isInvalidKey -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f)
+                            isConfigured -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                            else -> MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (isInvalidKey) Icons.Rounded.GppBad else Icons.Rounded.VerifiedUser,
+                    contentDescription = null,
+                    tint = when {
+                        isInvalidKey -> MaterialTheme.colorScheme.error
+                        isConfigured -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "NodeSeek 官方交易平台",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (isConfigured) {
+                        "Android Keystore 加密 · 仅存本机"
+                    } else {
+                        "在 agent.nodeseek.org 申请 Key，仅存本机"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            when {
+                isInvalidKey -> {
+                    PulseAccentPill(
+                        text = "密钥失效",
+                        icon = Icons.Rounded.WarningAmber,
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+
+                isVerifiedKey -> {
+                    PulseAccentPill(
+                        text = "已验证",
+                        icon = Icons.Rounded.CheckCircle,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+
+                isConfigured -> {
+                    PulseAccentPill(
+                        text = "已连接",
+                        icon = Icons.Rounded.CheckCircle,
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+
+                else -> {
+                    PulseAccentPill(
+                        text = "未配置",
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (isConfigured) {
+            // Compact "已连接" status row (masked key + verification state + 更换 / 移除 buttons)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(
+                        width = 0.75.dp,
+                        color = if (isInvalidKey) {
+                            MaterialTheme.colorScheme.error.copy(alpha = if (isDark) 0.42f else 0.30f)
+                        } else {
+                            ext.cardBorder
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        tint = if (isInvalidKey) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Text(
+                        text = maskedApiKey?.takeIf { it.isNotBlank() } ?: "ntk_****",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                        ).withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(
+                                enabled = !isBusy && !isReplacingKey,
+                                role = Role.Button,
+                                onClick = { onVerifyKey("") },
+                            )
+                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (isVerifying && !isReplacingKey) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(11.dp),
+                                strokeWidth = 1.6.dp,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "验证已保存的密钥",
+                                tint = if (!isBusy && !isReplacingKey) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                },
+                                modifier = Modifier.size(13.dp),
+                            )
+                        }
+                        Text(
+                            text = if (isVerifying && !isReplacingKey) "验证中" else "验证",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (!isBusy && !isReplacingKey) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                            },
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val statusCaption = when (keyStatus) {
+                        OfficialTradeKeyStatus.VERIFIED -> "验证通过 · 平台连接正常"
+                        OfficialTradeKeyStatus.INVALID -> "鉴权失败 · 请更换有效密钥"
+                        else -> "已保存 · 不随备份导出"
+                    }
+                    val statusColor = when (keyStatus) {
+                        OfficialTradeKeyStatus.VERIFIED -> MaterialTheme.colorScheme.primary
+                        OfficialTradeKeyStatus.INVALID -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+
+                    Text(
+                        text = statusCaption,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (isVerifiedKey || isInvalidKey) FontWeight.Medium else FontWeight.Normal,
+                        color = statusColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                    // 更换 button
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(
+                                if (isReplacingKey) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                },
+                            )
+                            .clickable(
+                                enabled = !isBusy,
+                                role = Role.Button,
+                                onClick = {
+                                    if (isReplacingKey) {
+                                        isReplacingKey = false
+                                        keyDraft = ""
+                                        showKey = false
+                                        onDraftEdited()
+                                    } else {
+                                        isReplacingKey = true
+                                        onDraftEdited()
+                                    }
+                                },
+                            )
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Edit,
+                            contentDescription = null,
+                            tint = if (isReplacingKey) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.size(13.dp),
+                        )
+                        Text(
+                            text = if (isReplacingKey) "收起" else "更换",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isReplacingKey) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+
+                    // 移除 button
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(
+                                MaterialTheme.colorScheme.errorContainer.copy(
+                                    alpha = if (isDark) 0.34f else 0.48f,
+                                ),
+                            )
+                            .clickable(
+                                enabled = !isBusy,
+                                role = Role.Button,
+                                onClick = { showRemoveConfirm = true },
+                            )
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(13.dp),
+                        )
+                        Text(
+                            text = "移除",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
+            }
+
+            // Expandable replace-key editor (hidden by default once configured)
+            AnimatedVisibility(
+                visible = isReplacingKey,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OfficialTradeApiKeyInputField(
+                        value = keyDraft,
+                        onValueChange = {
+                            keyDraft = it
+                            onDraftEdited()
+                        },
+                        label = "新官方交易平台 API Key",
+                        placeholder = "粘贴新的 ntk_... 密钥",
+                        showKey = showKey,
+                        onToggleShowKey = { showKey = !showKey },
+                        enabled = !isBusy,
+                        isError = feedbackIsError && !feedbackMessage.isNullOrBlank(),
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                isReplacingKey = false
+                                keyDraft = ""
+                                showKey = false
+                                onDraftEdited()
+                            },
+                            enabled = !isBusy,
+                            shape = CircleShape,
+                            border = BorderStroke(0.8.dp, ext.cardBorder),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 9.dp),
+                        ) {
+                            Text(
+                                text = "取消",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+
+                        FilledTonalButton(
+                            onClick = { onVerifyKey(keyDraft) },
+                            enabled = canVerifyDraft,
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 9.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            if (isVerifying) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                            }
+                            Text(
+                                text = if (isVerifying) "测试中" else "测试连接",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                onSaveKey(keyDraft) {
+                                    keyDraft = ""
+                                    showKey = false
+                                    isReplacingKey = false
+                                }
+                            },
+                            enabled = canSave,
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            if (isSaving) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                            }
+                            Text(
+                                text = if (isSaving) "保存中" else "保存",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+
+                    OfficialTradePortalLinkRow(
+                        hintText = "需要新密钥？可在官方平台重新生成",
+                        onOpenPortal = onOpenPortal,
+                    )
+                }
+            }
+        } else {
+            // Unconfigured state: show input box directly
+            OfficialTradeApiKeyInputField(
+                value = keyDraft,
+                onValueChange = {
+                    keyDraft = it
+                    onDraftEdited()
+                },
+                label = "官方交易平台 API Key",
+                placeholder = "粘贴 ntk_... 密钥",
+                showKey = showKey,
+                onToggleShowKey = { showKey = !showKey },
+                enabled = !isBusy,
+                isError = feedbackIsError && !feedbackMessage.isNullOrBlank(),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilledTonalButton(
+                    onClick = { onVerifyKey(keyDraft) },
+                    enabled = canVerifyDraft,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (isVerifying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = if (isVerifying) "测试中" else "测试连接",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        onSaveKey(keyDraft) {
+                            keyDraft = ""
+                            showKey = false
+                            isReplacingKey = false
+                        }
+                    },
+                    enabled = canSave,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = if (isSaving) "保存中" else "保存",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+            }
+
+            OfficialTradePortalLinkRow(
+                hintText = "Keystore 加密存储 · 不随 JSON 备份导出",
+                onOpenPortal = onOpenPortal,
+            )
+        }
+
+        // Feedback banner (shared across connected / replacing / unconfigured states)
+        AnimatedVisibility(
+            visible = !feedbackMessage.isNullOrBlank(),
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            val containerBg = if (feedbackIsError) {
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = if (isDark) 0.42f else 0.58f)
+            } else {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (isDark) 0.40f else 0.62f)
+            }
+            val contentFg = if (feedbackIsError) {
+                MaterialTheme.colorScheme.onErrorContainer
+            } else {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(containerBg)
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Icon(
+                    imageVector = if (feedbackIsError) {
+                        Icons.Rounded.WarningAmber
+                    } else {
+                        Icons.Rounded.CheckCircle
+                    },
+                    contentDescription = null,
+                    tint = if (feedbackIsError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = feedbackMessage.orEmpty(),
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    fontWeight = FontWeight.Normal,
+                    color = contentFg,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+
+    if (showRemoveConfirm) {
+        PulseConfirmDialog(
+            onDismissRequest = { showRemoveConfirm = false },
+            title = "移除官方交易平台密钥？",
+            message = "移除后将清除本机加密保存的 API Key（${maskedApiKey.orEmpty()}），卖家信用卡片将不再自动查询官方担保成交记录。",
+            confirmText = "移除",
+            dismissText = "取消",
+            icon = Icons.Rounded.DeleteOutline,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            onConfirm = {
+                showRemoveConfirm = false
+                onClearKey {
+                    keyDraft = ""
+                    showKey = false
+                    isReplacingKey = false
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun OfficialTradePortalLinkRow(
+    hintText: String,
+    onOpenPortal: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = hintText,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Normal,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Row(
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable(role = Role.Button, onClick = onOpenPortal)
+                .padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = "申请 Key",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                softWrap = false,
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun OfficialTradeApiKeyInputField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    placeholder: String,
+    showKey: Boolean,
+    onToggleShowKey: () -> Unit,
+    enabled: Boolean,
+    isError: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    PulseTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        isError = isError,
+        label = label,
+        placeholder = placeholder,
+        singleLine = true,
+        leadingIcon = {
+            Icon(
+                imageVector = Icons.Rounded.Key,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+        },
+        visualTransformation = if (showKey) {
+            VisualTransformation.None
+        } else {
+            PasswordVisualTransformation()
+        },
+        trailingIcon = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable(
+                            enabled = enabled,
+                            role = Role.Button,
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                val clip = clipboard?.primaryClip
+                                val pasted = if (clip != null && clip.itemCount > 0) {
+                                    clip.getItemAt(0)?.coerceToText(context)?.toString()
+                                } else {
+                                    null
+                                }
+                                if (!pasted.isNullOrBlank()) {
+                                    onValueChange(pasted.trim())
+                                }
+                            },
+                        )
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "粘贴",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (enabled) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+                IconButton(
+                    onClick = onToggleShowKey,
+                    enabled = enabled,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = if (showKey) {
+                            Icons.Rounded.VisibilityOff
+                        } else {
+                            Icons.Rounded.Visibility
+                        },
+                        contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+            }
+        },
+        modifier = modifier.fillMaxWidth(),
+    )
+}
+
 @Composable
 private fun OfficialTradeQuickKeyDialog(
     repository: OfficialTradeRepository,
     onSaved: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var keyDraft by rememberSaveable { mutableStateOf("") }
     var showKey by rememberSaveable { mutableStateOf(false) }
@@ -1259,64 +2030,16 @@ private fun OfficialTradeQuickKeyDialog(
         title = "官方交易平台 API Key",
         message = "在 agent.nodeseek.org 申请 Key，仅加密保存在本机（也可在「设置 → 官方交易平台」中管理）。",
         buttons = {
-            FilledTonalButton(
-                onClick = {
-                    val trimmed = keyDraft.trim()
-                    scope.launch {
-                        isVerifying = true
-                        feedbackMessage = null
-                        try {
-                            when (val res = repository.verifyApiKey(trimmed)) {
-                                is OfficialTradeLookup.Found,
-                                OfficialTradeLookup.NotFound,
-                                -> {
-                                    isErrorFeedback = false
-                                    feedbackMessage = "连接正常，API Key 验证有效"
-                                }
-                                OfficialTradeLookup.Unauthorized -> {
-                                    isErrorFeedback = true
-                                    feedbackMessage = "API Key 无效或已失效 (401/403)"
-                                }
-                                is OfficialTradeLookup.RateLimited -> {
-                                    isErrorFeedback = true
-                                    feedbackMessage = "触发限流，请 ${res.retryAfterSeconds ?: 60} 秒后再试"
-                                }
-                                OfficialTradeLookup.NotConfigured -> {
-                                    isErrorFeedback = true
-                                    feedbackMessage = "请先输入 ntk_ 开头的 API Key"
-                                }
-                                is OfficialTradeLookup.Failed -> {
-                                    isErrorFeedback = true
-                                    feedbackMessage = res.message
-                                }
-                            }
-                        } catch (c: CancellationException) {
-                            throw c
-                        } catch (t: Throwable) {
-                            isErrorFeedback = true
-                            feedbackMessage = t.message ?: "测试连接失败"
-                        } finally {
-                            isVerifying = false
-                        }
-                    }
-                },
-                enabled = !isBusy && keyDraft.isNotBlank(),
-                shape = CircleShape,
-            ) {
-                Text(
-                    text = if (isVerifying) "测试中…" else "测试连接",
-                    maxLines = 1,
-                    softWrap = false,
-                )
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            TextButton(
+            PulseDialogSecondaryButton(
+                text = "取消",
                 onClick = onDismiss,
                 enabled = !isBusy,
-            ) {
-                Text("取消", maxLines = 1, softWrap = false)
-            }
-            Button(
+                modifier = Modifier.weight(1f),
+            )
+            PulseDialogPrimaryButton(
+                text = if (isSaving) "保存中" else "保存",
+                loading = isSaving,
+                enabled = !isBusy && keyDraft.isNotBlank(),
                 onClick = {
                     val trimmed = keyDraft.trim()
                     scope.launch {
@@ -1335,86 +2058,105 @@ private fun OfficialTradeQuickKeyDialog(
                         }
                     }
                 },
-                enabled = !isBusy && keyDraft.isNotBlank(),
-                shape = CircleShape,
-            ) {
-                Text(
-                    text = if (isSaving) "保存中…" else "保存",
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    softWrap = false,
-                )
-            }
+                modifier = Modifier.weight(1f),
+            )
         },
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            OfficialTradeApiKeyInputField(
                 value = keyDraft,
                 onValueChange = {
                     keyDraft = it
                     feedbackMessage = null
                 },
-                label = { Text("API Key (ntk_...)") },
-                placeholder = { Text("粘贴您的 ntk_ 密钥…") },
-                shape = RoundedCornerShape(14.dp),
-                singleLine = true,
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Key,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                },
-                visualTransformation = if (showKey) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                val clip = clipboard?.primaryClip
-                                val pasted = if (clip != null && clip.itemCount > 0) {
-                                    clip.getItemAt(0)?.coerceToText(context)?.toString()
-                                } else {
-                                    null
-                                }
-                                if (!pasted.isNullOrBlank()) {
-                                    keyDraft = pasted.trim()
-                                    feedbackMessage = null
-                                }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
-                        ) {
-                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { showKey = !showKey }) {
-                            Icon(
-                                imageVector = if (showKey) {
-                                    Icons.Rounded.VisibilityOff
-                                } else {
-                                    Icons.Rounded.Visibility
-                                },
-                                contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
-                            )
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
+                label = "官方交易平台 API Key",
+                placeholder = "粘贴 ntk_... 密钥",
+                showKey = showKey,
+                onToggleShowKey = { showKey = !showKey },
+                enabled = !isBusy,
+                isError = isErrorFeedback && !feedbackMessage.isNullOrBlank(),
             )
 
-            if (!feedbackMessage.isNullOrBlank()) {
-                Text(
-                    text = feedbackMessage!!,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isErrorFeedback) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.primary
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                if (!feedbackMessage.isNullOrBlank()) {
+                    Text(
+                        text = feedbackMessage!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Normal,
+                        color = if (isErrorFeedback) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+
+                TextButton(
+                    onClick = {
+                        val trimmed = keyDraft.trim()
+                        scope.launch {
+                            isVerifying = true
+                            feedbackMessage = null
+                            try {
+                                when (val res = repository.verifyApiKey(trimmed)) {
+                                    is OfficialTradeLookup.Found,
+                                    OfficialTradeLookup.NotFound,
+                                    -> {
+                                        isErrorFeedback = false
+                                        feedbackMessage = "连接正常，API Key 验证有效"
+                                    }
+                                    OfficialTradeLookup.Unauthorized -> {
+                                        isErrorFeedback = true
+                                        feedbackMessage = "API Key 无效或已失效 (401/403)"
+                                    }
+                                    is OfficialTradeLookup.RateLimited -> {
+                                        isErrorFeedback = true
+                                        feedbackMessage = "触发限流，请 ${res.retryAfterSeconds ?: 60} 秒后再试"
+                                    }
+                                    OfficialTradeLookup.NotConfigured -> {
+                                        isErrorFeedback = true
+                                        feedbackMessage = "请先输入 ntk_ 开头的 API Key"
+                                    }
+                                    is OfficialTradeLookup.Failed -> {
+                                        isErrorFeedback = true
+                                        feedbackMessage = res.message
+                                    }
+                                }
+                            } catch (c: CancellationException) {
+                                throw c
+                            } catch (t: Throwable) {
+                                isErrorFeedback = true
+                                feedbackMessage = t.message ?: "测试连接失败"
+                            } finally {
+                                isVerifying = false
+                            }
+                        }
                     },
-                )
+                    enabled = !isBusy && keyDraft.isNotBlank(),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    if (isVerifying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.8.dp,
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = if (isVerifying) "测试中…" else "测试连接",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
             }
         }
     }
