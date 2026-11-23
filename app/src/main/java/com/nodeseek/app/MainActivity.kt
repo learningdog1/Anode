@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.lifecycleScope
 import com.nodeseek.app.data.fleet.FleetAlertNotifier
 import com.nodeseek.app.data.restock.RestockNotificationHelper
 import com.nodeseek.app.domain.radar.NotificationTapTarget
@@ -19,16 +21,21 @@ import com.nodeseek.app.navigation.MyServersRoute
 import com.nodeseek.app.navigation.NodePulseRootShell
 import com.nodeseek.app.navigation.RestockMonitorRoute
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private val pendingDeepLinkUri = MutableStateFlow<Uri?>(null)
+    private val deepLinkUriFlow = pendingDeepLinkUri.asStateFlow()
     private val pendingNotificationTap = Channel<NotificationTapTarget>(Channel.BUFFERED)
+    private val notificationTapFlow = pendingNotificationTap.receiveAsFlow()
     private val pendingShortcutDestination = Channel<AppDestination>(Channel.BUFFERED)
+    private val shortcutDestinationFlow = pendingShortcutDestination.receiveAsFlow()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,12 +59,12 @@ class MainActivity : ComponentActivity() {
             NodePulseRootShell(
                 container = appContainer,
                 windowSizeClass = windowSizeClass,
-                deepLinkUriFlow = pendingDeepLinkUri.asStateFlow(),
+                deepLinkUriFlow = deepLinkUriFlow,
                 onDeepLinkConsumed = {
                     pendingDeepLinkUri.value = null
                 },
-                notificationTapFlow = pendingNotificationTap.receiveAsFlow(),
-                shortcutDestinationFlow = pendingShortcutDestination.receiveAsFlow(),
+                notificationTapFlow = notificationTapFlow,
+                shortcutDestinationFlow = shortcutDestinationFlow,
                 onDarkThemeResolved = { isDark ->
                     val systemBarStyle = if (isDark) {
                         SystemBarStyle.dark(Color.TRANSPARENT)
@@ -92,24 +99,39 @@ class MainActivity : ComponentActivity() {
         dispatchNotificationTapIfPresent(intent)
     }
 
-    override fun onDestroy() {
-        val closingApp = !isChangingConfigurations && isFinishing
-        super.onDestroy()
-        if (closingApp) {
-            (application as? NodePulseApp)?.container?.onAppClosed()
-        }
-    }
-
     private fun dispatchNotificationTapIfPresent(targetIntent: Intent?) {
         if (targetIntent == null) return
         if (RestockNotificationHelper.isRestockMonitorIntent(targetIntent)) {
+            val watchId = targetIntent.getStringExtra(RestockNotificationHelper.EXTRA_RESTOCK_WATCH_ID)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            val eventId = targetIntent.getStringExtra(RestockNotificationHelper.EXTRA_RESTOCK_EVENT_ID)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
             targetIntent.action = null
+            targetIntent.removeExtra(RestockNotificationHelper.EXTRA_RESTOCK_WATCH_ID)
+            targetIntent.removeExtra(RestockNotificationHelper.EXTRA_RESTOCK_EVENT_ID)
+            if (watchId != null) {
+                runCatching {
+                    NotificationManagerCompat.from(this)
+                        .cancel(RestockNotificationHelper.notificationIdForWatch(watchId))
+                }
+            }
+            if (eventId != null) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        (application as? NodePulseApp)?.container?.restockRepository?.markEventRead(eventId)
+                    }
+                }
+            }
             pendingShortcutDestination.trySend(RestockMonitorRoute(initialTab = 1))
             return
         }
         if (targetIntent.action == FleetAlertNotifier.ACTION_OPEN_FLEET) {
             val tab = targetIntent.getStringExtra(FleetAlertNotifier.EXTRA_FLEET_TAB)
             targetIntent.action = null
+            targetIntent.removeExtra(FleetAlertNotifier.EXTRA_FLEET_TAB)
+            targetIntent.removeExtra(FleetAlertNotifier.EXTRA_ASSET_ID)
             val initialTab = if (tab == FleetAlertNotifier.EXTRA_TAB_ASSETS) 1 else 0
             pendingShortcutDestination.trySend(MyServersRoute(initialTab = initialTab))
             return

@@ -526,8 +526,6 @@ fun PulseNavigationRail(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.weight(1f))
         }
 
         Box(

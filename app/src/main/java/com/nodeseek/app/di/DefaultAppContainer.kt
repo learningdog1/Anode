@@ -605,13 +605,69 @@ class DefaultAppContainer(
         )
     }
 
-    fun startBackgroundFeatureSchedulers() {
-        restockNotificationHelper.ensureChannel()
-        fleetAlertNotifier.ensureChannels()
+    fun registerBackgroundWorkerProviders() {
         RestockCheckWorker.registerControllerProvider { restockMonitorController }
         OverseasPromoWorker.registerControllerProvider { overseasPromoMonitorController }
         ActivityMonitorWorker.registerControllerProvider { activityMonitorController }
         FleetMonitorWorker.externalRepositoryFactory = { fleetRepository }
+    }
+
+    fun startBackgroundServicesAsync(
+        isForegroundProvider: () -> Boolean,
+    ) {
+        applicationScope.launch {
+            runCatching { notificationDispatcher.ensureChannels() }
+            runCatching { userAgentProvider }
+            runCatching { startBackgroundRadarScheduling() }
+            runCatching { startBackgroundFeatureSchedulers() }
+            val inForeground = isForegroundProvider()
+            runCatching {
+                radarMonitorController.onForegroundChanged(inForeground)
+                radarMonitorController.start()
+            }
+            runCatching {
+                restockMonitorController.onForegroundChanged(inForeground)
+                restockMonitorController.start()
+            }
+            runCatching {
+                overseasPromoMonitorController.onForegroundChanged(inForeground)
+                overseasPromoMonitorController.start()
+            }
+            runCatching {
+                activityMonitorController.onForegroundChanged(inForeground)
+                activityMonitorController.start()
+            }
+        }
+    }
+
+    fun dispatchForegroundTransitionAsync(inForeground: Boolean) {
+        applicationScope.launch {
+            if (inForeground) {
+                onAppEnteredForeground()
+                radarMonitorController.onForegroundChanged(true)
+                restockMonitorController.onForegroundChanged(true)
+                overseasPromoMonitorController.onForegroundChanged(true)
+                activityMonitorController.onForegroundChanged(true)
+            } else {
+                radarMonitorController.onForegroundChanged(false)
+                onAppEnteredBackground()
+                restockMonitorController.onForegroundChanged(false)
+                overseasPromoMonitorController.onForegroundChanged(false)
+                overseasPromoWorkScheduler.onAppEnteredBackground(
+                    overseasPromoMonitorController.settingsFlow.value,
+                )
+                activityMonitorController.onForegroundChanged(false)
+                activityWorkScheduler.onAppEnteredBackground(
+                    activityMonitorController.settingsFlow.value,
+                )
+            }
+        }
+    }
+
+    fun startBackgroundFeatureSchedulers() {
+        restockNotificationHelper.ensureChannel()
+        fleetAlertNotifier.ensureChannels()
+        registerBackgroundWorkerProviders()
         applicationScope.launch {
             runCatching { activityRepository.loadCachedActivities() }
         }

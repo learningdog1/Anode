@@ -45,15 +45,15 @@ class NodePulseApp :
     override val activityMonitorController: ActivityMonitorController
         get() = container.activityMonitorController
 
+    @Volatile
     private var startedActivityCount: Int = 0
     private var isActivityChangingConfigurations: Boolean = false
+    private var appClosedNotified: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
         container = DefaultAppContainer(this)
-        container.notificationDispatcher.ensureChannels()
-        container.startBackgroundRadarScheduling()
-        container.startBackgroundFeatureSchedulers()
+        container.registerBackgroundWorkerProviders()
         registerActivityLifecycleCallbacks(
             object : ActivityLifecycleCallbacks {
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
@@ -62,12 +62,9 @@ class NodePulseApp :
                     val transitioningFromConfigChange = isActivityChangingConfigurations
                     isActivityChangingConfigurations = false
                     startedActivityCount += 1
-                    if (startedActivityCount > 0 && !transitioningFromConfigChange) {
-                        container.onAppEnteredForeground()
-                        container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
-                        container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
-                        container.overseasPromoMonitorController.onForegroundChanged(startedActivityCount > 0)
-                        container.activityMonitorController.onForegroundChanged(startedActivityCount > 0)
+                    if (startedActivityCount == 1 && !transitioningFromConfigChange) {
+                        appClosedNotified = false
+                        container.dispatchForegroundTransitionAsync(inForeground = true)
                     }
                 }
 
@@ -79,20 +76,10 @@ class NodePulseApp :
                     isActivityChangingConfigurations = activity.isChangingConfigurations
                     startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
                     if (startedActivityCount == 0 && !isActivityChangingConfigurations) {
-                        container.radarMonitorController.onForegroundChanged(false)
-                        container.onAppEnteredBackground()
+                        container.dispatchForegroundTransitionAsync(inForeground = false)
                         if (activity is MainActivity && activity.isFinishing) {
-                            container.onAppClosed()
+                            notifyAppClosedOnce()
                         }
-                        container.restockMonitorController.onForegroundChanged(false)
-                        container.overseasPromoMonitorController.onForegroundChanged(false)
-                        container.overseasPromoWorkScheduler.onAppEnteredBackground(
-                            container.overseasPromoMonitorController.settingsFlow.value,
-                        )
-                        container.activityMonitorController.onForegroundChanged(false)
-                        container.activityWorkScheduler.onAppEnteredBackground(
-                            container.activityMonitorController.settingsFlow.value,
-                        )
                     }
                 }
 
@@ -103,19 +90,19 @@ class NodePulseApp :
                         !activity.isChangingConfigurations &&
                         startedActivityCount == 0
                     ) {
-                        container.onAppClosed()
+                        notifyAppClosedOnce()
                     }
                 }
             },
         )
-        container.radarMonitorController.onForegroundChanged(startedActivityCount > 0)
-        container.radarMonitorController.start()
-        container.restockMonitorController.onForegroundChanged(startedActivityCount > 0)
-        container.restockMonitorController.start()
-        container.overseasPromoMonitorController.onForegroundChanged(startedActivityCount > 0)
-        container.overseasPromoMonitorController.start()
-        container.activityMonitorController.onForegroundChanged(startedActivityCount > 0)
-        container.activityMonitorController.start()
+        container.startBackgroundServicesAsync(isForegroundProvider = { startedActivityCount > 0 })
+    }
+
+    private fun notifyAppClosedOnce() {
+        if (!appClosedNotified) {
+            appClosedNotified = true
+            container.onAppClosed()
+        }
     }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader {
