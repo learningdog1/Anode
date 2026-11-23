@@ -166,6 +166,7 @@ import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -2390,12 +2391,11 @@ private fun NodeImageApiKeyDialog(
             }
         },
     ) {
-        OutlinedTextField(
+        PulseTextField(
             value = apiKeyDraft,
             onValueChange = { apiKeyDraft = it },
-            label = { Text("NodeImage X-API-Key") },
-            placeholder = { Text("粘贴您的图床 API Key…") },
-            shape = RoundedCornerShape(14.dp),
+            label = "NodeImage X-API-Key",
+            placeholder = "粘贴您的图床 API Key…",
             singleLine = true,
             leadingIcon = {
                 Icon(
@@ -2481,11 +2481,10 @@ private fun BlockedUsersManagerDialog(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
+                PulseTextField(
                     value = newUsername,
                     onValueChange = { newUsername = it },
-                    placeholder = { Text("输入要屏蔽的用户名…") },
-                    shape = RoundedCornerShape(14.dp),
+                    placeholder = "输入要屏蔽的用户名…",
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
@@ -3333,30 +3332,28 @@ private fun AwayDigestCustomDurationDialog(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedTextField(
+                PulseTextField(
                     value = hoursDraft,
                     onValueChange = { raw ->
                         hoursDraft = raw.filter { it.isDigit() }.take(2)
                     },
-                    label = { Text("小时") },
-                    placeholder = { Text("0") },
+                    label = "小时",
+                    placeholder = "0",
                     suffix = { Text("小时") },
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
                 )
 
-                OutlinedTextField(
+                PulseTextField(
                     value = minutesDraft,
                     onValueChange = { raw ->
                         minutesDraft = raw.filter { it.isDigit() }.take(4)
                     },
-                    label = { Text("分钟") },
-                    placeholder = { Text("0") },
+                    label = "分钟",
+                    placeholder = "0",
                     suffix = { Text("分钟") },
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
                 )

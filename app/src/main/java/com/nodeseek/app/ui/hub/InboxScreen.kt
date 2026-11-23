@@ -37,13 +37,11 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Radar
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -95,6 +93,7 @@ import com.nodeseek.app.ui.components.FloorNumberPill
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -1297,18 +1296,15 @@ private fun NewDirectMessageDialog(
         dismissText = null,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            PulseSearchField(
                 value = query,
                 onValueChange = {
                     query = it
                     onSearchChange(it)
                 },
-                placeholder = { Text("输入成员用户名搜索…") },
-                leadingIcon = {
-                    Icon(imageVector = Icons.Rounded.Search, contentDescription = null)
-                },
-                shape = RoundedCornerShape(14.dp),
-                singleLine = true,
+                placeholder = "输入成员用户名搜索…",
+                elevated = false,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth(),
             )
 

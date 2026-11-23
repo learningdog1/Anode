@@ -51,7 +51,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -78,6 +77,7 @@ import com.nodeseek.app.domain.filter.ContentFilterEngine
 import com.nodeseek.app.domain.filter.ContentFilterPreset
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.radar.KeywordMatchMode
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.CategoryPalette
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -799,23 +799,17 @@ private fun ContentBlockRuleEditorSheet(
                 fontWeight = FontWeight.Bold,
             )
 
-            OutlinedTextField(
+            PulseTextField(
                 value = pattern,
                 onValueChange = { pattern = it },
-                label = {
-                    Text(if (matchMode == KeywordMatchMode.REGEX) "正则表达式" else "屏蔽关键词")
-                },
-                placeholder = {
-                    Text(
-                        if (matchMode == KeywordMatchMode.REGEX) {
-                            """例如：(^|[\s【\[])(收|求购)"""
-                        } else {
-                            "例如：求购、AFF、代购"
-                        },
-                    )
+                label = if (matchMode == KeywordMatchMode.REGEX) "正则表达式" else "屏蔽关键词",
+                placeholder = if (matchMode == KeywordMatchMode.REGEX) {
+                    """例如：(^|[\s【\[])(收|求购)"""
+                } else {
+                    "例如：求购、AFF、代购"
                 },
                 isError = regexSyntaxError != null,
-                supportingText = when {
+                supportingContent = when {
                     regexSyntaxError != null -> {
                         {
                             Text(
@@ -842,7 +836,6 @@ private fun ContentBlockRuleEditorSheet(
                     }
                     else -> null
                 },
-                shape = RoundedCornerShape(14.dp),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -870,12 +863,11 @@ private fun ContentBlockRuleEditorSheet(
                 }
             }
 
-            OutlinedTextField(
+            PulseTextField(
                 value = note,
                 onValueChange = { note = it },
-                label = { Text("规则备注（可选）") },
-                placeholder = { Text("例如：屏蔽求购帖") },
-                shape = RoundedCornerShape(14.dp),
+                label = "规则备注（可选）",
+                placeholder = "例如：屏蔽求购帖",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -956,10 +948,11 @@ private fun ContentBlockRuleEditorSheet(
                     }
                 }
 
-                OutlinedTextField(
+                PulseTextField(
                     value = sampleTitle,
                     onValueChange = { sampleTitle = it },
-                    label = { Text("测试帖子标题") },
+                    label = "测试帖子标题",
+                    placeholder = "输入任意帖子标题测试匹配效果",
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),

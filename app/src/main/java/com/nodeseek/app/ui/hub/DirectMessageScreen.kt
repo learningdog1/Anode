@@ -44,8 +44,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -88,6 +86,7 @@ import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -1139,20 +1138,15 @@ private fun DirectMessageComposerBar(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
+                PulseTextField(
                     value = text,
                     onValueChange = onTextChange,
-                    placeholder = {
-                        Text(if (isMarkdownMode) "输入 Markdown 私信…" else "输入私信内容…")
-                    },
+                    placeholder = if (isMarkdownMode) "输入 Markdown 私信…" else "输入私信内容…",
+                    singleLine = false,
                     maxLines = 5,
+                    minHeight = 46.dp,
                     shape = RoundedCornerShape(22.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = ext.cardSurface,
-                        unfocusedContainerColor = if (isDark) ext.cardSurface else ext.cardSurfaceElevated,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = ext.cardBorder,
-                    ),
+                    containerColor = if (isDark) ext.cardSurface else ext.cardSurfaceElevated,
                     modifier = Modifier.weight(1f),
                 )
 
