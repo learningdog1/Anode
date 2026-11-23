@@ -29,6 +29,14 @@ interface ReadHistoryDao {
     @Query(
         """
         SELECT * FROM read_history
+        WHERE accountUid = :accountUid AND topicId IN (:topicIds)
+        """
+    )
+    suspend fun getByTopicIds(accountUid: Long, topicIds: Collection<Long>): List<ReadHistoryEntity>
+
+    @Query(
+        """
+        SELECT * FROM read_history
         WHERE accountUid = :accountUid AND topicId = :topicId
         LIMIT 1
         """

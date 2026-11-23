@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.IOException
@@ -35,12 +36,17 @@ val Context.nodePulseDataStore: DataStore<Preferences> by preferencesDataStore(
 class SettingsRepositoryImpl(
     private val dataStore: DataStore<Preferences>,
     externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val secretCipher: SettingsSecretCipher = SettingsSecretCipherFactory.createDefault(),
 ) : SettingsRepository {
 
     constructor(
         context: Context,
         externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-    ) : this(context.applicationContext.nodePulseDataStore, externalScope)
+    ) : this(
+        dataStore = context.applicationContext.nodePulseDataStore,
+        externalScope = externalScope,
+        secretCipher = SettingsSecretCipherFactory.createDefault(context.applicationContext),
+    )
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -74,6 +80,44 @@ class SettingsRepositoryImpl(
             started = SharingStarted.Eagerly,
             initialValue = emptyList(),
         )
+
+    init {
+        val ds = dataStore
+        val flow = safePreferencesFlow
+        val cipher = secretCipher
+        externalScope.launch {
+            migratePlaintextSecretsIfNeeded(ds, flow, cipher)
+        }
+    }
+
+    private suspend fun migratePlaintextSecretsIfNeeded(
+        ds: DataStore<Preferences>,
+        prefsFlow: kotlinx.coroutines.flow.Flow<Preferences>,
+        cipher: SettingsSecretCipher,
+    ) {
+        try {
+            val prefs = prefsFlow.first()
+            val rawNodeImage = prefs[Keys.NODE_IMAGE_API_KEY].orEmpty().trim()
+            val rawSeekMail = prefs[Keys.SEEK_MAIL_API_KEY].orEmpty().trim()
+            val needsNodeImageMigration = rawNodeImage.isNotEmpty() && !cipher.isEncryptedEnvelope(rawNodeImage)
+            val needsSeekMailMigration = rawSeekMail.isNotEmpty() && !cipher.isEncryptedEnvelope(rawSeekMail)
+            if (!needsNodeImageMigration && !needsSeekMailMigration) return
+            ds.edit { mutablePrefs ->
+                val curNodeImage = mutablePrefs[Keys.NODE_IMAGE_API_KEY].orEmpty().trim()
+                if (curNodeImage.isNotEmpty() && !cipher.isEncryptedEnvelope(curNodeImage)) {
+                    mutablePrefs[Keys.NODE_IMAGE_API_KEY] = cipher.encrypt(curNodeImage)
+                }
+                val curSeekMail = mutablePrefs[Keys.SEEK_MAIL_API_KEY].orEmpty().trim()
+                if (curSeekMail.isNotEmpty() && !cipher.isEncryptedEnvelope(curSeekMail)) {
+                    mutablePrefs[Keys.SEEK_MAIL_API_KEY] = cipher.encrypt(curSeekMail)
+                }
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            // Best-effort legacy secret migration; plaintext remains readable until next save.
+        }
+    }
 
     override suspend fun setThemeMode(mode: ThemeMode) {
         dataStore.edit { prefs ->
@@ -138,14 +182,16 @@ class SettingsRepositoryImpl(
     }
 
     override suspend fun setNodeImageApiKey(apiKey: String) {
+        val trimmed = apiKey.trim()
         dataStore.edit { prefs ->
-            prefs[Keys.NODE_IMAGE_API_KEY] = apiKey.trim()
+            prefs[Keys.NODE_IMAGE_API_KEY] = if (trimmed.isEmpty()) "" else secretCipher.encrypt(trimmed)
         }
     }
 
     override suspend fun setSeekMailApiKey(apiKey: String) {
+        val trimmed = apiKey.trim()
         dataStore.edit { prefs ->
-            prefs[Keys.SEEK_MAIL_API_KEY] = apiKey.trim()
+            prefs[Keys.SEEK_MAIL_API_KEY] = if (trimmed.isEmpty()) "" else secretCipher.encrypt(trimmed)
         }
     }
 
@@ -277,7 +323,12 @@ class SettingsRepositoryImpl(
                 backup.ignoredUpdateTag.trim()
             }
 
-            val cleanedPinned = backup.pinnedCategorySlugs
+            val hasExplicitPinned = prefs[Keys.PINNED_CATEGORY_SLUGS] != null
+            val cleanedPinned = (if (merge && hasExplicitPinned) {
+                current.pinnedCategorySlugs + backup.pinnedCategorySlugs
+            } else {
+                backup.pinnedCategorySlugs
+            })
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .distinct()
@@ -300,8 +351,8 @@ class SettingsRepositoryImpl(
             prefs[Keys.PINNED_CATEGORY_SLUGS] = json.encodeToString(cleanedPinned)
             prefs[Keys.INCLUDE_BLOCKED_TOPICS] = backup.includeBlockedTopics
             prefs[Keys.PREFER_RSS_FALLBACK] = backup.preferRssFallback
-            prefs[Keys.NODE_IMAGE_API_KEY] = resolvedNodeImageKey
-            prefs[Keys.SEEK_MAIL_API_KEY] = resolvedSeekMailKey
+            prefs[Keys.NODE_IMAGE_API_KEY] = if (resolvedNodeImageKey.isEmpty()) "" else secretCipher.encrypt(resolvedNodeImageKey)
+            prefs[Keys.SEEK_MAIL_API_KEY] = if (resolvedSeekMailKey.isEmpty()) "" else secretCipher.encrypt(resolvedSeekMailKey)
             prefs[Keys.AUTO_CHECK_UPDATES] = backup.autoCheckUpdates
             prefs[Keys.INCLUDE_PRERELEASE_UPDATES] = backup.includePrereleaseUpdates
             prefs[Keys.IGNORED_UPDATE_TAG] = resolvedIgnoredTag
@@ -342,8 +393,8 @@ class SettingsRepositoryImpl(
             pinnedCategorySlugs = decodePinnedSlugs(this[Keys.PINNED_CATEGORY_SLUGS]),
             includeBlockedTopics = this[Keys.INCLUDE_BLOCKED_TOPICS] ?: false,
             preferRssFallback = this[Keys.PREFER_RSS_FALLBACK] ?: false,
-            nodeImageApiKey = this[Keys.NODE_IMAGE_API_KEY] ?: "",
-            seekMailApiKey = this[Keys.SEEK_MAIL_API_KEY] ?: "",
+            nodeImageApiKey = secretCipher.decrypt(this[Keys.NODE_IMAGE_API_KEY] ?: ""),
+            seekMailApiKey = secretCipher.decrypt(this[Keys.SEEK_MAIL_API_KEY] ?: ""),
             autoCheckUpdates = this[Keys.AUTO_CHECK_UPDATES] ?: true,
             includePrereleaseUpdates = this[Keys.INCLUDE_PRERELEASE_UPDATES] ?: false,
             ignoredUpdateTag = this[Keys.IGNORED_UPDATE_TAG] ?: "",
@@ -387,7 +438,7 @@ class SettingsRepositoryImpl(
 
     companion object {
         const val MIN_FONT_SCALE = 0.85f
-        const val MAX_FONT_SCALE = 1.35f
+        const val MAX_FONT_SCALE = 1.30f
         const val MAX_RECENT_SEARCHES = 12
     }
 }

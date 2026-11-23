@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         LocalAlertEntity::class,
     ],
     version = 2,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class NodePulseDatabase : RoomDatabase() {
     abstract fun readHistoryDao(): ReadHistoryDao
@@ -115,7 +115,6 @@ abstract class NodePulseDatabase : RoomDatabase() {
                 DATABASE_NAME,
             )
                 .addMigrations(MIGRATION_1_2)
-                .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
 
         fun buildInMemory(context: Context): NodePulseDatabase =

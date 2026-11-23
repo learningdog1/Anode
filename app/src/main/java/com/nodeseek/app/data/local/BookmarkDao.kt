@@ -21,6 +21,9 @@ interface BookmarkDao {
     @Query("SELECT topicId FROM bookmarks WHERE accountUid = :accountUid")
     fun observeBookmarkedTopicIds(accountUid: Long): Flow<List<Long>>
 
+    @Query("SELECT topicId FROM bookmarks WHERE accountUid = :accountUid")
+    suspend fun getBookmarkedTopicIds(accountUid: Long): List<Long>
+
     @Query(
         """
         SELECT * FROM bookmarks
