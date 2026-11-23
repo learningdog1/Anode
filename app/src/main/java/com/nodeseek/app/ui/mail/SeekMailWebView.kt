@@ -39,6 +39,8 @@ import androidx.webkit.WebViewFeature
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PurePitchBlack
 import org.jsoup.Jsoup
+import org.jsoup.nodes.DataNode
+import org.jsoup.nodes.Element
 import java.io.ByteArrayInputStream
 import java.util.Locale
 
@@ -233,7 +235,7 @@ fun SeekMailWebView(
                 )
                 setBackgroundColor(backgroundColor.toArgb())
                 isVerticalScrollBarEnabled = true
-                isHorizontalScrollBarEnabled = true
+                isHorizontalScrollBarEnabled = false
                 overScrollMode = WebView.OVER_SCROLL_IF_CONTENT_SCROLLS
 
                 // Only adjust third-party cookies for this isolated WebView instance; never call
@@ -254,6 +256,7 @@ fun SeekMailWebView(
                     blockNetworkImage = !allowRemoteImages
                     useWideViewPort = true
                     loadWithOverviewMode = true
+                    textZoom = 100
                     setSupportZoom(true)
                     builtInZoomControls = true
                     displayZoomControls = false
@@ -264,7 +267,7 @@ fun SeekMailWebView(
                     WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
                 }
 
-                // Prevent parent sheets/pagers from intercepting horizontal table drags or vertical scrolls.
+                // Keep vertical scrolling and pinch-zoom gestures responsive inside the WebView.
                 setOnTouchListener { v, _ ->
                     v.parent?.requestDisallowInterceptTouchEvent(true)
                     false
@@ -352,7 +355,7 @@ internal fun buildThemedEmailHtmlDocument(
     val bodyContent = if (sanitizedFragmentHtml.isBlank()) {
         ""
     } else {
-        sanitizedFragmentHtml
+        normalizeEmailHtmlForMobileViewport(sanitizedFragmentHtml)
     }
 
     return """
@@ -366,9 +369,16 @@ internal fun buildThemedEmailHtmlDocument(
             :root {
               color-scheme: $colorSchemeValue;
             }
+            *, *::before, *::after {
+              box-sizing: border-box;
+            }
             html, body {
-              margin: 0;
-              padding: 0;
+              margin: 0 !important;
+              padding: 0 !important;
+              width: 100% !important;
+              max-width: 100% !important;
+              min-width: 0 !important;
+              overflow-x: hidden !important;
               background-color: $resolvedBg !important;
               color: $onSurfaceHex;
               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "PingFang SC", sans-serif;
@@ -376,36 +386,47 @@ internal fun buildThemedEmailHtmlDocument(
               line-height: 1.65;
               word-wrap: break-word;
               overflow-wrap: anywhere;
+              word-break: break-word;
               -webkit-text-size-adjust: 100%;
             }
             body {
-              padding: 14px 16px 28px 16px;
-              box-sizing: border-box;
+              padding: 12px 14px 28px 14px !important;
+              box-sizing: border-box !important;
             }
             .np-mail-root {
-              max-width: 100%;
-              overflow-x: auto;
+              width: 100% !important;
+              max-width: 100% !important;
+              min-width: 0 !important;
+              overflow-x: hidden !important;
             }
             a {
               color: $primaryHex;
               text-decoration: underline;
               word-break: break-word;
+              overflow-wrap: anywhere;
             }
-            img, svg, video, picture {
+            img, svg, video, picture, canvas {
               max-width: 100% !important;
               height: auto !important;
             }
             table {
               max-width: 100% !important;
+              min-width: 0 !important;
               border-collapse: collapse;
             }
             th, td {
               border-color: $outlineHex;
+              word-break: break-word;
+              overflow-wrap: anywhere;
+              white-space: normal;
             }
             pre {
-              max-width: 100%;
+              max-width: 100% !important;
+              white-space: pre-wrap !important;
+              word-break: break-word !important;
+              overflow-wrap: anywhere !important;
               overflow-x: auto;
-              padding: 12px;
+              padding: 10px 12px;
               border-radius: 10px;
               background-color: $surfaceContainerHex;
               border: 1px solid $outlineHex;
@@ -419,6 +440,12 @@ internal fun buildThemedEmailHtmlDocument(
               padding: 1px 5px;
               border-radius: 5px;
               background-color: $surfaceContainerHex;
+              word-break: break-word;
+              overflow-wrap: anywhere;
+            }
+            pre code {
+              background: transparent;
+              padding: 0;
             }
             blockquote {
               margin: 10px 0;
@@ -441,9 +468,430 @@ internal fun buildThemedEmailHtmlDocument(
         </head>
         <body>
           <div class="np-mail-root">$bodyContent</div>
+          <style>
+            html, body {
+              width: 100% !important;
+              max-width: 100% !important;
+              min-width: 0 !important;
+              overflow-x: hidden !important;
+            }
+            html body .np-mail-root,
+            html body .np-mail-root * {
+              box-sizing: border-box !important;
+              max-width: 100% !important;
+              min-width: 0 !important;
+            }
+            html body .np-mail-root img,
+            html body .np-mail-root svg,
+            html body .np-mail-root video,
+            html body .np-mail-root picture,
+            html body .np-mail-root canvas {
+              max-width: 100% !important;
+              height: auto !important;
+            }
+            html body .np-mail-root table {
+              max-width: 100% !important;
+              min-width: 0 !important;
+            }
+            html body .np-mail-root table.np-mail-wide-table {
+              width: 100% !important;
+              table-layout: fixed !important;
+              font-size: 0.92em;
+            }
+            html body .np-mail-root table.np-mail-wide-table th,
+            html body .np-mail-root table.np-mail-wide-table td {
+              padding: 6px 5px !important;
+            }
+            html body .np-mail-root th,
+            html body .np-mail-root td {
+              word-break: break-word !important;
+              overflow-wrap: anywhere !important;
+              white-space: normal !important;
+            }
+            html body .np-mail-root pre {
+              max-width: 100% !important;
+              white-space: pre-wrap !important;
+              word-break: break-word !important;
+              overflow-wrap: anywhere !important;
+            }
+            html body .np-mail-root a {
+              word-break: break-word !important;
+              overflow-wrap: anywhere !important;
+            }
+          </style>
         </body>
         </html>
     """.trimIndent()
+}
+
+private val MEDIA_TAGS = setOf("img", "svg", "video", "picture", "canvas")
+private val TABLE_CELL_TAGS = setOf("td", "th", "col", "colgroup")
+private val CSS_LENGTH_REGEX = Regex(
+    """^\s*([0-9]+(?:\.[0-9]+)?)\s*(px|pt|pc|in|cm|mm|em|rem|vw|%)?\s*$""",
+    RegexOption.IGNORE_CASE,
+)
+private val EMBEDDED_MIN_WIDTH_REGEX = Regex(
+    """min-width\s*:\s*[^;}]+""",
+    RegexOption.IGNORE_CASE,
+)
+private val EMBEDDED_NOWRAP_REGEX = Regex(
+    """white-space\s*:\s*nowrap(?:\s*!important)?""",
+    RegexOption.IGNORE_CASE,
+)
+private val EMBEDDED_FIXED_WIDTH_REGEX = Regex(
+    """(?<![a-z0-9-])width\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(px|pt|cm|mm|in)(?:\s*!important)?""",
+    RegexOption.IGNORE_CASE,
+)
+
+/**
+ * Normalizes desktop-fixed email layouts (e.g. 600px wrapper tables, fixed cell widths,
+ * `min-width`, `nowrap`, huge desktop side gutters, and wide multi-column data tables)
+ * purely in Kotlin/Jsoup with zero JavaScript so HTML mails fit mobile screens cleanly.
+ */
+internal fun normalizeEmailHtmlForMobileViewport(sanitizedFragmentHtml: String): String {
+    if (sanitizedFragmentHtml.isBlank()) return ""
+    val doc = Jsoup.parseBodyFragment(sanitizedFragmentHtml)
+    doc.outputSettings().prettyPrint(false)
+    val body = doc.body()
+
+    for (element in body.allElements) {
+        if (element === body) continue
+        val tag = element.tagName().lowercase(Locale.ROOT)
+
+        if (tag == "style") {
+            normalizeEmbeddedStyleBlock(element)
+            continue
+        }
+
+        if (element.hasAttr("nowrap")) {
+            element.removeAttr("nowrap")
+        }
+
+        var removedOversizedMediaWidth = false
+        if (element.hasAttr("width")) {
+            val rawWidth = element.attr("width").trim()
+            val parsed = parseCssLength(rawWidth)
+            if (parsed != null) {
+                when {
+                    parsed.isPercent -> {
+                        if (parsed.value > 100f) {
+                            element.attr("width", "100%")
+                        }
+                    }
+                    tag in MEDIA_TAGS -> {
+                        if (parsed.approxPx > 260f) {
+                            element.removeAttr("width")
+                            element.removeAttr("height")
+                            removedOversizedMediaWidth = true
+                        }
+                    }
+                    tag == "table" -> {
+                        if (parsed.approxPx > 260f) {
+                            element.attr("width", "100%")
+                        }
+                    }
+                    tag in TABLE_CELL_TAGS -> {
+                        if (parsed.approxPx > 96f) {
+                            element.removeAttr("width")
+                        }
+                    }
+                    else -> {
+                        if (parsed.approxPx > 260f) {
+                            element.removeAttr("width")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (element.hasAttr("style")) {
+            val normalizedStyle = normalizeInlineStyleForMobile(
+                rawStyle = element.attr("style"),
+                tag = tag,
+                removedOversizedMediaWidth = removedOversizedMediaWidth,
+            )
+            if (normalizedStyle.isBlank()) {
+                element.removeAttr("style")
+            } else {
+                element.attr("style", normalizedStyle)
+            }
+        }
+    }
+
+    // Mark wide leaf data tables (4+ non-empty columns or dense multi-column grids) so CSS
+    // switches them to `table-layout: fixed; width: 100%` without harming 1–3 column layout tables.
+    for (table in body.select("table")) {
+        if (isWideLeafDataTable(table)) {
+            table.addClass("np-mail-wide-table")
+        }
+    }
+
+    return body.html()
+}
+
+private fun normalizeEmbeddedStyleBlock(styleElement: Element) {
+    val rawCss = styleElement.data()
+    if (rawCss.isBlank()) return
+    var normalized = EMBEDDED_MIN_WIDTH_REGEX.replace(rawCss, "min-width: 0")
+    normalized = EMBEDDED_NOWRAP_REGEX.replace(normalized, "white-space: normal")
+    normalized = EMBEDDED_FIXED_WIDTH_REGEX.replace(normalized) { match ->
+        val amount = match.groupValues[1].toFloatOrNull() ?: return@replace match.value
+        val unit = match.groupValues[2].lowercase(Locale.ROOT)
+        val approxPx = toApproxPx(amount, unit)
+        if (approxPx > 260f) {
+            "max-width: 100%; width: auto"
+        } else {
+            match.value.replace(Regex("""\s*!important""", RegexOption.IGNORE_CASE), "")
+        }
+    }
+    if (normalized != rawCss) {
+        styleElement.childNodes().toList().forEach { it.remove() }
+        styleElement.appendChild(DataNode(normalized))
+    }
+}
+
+private fun normalizeInlineStyleForMobile(
+    rawStyle: String,
+    tag: String,
+    removedOversizedMediaWidth: Boolean,
+): String {
+    val declarations = splitCssDeclarations(rawStyle)
+    if (declarations.isEmpty()) return ""
+
+    var dropMediaHeight = removedOversizedMediaWidth
+    val parsedPairs = declarations.mapNotNull { decl ->
+        val colonIdx = decl.indexOf(':')
+        if (colonIdx <= 0) return@mapNotNull null
+        val prop = decl.substring(0, colonIdx).trim().lowercase(Locale.ROOT)
+        val value = decl.substring(colonIdx + 1).trim()
+        if (prop.isEmpty() || value.isEmpty()) return@mapNotNull null
+        prop to value
+    }
+
+    if (tag in MEDIA_TAGS && !dropMediaHeight) {
+        for ((prop, value) in parsedPairs) {
+            if (prop == "width") {
+                val cleaned = stripImportant(value)
+                val len = parseCssLength(cleaned)
+                if (len != null && !len.isPercent && len.approxPx > 260f) {
+                    dropMediaHeight = true
+                    break
+                }
+            }
+        }
+    }
+
+    val kept = ArrayList<String>(parsedPairs.size)
+    for ((prop, rawVal) in parsedPairs) {
+        val cleanVal = stripImportant(rawVal)
+        when (prop) {
+            "min-width" -> {
+                // Drop desktop min-width locks; CSS enforces min-width: 0.
+            }
+
+            "white-space" -> {
+                val lower = cleanVal.lowercase(Locale.ROOT)
+                when {
+                    lower.contains("nowrap") -> { /* drop nowrap */ }
+                    lower == "pre" -> kept.add("white-space: pre-wrap")
+                    else -> kept.add("$prop: $cleanVal")
+                }
+            }
+
+            "word-break" -> {
+                if (!cleanVal.equals("keep-all", ignoreCase = true)) {
+                    kept.add("$prop: $cleanVal")
+                }
+            }
+
+            "width" -> {
+                val lower = cleanVal.lowercase(Locale.ROOT)
+                if (lower == "max-content" || lower == "min-content") {
+                    // Drop intrinsic width locks that overflow mobile screens.
+                } else {
+                    val len = parseCssLength(cleanVal)
+                    when {
+                        len == null -> kept.add("width: $cleanVal")
+                        len.isPercent -> {
+                            kept.add(if (len.value > 100f) "width: 100%" else "width: $cleanVal")
+                        }
+                        tag == "table" -> {
+                            if (len.approxPx > 260f) {
+                                kept.add("width: 100%")
+                            } else {
+                                kept.add("width: $cleanVal")
+                            }
+                        }
+                        tag in TABLE_CELL_TAGS -> {
+                            if (len.approxPx <= 96f) {
+                                kept.add("width: $cleanVal")
+                            }
+                        }
+                        tag in MEDIA_TAGS -> {
+                            if (len.approxPx <= 260f) {
+                                kept.add("width: $cleanVal")
+                            }
+                        }
+                        else -> {
+                            if (len.approxPx <= 260f) {
+                                kept.add("width: $cleanVal")
+                            }
+                        }
+                    }
+                }
+            }
+
+            "max-width" -> {
+                val len = parseCssLength(cleanVal)
+                when {
+                    len == null -> kept.add("max-width: $cleanVal")
+                    len.isPercent && len.value > 100f -> kept.add("max-width: 100%")
+                    !len.isPercent && len.approxPx > 320f -> kept.add("max-width: 100%")
+                    else -> kept.add("max-width: $cleanVal")
+                }
+            }
+
+            "height" -> {
+                if (tag in MEDIA_TAGS) {
+                    if (!dropMediaHeight) {
+                        kept.add("height: $cleanVal")
+                    }
+                } else {
+                    kept.add("$prop: $rawVal")
+                }
+            }
+
+            "padding-left", "padding-right" -> {
+                val len = parseCssLength(cleanVal)
+                if (len != null && !len.isPercent && len.approxPx > 24f) {
+                    kept.add("$prop: 16px")
+                } else {
+                    kept.add("$prop: $rawVal")
+                }
+            }
+
+            "margin-left", "margin-right" -> {
+                val len = parseCssLength(cleanVal)
+                if (len != null && !len.isPercent && len.approxPx > 24f) {
+                    kept.add("$prop: 0px")
+                } else {
+                    kept.add("$prop: $rawVal")
+                }
+            }
+
+            "padding" -> {
+                kept.add("padding: ${clampHorizontalBoxShorthand(cleanVal, maxPx = 24f, clampedValue = "16px")}")
+            }
+
+            "margin" -> {
+                kept.add("margin: ${clampHorizontalBoxShorthand(cleanVal, maxPx = 24f, clampedValue = "0px")}")
+            }
+
+            else -> kept.add("$prop: $rawVal")
+        }
+    }
+    return kept.joinToString("; ")
+}
+
+private fun clampHorizontalBoxShorthand(
+    value: String,
+    maxPx: Float,
+    clampedValue: String,
+): String {
+    val parts = value.trim().split(Regex("""\s+"""))
+    if (parts.size !in 1..4) return value
+    fun clampIfOversized(token: String): String {
+        val len = parseCssLength(token)
+        return if (len != null && !len.isPercent && len.approxPx > maxPx) clampedValue else token
+    }
+    return when (parts.size) {
+        1 -> {
+            val clampedH = clampIfOversized(parts[0])
+            if (clampedH == parts[0]) value else "${parts[0]} $clampedH"
+        }
+        2 -> "${parts[0]} ${clampIfOversized(parts[1])}"
+        3 -> "${parts[0]} ${clampIfOversized(parts[1])} ${parts[2]}"
+        4 -> "${parts[0]} ${clampIfOversized(parts[1])} ${parts[2]} ${clampIfOversized(parts[3])}"
+        else -> value
+    }
+}
+
+private fun isWideLeafDataTable(table: Element): Boolean {
+    if (table.select("table").size > 1) return false
+    val rows = table.select("tr")
+    if (rows.size < 2) return false
+    var maxNonEmptyCols = 0
+    for (row in rows) {
+        val cells = row.children().filter {
+            val t = it.tagName().lowercase(Locale.ROOT)
+            t == "td" || t == "th"
+        }
+        val nonEmptyCount = cells.count { cell ->
+            cell.text().replace("\u00A0", "").isNotBlank() || cell.selectFirst("img, svg") != null
+        }
+        if (nonEmptyCount > maxNonEmptyCols) {
+            maxNonEmptyCols = nonEmptyCount
+        }
+    }
+    return maxNonEmptyCols >= 4
+}
+
+private fun splitCssDeclarations(style: String): List<String> {
+    val result = mutableListOf<String>()
+    val current = StringBuilder()
+    var inSingle = false
+    var inDouble = false
+    var parenDepth = 0
+    for (ch in style) {
+        when (ch) {
+            '\'' -> if (!inDouble) inSingle = !inSingle
+            '"' -> if (!inSingle) inDouble = !inDouble
+            '(' -> if (!inSingle && !inDouble) parenDepth++
+            ')' -> if (!inSingle && !inDouble && parenDepth > 0) parenDepth--
+            ';' -> if (!inSingle && !inDouble && parenDepth == 0) {
+                val item = current.toString().trim()
+                if (item.isNotEmpty()) result.add(item)
+                current.setLength(0)
+                continue
+            }
+        }
+        current.append(ch)
+    }
+    val trailing = current.toString().trim()
+    if (trailing.isNotEmpty()) result.add(trailing)
+    return result
+}
+
+private fun stripImportant(value: String): String =
+    value.replace(Regex("""\s*!important\s*$""", RegexOption.IGNORE_CASE), "").trim()
+
+private data class ParsedCssLength(
+    val value: Float,
+    val isPercent: Boolean,
+    val approxPx: Float,
+)
+
+private fun parseCssLength(raw: String): ParsedCssLength? {
+    val match = CSS_LENGTH_REGEX.matchEntire(raw) ?: return null
+    val num = match.groupValues[1].toFloatOrNull() ?: return null
+    val unit = match.groupValues[2].lowercase(Locale.ROOT)
+    return if (unit == "%") {
+        ParsedCssLength(value = num, isPercent = true, approxPx = 0f)
+    } else {
+        ParsedCssLength(value = num, isPercent = false, approxPx = toApproxPx(num, unit))
+    }
+}
+
+private fun toApproxPx(value: Float, unit: String): Float = when (unit) {
+    "", "px" -> value
+    "pt" -> value * 1.333f
+    "pc" -> value * 16f
+    "em", "rem" -> value * 16f
+    "in" -> value * 96f
+    "cm" -> value * 37.8f
+    "mm" -> value * 3.78f
+    "vw" -> value * 4f
+    else -> value
 }
 
 private fun isAllowedRemoteImageRequest(request: WebResourceRequest): Boolean {

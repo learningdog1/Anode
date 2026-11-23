@@ -1,14 +1,21 @@
 package com.nodeseek.app.domain.mail
 
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+private val EMPTY_LOCAL_TAG_STORE_FLOW: StateFlow<SeekMailLocalTagStore> =
+    MutableStateFlow(SeekMailLocalTagStore()).asStateFlow()
 
 /**
- * Domain repository for Seek Mail (`seek.li`) OpenAPI operations, local read tracking,
+ * Domain repository for Seek Mail (`seek.li`) OpenAPI operations, local read/tag tracking,
  * and client-side response caching.
  */
 interface SeekMailRepository {
     val locallyReadMailIds: StateFlow<Set<Long>>
     val latestRateLimit: StateFlow<SeekMailRateLimit?>
+    val localTagStore: StateFlow<SeekMailLocalTagStore>
+        get() = EMPTY_LOCAL_TAG_STORE_FLOW
 
     suspend fun verifyApiKey(candidateKey: String? = null): Result<SeekMailConnectionStatus>
 
@@ -57,6 +64,17 @@ interface SeekMailRepository {
     ): Result<List<SeekMailContact>>
 
     suspend fun markMailReadLocally(mailId: Long)
+
+    suspend fun createLocalTag(
+        name: String,
+        colorHex: String,
+    ): Result<SeekMailLocalTag> = Result.failure(UnsupportedOperationException("Local mail tags are not supported"))
+
+    suspend fun deleteLocalTag(tagId: String) = Unit
+
+    suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) = Unit
+
+    suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) = Unit
 
     suspend fun clearCache()
 }

@@ -6,6 +6,8 @@ import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
 import com.nodeseek.app.domain.mail.SeekMailErrorKind
 import com.nodeseek.app.domain.mail.SeekMailException
+import com.nodeseek.app.domain.mail.SeekMailLocalTag
+import com.nodeseek.app.domain.mail.SeekMailLocalTagStore
 import com.nodeseek.app.domain.mail.SeekMailPage
 import com.nodeseek.app.domain.mail.SeekMailRateLimit
 import com.nodeseek.app.domain.mail.SeekMailRepository
@@ -28,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
+import java.util.UUID
 
 /**
  * Concrete [SeekMailRepository] orchestrating [SeekMailApiClient], key-isolated [SeekMailDiskCache],
@@ -47,6 +50,9 @@ class SeekMailRepositoryImpl(
 
     private val _locallyReadMailIds = MutableStateFlow<Set<Long>>(emptySet())
     override val locallyReadMailIds: StateFlow<Set<Long>> = _locallyReadMailIds.asStateFlow()
+
+    private val _localTagStore = MutableStateFlow(SeekMailLocalTagStore())
+    override val localTagStore: StateFlow<SeekMailLocalTagStore> = _localTagStore.asStateFlow()
 
     override val latestRateLimit: StateFlow<SeekMailRateLimit?>
         get() = apiClient.latestRateLimit
@@ -342,9 +348,118 @@ class SeekMailRepositoryImpl(
         markMailReadLocallyForKey(key, mailId)
     }
 
+    override suspend fun createLocalTag(
+        name: String,
+        colorHex: String,
+    ): Result<SeekMailLocalTag> = runMailCatching {
+        val trimmedName = name.trim().take(MAX_LOCAL_TAG_NAME_LENGTH)
+        if (trimmedName.isEmpty()) {
+            throw SeekMailException(
+                kind = SeekMailErrorKind.UNKNOWN,
+                message = "标签名称不能为空",
+            )
+        }
+        val key = requireApiKey()
+        val safeHex = normalizeLocalTagHex(colorHex)
+        stateMutex.withLock {
+            if (activeKey != key) {
+                throw SeekMailException(
+                    kind = SeekMailErrorKind.MISSING_API_KEY,
+                    message = "请先配置 Seek 邮箱 API Key",
+                )
+            }
+            val current = _localTagStore.value
+            val existing = current.tags.firstOrNull { it.name.equals(trimmedName, ignoreCase = true) }
+            if (existing != null) {
+                return@withLock existing
+            }
+            val created = SeekMailLocalTag(
+                id = "ltag_${UUID.randomUUID().toString().replace("-", "").take(12)}",
+                name = trimmedName,
+                colorHex = safeHex,
+            )
+            val updated = current.copy(tags = current.tags + created)
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+            created
+        }
+    }
+
+    override suspend fun deleteLocalTag(tagId: String) {
+        val cleanId = tagId.trim()
+        if (cleanId.isEmpty()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            val nextTags = current.tags.filterNot { it.id == cleanId }
+            val nextMailTags = current.mailTagIds.mapNotNull { (mailId, ids) ->
+                val filtered = ids.filterNot { it == cleanId }
+                if (filtered.isEmpty()) null else mailId to filtered
+            }.toMap()
+            val updated = SeekMailLocalTagStore(
+                tags = nextTags,
+                mailTagIds = nextMailTags,
+            )
+            if (updated == current) return
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
+    override suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) {
+        if (mailId <= 0L || tagId.isBlank()) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            if (current.tags.none { it.id == tagId }) return
+            val existingIds = current.mailTagIds[mailId].orEmpty()
+            val nextIds = if (tagId in existingIds) {
+                existingIds.filterNot { it == tagId }
+            } else {
+                existingIds + tagId
+            }
+            val nextMap = current.mailTagIds.toMutableMap()
+            if (nextIds.isEmpty()) {
+                nextMap.remove(mailId)
+            } else {
+                nextMap[mailId] = nextIds
+            }
+            val updated = current.copy(mailTagIds = nextMap)
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
+    override suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) {
+        if (mailId <= 0L) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localTagStore.value
+            val knownIds = current.tags.mapTo(HashSet()) { it.id }
+            val sanitized = tagIds.filter { it in knownIds }.distinct()
+            val nextMap = current.mailTagIds.toMutableMap()
+            if (sanitized.isEmpty()) {
+                nextMap.remove(mailId)
+            } else {
+                nextMap[mailId] = sanitized
+            }
+            val updated = current.copy(mailTagIds = nextMap)
+            if (updated == current) return
+            _localTagStore.value = updated
+            diskCache?.saveLocalTagStore(key, updated)
+        }
+    }
+
     override suspend fun clearCache() {
         stateMutex.withLock {
             _locallyReadMailIds.value = emptySet()
+            _localTagStore.value = SeekMailLocalTagStore()
             loadedReadIdsForKey = null
             diskCache?.clearAll()
         }
@@ -394,9 +509,13 @@ class SeekMailRepositoryImpl(
                 if (_locallyReadMailIds.value.isNotEmpty()) {
                     _locallyReadMailIds.value = emptySet()
                 }
+                if (_localTagStore.value.tags.isNotEmpty() || _localTagStore.value.mailTagIds.isNotEmpty()) {
+                    _localTagStore.value = SeekMailLocalTagStore()
+                }
                 loadedReadIdsForKey = ""
             } else if (loadedReadIdsForKey != newKey) {
                 _locallyReadMailIds.value = diskCache?.getLocallyReadIds(newKey).orEmpty()
+                _localTagStore.value = diskCache?.getLocalTagStore(newKey) ?: SeekMailLocalTagStore()
                 loadedReadIdsForKey = newKey
             }
         }
@@ -469,5 +588,18 @@ class SeekMailRepositoryImpl(
     companion object {
         private const val METADATA_CACHE_TTL_MS = 60_000L
         private const val TAGS_CACHE_TTL_MS = 300_000L
+        private const val MAX_LOCAL_TAG_NAME_LENGTH = 20
+        private const val DEFAULT_LOCAL_TAG_HEX = "#2D637E"
+        private val HEX_COLOR_REGEX = Regex("""^#[0-9A-Fa-f]{6}$""")
+
+        private fun normalizeLocalTagHex(raw: String): String {
+            val trimmed = raw.trim()
+            val candidate = if (trimmed.startsWith("#")) trimmed else "#$trimmed"
+            return if (HEX_COLOR_REGEX.matches(candidate)) {
+                candidate.uppercase()
+            } else {
+                DEFAULT_LOCAL_TAG_HEX
+            }
+        }
     }
 }

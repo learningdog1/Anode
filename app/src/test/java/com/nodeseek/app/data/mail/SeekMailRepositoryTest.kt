@@ -335,4 +335,60 @@ class SeekMailRepositoryTest {
         val unreadPage = repo.getUnreadMails().getOrThrow()
         assertEquals(mapOf(501L to true, 502L to true, 503L to false), unreadPage.items.associate { it.id to it.isRead })
     }
+
+    @Test
+    fun `local tags persist per mail id across restarts and stay isolated per API key`(): Unit = runBlocking {
+        val repo = createRepository()
+        settingsRepository.setSeekMailApiKey(dummyKeyA)
+
+        val vpsTag = repo.createLocalTag(name = "VPS 账单", colorHex = "#2D637E").getOrThrow()
+        val duplicateTag = repo.createLocalTag(name = "  vps 账单 ", colorHex = "#999999").getOrThrow()
+        assertEquals(vpsTag.id, duplicateTag.id)
+
+        val urgentTag = repo.createLocalTag(name = "重要", colorHex = "#D97706").getOrThrow()
+        repo.toggleLocalTagForMail(mailId = 801L, tagId = vpsTag.id)
+        repo.toggleLocalTagForMail(mailId = 801L, tagId = urgentTag.id)
+        repo.toggleLocalTagForMail(mailId = 802L, tagId = vpsTag.id)
+
+        assertEquals(
+            listOf(vpsTag.id, urgentTag.id),
+            repo.localTagStore.value.tagsForMail(801L).map { it.id },
+        )
+        assertEquals(2, repo.localTagStore.value.mailCountForTag(vpsTag.id))
+
+        // Toggle off removes tag cleanly
+        repo.toggleLocalTagForMail(mailId = 801L, tagId = urgentTag.id)
+        assertEquals(listOf(vpsTag.id), repo.localTagStore.value.tagsForMail(801L).map { it.id })
+
+        // Cold-start repo with same API key reloads persisted local tags
+        val coldScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val coldRepo = createRepository(coldScope)
+            withTimeout(5_000L) {
+                coldRepo.localTagStore.first { it.tags.size == 2 }
+            }
+            assertEquals(
+                listOf("VPS 账单"),
+                coldRepo.localTagStore.value.tagsForMail(801L).map { it.name },
+            )
+            assertEquals(
+                listOf("VPS 账单"),
+                coldRepo.localTagStore.value.tagsForMail(802L).map { it.name },
+            )
+
+            // Deleting a tag removes it from definitions and all mail assignments
+            coldRepo.deleteLocalTag(vpsTag.id)
+            assertTrue(coldRepo.localTagStore.value.tagsForMail(801L).isEmpty())
+            assertTrue(coldRepo.localTagStore.value.tagsForMail(802L).isEmpty())
+            assertEquals(listOf(urgentTag.id), coldRepo.localTagStore.value.tags.map { it.id })
+        } finally {
+            coldScope.cancel()
+        }
+
+        // Switching to Key B isolates local tag store
+        settingsRepository.setSeekMailApiKey(dummyKeyB)
+        withTimeout(5_000L) {
+            repo.localTagStore.first { it.tags.isEmpty() && it.mailTagIds.isEmpty() }
+        }
+    }
 }

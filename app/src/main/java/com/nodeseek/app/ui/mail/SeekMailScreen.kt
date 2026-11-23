@@ -15,10 +15,13 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,6 +57,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ForwardToInbox
+import androidx.compose.material.icons.automirrored.rounded.Label
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
@@ -102,7 +106,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -123,6 +126,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -141,6 +148,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.AppContainer
@@ -150,6 +158,7 @@ import com.nodeseek.app.domain.mail.SeekMailAuthTelemetry
 import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
 import com.nodeseek.app.domain.mail.SeekMailErrorKind
+import com.nodeseek.app.domain.mail.SeekMailLocalTag
 import com.nodeseek.app.domain.mail.SeekMailRateLimit
 import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
@@ -161,7 +170,9 @@ import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -177,6 +188,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
+import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -375,10 +387,14 @@ fun SeekMailScreen(
                         filterMode = uiState.filterMode,
                         tags = uiState.tags,
                         selectedTagId = uiState.selectedTagId,
+                        localTags = uiState.localTags,
+                        localTagCounts = uiState.localTagCounts,
+                        selectedLocalTagId = uiState.selectedLocalTagId,
                         totalMailCount = uiState.totalMailCount,
                         unreadCount = uiState.unreadLoadedCount,
                         onSelectFilterMode = viewModel::selectFilterMode,
                         onToggleTag = viewModel::toggleTagFilter,
+                        onToggleLocalTag = viewModel::toggleLocalTagFilter,
                     )
 
                     if (uiState.activeSearchQuery.isNotBlank()) {
@@ -398,6 +414,7 @@ fun SeekMailScreen(
                         onOpenCreateMailbox = viewModel::openCreateMailboxSheet,
                         onManageApiKey = openApiKeyDialog,
                         onOpenMail = viewModel::openMail,
+                        onLongClickMail = viewModel::openMailTagSheet,
                         onCopyCode = { code ->
                             copyWithFeedback("验证码", code, "已复制验证码：$code")
                         },
@@ -424,11 +441,11 @@ fun SeekMailScreen(
                 onBack = viewModel::closeMailDetail,
                 onRetryDetail = viewModel::retryMailDetail,
                 onSelectReaderMode = viewModel::selectReaderMode,
-                onRetryRawEml = viewModel::retryRawEml,
                 onRetryAttachments = viewModel::retryAttachments,
                 onToggleRemoteImages = viewModel::toggleAllowRemoteImages,
                 onToggleVpsPasswordVisibility = viewModel::toggleVpsPasswordVisibility,
                 onIngestVpsMail = viewModel::ingestOpenedVpsMail,
+                onManageMailTags = { summary -> viewModel.openMailTagSheet(summary) },
                 onCopyCode = { code ->
                     copyWithFeedback("验证码", code, "已复制验证码：$code")
                 },
@@ -438,12 +455,6 @@ fun SeekMailScreen(
                 onDownloadAttachment = { attachment ->
                     val mailId = uiState.openedMailId ?: return@SeekMailDetailReaderPane
                     startExport(PendingExportTarget.Attachment(mailId = mailId, attachment = attachment))
-                },
-                onSaveRawEml = {
-                    val mailId = uiState.openedMailId ?: return@SeekMailDetailReaderPane
-                    val subject = uiState.openedDetail?.summary?.subject
-                        ?: uiState.openedPreviewSummary?.subject.orEmpty()
-                    startExport(PendingExportTarget.RawEml(mailId = mailId, subject = subject))
                 },
                 onExternalUrlClick = { url -> pendingExternalUrl = url },
             )
@@ -492,6 +503,24 @@ fun SeekMailScreen(
                 copyWithFeedback("联系人邮箱", email, "已复制邮箱：$email")
             },
             onDismiss = viewModel::dismissContactsSheet,
+        )
+    }
+
+    uiState.taggingTargetMail?.let { targetMail ->
+        val assignedIds = remember(uiState.localTagsByMailId, targetMail.id) {
+            uiState.localTagsByMailId[targetMail.id].orEmpty().mapTo(HashSet()) { it.id }
+        }
+        SeekMailTagBottomSheet(
+            mail = targetMail,
+            allLocalTags = uiState.localTags,
+            assignedTagIds = assignedIds,
+            onToggleTag = { tagId -> viewModel.toggleLocalTagForMail(targetMail.id, tagId) },
+            onCreateAndAttachTag = { name, colorHex ->
+                viewModel.createAndAttachLocalTag(targetMail.id, name, colorHex)
+            },
+            onClearMailTags = { viewModel.clearLocalTagsForMail(targetMail.id) },
+            onDeleteTagDefinition = viewModel::deleteLocalTag,
+            onDismiss = viewModel::dismissMailTagSheet,
         )
     }
 
@@ -848,16 +877,16 @@ private fun SeekMailOnboardingView(
 
             PulseGradientDivider()
 
-            OutlinedTextField(
+            PulseTextField(
                 value = draftKey,
                 onValueChange = {
                     draftKey = it
                     onClearError()
                 },
-                label = { Text("Seek 邮箱 API Key") },
-                placeholder = { Text("粘贴 sk_live_... 密钥") },
+                label = "Seek 邮箱 API Key",
+                placeholder = "粘贴 sk_live_... 密钥",
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                isError = !errorMessage.isNullOrBlank(),
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Rounded.Key,
@@ -871,20 +900,31 @@ private fun SeekMailOnboardingView(
                     PasswordVisualTransformation()
                 },
                 trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = {
-                                val pasted = readClipboardText(context)
-                                if (!pasted.isNullOrBlank()) {
-                                    draftKey = pasted.trim()
-                                    onClearError()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "粘贴",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable(role = Role.Button) {
+                                    val pasted = readClipboardText(context)
+                                    if (!pasted.isNullOrBlank()) {
+                                        draftKey = pasted.trim()
+                                        onClearError()
+                                    }
                                 }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                        IconButton(
+                            onClick = { showKey = !showKey },
+                            modifier = Modifier.size(34.dp),
                         ) {
-                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { showKey = !showKey }) {
                             Icon(
                                 imageVector = if (showKey) {
                                     Icons.Rounded.VisibilityOff
@@ -892,6 +932,7 @@ private fun SeekMailOnboardingView(
                                     Icons.Rounded.Visibility
                                 },
                                 contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                                modifier = Modifier.size(19.dp),
                             )
                         }
                     }
@@ -1063,36 +1104,54 @@ private fun SeekMailApiKeyDialog(
         },
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            PulseTextField(
                 value = draftKey,
                 onValueChange = {
                     draftKey = it
                     onClearError()
                 },
-                label = { Text("输入新的 API Key") },
-                placeholder = { Text("粘贴 sk_live_... 密钥") },
+                label = "输入新的 API Key",
+                placeholder = "粘贴 sk_live_... 密钥",
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                isError = !errorMessage.isNullOrBlank(),
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
                 visualTransformation = if (showKey) {
                     VisualTransformation.None
                 } else {
                     PasswordVisualTransformation()
                 },
                 trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            onClick = {
-                                val pasted = readClipboardText(context)
-                                if (!pasted.isNullOrBlank()) {
-                                    draftKey = pasted.trim()
-                                    onClearError()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "粘贴",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable(role = Role.Button) {
+                                    val pasted = readClipboardText(context)
+                                    if (!pasted.isNullOrBlank()) {
+                                        draftKey = pasted.trim()
+                                        onClearError()
+                                    }
                                 }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                        IconButton(
+                            onClick = { showKey = !showKey },
+                            modifier = Modifier.size(34.dp),
                         ) {
-                            Text("粘贴", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = { showKey = !showKey }) {
                             Icon(
                                 imageVector = if (showKey) {
                                     Icons.Rounded.VisibilityOff
@@ -1100,10 +1159,20 @@ private fun SeekMailApiKeyDialog(
                                     Icons.Rounded.Visibility
                                 },
                                 contentDescription = if (showKey) "隐藏密钥" else "显示密钥",
+                                modifier = Modifier.size(19.dp),
                             )
                         }
                     }
                 },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (!isVerifying && draftKey.isNotBlank()) {
+                            submittedReplacement = true
+                            onVerifyAndSave(draftKey)
+                        }
+                    },
+                ),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -1178,40 +1247,21 @@ private fun SeekMailSearchBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedTextField(
+        PulseSearchField(
             value = draft,
             onValueChange = onDraftChange,
-            placeholder = { Text("搜索发件人、主题或收件邮箱…") },
-            singleLine = true,
-            shape = CircleShape,
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Rounded.Search,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp),
-                )
-            },
-            trailingIcon = {
-                if (draft.isNotEmpty() || activeQuery.isNotEmpty()) {
-                    IconButton(onClick = onClear) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "清除搜索",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-            },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
+            placeholder = "搜索发件人、主题或收件邮箱…",
+            showClearButton = draft.isNotEmpty() || activeQuery.isNotEmpty(),
+            onClear = onClear,
+            onSearch = onSubmit,
             modifier = Modifier.weight(1f),
         )
 
         FilledTonalButton(
             onClick = onSubmit,
             shape = CircleShape,
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+            modifier = Modifier.height(44.dp),
         ) {
             Text(
                 text = "搜索",
@@ -1233,8 +1283,8 @@ private fun SeekMailboxRail(
     onCreateMailbox: () -> Unit,
 ) {
     LazyRow(
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         item(key = "all_mailboxes") {
@@ -1561,75 +1611,146 @@ private fun SeekMailFilterAndTagRail(
     filterMode: SeekMailFilterMode,
     tags: List<SeekMailTag>,
     selectedTagId: Long?,
+    localTags: List<SeekMailLocalTag>,
+    localTagCounts: Map<String, Int>,
+    selectedLocalTagId: String?,
     totalMailCount: Int,
     unreadCount: Int,
     onSelectFilterMode: (SeekMailFilterMode) -> Unit,
     onToggleTag: (Long) -> Unit,
+    onToggleLocalTag: (String) -> Unit,
 ) {
     LazyRow(
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         item(key = "filter_all") {
-            val selected = filterMode == SeekMailFilterMode.ALL && selectedTagId == null
-            FilterChip(
+            val selected = filterMode == SeekMailFilterMode.ALL &&
+                selectedTagId == null &&
+                selectedLocalTagId == null
+            val label = if (selected && totalMailCount > 0) "全部 · $totalMailCount" else "全部"
+            CompactMailFilterPill(
+                label = label,
                 selected = selected,
                 onClick = { onSelectFilterMode(SeekMailFilterMode.ALL) },
-                label = {
-                    val label = if (selected && totalMailCount > 0) {
-                        "全部 · $totalMailCount"
-                    } else {
-                        "全部"
-                    }
-                    Text(label, maxLines = 1, softWrap = false)
-                },
             )
         }
 
         item(key = "filter_unread") {
-            val selected = filterMode == SeekMailFilterMode.UNREAD
-            FilterChip(
+            val selected = filterMode == SeekMailFilterMode.UNREAD && selectedLocalTagId == null
+            val label = if (selected && unreadCount > 0) "未读 · $unreadCount" else "未读"
+            CompactMailFilterPill(
+                label = label,
                 selected = selected,
+                icon = Icons.Rounded.MarkEmailUnread,
                 onClick = { onSelectFilterMode(SeekMailFilterMode.UNREAD) },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.MarkEmailUnread,
-                        contentDescription = null,
-                        modifier = Modifier.size(15.dp),
-                    )
-                },
-                label = {
-                    val label = if (selected && unreadCount > 0) {
-                        "未读 · $unreadCount"
-                    } else {
-                        "未读"
-                    }
-                    Text(label, maxLines = 1, softWrap = false)
-                },
             )
         }
 
-        items(tags, key = { it.id }) { tag ->
-            val selected = selectedTagId == tag.id
-            val parsedColor = remember(tag.color) { parseHexColorOrNull(tag.color) }
-            val dotColor = parsedColor ?: MaterialTheme.colorScheme.secondary
-            FilterChip(
+        items(localTags, key = { "local_${it.id}" }) { localTag ->
+            val selected = selectedLocalTagId == localTag.id
+            val count = localTagCounts[localTag.id] ?: 0
+            val dotColor = remember(localTag.colorHex) { parseMailHexColorOrNull(localTag.colorHex) }
+                ?: MaterialTheme.colorScheme.primary
+            CompactMailFilterPill(
+                label = if (count > 0) "${localTag.name} · $count" else localTag.name,
                 selected = selected,
-                onClick = { onToggleTag(tag.id) },
-                leadingIcon = {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(dotColor),
-                    )
-                },
-                label = {
-                    Text(tag.name, maxLines = 1, softWrap = false)
-                },
+                dotColor = dotColor,
+                onClick = { onToggleLocalTag(localTag.id) },
             )
         }
+
+        items(tags, key = { "remote_${it.id}" }) { tag ->
+            val selected = selectedTagId == tag.id
+            val dotColor = remember(tag.color) { parseMailHexColorOrNull(tag.color) }
+                ?: MaterialTheme.colorScheme.secondary
+            CompactMailFilterPill(
+                label = tag.name,
+                selected = selected,
+                dotColor = dotColor,
+                onClick = { onToggleTag(tag.id) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactMailFilterPill(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: ImageVector? = null,
+    dotColor: Color? = null,
+) {
+    val isDark = NodePulseThemeTokens.isDark
+    val accent = dotColor ?: MaterialTheme.colorScheme.primary
+    val bgColor = if (selected) {
+        if (dotColor != null) {
+            dotColor.copy(alpha = if (isDark) 0.24f else 0.14f)
+        } else {
+            MaterialTheme.colorScheme.primaryContainer
+        }
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerLow
+    }
+    val borderColor = if (selected) {
+        accent.copy(alpha = if (isDark) 0.62f else 0.44f)
+    } else {
+        NodePulseThemeTokens.extendedColors.cardBorder
+    }
+    val contentColor = if (selected) {
+        if (dotColor != null) {
+            if (isDark) blendColor(dotColor, Color.White, 0.30f) else blendColor(dotColor, Color.Black, 0.26f)
+        } else {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        }
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Row(
+        modifier = Modifier
+            .height(29.dp)
+            .clip(CircleShape)
+            .background(bgColor)
+            .border(
+                width = if (selected) 1.dp else 0.8.dp,
+                color = borderColor,
+                shape = CircleShape,
+            )
+            .pulseBouncyClickable(
+                pressedScale = NodePulseMotion.chipPressScale,
+                role = Role.Tab,
+                onClick = onClick,
+            )
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (dotColor != null) {
+            Box(
+                modifier = Modifier
+                    .size(6.5.dp)
+                    .clip(CircleShape)
+                    .background(dotColor),
+            )
+        } else if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 
@@ -1685,6 +1806,7 @@ private fun SeekMailListPane(
     onOpenCreateMailbox: () -> Unit,
     onManageApiKey: () -> Unit,
     onOpenMail: (SeekMailSummary) -> Unit,
+    onLongClickMail: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
     bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
@@ -1729,14 +1851,14 @@ private fun SeekMailListPane(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 8.dp,
+                        start = 14.dp,
+                        end = 14.dp,
+                        top = 6.dp,
                         bottom = 28.dp + bottomContentPadding,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    items(5, key = { "mail_skel_$it" }) {
+                    items(8, key = { "mail_skel_$it" }) {
                         SeekMailSkeletonCard()
                     }
                 }
@@ -1762,22 +1884,30 @@ private fun SeekMailListPane(
             uiState.mails.isEmpty() -> {
                 val hasFilters = uiState.selectedMailboxId != null ||
                     uiState.selectedTagId != null ||
+                    uiState.selectedLocalTagId != null ||
                     uiState.activeSearchQuery.isNotBlank() ||
                     uiState.filterMode == SeekMailFilterMode.UNREAD
                 val title = when {
                     uiState.activeSearchQuery.isNotBlank() -> "未找到匹配邮件"
                     uiState.filterMode == SeekMailFilterMode.UNREAD -> "太棒了，暂无未读邮件"
+                    uiState.selectedLocalTag != null -> "「${uiState.selectedLocalTag?.name}」标签下暂无邮件"
                     uiState.selectedTag != null -> "「${uiState.selectedTag?.name}」标签下暂无邮件"
                     uiState.selectedMailbox != null -> "该邮箱暂无收件记录"
                     else -> "收件箱暂无邮件"
                 }
                 val subtitle = when {
+                    uiState.selectedLocalTag != null && uiState.hasMoreMails ->
+                        "当前已加载页面中没有该标签的邮件，您可以加载更多历史邮件或清除筛选。"
+                    uiState.selectedLocalTag != null ->
+                        "长按任意邮件可快速为其添加或移除本地标签。"
                     hasFilters -> "您可以清除当前筛选条件，或下拉刷新同步最新来信。"
                     else -> "您可以向任意自有域名别名发送一封测试邮件，或创建一个新的临时别名。"
                 }
                 SeekMailEmptyStateCard(
                     icon = if (uiState.activeSearchQuery.isNotBlank()) {
                         Icons.Rounded.SearchOff
+                    } else if (uiState.selectedLocalTag != null) {
+                        Icons.AutoMirrored.Rounded.Label
                     } else {
                         Icons.Rounded.Mail
                     },
@@ -1786,6 +1916,16 @@ private fun SeekMailListPane(
                     actionLabel = if (hasFilters) "查看全部邮件" else "新建邮箱别名",
                     actionIcon = if (hasFilters) Icons.Rounded.Refresh else Icons.Rounded.Add,
                     onAction = if (hasFilters) onClearFilters else onOpenCreateMailbox,
+                    secondaryActionLabel = if (uiState.selectedLocalTag != null && uiState.hasMoreMails) {
+                        "加载更多邮件"
+                    } else {
+                        null
+                    },
+                    onSecondaryAction = if (uiState.selectedLocalTag != null && uiState.hasMoreMails) {
+                        onLoadMore
+                    } else {
+                        null
+                    },
                     modifier = Modifier
                         .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
                         .padding(bottom = bottomContentPadding),
@@ -1797,12 +1937,12 @@ private fun SeekMailListPane(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 8.dp,
-                        bottom = 32.dp + bottomContentPadding,
+                        start = 14.dp,
+                        end = 14.dp,
+                        top = 6.dp,
+                        bottom = 28.dp + bottomContentPadding,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     if (uiState.mailsErrorMessage != null) {
                         val isUnauthorized = uiState.mailsErrorKind == SeekMailErrorKind.UNAUTHORIZED
@@ -1810,9 +1950,9 @@ private fun SeekMailListPane(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.78f))
-                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
@@ -1850,10 +1990,13 @@ private fun SeekMailListPane(
                         items = uiState.mails,
                         key = { _, mail -> mail.id },
                     ) { index, mail ->
+                        val localTags = uiState.localTagsByMailId[mail.id].orEmpty()
                         PulseStaggeredEntrance(index = index.coerceAtMost(6)) {
                             SeekMailSummaryCard(
                                 mail = mail,
+                                localTags = localTags,
                                 onClick = { onOpenMail(mail) },
+                                onLongClick = { onLongClickMail(mail) },
                                 onCopyCode = { code -> onCopyCode(code) },
                             )
                         }
@@ -1864,7 +2007,7 @@ private fun SeekMailListPane(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .then(if (bottomContentPadding == 0.dp) Modifier.navigationBarsPadding() else Modifier)
-                                .padding(vertical = 12.dp),
+                                .padding(vertical = 10.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             when {
@@ -1896,7 +2039,7 @@ private fun SeekMailListPane(
 
                                 else -> {
                                     Text(
-                                        text = "已显示全部 ${uiState.mails.size} 封邮件",
+                                        text = "已显示全部 ${uiState.mails.size} 封邮件 · 长按邮件可打标签",
                                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -1910,103 +2053,147 @@ private fun SeekMailListPane(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun SeekMailSummaryCard(
     mail: SeekMailSummary,
+    localTags: List<SeekMailLocalTag>,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onCopyCode: (String) -> Unit,
 ) {
     val isUnread = !mail.isRead
+    val isDark = NodePulseThemeTokens.isDark
     val ext = NodePulseThemeTokens.extendedColors
-    val extraType = NodePulseThemeTokens.extraTypography
-    val unreadAccent = MaterialTheme.colorScheme.primary
+    val fontScale = NodePulseThemeTokens.fontScale
+    val haptics = LocalHapticFeedback.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val cardShape = RoundedCornerShape(12.dp)
+
+    val cardBgColor = if (isUnread) {
+        blendColor(
+            source = ext.cardSurface,
+            target = primaryColor,
+            fraction = if (isDark) 0.08f else 0.035f,
+        )
+    } else {
+        ext.cardSurface
+    }
+    val cardBorderColor = if (isUnread) {
+        blendColor(
+            source = ext.cardBorder,
+            target = primaryColor,
+            fraction = if (isDark) 0.44f else 0.30f,
+        )
+    } else {
+        ext.cardBorder
+    }
+
     val senderLabel = mail.fromName.ifBlank { mail.fromAddress }.ifBlank { "未知发件人" }
+    val compactSnippet = remember(mail.id, mail.snippet) {
+        mail.snippet.replace('\r', ' ').replace('\n', ' ').replace(Regex("""\s{2,}"""), " ").trim()
+    }
+    val otpCode = mail.verificationCode?.trim()?.takeIf { it.isNotEmpty() }
+    val vpsHint = remember(mail.id, mail.subject, mail.snippet, mail.fromName, mail.fromAddress) {
+        VpsBillingMailParser.parseSummaryHint(mail)
+    }
+    val hasBadgeRow = otpCode != null || vpsHint != null || mail.tags.isNotEmpty() || localTags.isNotEmpty()
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard(
-                accentColor = if (isUnread) unreadAccent else null,
+            .pulsePressScale(interactionSource = interactionSource, pressedScale = 0.985f)
+            .clip(cardShape)
+            .background(cardBgColor)
+            .border(
+                width = if (isUnread) 1.dp else 0.8.dp,
+                color = cardBorderColor,
+                shape = cardShape,
             )
-            .pulseBouncyClickable(onClick = onClick)
-            .padding(14.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        if (isUnread) {
-            Box(
-                modifier = Modifier
-                    .width(3.5.dp)
-                    .height(54.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(unreadAccent, MaterialTheme.colorScheme.secondary),
-                        ),
-                    ),
-            )
-        }
-
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            // ── 1. Sender & Timestamp Row ──
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                MailSenderAvatar(
-                    senderName = senderLabel,
-                    senderAddress = mail.fromAddress,
-                    isUnread = isUnread,
-                    size = 36.dp,
-                )
-
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                ) {
-                    Text(
-                        text = senderLabel,
-                        style = MaterialTheme.typography.titleSmall.copy(
-                            fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Medium,
-                        ),
-                        color = if (isUnread) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = ext.readTitleAlpha + 0.14f)
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (mail.fromName.isNotBlank() && mail.fromAddress.isNotBlank()) {
-                        Text(
-                            text = mail.fromAddress,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+            .drawWithContent {
+                drawContent()
+                if (isUnread) {
+                    val barW = 3.dp.toPx()
+                    val vPad = 9.dp.toPx()
+                    if (size.height > vPad * 2f) {
+                        val r = 2.dp.toPx()
+                        drawRoundRect(
+                            color = primaryColor,
+                            topLeft = Offset(0f, vPad),
+                            size = Size(barW, size.height - vPad * 2f),
+                            cornerRadius = CornerRadius(r, r),
                         )
                     }
                 }
+            }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick,
+                onLongClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                },
+                onLongClickLabel = "管理邮件标签",
+            )
+            .padding(start = 11.dp, end = 11.dp, top = 8.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        MailSenderAvatar(
+            senderName = senderLabel,
+            senderAddress = mail.fromAddress,
+            isUnread = isUnread,
+            size = 30.dp,
+            modifier = Modifier.padding(top = 1.dp),
+        )
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            // ── 1. Sender + Attachment Indicator + Relative Time ──
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = senderLabel,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = (13.5f * fontScale).sp,
+                        lineHeight = (17.5f * fontScale).sp,
+                        fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Medium,
+                    ),
+                    color = if (isUnread) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = ext.readTitleAlpha + 0.16f)
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     if (mail.hasAttachments) {
                         Icon(
                             imageVector = Icons.Rounded.AttachFile,
                             contentDescription = "包含附件",
                             tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(14.dp),
+                            modifier = Modifier.size(12.5.dp),
                         )
                     }
                     RelativeTimeText(
                         isoTimestamp = mail.receivedAt.ifBlank { mail.createdAt },
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = (10.5f * fontScale).sp,
+                            fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Medium,
+                        ),
                         color = if (isUnread) {
                             MaterialTheme.colorScheme.primary
                         } else {
@@ -2016,78 +2203,64 @@ private fun SeekMailSummaryCard(
                 }
             }
 
-            // ── 2. Subject & Snippet ──
+            // ── 2. Subject (1 Crisp Line) ──
             Text(
                 text = mail.subject.ifBlank { "(无主题)" },
-                style = if (isUnread) extraType.titleMediumUnread else extraType.titleMediumRead,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = (14f * fontScale).sp,
+                    lineHeight = (19f * fontScale).sp,
+                    fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal,
+                ),
                 color = if (isUnread) {
                     MaterialTheme.colorScheme.onSurface
                 } else {
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = ext.readTitleAlpha + 0.16f)
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = ext.readTitleAlpha + 0.12f)
                 },
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
 
-            if (mail.snippet.isNotBlank()) {
+            // ── 3. Single-Line Snippet ──
+            if (compactSnippet.isNotBlank()) {
                 Text(
-                    text = mail.snippet,
-                    style = MaterialTheme.typography.bodySmall,
+                    text = compactSnippet,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = (12f * fontScale).sp,
+                        lineHeight = (16f * fontScale).sp,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            // ── 3. Prominent 1-Tap OTP Verification Code Pill & Subtle VPS Mail Hint ──
-            val otpCode = mail.verificationCode?.trim()?.takeIf { it.isNotEmpty() }
-            if (otpCode != null) {
-                OtpQuickCopyPill(
-                    code = otpCode,
-                    onCopy = { onCopyCode(otpCode) },
-                )
-            }
-
-            val vpsHint = remember(mail.id, mail.subject, mail.snippet, mail.fromName, mail.fromAddress) {
-                VpsBillingMailParser.parseSummaryHint(mail)
-            }
-            if (vpsHint != null) {
-                VpsMailSummaryMicroBadge(hint = vpsHint)
-            }
-
-            // ── 4. Target Mailbox + Tag Pills ──
-            if (mail.toAddress.isNotBlank() || mail.tags.isNotEmpty()) {
+            // ── 4. Compact OTP / VPS / Tag Badges Row (only when present) ──
+            if (hasBadgeRow) {
                 FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (mail.toAddress.isNotBlank()) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(7.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f))
-                                .padding(horizontal = 7.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.AlternateEmail,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(11.dp),
-                            )
-                            Text(
-                                text = mail.toAddress,
-                                style = extraType.microLabel,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                    if (otpCode != null) {
+                        OtpQuickCopyPill(
+                            code = otpCode,
+                            onCopy = { onCopyCode(otpCode) },
+                        )
                     }
-
+                    if (vpsHint != null) {
+                        VpsMailSummaryMicroBadge(hint = vpsHint)
+                    }
+                    localTags.forEach { localTag ->
+                        SeekMailCompactTagChip(
+                            name = localTag.name,
+                            colorHex = localTag.colorHex,
+                        )
+                    }
                     mail.tags.forEach { tag ->
-                        SeekMailTagMicroPill(tag = tag)
+                        SeekMailCompactTagChip(
+                            name = tag.name,
+                            colorHex = tag.color,
+                        )
                     }
                 }
             }
@@ -2103,6 +2276,7 @@ private fun OtpQuickCopyPill(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
+    val fontScale = NodePulseThemeTokens.fontScale
     val borderBrush = PulseBrushes.drumstickGoldGradient()
 
     Row(
@@ -2116,27 +2290,30 @@ private fun OtpQuickCopyPill(
                     ),
                 ),
             )
-            .border(width = 1.dp, brush = borderBrush, shape = CircleShape)
+            .border(width = 0.85.dp, brush = borderBrush, shape = CircleShape)
             .pulseBouncyClickable(
                 pressedScale = NodePulseMotion.chipPressScale,
                 role = Role.Button,
                 onClickLabel = "复制验证码 $code",
                 onClick = onCopy,
             )
-            .padding(horizontal = 11.dp, vertical = 6.dp),
+            .padding(horizontal = 7.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Icon(
             imageVector = Icons.Rounded.Key,
             contentDescription = null,
             tint = ext.drumstickGoldEnd,
-            modifier = Modifier.size(14.dp),
+            modifier = Modifier.size(11.dp),
         )
         Text(
-            text = "验证码 $code · 复制",
-            style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-            fontWeight = FontWeight.Bold,
+            text = "验证码 $code",
+            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                fontSize = (10.5f * fontScale).sp,
+                lineHeight = (13.5f * fontScale).sp,
+                fontWeight = FontWeight.Bold,
+            ).withTabularNumbers(),
             color = ext.onDrumstickContainer,
             maxLines = 1,
             softWrap = false,
@@ -2145,47 +2322,7 @@ private fun OtpQuickCopyPill(
             imageVector = Icons.Rounded.ContentCopy,
             contentDescription = null,
             tint = ext.onDrumstickContainer,
-            modifier = Modifier.size(13.dp),
-        )
-    }
-}
-
-@Composable
-private fun SeekMailTagMicroPill(
-    tag: SeekMailTag,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    val parsedColor = remember(tag.color) { parseHexColorOrNull(tag.color) }
-        ?: MaterialTheme.colorScheme.secondary
-    val bgColor = parsedColor.copy(alpha = if (isDark) 0.20f else 0.12f)
-    val borderColor = parsedColor.copy(alpha = if (isDark) 0.42f else 0.26f)
-    val textColor = if (isDark) {
-        blendColor(parsedColor, Color.White, 0.30f)
-    } else {
-        blendColor(parsedColor, Color.Black, 0.28f)
-    }
-
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(7.dp))
-            .background(bgColor)
-            .border(width = 0.75.dp, color = borderColor, shape = RoundedCornerShape(7.dp))
-            .padding(horizontal = 7.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(6.dp)
-                .clip(CircleShape)
-                .background(parsedColor),
-        )
-        Text(
-            text = tag.name,
-            style = NodePulseThemeTokens.extraTypography.microLabel,
-            color = textColor,
-            maxLines = 1,
-            softWrap = false,
+            modifier = Modifier.size(10.5.dp),
         )
     }
 }
@@ -2195,7 +2332,8 @@ private fun MailSenderAvatar(
     senderName: String,
     senderAddress: String,
     isUnread: Boolean,
-    size: Dp = 36.dp,
+    size: Dp = 30.dp,
+    modifier: Modifier = Modifier,
 ) {
     val isDark = NodePulseThemeTokens.isDark
     val palette = listOf(
@@ -2208,22 +2346,22 @@ private fun MailSenderAvatar(
     val accent = palette[seed % palette.size]
     val initial = senderName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "M"
 
-    Box(modifier = Modifier.size(size)) {
+    Box(modifier = modifier.size(size)) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(CircleShape)
-                .background(accent.copy(alpha = if (isDark) 0.24f else 0.14f))
+                .background(accent.copy(alpha = if (isDark) 0.22f else 0.13f))
                 .border(
-                    width = 1.dp,
-                    color = accent.copy(alpha = if (isDark) 0.46f else 0.28f),
+                    width = 0.85.dp,
+                    color = accent.copy(alpha = if (isDark) 0.44f else 0.26f),
                     shape = CircleShape,
                 ),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = initial,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.ExtraBold),
                 color = accent,
             )
         }
@@ -2231,11 +2369,11 @@ private fun MailSenderAvatar(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .size(9.dp)
+                    .size(7.5.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary)
                     .border(
-                        width = 1.5.dp,
+                        width = 1.2.dp,
                         color = MaterialTheme.colorScheme.background,
                         shape = CircleShape,
                     ),
@@ -2246,32 +2384,33 @@ private fun MailSenderAvatar(
 
 @Composable
 private fun SeekMailSkeletonCard() {
-    Column(
+    val ext = NodePulseThemeTokens.extendedColors
+    val cardShape = RoundedCornerShape(12.dp)
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .pulseCard()
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .clip(cardShape)
+            .background(ext.cardSurface)
+            .border(width = 0.8.dp, color = ext.cardBorder, shape = cardShape)
+            .padding(horizontal = 11.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        PulseShimmerBox(modifier = Modifier.size(30.dp), shape = CircleShape)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            PulseShimmerBox(modifier = Modifier.size(36.dp), shape = CircleShape)
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.45f).height(14.dp))
-                PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.62f).height(10.dp))
+                PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.42f).height(12.dp))
+                PulseShimmerBox(modifier = Modifier.width(38.dp).height(10.dp))
             }
-            PulseShimmerBox(modifier = Modifier.width(44.dp).height(12.dp))
-        }
-        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.88f).height(16.dp))
-        PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.72f).height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PulseShimmerBox(modifier = Modifier.width(120.dp).height(20.dp), shape = CircleShape)
-            PulseShimmerBox(modifier = Modifier.width(56.dp).height(20.dp), shape = CircleShape)
+            PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.84f).height(13.dp))
+            PulseShimmerBox(modifier = Modifier.fillMaxWidth(0.68f).height(11.dp))
         }
     }
 }
@@ -2377,19 +2516,21 @@ private fun SeekMailDetailReaderPane(
     onBack: () -> Unit,
     onRetryDetail: () -> Unit,
     onSelectReaderMode: (SeekMailReaderMode) -> Unit,
-    onRetryRawEml: () -> Unit,
     onRetryAttachments: () -> Unit,
     onToggleRemoteImages: () -> Unit,
     onToggleVpsPasswordVisibility: () -> Unit,
     onIngestVpsMail: () -> Unit,
+    onManageMailTags: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
     onCopyText: (label: String, text: String, toast: String) -> Unit,
     onDownloadAttachment: (SeekMailAttachment) -> Unit,
-    onSaveRawEml: () -> Unit,
     onExternalUrlClick: (String) -> Unit,
 ) {
     val detail = uiState.openedDetail
     val summary = detail?.summary ?: uiState.openedPreviewSummary
+    val localTagsForOpened = remember(uiState.localTagsByMailId, summary?.id) {
+        summary?.id?.let { uiState.localTagsByMailId[it] }.orEmpty()
+    }
     var headersExpanded by rememberSaveable(uiState.openedMailId) { mutableStateOf(false) }
 
     Surface(
@@ -2397,7 +2538,7 @@ private fun SeekMailDetailReaderPane(
         color = MaterialTheme.colorScheme.background,
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // ── Reader Glass TopBar + 3-Way Segmented Mode Switcher ──
+            // ── Reader Glass TopBar + 2-Way Segmented Mode Switcher ──
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2444,6 +2585,18 @@ private fun SeekMailDetailReaderPane(
                             )
                         }
                     }
+                    if (summary != null) {
+                        MailTopCircleButton(
+                            icon = Icons.AutoMirrored.Rounded.Label,
+                            contentDescription = "管理邮件标签",
+                            onClick = { onManageMailTags(summary) },
+                            tint = if (localTagsForOpened.isNotEmpty()) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                     MailTopCircleButton(
                         icon = Icons.Rounded.Refresh,
                         contentDescription = "刷新邮件详情",
@@ -2488,6 +2641,7 @@ private fun SeekMailDetailReaderPane(
                 if (summary != null) {
                     ExpandableMailHeaderCard(
                         summary = summary,
+                        localTags = localTagsForOpened,
                         authTelemetry = detail?.authTelemetry,
                         expanded = headersExpanded,
                         onToggleExpanded = { headersExpanded = !headersExpanded },
@@ -2564,20 +2718,16 @@ private fun SeekMailDetailReaderPane(
                                         icon = Icons.Rounded.Code,
                                         title = "此邮件不包含 HTML 富文本正文",
                                         subtitle = if (detail.bodyText.isNotBlank()) {
-                                            "您可以切换至「纯文本」或「原始源码 (.eml)」查看完整内容。"
+                                            "您可以切换至「纯文本」查看完整内容。"
                                         } else {
-                                            "邮件正文为空，您可以查看原始 MIME 源码确认详情。"
+                                            "该邮件正文为空，暂无可展示的内容。"
                                         },
-                                        actionLabel = if (detail.bodyText.isNotBlank()) "切换至纯文本" else "查看原始源码",
+                                        actionLabel = if (detail.bodyText.isNotBlank()) "切换至纯文本" else null,
                                         actionIcon = null,
                                         onAction = {
-                                            onSelectReaderMode(
-                                                if (detail.bodyText.isNotBlank()) {
-                                                    SeekMailReaderMode.TEXT
-                                                } else {
-                                                    SeekMailReaderMode.RAW_EML
-                                                },
-                                            )
+                                            if (detail.bodyText.isNotBlank()) {
+                                                onSelectReaderMode(SeekMailReaderMode.TEXT)
+                                            }
                                         },
                                     )
                                 } else {
@@ -2598,20 +2748,6 @@ private fun SeekMailDetailReaderPane(
                                     onCopyPlainText = {
                                         onCopyText("邮件正文", detail.bodyText, "已复制纯文本正文")
                                     },
-                                )
-                            }
-
-                            SeekMailReaderMode.RAW_EML -> {
-                                RawEmlReaderView(
-                                    rawEml = uiState.rawEml,
-                                    isLoading = uiState.isLoadingRawEml,
-                                    errorMessage = uiState.rawEmlErrorMessage,
-                                    isExporting = uiState.exportingKey == "eml:${detail.summary.id}",
-                                    onRetry = onRetryRawEml,
-                                    onCopy = { eml ->
-                                        onCopyText("原始 EML 源码", eml, "已复制原始 .eml 源码")
-                                    },
-                                    onSave = onSaveRawEml,
                                 )
                             }
                         }
@@ -2778,29 +2914,30 @@ private fun VpsMailSummaryMicroBadge(
     modifier: Modifier = Modifier,
 ) {
     val isDark = NodePulseThemeTokens.isDark
+    val fontScale = NodePulseThemeTokens.fontScale
     val (accentColor, icon) = when (hint.mailType) {
         VpsMailType.PROVISIONING -> MaterialTheme.colorScheme.primary to Icons.Rounded.Dns
         VpsMailType.RENEWAL -> MaterialTheme.colorScheme.tertiary to Icons.Rounded.CloudDone
         VpsMailType.INVOICE -> MaterialTheme.colorScheme.secondary to Icons.Rounded.AccountBalanceWallet
     }
-    val bgColor = accentColor.copy(alpha = if (isDark) 0.18f else 0.11f)
-    val borderColor = accentColor.copy(alpha = if (isDark) 0.42f else 0.26f)
+    val bgColor = accentColor.copy(alpha = if (isDark) 0.18f else 0.10f)
+    val borderColor = accentColor.copy(alpha = if (isDark) 0.42f else 0.25f)
     val detailSuffix = hint.primaryIp ?: hint.formattedPrice
 
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(6.dp))
             .background(bgColor)
-            .border(width = 0.8.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .border(width = 0.7.dp, color = borderColor, shape = RoundedCornerShape(6.dp))
+            .padding(horizontal = 5.5.dp, vertical = 1.5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.5.dp),
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = accentColor,
-            modifier = Modifier.size(13.dp),
+            modifier = Modifier.size(11.dp),
         )
         Text(
             text = buildString {
@@ -2810,8 +2947,11 @@ private fun VpsMailSummaryMicroBadge(
                     append(detailSuffix)
                 }
             },
-            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-            fontWeight = FontWeight.SemiBold,
+            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                fontSize = (10f * fontScale).sp,
+                lineHeight = (13f * fontScale).sp,
+                fontWeight = FontWeight.SemiBold,
+            ).withTabularNumbers(),
             color = accentColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -3202,6 +3342,7 @@ private fun VpsInsightFieldChip(
 @Composable
 private fun ExpandableMailHeaderCard(
     summary: SeekMailSummary,
+    localTags: List<SeekMailLocalTag>,
     authTelemetry: SeekMailAuthTelemetry?,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
@@ -3265,6 +3406,20 @@ private fun ExpandableMailHeaderCard(
             )
         }
 
+        if (localTags.isNotEmpty() || summary.tags.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                localTags.forEach { localTag ->
+                    SeekMailCompactTagChip(name = localTag.name, colorHex = localTag.colorHex)
+                }
+                summary.tags.forEach { tag ->
+                    SeekMailCompactTagChip(name = tag.name, colorHex = tag.color)
+                }
+            }
+        }
+
         AnimatedVisibility(
             visible = expanded,
             enter = expandVertically() + fadeIn(),
@@ -3326,16 +3481,6 @@ private fun ExpandableMailHeaderCard(
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                        }
-                    }
-                }
-                if (summary.tags.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        summary.tags.forEach { tag ->
-                            SeekMailTagMicroPill(tag = tag)
                         }
                     }
                 }
@@ -3665,7 +3810,7 @@ private fun PlainTextReaderView(
         SeekMailEmptyStateCard(
             icon = Icons.Rounded.Mail,
             title = "无纯文本内容",
-            subtitle = "该邮件未包含纯文本部分，可切换至 HTML 视图或原始源码查看。",
+            subtitle = "该邮件未包含纯文本部分，可切换至 HTML 视图查看。",
             actionLabel = null,
             actionIcon = null,
             onAction = {},
@@ -3705,133 +3850,6 @@ private fun PlainTextReaderView(
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-    }
-}
-
-@Composable
-private fun RawEmlReaderView(
-    rawEml: String?,
-    isLoading: Boolean,
-    errorMessage: String?,
-    isExporting: Boolean,
-    onRetry: () -> Unit,
-    onCopy: (String) -> Unit,
-    onSave: () -> Unit,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val extraType = NodePulseThemeTokens.extraTypography
-
-    when {
-        isLoading -> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    CircularProgressIndicator()
-                    Text(
-                        text = "正在获取原始 MIME 源码…",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        errorMessage != null && rawEml == null -> {
-            SeekMailEmptyStateCard(
-                icon = Icons.Rounded.ErrorOutline,
-                title = "无法加载原始源码",
-                subtitle = errorMessage,
-                actionLabel = "重新获取",
-                actionIcon = Icons.Rounded.Refresh,
-                onAction = onRetry,
-            )
-        }
-
-        rawEml != null -> {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                ) {
-                    FilledTonalButton(
-                        onClick = { onCopy(rawEml) },
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ContentCopy,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "复制源码",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-
-                    Button(
-                        onClick = onSave,
-                        enabled = !isExporting,
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    ) {
-                        if (isExporting) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Rounded.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "保存 .eml",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clip(PulseArchitecturalShapes.CodeBlock)
-                        .background(ext.codeSurface)
-                        .border(width = 1.dp, color = ext.codeBorder, shape = PulseArchitecturalShapes.CodeBlock)
-                        .verticalScroll(rememberScrollState())
-                        .horizontalScroll(rememberScrollState())
-                        .padding(12.dp),
-                ) {
-                    SelectionContainer {
-                        Text(
-                            text = rawEml,
-                            style = extraType.codeBody,
-                            color = ext.onCodeSurface,
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -3881,22 +3899,24 @@ private fun CreateMailboxBottomSheet(
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
             )
 
-            OutlinedTextField(
+            PulseTextField(
                 value = uiState.createLocalPart,
                 onValueChange = onLocalPartChange,
-                label = { Text("邮箱前缀") },
-                placeholder = { Text("例如：nodeseek-vip") },
+                label = "邮箱前缀",
+                placeholder = "例如：nodeseek-vip",
+                isError = !uiState.createMailboxError.isNullOrBlank(),
                 suffix = {
                     if (activeDomain.isNotBlank()) {
                         Text(
                             text = "@$activeDomain",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -3925,13 +3945,12 @@ private fun CreateMailboxBottomSheet(
             }
 
             AnimatedVisibility(visible = uiState.useCustomDomain) {
-                OutlinedTextField(
+                PulseTextField(
                     value = uiState.customDomain,
                     onValueChange = onCustomDomainChange,
-                    label = { Text("自定义域名") },
-                    placeholder = { Text("例如：mail.example.com") },
+                    label = "自定义域名",
+                    placeholder = "例如：mail.example.com",
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -4248,25 +4267,6 @@ private fun readClipboardText(context: Context): String? {
     val clip = clipboard?.primaryClip ?: return null
     if (clip.itemCount <= 0) return null
     return clip.getItemAt(0)?.coerceToText(context)?.toString()
-}
-
-private fun parseHexColorOrNull(raw: String): Color? {
-    val hex = raw.trim().removePrefix("#")
-    if (hex.isEmpty()) return null
-    val normalized = when (hex.length) {
-        3 -> buildString {
-            append("FF")
-            hex.forEach { c ->
-                append(c)
-                append(c)
-            }
-        }
-        6 -> "FF$hex"
-        8 -> hex
-        else -> return null
-    }
-    val argb = normalized.toLongOrNull(16) ?: return null
-    return Color(argb.toInt())
 }
 
 private fun formatByteSize(bytes: Long): String {
