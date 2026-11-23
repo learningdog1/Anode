@@ -3630,7 +3630,7 @@ internal fun collectDocumentLightboxImages(
                 is MdBlock.Paragraph -> collectInline(tokenizeMarkdownInline(block.text, referenceLinks))
                 is MdBlock.Blockquote -> walkBlocks(block.children)
                 is MdBlock.DetailsSpoiler -> walkBlocks(block.children)
-                is MdBlock.TabsContainer -> block.tabs.forEach { walkBlocks(it.blocks) }
+                is MdBlock.TabsContainer -> block.tabs.forEach { walkBlocks(it.children) }
                 is MdBlock.ListContainer -> block.items.forEach { item ->
                     collectInline(tokenizeMarkdownInline(item.text, referenceLinks))
                 }
