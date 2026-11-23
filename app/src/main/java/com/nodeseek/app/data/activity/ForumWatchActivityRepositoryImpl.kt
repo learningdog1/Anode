@@ -5,6 +5,7 @@ import com.nodeseek.app.domain.activity.ActivityCounts
 import com.nodeseek.app.domain.activity.ActivityFeedSnapshot
 import com.nodeseek.app.domain.activity.ActivityKind
 import com.nodeseek.app.domain.activity.ActivityLabeledLink
+import com.nodeseek.app.domain.activity.ActivityLotteryClassifier
 import com.nodeseek.app.domain.activity.ActivityRepository
 import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityDetail
@@ -173,9 +174,10 @@ class ForumWatchActivityRepositoryImpl(
             if (detailsPayload != null) {
                 detailCacheMap.clear()
                 for (entry in detailsPayload.entries) {
-                    val itemId = entry.detail.item.id.trim()
+                    val normalizedDetail = ActivityLotteryClassifier.normalizeDetail(entry.detail)
+                    val itemId = normalizedDetail.item.id.trim()
                     if (itemId.isNotEmpty()) {
-                        detailCacheMap[itemId] = entry
+                        detailCacheMap[itemId] = entry.copy(detail = normalizedDetail)
                     }
                 }
                 trimDetailCacheLocked()
@@ -231,7 +233,9 @@ class ForumWatchActivityRepositoryImpl(
                 cachedListLastModified = nextLastMod
 
                 val updatedSnapshot = _snapshot.updateAndGetCompat { prev ->
+                    val resorted = deduplicateAndSortActivities(prev.activities, now)
                     val refreshed = prev.copy(
+                        activities = resorted,
                         isRefreshing = false,
                         errorMessage = null,
                         lastSyncedEpochMillis = now,
@@ -323,17 +327,21 @@ class ForumWatchActivityRepositoryImpl(
             val now = clockMillis()
 
             if (conditional.notModified && cachedEntry != null) {
+                val normalizedDetail = ActivityLotteryClassifier.normalizeDetail(cachedEntry.detail)
                 val refreshedEntry = cachedEntry.copy(
+                    detail = normalizedDetail,
                     etag = conditional.etag ?: cachedEntry.etag,
                     lastModified = conditional.lastModified ?: cachedEntry.lastModified,
                     cachedAtEpochMillis = now,
                 )
                 saveDetailEntry(cleanId, refreshedEntry)
+                syncEnrichedItemIntoSnapshot(normalizedDetail.item, now)
                 Result.success(refreshedEntry.detail)
             } else {
-                val detail = conditional.data
+                val rawDetail = conditional.data
                     ?: cachedEntry?.detail
                     ?: throw IllegalStateException("Empty ForumWatch activity detail response")
+                val detail = ActivityLotteryClassifier.normalizeDetail(rawDetail)
                 val entry = CachedActivityDetailEntry(
                     detail = detail,
                     etag = conditional.etag,
@@ -341,22 +349,25 @@ class ForumWatchActivityRepositoryImpl(
                     cachedAtEpochMillis = now,
                 )
                 saveDetailEntry(cleanId, entry)
+                syncEnrichedItemIntoSnapshot(detail.item, now)
                 Result.success(detail)
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             if (cachedEntry != null) {
-                Result.success(cachedEntry.detail)
+                val normalizedDetail = ActivityLotteryClassifier.normalizeDetail(cachedEntry.detail)
+                Result.success(normalizedDetail)
             } else {
                 // Synthesize graceful fallback from list snapshot if offline and item is already in memory
                 val listMatch = _snapshot.value.activities.firstOrNull { it.id == cleanId }
                 if (listMatch != null && listMatch.summary.isNotBlank()) {
+                    val normalizedMatch = ActivityLotteryClassifier.normalizeItem(listMatch)
                     Result.success(
                         ForumWatchActivityDetail(
-                            item = listMatch,
-                            bodyMarkdown = listMatch.summary,
+                            item = normalizedMatch,
+                            bodyMarkdown = normalizedMatch.summary,
                             externalLinks = buildList {
-                                listMatch.luckyUrl?.takeIf { it.isNotBlank() }?.let {
+                                normalizedMatch.resolvedLotteryUrl?.let {
                                     add(ActivityLabeledLink(text = "开奖链接", url = it))
                                 }
                             },
@@ -366,6 +377,44 @@ class ForumWatchActivityRepositoryImpl(
                     Result.failure(t)
                 }
             }
+        }
+    }
+
+    /**
+     * When fetching full post detail reveals an explicit lottery link or draw time (from
+     * `bodyMarkdown` or `externalLinks`) that was absent from the list summary, promote the
+     * matching entry in the live feed snapshot so list badges and filters stay consistent.
+     */
+    private fun syncEnrichedItemIntoSnapshot(
+        enrichedItem: ForumWatchActivityItem,
+        nowEpochMillis: Long,
+    ) {
+        _snapshot.update { prev ->
+            val existing = prev.activities.firstOrNull { it.id == enrichedItem.id } ?: return@update prev
+            val hasUpgrade = (existing.resolvedLotteryUrl == null && enrichedItem.resolvedLotteryUrl != null) ||
+                (existing.endsAtEpochMillis == null && enrichedItem.endsAtEpochMillis != null) ||
+                (existing.startsAtEpochMillis == null && enrichedItem.startsAtEpochMillis != null) ||
+                (existing.status != enrichedItem.status)
+            if (!hasUpgrade) return@update prev
+
+            val replaced = prev.activities.map { candidate ->
+                if (candidate.id == enrichedItem.id) {
+                    ActivityLotteryClassifier.normalizeItem(
+                        candidate.copy(
+                            kind = enrichedItem.kind,
+                            status = enrichedItem.status,
+                            startsAtEpochMillis = enrichedItem.startsAtEpochMillis ?: candidate.startsAtEpochMillis,
+                            luckyUrl = enrichedItem.luckyUrl ?: candidate.luckyUrl,
+                            endsAtEpochMillis = enrichedItem.endsAtEpochMillis ?: candidate.endsAtEpochMillis,
+                        ),
+                    )
+                } else {
+                    candidate
+                }
+            }
+            val resorted = deduplicateAndSortActivities(replaced, nowEpochMillis)
+            val updated = prev.copy(activities = resorted)
+            updated.copy(counts = updated.liveCounts(nowEpochMillis))
         }
     }
 
@@ -445,9 +494,10 @@ class ForumWatchActivityRepositoryImpl(
             if (items.isEmpty()) return emptyList()
 
             val byId = LinkedHashMap<String, ForumWatchActivityItem>(items.size)
-            for (item in items) {
-                val id = item.id.trim()
-                if (id.isEmpty() || item.title.isBlank()) continue
+            for (rawItem in items) {
+                val id = rawItem.id.trim()
+                if (id.isEmpty() || rawItem.title.isBlank()) continue
+                val item = ActivityLotteryClassifier.normalizeItem(rawItem)
                 val existing = byId[id]
                 if (existing == null || shouldPreferCandidate(candidate = item, existing = existing)) {
                     byId[id] = item
@@ -541,13 +591,35 @@ class PreviewForumWatchActivityRepository(
             topicId = "618001",
             category = "日常",
             categorySlug = "daily",
-            luckyUrl = "https://lucky.nodeseek.com/?post=618001",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=618001&time=${nowEpochMillis + 3_600_000L * 18}&count=3&start=1&duplicate=false&mode=view",
             drawFloor = 200,
             prize = "DMIT TYO.Pro.Tiny 年付 × 3",
             participation = "回复本帖任意内容（每人限一次）",
             tags = listOf("抽奖", "DMIT", "免单"),
             createdAtEpochMillis = nowEpochMillis - 3_600_000L * 6,
             updatedAtEpochMillis = nowEpochMillis - 1_800_000L,
+        ),
+        ForumWatchActivityItem(
+            id = "nodeseek-618040",
+            title = "【预告抽奖】黑五整点抽 2 台美国 CN2 GIA 小鸡",
+            summary = "今晚 20:00 开放回复参与，次日 20:00 官方随机数自动开奖。",
+            sourceUrl = "https://www.nodeseek.com/post-618040-1",
+            organizer = "vps_club",
+            startsAtEpochMillis = nowEpochMillis + 3_600_000L * 2,
+            endsAtEpochMillis = nowEpochMillis + 3_600_000L * 26,
+            status = ActivityTimeStatus.UPCOMING,
+            kind = ActivityKind.LOTTERY,
+            pinned = false,
+            sourceId = "nodeseek",
+            topicId = "618040",
+            category = "日常",
+            categorySlug = "daily",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=618040&time=${nowEpochMillis + 3_600_000L * 26}&count=2&start=1&duplicate=true&mode=view",
+            prize = "CN2 GIA 年付 × 2",
+            participation = "活动开始后评论即可参与",
+            tags = listOf("抽奖", "官方开奖"),
+            createdAtEpochMillis = nowEpochMillis - 1_800_000L,
+            updatedAtEpochMillis = nowEpochMillis - 900_000L,
         ),
         ForumWatchActivityItem(
             id = "nodeseek-617890",
@@ -572,7 +644,7 @@ class PreviewForumWatchActivityRepository(
         ),
         ForumWatchActivityItem(
             id = "nodeseek-616500",
-            title = "【已开奖】BGP.Tools 社区节点联合测速挑战赛",
+            title = "【社区活动】BGP.Tools 社区节点联合测速挑战赛",
             summary = "提交真实 YABS 与回程路由报告参与评选，获奖名单已在主贴更新。",
             sourceUrl = "https://www.nodeseek.com/post-616500-1",
             organizer = "latency_hunter",
@@ -590,16 +662,36 @@ class PreviewForumWatchActivityRepository(
             createdAtEpochMillis = nowEpochMillis - 86_400_000L * 4,
             updatedAtEpochMillis = nowEpochMillis - 3_600_000L * 5,
         ),
+        ForumWatchActivityItem(
+            id = "nodeseek-616200",
+            title = "【已开奖】周末鸡腿与域名续费券抽奖",
+            summary = "已于昨日完成随机开奖，中奖楼层请前往开奖页核对。",
+            sourceUrl = "https://www.nodeseek.com/post-616200-1",
+            organizer = "domain_ops",
+            startsAtEpochMillis = nowEpochMillis - 86_400_000L * 2,
+            endsAtEpochMillis = nowEpochMillis - 3_600_000L * 4,
+            status = ActivityTimeStatus.ENDED,
+            kind = ActivityKind.LOTTERY,
+            pinned = false,
+            sourceId = "nodeseek",
+            topicId = "616200",
+            category = "日常",
+            categorySlug = "daily",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=616200&time=${nowEpochMillis - 3_600_000L * 4}&count=5&start=1&duplicate=false&mode=view",
+            prize = "域名续费券 × 5",
+            tags = listOf("抽奖", "官方开奖"),
+            createdAtEpochMillis = nowEpochMillis - 86_400_000L * 2,
+            updatedAtEpochMillis = nowEpochMillis - 3_600_000L * 4,
+        ),
     )
 
     private val initialSnapshot = ActivityFeedSnapshot(
         activities = sampleItems,
         updatedAtEpochMillis = nowEpochMillis - 120_000L,
-        counts = ActivityCounts(all = 3, ongoing = 1, upcoming = 0, ended = 0),
         lastSyncedEpochMillis = nowEpochMillis - 60_000L,
-        totalCount = 3,
+        totalCount = sampleItems.size,
         hasMore = false,
-    )
+    ).let { snap -> snap.copy(counts = snap.liveCounts(nowEpochMillis)) }
 
     private val _snapshot = MutableStateFlow(initialSnapshot)
     override val snapshot: StateFlow<ActivityFeedSnapshot> = _snapshot.asStateFlow()

@@ -1,5 +1,10 @@
 package com.nodeseek.app.ui.activity
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -36,6 +41,7 @@ import androidx.compose.material.icons.rounded.Celebration
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -94,9 +100,12 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
- * 「活动」页面：接入 ForumWatch 社区活动与福利聚合 API，支持状态筛选、下拉刷新、
+ * 「活动」页面：接入 ForumWatch 社区活动与福利聚合 API，支持两级分类/抽奖开奖状态筛选、下拉刷新、
  * 原生帖子直跳、详情 Markdown 预览及默认关闭的可选「新活动通知」开关。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -231,10 +240,13 @@ fun ActivityScreen(
                     }
 
                     item(key = "activity_filter_bar") {
-                        ActivityStatusFilterRow(
-                            selectedFilter = uiState.selectedFilter,
+                        ActivityFilterBar(
+                            selectedCategory = uiState.selectedCategory,
+                            selectedLotteryStatus = uiState.selectedLotteryStatus,
+                            showLotteryStatusFilters = uiState.showLotteryStatusFilters,
                             counts = uiState.counts,
-                            onSelectFilter = viewModel::selectFilter,
+                            onSelectCategory = viewModel::selectCategory,
+                            onSelectLotteryStatus = viewModel::selectLotteryStatus,
                         )
                     }
 
@@ -263,12 +275,16 @@ fun ActivityScreen(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     ActivityEmptyOrErrorCard(
-                                        selectedFilter = uiState.selectedFilter,
-                                        totalCount = uiState.counts.all,
+                                        selectedCategory = uiState.selectedCategory,
+                                        selectedLotteryStatus = uiState.selectedLotteryStatus,
+                                        counts = uiState.counts,
                                         errorMessage = uiState.errorMessage,
                                         isRefreshing = uiState.isRefreshing,
                                         onRefresh = viewModel::refresh,
-                                        onResetFilter = { viewModel.selectFilter(ActivityStatusFilter.ALL) },
+                                        onResetLotteryStatus = {
+                                            viewModel.selectLotteryStatus(LotteryStatusFilter.ALL)
+                                        },
+                                        onResetAllFilters = viewModel::resetFilters,
                                     )
                                 }
                             }
@@ -279,12 +295,13 @@ fun ActivityScreen(
                                 items = uiState.filteredActivities,
                                 key = { it.id },
                             ) { item ->
+                                val explicitLotteryUrl = item.resolvedLotteryUrl
                                 ActivityFeedCard(
                                     item = item,
                                     nowEpochMillis = uiState.nowEpochMillis,
                                     onOpenPrimaryTarget = { handleOpenActivityPrimaryTarget(item) },
                                     onOpenDetail = { viewModel.openDetailSheet(item) },
-                                    onOpenLuckyUrl = item.luckyUrl?.takeIf { it.isNotBlank() }?.let { url ->
+                                    onOpenLuckyUrl = explicitLotteryUrl?.let { url ->
                                         { openAnyUrl(url) }
                                     },
                                 )
@@ -352,10 +369,14 @@ private fun ActivityTopBar(
             )
             Text(
                 text = when {
-                    counts.all > 0 && counts.ongoing > 0 ->
-                        "共 ${counts.all} 场活动 · ${counts.ongoing} 场抽奖进行中"
+                    counts.all > 0 && counts.lottery > 0 && counts.ongoing > 0 ->
+                        "共 ${counts.all} 条活动 · ${counts.lottery} 场抽奖（${counts.ongoing} 进行中）"
+                    counts.all > 0 && counts.lottery > 0 && counts.upcoming > 0 ->
+                        "共 ${counts.all} 条活动 · ${counts.lottery} 场抽奖（${counts.upcoming} 即将开始）"
+                    counts.all > 0 && counts.lottery > 0 ->
+                        "共 ${counts.all} 条活动 · ${counts.lottery} 场抽奖"
                     counts.all > 0 ->
-                        "共 ${counts.all} 场社区活动"
+                        "共 ${counts.all} 条社区福利与活动"
                     else ->
                         "社区抽奖、福利赠送与限时活动聚合"
                 },
@@ -388,62 +409,165 @@ private fun ActivityTopBar(
 }
 
 @Composable
-private fun ActivityStatusFilterRow(
-    selectedFilter: ActivityStatusFilter,
+private fun ActivityFilterBar(
+    selectedCategory: ActivityCategoryFilter,
+    selectedLotteryStatus: LotteryStatusFilter,
+    showLotteryStatusFilters: Boolean,
     counts: ActivityCounts,
-    onSelectFilter: (ActivityStatusFilter) -> Unit,
+    onSelectCategory: (ActivityCategoryFilter) -> Unit,
+    onSelectLotteryStatus: (LotteryStatusFilter) -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        ActivityStatusFilter.entries.forEach { filter ->
-            val count = when (filter) {
-                ActivityStatusFilter.ALL -> counts.all
-                ActivityStatusFilter.ONGOING -> counts.ongoing
-                ActivityStatusFilter.UPCOMING -> counts.upcoming
-                ActivityStatusFilter.ENDED -> counts.ended
-            }
-            val selected = selectedFilter == filter
-            val bgColor = if (selected) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceContainerLow
-            }
-            val fgColor = if (selected) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-            val borderColor = if (selected) {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-            } else {
-                ext.cardBorder
-            }
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(bgColor)
-                    .border(0.75.dp, borderColor, CircleShape)
-                    .pulseBouncyClickable(
-                        pressedScale = NodePulseMotion.chipPressScale,
-                        role = Role.Tab,
-                        onClick = { onSelectFilter(filter) },
+        // Tier 1: Category tabs (全部 / 抽奖 / 其他活动)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ActivityCategoryFilter.entries.forEach { category ->
+                val count = when (category) {
+                    ActivityCategoryFilter.ALL -> counts.all
+                    ActivityCategoryFilter.LOTTERY -> counts.lottery
+                    ActivityCategoryFilter.OTHER -> counts.other
+                }
+                val selected = selectedCategory == category
+                val bgColor = if (selected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerLow
+                }
+                val fgColor = if (selected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val borderColor = if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                } else {
+                    ext.cardBorder
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(bgColor)
+                        .border(0.75.dp, borderColor, CircleShape)
+                        .pulseBouncyClickable(
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.Tab,
+                            onClick = { onSelectCategory(category) },
+                        )
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (count > 0) "${category.label} $count" else category.label,
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = fgColor,
+                        maxLines = 1,
+                        softWrap = false,
                     )
-                    .padding(horizontal = 11.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center,
+                }
+            }
+        }
+
+        // Tier 2: Draw-status chips — visible ONLY when 「抽奖」 category is selected
+        AnimatedVisibility(
+            visible = showLotteryStatusFilters,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            val subBarShape = RoundedCornerShape(12.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(subBarShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .border(0.75.dp, ext.cardBorder, subBarShape)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    text = if (count > 0) "${filter.label} $count" else filter.label,
-                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = fgColor,
+                    text = "开奖状态",
+                    style = NodePulseThemeTokens.extraTypography.microLabel,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     softWrap = false,
                 )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LotteryStatusFilter.entries.forEach { statusFilter ->
+                        val count = when (statusFilter) {
+                            LotteryStatusFilter.ALL -> counts.lottery
+                            LotteryStatusFilter.ONGOING -> counts.ongoing
+                            LotteryStatusFilter.UPCOMING -> counts.upcoming
+                            LotteryStatusFilter.ENDED -> counts.ended
+                        }
+                        val selected = selectedLotteryStatus == statusFilter
+                        val (bgColor, fgColor, borderColor) = if (selected) {
+                            when (statusFilter) {
+                                LotteryStatusFilter.UPCOMING -> Triple(
+                                    MaterialTheme.colorScheme.tertiaryContainer,
+                                    MaterialTheme.colorScheme.onTertiaryContainer,
+                                    MaterialTheme.colorScheme.tertiary.copy(alpha = 0.45f),
+                                )
+                                LotteryStatusFilter.ENDED -> Triple(
+                                    MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    MaterialTheme.colorScheme.onSurface,
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                )
+                                LotteryStatusFilter.ALL,
+                                LotteryStatusFilter.ONGOING,
+                                -> Triple(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    MaterialTheme.colorScheme.onPrimaryContainer,
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                )
+                            }
+                        } else {
+                            Triple(
+                                MaterialTheme.colorScheme.surface,
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                                ext.cardBorder,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(bgColor)
+                                .border(0.75.dp, borderColor, CircleShape)
+                                .pulseBouncyClickable(
+                                    pressedScale = NodePulseMotion.chipPressScale,
+                                    role = Role.Tab,
+                                    onClick = { onSelectLotteryStatus(statusFilter) },
+                                )
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = if (count > 0) "${statusFilter.label} $count" else statusFilter.label,
+                                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = fgColor,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -523,6 +647,14 @@ private fun ActivityFeedCard(
 ) {
     val lotteryStatus = item.resolveLotteryStatusOrNull(nowEpochMillis)
     val isEnded = lotteryStatus == ActivityTimeStatus.ENDED
+    val compactTimingLabel = remember(item, lotteryStatus, nowEpochMillis) {
+        formatLotteryTimingLabel(
+            item = item,
+            lotteryStatus = lotteryStatus,
+            nowEpochMillis = nowEpochMillis,
+            compact = true,
+        )
+    }
     val accentColor = when {
         item.pinned -> MaterialTheme.colorScheme.primary
         lotteryStatus == ActivityTimeStatus.ONGOING -> MaterialTheme.colorScheme.primary
@@ -537,8 +669,13 @@ private fun ActivityFeedCard(
         else -> ""
     }
 
+    val hasPrizeMeta = !item.prize.isNullOrBlank()
     val inlineMetaLine = buildString {
-        item.prize?.takeIf { it.isNotBlank() }?.let { append("奖品：$it") }
+        compactTimingLabel?.let { append(it) }
+        item.prize?.takeIf { it.isNotBlank() }?.let {
+            if (isNotEmpty()) append(" · ")
+            append("奖品：$it")
+        }
         item.drawFloor?.takeIf { it > 0 }?.let { floor ->
             if (isNotEmpty()) append(" · ")
             append("开奖 #$floor")
@@ -587,12 +724,13 @@ private fun ActivityFeedCard(
                 }
                 if (lotteryStatus != null) {
                     ActivityStatusBadge(status = lotteryStatus, compact = true)
+                } else {
+                    ActivityCompactTag(
+                        text = item.effectiveKind.displayLabel,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
                 }
-                ActivityCompactTag(
-                    text = item.kind.displayLabel,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.78f),
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
                 if (item.category.isNotBlank()) {
                     ActivityCompactTag(
                         text = item.category,
@@ -641,7 +779,7 @@ private fun ActivityFeedCard(
             )
         }
 
-        // Row 4: Inline prize/participation meta + compact action chips
+        // Row 4: Inline draw-time / prize meta + compact action chips
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -656,14 +794,22 @@ private fun ActivityFeedCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.CardGiftcard,
+                        imageVector = if (compactTimingLabel != null && !hasPrizeMeta) {
+                            Icons.Rounded.Schedule
+                        } else {
+                            Icons.Rounded.CardGiftcard
+                        },
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = if (isEnded) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
                         text = inlineMetaLine,
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -805,15 +951,16 @@ private fun ActivityStatusBadge(
         ActivityTimeStatus.ENDED ->
             MaterialTheme.colorScheme.surfaceContainerHighest to MaterialTheme.colorScheme.onSurfaceVariant
     }
+    val label = "抽奖 · ${status.displayLabel}"
     if (compact) {
         ActivityCompactTag(
-            text = status.displayLabel,
+            text = label,
             containerColor = bg,
             contentColor = fg,
         )
     } else {
         PulseAccentPill(
-            text = status.displayLabel,
+            text = label,
             containerColor = bg,
             contentColor = fg,
         )
@@ -822,17 +969,49 @@ private fun ActivityStatusBadge(
 
 @Composable
 private fun ActivityEmptyOrErrorCard(
-    selectedFilter: ActivityStatusFilter,
-    totalCount: Int,
+    selectedCategory: ActivityCategoryFilter,
+    selectedLotteryStatus: LotteryStatusFilter,
+    counts: ActivityCounts,
     errorMessage: String?,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
-    onResetFilter: () -> Unit,
+    onResetLotteryStatus: () -> Unit,
+    onResetAllFilters: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val isDark = NodePulseThemeTokens.isDark
     val primary = MaterialTheme.colorScheme.primary
-    val isFilteredEmpty = errorMessage == null && totalCount > 0 && selectedFilter != ActivityStatusFilter.ALL
+    val isFilteredEmpty = errorMessage == null &&
+        counts.all > 0 &&
+        (selectedCategory != ActivityCategoryFilter.ALL || selectedLotteryStatus != LotteryStatusFilter.ALL)
+    val canResetToAllLotteries = isFilteredEmpty &&
+        selectedCategory == ActivityCategoryFilter.LOTTERY &&
+        selectedLotteryStatus != LotteryStatusFilter.ALL &&
+        counts.lottery > 0
+
+    val headline = when {
+        errorMessage != null -> "活动列表加载失败"
+        isFilteredEmpty && selectedCategory == ActivityCategoryFilter.LOTTERY &&
+            selectedLotteryStatus != LotteryStatusFilter.ALL ->
+            "暂无「抽奖 · ${selectedLotteryStatus.label}」活动"
+        isFilteredEmpty && selectedCategory == ActivityCategoryFilter.LOTTERY ->
+            "当前暂无带明确抽奖链接的抽奖"
+        isFilteredEmpty && selectedCategory == ActivityCategoryFilter.OTHER ->
+            "暂无其他社区活动"
+        else -> "当前暂无正在收录的社区活动"
+    }
+
+    val description = when {
+        errorMessage != null -> errorMessage
+        canResetToAllLotteries ->
+            "当前共有 ${counts.lottery} 场其他开奖状态的抽奖活动，可切换查看全部抽奖。"
+        isFilteredEmpty && selectedCategory == ActivityCategoryFilter.LOTTERY ->
+            "仅正文或链接包含明确抽奖/开奖地址的帖子归入「抽奖」分类；当前共有 ${counts.all} 条社区活动可查看。"
+        isFilteredEmpty ->
+            "当前共有 ${counts.all} 条其他分类的社区活动，可切换回全部查看。"
+        else ->
+            "ForumWatch 正在持续巡检社区抽奖、福利赠送与节日互动帖，你也可以打开上方「新活动通知」第一时间接收提醒。"
+    }
 
     Column(
         modifier = modifier
@@ -868,11 +1047,7 @@ private fun ActivityEmptyOrErrorCard(
         }
 
         Text(
-            text = when {
-                errorMessage != null -> "活动列表加载失败"
-                isFilteredEmpty -> "暂无「${selectedFilter.label}」状态的活动"
-                else -> "当前暂无正在收录的社区活动"
-            },
+            text = headline,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.ExtraBold,
             color = MaterialTheme.colorScheme.onSurface,
@@ -880,19 +1055,25 @@ private fun ActivityEmptyOrErrorCard(
         )
 
         Text(
-            text = when {
-                errorMessage != null -> errorMessage
-                isFilteredEmpty -> "当前共有 $totalCount 场其他状态的社区活动，可切换回全部查看。"
-                else -> "ForumWatch 正在持续巡检社区抽奖、福利赠送与节日互动帖，你也可以打开上方「新活动通知」第一时间接收提醒。"
-            },
+            text = description,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
 
-        if (isFilteredEmpty) {
+        if (canResetToAllLotteries) {
             FilledTonalButton(
-                onClick = onResetFilter,
+                onClick = onResetLotteryStatus,
+                shape = CircleShape,
+            ) {
+                Text(
+                    text = "查看全部抽奖",
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        } else if (isFilteredEmpty) {
+            FilledTonalButton(
+                onClick = onResetAllFilters,
                 shape = CircleShape,
             ) {
                 Text(
@@ -934,6 +1115,15 @@ private fun ActivityDetailModalSheet(
     val modalState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val item = sheetState.detail?.item ?: sheetState.item
     val lotteryStatus = item.resolveLotteryStatusOrNull(nowEpochMillis)
+    val explicitLotteryUrl = item.resolvedLotteryUrl
+    val detailedTimingLabel = remember(item, lotteryStatus, nowEpochMillis) {
+        formatLotteryTimingLabel(
+            item = item,
+            lotteryStatus = lotteryStatus,
+            nowEpochMillis = nowEpochMillis,
+            compact = false,
+        )
+    }
     val markdownContent = sheetState.detail?.bodyMarkdown?.takeIf { it.isNotBlank() }
         ?: item.summary
 
@@ -956,12 +1146,13 @@ private fun ActivityDetailModalSheet(
             ) {
                 if (lotteryStatus != null) {
                     ActivityStatusBadge(status = lotteryStatus)
+                } else {
+                    PulseAccentPill(
+                        text = item.effectiveKind.displayLabel,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
                 }
-                PulseAccentPill(
-                    text = item.kind.displayLabel,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
                 if (item.organizer.isNotBlank()) {
                     PulseAccentPill(
                         text = "@${item.organizer}",
@@ -977,6 +1168,34 @@ private fun ActivityDetailModalSheet(
                 fontWeight = FontWeight.ExtraBold,
                 color = MaterialTheme.colorScheme.onSurface,
             )
+
+            detailedTimingLabel?.let { timing ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Schedule,
+                        contentDescription = null,
+                        tint = if (lotteryStatus == ActivityTimeStatus.ENDED) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Text(
+                        text = timing,
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (lotteryStatus == ActivityTimeStatus.ENDED) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
+            }
 
             PulseGradientDivider()
 
@@ -1061,7 +1280,7 @@ private fun ActivityDetailModalSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                item.luckyUrl?.takeIf { it.isNotBlank() }?.let { luckyUrl ->
+                explicitLotteryUrl?.let { luckyUrl ->
                     OutlinedButton(
                         onClick = { onOpenUrl(luckyUrl) },
                         modifier = Modifier.weight(1f),
@@ -1090,6 +1309,94 @@ private fun ActivityDetailModalSheet(
         }
     }
 }
+
+private val LOTTERY_TIME_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
+/**
+ * Formats start/draw timing hints exclusively for explicit-link lotteries (`lotteryStatus != null`);
+ * returns `null` for non-lottery activities.
+ */
+internal fun formatLotteryTimingLabel(
+    item: ForumWatchActivityItem,
+    lotteryStatus: ActivityTimeStatus?,
+    nowEpochMillis: Long,
+    compact: Boolean,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String? {
+    if (lotteryStatus == null) return null
+    val startsAt = item.startsAtEpochMillis?.takeIf { it > 0L }
+    val drawAt = item.resolveDrawTimeEpochMillis()
+
+    return when (lotteryStatus) {
+        ActivityTimeStatus.UPCOMING -> {
+            if (startsAt != null && startsAt > nowEpochMillis) {
+                if (compact) {
+                    "开始 ${formatLocalMonthDayTime(startsAt, zoneId)}"
+                } else {
+                    val delta = (startsAt - nowEpochMillis).coerceAtLeast(0L)
+                    buildString {
+                        append("距开始 ${formatRelativeDurationCompact(delta)}（${formatLocalMonthDayTime(startsAt, zoneId)}）")
+                        if (drawAt != null) {
+                            append(" · 开奖 ${formatLocalMonthDayTime(drawAt, zoneId)}")
+                        }
+                    }
+                }
+            } else if (drawAt != null) {
+                "开奖 ${formatLocalMonthDayTime(drawAt, zoneId)}"
+            } else {
+                null
+            }
+        }
+
+        ActivityTimeStatus.ONGOING -> {
+            if (drawAt != null && drawAt > nowEpochMillis) {
+                if (compact) {
+                    "开奖 ${formatLocalMonthDayTime(drawAt, zoneId)}"
+                } else {
+                    val delta = drawAt - nowEpochMillis
+                    "距开奖 ${formatRelativeDurationCompact(delta)}（${formatLocalMonthDayTime(drawAt, zoneId)}）"
+                }
+            } else {
+                null
+            }
+        }
+
+        ActivityTimeStatus.ENDED -> {
+            if (drawAt != null && drawAt <= nowEpochMillis) {
+                if (compact) {
+                    "已开奖 ${formatLocalMonthDayTime(drawAt, zoneId)}"
+                } else {
+                    "已于 ${formatLocalMonthDayTime(drawAt, zoneId)} 开奖"
+                }
+            } else {
+                if (compact) "已开奖" else "抽奖已结束"
+            }
+        }
+    }
+}
+
+private fun formatRelativeDurationCompact(durationMs: Long): String {
+    val totalMinutes = (durationMs / 60_000L).coerceAtLeast(1L)
+    val days = totalMinutes / (60L * 24L)
+    val hours = (totalMinutes % (60L * 24L)) / 60L
+    val minutes = totalMinutes % 60L
+    return when {
+        days > 0L -> "${days}天${hours}小时"
+        hours > 0L -> "${hours}小时${minutes}分"
+        else -> "${minutes}分钟"
+    }
+}
+
+private fun formatLocalMonthDayTime(
+    epochMillis: Long,
+    zoneId: ZoneId,
+): String =
+    runCatching {
+        Instant.ofEpochMilli(epochMillis)
+            .atZone(zoneId)
+            .format(LOTTERY_TIME_FORMATTER)
+    }.getOrDefault("")
 
 @Preview(showBackground = true, widthDp = 412, heightDp = 840)
 @Composable

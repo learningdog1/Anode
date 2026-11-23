@@ -12,6 +12,7 @@ import androidx.work.PeriodicWorkRequest
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.nodeseek.app.domain.activity.ActivityLotteryClassifier
 import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.activity.ActivityMonitorRuntimeStatus
 import com.nodeseek.app.domain.activity.ActivityMonitorSettings
@@ -58,7 +59,9 @@ interface ActivityMonitorHost {
  * - Lightweight conditional (`ETag` -> `304`) foreground coroutine polling (default every 3 minutes),
  * - Serialized WorkManager background poll passes (`15` minutes) sharing [pollMutex],
  * - Baseline seeding on first enable so historical activities never spam notifications,
- * - Alerts dispatched only for newly discovered `ONGOING` / `UPCOMING` activities.
+ * - Normalizes incoming records via [ActivityLotteryClassifier] so only explicit-link lotteries
+ *   carry the `抽奖` kind/status, skips already-`ENDED` lotteries, and notifies newly discovered
+ *   active lotteries (`ONGOING`/`UPCOMING`) and non-lottery community activities.
  */
 class ActivityMonitorControllerImpl(
     private val repository: ActivityRepository,
@@ -429,6 +432,7 @@ class ActivityMonitorControllerImpl(
                 .orEmpty()
                 .filter { it.id.isNotBlank() && it.title.isNotBlank() }
                 .distinctBy { it.id.trim() }
+                .map(ActivityLotteryClassifier::normalizeItem)
 
             val currentIds = validActivities.map { it.id.trim() }
             val wasBaselineInitialized = preferencesStore.isBaselineInitialized()
@@ -454,9 +458,11 @@ class ActivityMonitorControllerImpl(
             }
 
             val seenIds = preferencesStore.getSeenActivityIds()
+            // Lottery status applies only to explicit-link lotteries: skip already-ended lotteries,
+            // while never discarding non-lottery community activities (whose lottery status is null).
             val unseenActiveItems = validActivities.filter { item ->
                 item.id.trim() !in seenIds &&
-                    item.resolveLiveStatus(finishedAt) != ActivityTimeStatus.ENDED
+                    item.resolveLotteryStatusOrNull(finishedAt) != ActivityTimeStatus.ENDED
             }
             val canNotify = notificationDispatcher.hasPostNotificationsPermission()
             val notifiedItems = if (unseenActiveItems.isNotEmpty() && canNotify) {
@@ -518,7 +524,7 @@ class ActivityMonitorControllerImpl(
 
 /**
  * WorkManager periodic worker executing a single serialized community activity check pass
- * and dispatching system notifications whenever new `ONGOING`/`UPCOMING` activities appear.
+ * and dispatching system notifications whenever new active lotteries or community activities appear.
  */
 class ActivityMonitorWorker internal constructor(
     appContext: Context,

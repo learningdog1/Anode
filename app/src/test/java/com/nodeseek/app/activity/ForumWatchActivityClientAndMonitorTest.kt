@@ -478,6 +478,7 @@ class ForumWatchActivityClientAndMonitorTest {
                   "pinned": false,
                   "sourceId": "nodeseek",
                   "topicId": "620001",
+                  "luckyUrl": "https://www.nodeseek.com/lucky?post=620001&time=1763820060000&count=1&start=1&duplicate=false&mode=view",
                   "updatedAtEpochMillis": 1763819000000
                 },
                 {
@@ -491,6 +492,7 @@ class ForumWatchActivityClientAndMonitorTest {
                   "kind": "lottery",
                   "pinned": true,
                   "sourceId": "manual",
+                  "luckyUrl": "https://www.nodeseek.com/lucky?post=620001&time=1763820060000&count=1&start=1&duplicate=false&mode=view",
                   "updatedAtEpochMillis": 1763820000000
                 }
               ]
@@ -600,6 +602,7 @@ class ForumWatchActivityClientAndMonitorTest {
             kind = ActivityKind.LOTTERY,
             sourceId = "nodeseek",
             topicId = "610100",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=610100&time=${nowMs + 7_200_000L}&count=1",
         )
         fakeRepo.setActivities(listOf(historicalItem), updatedAtMs = nowMs)
 
@@ -613,7 +616,10 @@ class ForumWatchActivityClientAndMonitorTest {
         assertTrue(firstEnabledPass is ActivityPollOutcome.Completed)
         assertEquals(0, notifSpy.dispatchedItems.size)
 
-        // 3. Subsequent poll discovers 1 new ONGOING activity and 1 already ENDED activity -> notifies ONLY the ONGOING one
+        // 3. Subsequent poll discovers:
+        //    - 1 new ONGOING explicit-link lottery -> notifies as LOTTERY
+        //    - 1 new non-lottery post mislabeled LOTTERY without link (even with ENDED status) -> normalized to EVENT & notifies
+        //    - 3 already-ENDED explicit-link lotteries (server ENDED, forceEnded, draw-time expired) -> skipped
         nowMs += 180_000L
         val brandNewOngoing = ForumWatchActivityItem(
             id = "new-201",
@@ -623,6 +629,7 @@ class ForumWatchActivityClientAndMonitorTest {
             kind = ActivityKind.LOTTERY,
             sourceId = "nodeseek",
             topicId = "620201",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=620201&time=${nowMs + 3_600_000L}&count=1",
             endsAtEpochMillis = nowMs + 3_600_000L,
         )
         val brandNewAlreadyEnded = ForumWatchActivityItem(
@@ -635,6 +642,7 @@ class ForumWatchActivityClientAndMonitorTest {
             kind = ActivityKind.LOTTERY,
             sourceId = "nodeseek",
             topicId = "620202",
+            luckyUrl = "https://lucky.nodeseek.com/?post=620202",
         )
         val brandNewForceEndedFutureDeadline = ForumWatchActivityItem(
             id = "new-force-ended-203",
@@ -646,29 +654,58 @@ class ForumWatchActivityClientAndMonitorTest {
             kind = ActivityKind.LOTTERY,
             sourceId = "nodeseek",
             topicId = "620203",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=620203&time=${nowMs + 7_200_000L}&count=1",
         )
-        assertEquals(ActivityTimeStatus.ENDED, brandNewAlreadyEnded.resolveLiveStatus(nowMs))
-        assertEquals(ActivityTimeStatus.ENDED, brandNewForceEndedFutureDeadline.resolveLiveStatus(nowMs))
+        val brandNewDrawTimePassed = ForumWatchActivityItem(
+            id = "new-draw-passed-204",
+            title = "【已到点开奖】URL 中开奖时间已过",
+            sourceUrl = "https://www.nodeseek.com/post-620204-1",
+            startsAtEpochMillis = nowMs - 7_200_000L,
+            endsAtEpochMillis = null,
+            status = ActivityTimeStatus.ONGOING,
+            kind = ActivityKind.LOTTERY,
+            sourceId = "nodeseek",
+            topicId = "620204",
+            luckyUrl = "https://www.nodeseek.com/lucky?post=620204&time=${nowMs - 60_000L}&count=1",
+        )
+        val brandNewNonLotteryMislabeled = ForumWatchActivityItem(
+            id = "new-nonlottery-205",
+            title = "抽奖器好像有bug，大家讨论下",
+            sourceUrl = "https://www.nodeseek.com/post-620205-1",
+            status = ActivityTimeStatus.ENDED,
+            kind = ActivityKind.LOTTERY,
+            sourceId = "nodeseek",
+            topicId = "620205",
+            luckyUrl = null,
+        )
+        assertEquals(ActivityTimeStatus.ENDED, brandNewAlreadyEnded.resolveLotteryStatusOrNull(nowMs))
+        assertEquals(ActivityTimeStatus.ENDED, brandNewForceEndedFutureDeadline.resolveLotteryStatusOrNull(nowMs))
+        assertEquals(ActivityTimeStatus.ENDED, brandNewDrawTimePassed.resolveLotteryStatusOrNull(nowMs))
+        assertNull(brandNewNonLotteryMislabeled.resolveLotteryStatusOrNull(nowMs))
 
         fakeRepo.setActivities(
             listOf(
                 brandNewOngoing,
                 brandNewAlreadyEnded,
                 brandNewForceEndedFutureDeadline,
+                brandNewDrawTimePassed,
+                brandNewNonLotteryMislabeled,
                 historicalItem,
             ),
             updatedAtMs = nowMs,
         )
 
         val secondPass = controller.runBackgroundPollPass() as ActivityPollOutcome.Completed
-        assertEquals(1, secondPass.newActivitiesNotified)
-        assertEquals(listOf("new-201"), notifSpy.dispatchedItems.map { it.id })
+        assertEquals(2, secondPass.newActivitiesNotified)
+        assertEquals(listOf("new-201", "new-nonlottery-205"), notifSpy.dispatchedItems.map { it.id })
+        assertEquals(ActivityKind.LOTTERY, notifSpy.dispatchedItems[0].kind)
+        assertEquals(ActivityKind.EVENT, notifSpy.dispatchedItems[1].kind)
 
         // Re-running poll does NOT duplicate notifications
         nowMs += 180_000L
         val thirdPass = controller.runBackgroundPollPass() as ActivityPollOutcome.Completed
         assertEquals(0, thirdPass.newActivitiesNotified)
-        assertEquals(1, notifSpy.dispatchedItems.size)
+        assertEquals(2, notifSpy.dispatchedItems.size)
 
         // 4. Turning switch OFF cancels WorkManager immediately
         controller.setNotificationsEnabled(false)
@@ -748,7 +785,7 @@ class ForumWatchActivityClientAndMonitorTest {
     }
 
     @Test
-    fun `only LOTTERY items expose time status badges and count toward ongoing upcoming and ended filters`() {
+    fun `only explicit-link LOTTERY items expose time status badges and drive two-tier ViewModel filters`() {
         val mainDispatcher = UnconfinedTestDispatcher()
         Dispatchers.setMain(mainDispatcher)
         try {
@@ -761,6 +798,7 @@ class ForumWatchActivityClientAndMonitorTest {
                     kind = ActivityKind.LOTTERY,
                     startsAtEpochMillis = nowMs - 3_600_000L,
                     endsAtEpochMillis = nowMs + 3_600_000L,
+                    luckyUrl = "https://www.nodeseek.com/lucky?post=619001&time=${nowMs + 3_600_000L}&count=1",
                 )
                 val lotteryUpcoming = ForumWatchActivityItem(
                     id = "lot-upcoming",
@@ -768,12 +806,22 @@ class ForumWatchActivityClientAndMonitorTest {
                     status = ActivityTimeStatus.UPCOMING,
                     kind = ActivityKind.LOTTERY,
                     startsAtEpochMillis = nowMs + 7_200_000L,
+                    luckyUrl = "https://lucky.nodeseek.com/?post=619002",
                 )
                 val lotteryEnded = ForumWatchActivityItem(
                     id = "lot-ended",
                     title = "【已开奖】昨日抽奖",
-                    status = ActivityTimeStatus.ENDED,
+                    status = ActivityTimeStatus.ONGOING,
                     kind = ActivityKind.LOTTERY,
+                    endsAtEpochMillis = nowMs - 60_000L,
+                    luckyUrl = "https://www.nodeseek.com/lucky?post=619003&time=${nowMs - 60_000L}&count=3",
+                )
+                val falsePositiveLotteryNoLink = ForumWatchActivityItem(
+                    id = "no-link-discussion",
+                    title = "抽奖器好像有bug，奖品数量大于评论数不打乱顺序",
+                    status = ActivityTimeStatus.ONGOING,
+                    kind = ActivityKind.LOTTERY,
+                    luckyUrl = null,
                 )
                 val giveawayItem = ForumWatchActivityItem(
                     id = "giveaway-1",
@@ -799,11 +847,20 @@ class ForumWatchActivityClientAndMonitorTest {
                 assertEquals(ActivityTimeStatus.ONGOING, lotteryOngoing.resolveLotteryStatusOrNull(nowMs))
                 assertEquals(ActivityTimeStatus.UPCOMING, lotteryUpcoming.resolveLotteryStatusOrNull(nowMs))
                 assertEquals(ActivityTimeStatus.ENDED, lotteryEnded.resolveLotteryStatusOrNull(nowMs))
+                assertNull(falsePositiveLotteryNoLink.resolveLotteryStatusOrNull(nowMs))
                 assertNull(giveawayItem.resolveLotteryStatusOrNull(nowMs))
                 assertNull(eventItem.resolveLotteryStatusOrNull(nowMs))
                 assertNull(promoItem.resolveLotteryStatusOrNull(nowMs))
 
-                val allItems = listOf(lotteryOngoing, lotteryUpcoming, lotteryEnded, giveawayItem, eventItem, promoItem)
+                val allItems = listOf(
+                    lotteryOngoing,
+                    lotteryUpcoming,
+                    lotteryEnded,
+                    falsePositiveLotteryNoLink,
+                    giveawayItem,
+                    eventItem,
+                    promoItem,
+                )
                 val fakeRepo = FakeActivityRepository()
                 fakeRepo.setActivities(allItems, updatedAtMs = nowMs)
 
@@ -816,23 +873,52 @@ class ForumWatchActivityClientAndMonitorTest {
                     vm.uiState.collect {}
                 }
 
-                assertEquals(6, vm.uiState.value.counts.all)
+                // Counts cleanly partition into 3 explicit-link lotteries + 4 other activities = 7 total
+                assertEquals(7, vm.uiState.value.counts.all)
+                assertEquals(3, vm.uiState.value.counts.lottery)
+                assertEquals(4, vm.uiState.value.counts.other)
                 assertEquals(1, vm.uiState.value.counts.ongoing)
                 assertEquals(1, vm.uiState.value.counts.upcoming)
                 assertEquals(1, vm.uiState.value.counts.ended)
-                assertEquals(6, vm.uiState.value.filteredActivities.size)
+                assertFalse(vm.uiState.value.showLotteryStatusFilters)
+                assertEquals(7, vm.uiState.value.filteredActivities.size)
 
-                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ONGOING)
+                // Selecting OTHER shows non-lottery items including downgraded no-link discussion (never dumped into ENDED)
+                vm.selectCategory(com.nodeseek.app.ui.activity.ActivityCategoryFilter.OTHER)
+                assertFalse(vm.uiState.value.showLotteryStatusFilters)
+                assertEquals(
+                    listOf("no-link-discussion", "giveaway-1", "event-1", "promo-1"),
+                    vm.uiState.value.filteredActivities.map { it.id },
+                )
+                assertEquals(
+                    ActivityKind.EVENT,
+                    vm.uiState.value.filteredActivities.first { it.id == "no-link-discussion" }.kind,
+                )
+
+                // Selecting LOTTERY reveals draw-status sub-filters and lists all 3 explicit lotteries
+                vm.selectCategory(com.nodeseek.app.ui.activity.ActivityCategoryFilter.LOTTERY)
+                assertTrue(vm.uiState.value.showLotteryStatusFilters)
+                assertEquals(
+                    com.nodeseek.app.ui.activity.LotteryStatusFilter.ALL,
+                    vm.uiState.value.selectedLotteryStatus,
+                )
+                assertEquals(
+                    listOf("lot-ongoing", "lot-upcoming", "lot-ended"),
+                    vm.uiState.value.filteredActivities.map { it.id },
+                )
+
+                vm.selectLotteryStatus(com.nodeseek.app.ui.activity.LotteryStatusFilter.ONGOING)
                 assertEquals(listOf("lot-ongoing"), vm.uiState.value.filteredActivities.map { it.id })
 
-                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.UPCOMING)
+                vm.selectLotteryStatus(com.nodeseek.app.ui.activity.LotteryStatusFilter.UPCOMING)
                 assertEquals(listOf("lot-upcoming"), vm.uiState.value.filteredActivities.map { it.id })
 
-                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ENDED)
+                vm.selectLotteryStatus(com.nodeseek.app.ui.activity.LotteryStatusFilter.ENDED)
                 assertEquals(listOf("lot-ended"), vm.uiState.value.filteredActivities.map { it.id })
 
-                vm.selectFilter(com.nodeseek.app.ui.activity.ActivityStatusFilter.ALL)
-                assertEquals(6, vm.uiState.value.filteredActivities.size)
+                vm.resetFilters()
+                assertFalse(vm.uiState.value.showLotteryStatusFilters)
+                assertEquals(7, vm.uiState.value.filteredActivities.size)
 
                 collector.cancel()
             }

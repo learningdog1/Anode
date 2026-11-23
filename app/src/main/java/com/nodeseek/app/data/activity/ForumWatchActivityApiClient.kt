@@ -5,6 +5,7 @@ import com.nodeseek.app.data.overseas.OverseasApiCrypto
 import com.nodeseek.app.domain.activity.ActivityCounts
 import com.nodeseek.app.domain.activity.ActivityKind
 import com.nodeseek.app.domain.activity.ActivityLabeledLink
+import com.nodeseek.app.domain.activity.ActivityLotteryClassifier
 import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityDetail
 import com.nodeseek.app.domain.activity.ForumWatchActivityItem
@@ -526,12 +527,47 @@ class ForumWatchActivityApiClient(
                 .map(::mapActivityItemDto)
             val resolvedPageSize = (if (dto.pageSize > 0) dto.pageSize else dto.pageSizeSnake).coerceAtLeast(1)
             val resolvedHasMore = dto.hasMore ?: dto.hasMoreSnake
-            val resolvedCounts = ActivityCounts(
-                all = dto.counts.all.coerceAtLeast(items.size),
-                ongoing = dto.counts.ongoing.coerceAtLeast(0),
-                upcoming = dto.counts.upcoming.coerceAtLeast(0),
-                ended = dto.counts.ended.coerceAtLeast(0),
-            )
+            val referenceNow = dto.serverTimeEpochMillis.takeIf { it > 0L }
+                ?: dto.updatedAtEpochMillis.takeIf { it > 0L }
+                ?: System.currentTimeMillis()
+            val resolvedCounts = if (items.isNotEmpty()) {
+                var ongoing = 0
+                var upcoming = 0
+                var ended = 0
+                var other = 0
+                for (item in items) {
+                    when (item.resolveLotteryStatusOrNull(referenceNow)) {
+                        ActivityTimeStatus.ONGOING -> ongoing++
+                        ActivityTimeStatus.UPCOMING -> upcoming++
+                        ActivityTimeStatus.ENDED -> ended++
+                        null -> other++
+                    }
+                }
+                val lotteryTotal = ongoing + upcoming + ended
+                val totalAll = dto.counts.all.coerceAtLeast(items.size)
+                ActivityCounts(
+                    all = totalAll,
+                    ongoing = ongoing,
+                    upcoming = upcoming,
+                    ended = ended,
+                    lottery = lotteryTotal,
+                    other = (totalAll - lotteryTotal).coerceAtLeast(other),
+                )
+            } else {
+                val ongoing = dto.counts.ongoing.coerceAtLeast(0)
+                val upcoming = dto.counts.upcoming.coerceAtLeast(0)
+                val ended = dto.counts.ended.coerceAtLeast(0)
+                val lotteryTotal = ongoing + upcoming + ended
+                val totalAll = dto.counts.all.coerceAtLeast(0)
+                ActivityCounts(
+                    all = totalAll,
+                    ongoing = ongoing,
+                    upcoming = upcoming,
+                    ended = ended,
+                    lottery = lotteryTotal,
+                    other = (totalAll - lotteryTotal).coerceAtLeast(0),
+                )
+            }
             return ForumWatchActivitiesPageResult(
                 updatedAtEpochMillis = dto.updatedAtEpochMillis.coerceAtLeast(0L),
                 serverTimeEpochMillis = dto.serverTimeEpochMillis.coerceAtLeast(0L),
@@ -554,19 +590,27 @@ class ForumWatchActivityApiClient(
                     message = "未找到对应的活动详情",
                 )
             }
-            val item = mapActivityItemDto(detailDto)
             val links = detailDto.externalLinks
                 .filter { it.url.isNotBlank() }
                 .map { ActivityLabeledLink(text = it.text.trim(), url = it.url.trim()) }
-            return ForumWatchActivityDetail(
-                item = item,
-                bodyMarkdown = detailDto.bodyMarkdown.trim(),
-                externalLinks = links,
+            val item = mapActivityItemDto(detailDto, preMappedLinks = links)
+            return ActivityLotteryClassifier.normalizeDetail(
+                ForumWatchActivityDetail(
+                    item = item,
+                    bodyMarkdown = detailDto.bodyMarkdown.trim(),
+                    externalLinks = links,
+                ),
             )
         }
 
-        private fun mapActivityItemDto(dto: ApiActivityItemDto): ForumWatchActivityItem {
-            return ForumWatchActivityItem(
+        private fun mapActivityItemDto(
+            dto: ApiActivityItemDto,
+            preMappedLinks: List<ActivityLabeledLink>? = null,
+        ): ForumWatchActivityItem {
+            val links = preMappedLinks ?: dto.externalLinks
+                .filter { it.url.isNotBlank() }
+                .map { ActivityLabeledLink(text = it.text.trim(), url = it.url.trim()) }
+            val rawItem = ForumWatchActivityItem(
                 id = dto.id.trim(),
                 title = dto.title.trim(),
                 summary = dto.summary.trim(),
@@ -589,6 +633,11 @@ class ForumWatchActivityApiClient(
                 tags = dto.tags.map { it.trim() }.filter { it.isNotEmpty() },
                 createdAtEpochMillis = dto.createdAtEpochMillis.coerceAtLeast(0L),
                 updatedAtEpochMillis = dto.updatedAtEpochMillis.coerceAtLeast(0L),
+            )
+            return ActivityLotteryClassifier.normalizeItem(
+                item = rawItem,
+                bodyMarkdown = dto.bodyMarkdown,
+                externalLinks = links,
             )
         }
 
