@@ -17,6 +17,7 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.ContinuationInterceptor
@@ -223,6 +224,7 @@ class SeekMailDiskCache(
         mailId: Long,
         detail: SeekMailDetail,
         fetchedAtEpochMillis: Long = System.currentTimeMillis(),
+        persistToDisk: Boolean = true,
     ) {
         val ns = keyNamespace(apiKey) ?: return
         val key = detailKey(ns, mailId)
@@ -232,20 +234,48 @@ class SeekMailDiskCache(
         )
         mailDetailMemory[key] = entry
         trimMemoryMapIfNeeded(mailDetailMemory, MAX_DETAIL_ENTRIES) { it.fetchedAtEpochMillis }
-        writeToDisk(
-            key = key,
-            serializer = CachedMailDetailEntry.serializer(),
-            value = entry,
-            prunePrefix = "${ns}_detail_",
-            maxForPrefix = MAX_DETAIL_ENTRIES,
-        )
+        if (persistToDisk) {
+            writeToDisk(
+                key = key,
+                serializer = CachedMailDetailEntry.serializer(),
+                value = entry,
+                prunePrefix = "${ns}_detail_",
+                maxForPrefix = MAX_DETAIL_ENTRIES,
+            )
+        } else {
+            // Ensure any older disk copy of a sensitive mail is removed.
+            deleteDiskKey(key)
+        }
+    }
+
+    suspend fun deleteMailDetails(
+        apiKey: String,
+        mailIds: Collection<Long>,
+    ) {
+        val ns = keyNamespace(apiKey) ?: return
+        val keys = mailIds.filter { it > 0L }.map { detailKey(ns, it) }
+        if (keys.isEmpty()) return
+        keys.forEach { mailDetailMemory.remove(it) }
+        withContext(ioDispatcher) {
+            diskMutex.withLock {
+                keys.forEach { key ->
+                    runCatching { File(cacheDir, "$key.json").delete() }
+                    runCatching { File(cacheDir, "$key.json.tmp").delete() }
+                }
+            }
+        }
     }
 
     suspend fun getLocallyReadIds(apiKey: String): Set<Long> {
         val ns = keyNamespace(apiKey) ?: return emptySet()
         val key = "${ns}_read_ids"
         locallyReadMemory[key]?.let { return it }
-        val loaded = readFromDisk(key, CachedLocallyReadIdsEntry.serializer())?.mailIds ?: emptySet()
+        val loaded = readFromDisk(
+            key = key,
+            serializer = CachedLocallyReadIdsEntry.serializer(),
+            maxBytes = MAX_DURABLE_STORE_BYTES,
+            backupCorrupt = true,
+        )?.mailIds ?: emptySet()
         locallyReadMemory[key] = loaded
         return loaded
     }
@@ -254,27 +284,35 @@ class SeekMailDiskCache(
         apiKey: String,
         mailIds: Set<Long>,
         updatedAtEpochMillis: Long = System.currentTimeMillis(),
-    ) {
-        val ns = keyNamespace(apiKey) ?: return
+    ): Boolean {
+        val ns = keyNamespace(apiKey) ?: return false
         val key = "${ns}_read_ids"
         val snapshot = mailIds.toSet()
-        locallyReadMemory[key] = snapshot
-        writeToDisk(
+        val persisted = writeToDisk(
             key = key,
             serializer = CachedLocallyReadIdsEntry.serializer(),
             value = CachedLocallyReadIdsEntry(
                 updatedAtEpochMillis = updatedAtEpochMillis,
                 mailIds = snapshot,
             ),
+            syncFileDescriptor = true,
         )
+        if (persisted) {
+            locallyReadMemory[key] = snapshot
+        }
+        return persisted
     }
 
     suspend fun getLocalTagStore(apiKey: String): SeekMailLocalTagStore {
         val ns = keyNamespace(apiKey) ?: return SeekMailLocalTagStore()
         val key = "${ns}_local_tags"
         localTagStoreMemory[key]?.let { return it }
-        val loaded = readFromDisk(key, CachedLocalTagStoreEntry.serializer())?.store
-            ?: SeekMailLocalTagStore()
+        val loaded = readFromDisk(
+            key = key,
+            serializer = CachedLocalTagStoreEntry.serializer(),
+            maxBytes = MAX_DURABLE_STORE_BYTES,
+            backupCorrupt = true,
+        )?.store ?: SeekMailLocalTagStore()
         localTagStoreMemory[key] = loaded
         return loaded
     }
@@ -283,26 +321,34 @@ class SeekMailDiskCache(
         apiKey: String,
         store: SeekMailLocalTagStore,
         updatedAtEpochMillis: Long = System.currentTimeMillis(),
-    ) {
-        val ns = keyNamespace(apiKey) ?: return
+    ): Boolean {
+        val ns = keyNamespace(apiKey) ?: return false
         val key = "${ns}_local_tags"
-        localTagStoreMemory[key] = store
-        writeToDisk(
+        val persisted = writeToDisk(
             key = key,
             serializer = CachedLocalTagStoreEntry.serializer(),
             value = CachedLocalTagStoreEntry(
                 updatedAtEpochMillis = updatedAtEpochMillis,
                 store = store,
             ),
+            syncFileDescriptor = true,
         )
+        if (persisted) {
+            localTagStoreMemory[key] = store
+        }
+        return persisted
     }
 
     suspend fun getLocalArchiveStore(apiKey: String): SeekMailLocalArchiveStore {
         val ns = keyNamespace(apiKey) ?: return SeekMailLocalArchiveStore()
         val key = "${ns}_local_archive"
         localArchiveStoreMemory[key]?.let { return it }
-        val loaded = readFromDisk(key, CachedLocalArchiveStoreEntry.serializer())?.store
-            ?: SeekMailLocalArchiveStore()
+        val loaded = readFromDisk(
+            key = key,
+            serializer = CachedLocalArchiveStoreEntry.serializer(),
+            maxBytes = MAX_DURABLE_STORE_BYTES,
+            backupCorrupt = true,
+        )?.store ?: SeekMailLocalArchiveStore()
         localArchiveStoreMemory[key] = loaded
         return loaded
     }
@@ -311,18 +357,22 @@ class SeekMailDiskCache(
         apiKey: String,
         store: SeekMailLocalArchiveStore,
         updatedAtEpochMillis: Long = System.currentTimeMillis(),
-    ) {
-        val ns = keyNamespace(apiKey) ?: return
+    ): Boolean {
+        val ns = keyNamespace(apiKey) ?: return false
         val key = "${ns}_local_archive"
-        localArchiveStoreMemory[key] = store
-        writeToDisk(
+        val persisted = writeToDisk(
             key = key,
             serializer = CachedLocalArchiveStoreEntry.serializer(),
             value = CachedLocalArchiveStoreEntry(
                 updatedAtEpochMillis = updatedAtEpochMillis,
                 store = store,
             ),
+            syncFileDescriptor = true,
         )
+        if (persisted) {
+            localArchiveStoreMemory[key] = store
+        }
+        return persisted
     }
 
     suspend fun clearForKey(apiKey: String) {
@@ -370,17 +420,24 @@ class SeekMailDiskCache(
     private suspend fun <T> readFromDisk(
         key: String,
         serializer: KSerializer<T>,
+        maxBytes: Long = MAX_ENTRY_BYTES,
+        backupCorrupt: Boolean = false,
     ): T? = withContext(ioDispatcher) {
         diskMutex.withLock {
             val file = File(cacheDir, "$key.json")
             if (!file.isFile) return@withLock null
             val length = file.length()
-            if (length <= 0L || length > MAX_ENTRY_BYTES) return@withLock null
+            if (length <= 0L || length > maxBytes) return@withLock null
             runCatching {
                 val text = file.readText(Charsets.UTF_8)
                 json.decodeFromString(serializer, text)
             }.getOrNull() ?: run {
-                runCatching { file.delete() }
+                if (backupCorrupt) {
+                    val backup = File(cacheDir, "$key.json.corrupt.${System.currentTimeMillis()}")
+                    runCatching { file.renameTo(backup) }
+                } else {
+                    runCatching { file.delete() }
+                }
                 null
             }
         }
@@ -392,25 +449,39 @@ class SeekMailDiskCache(
         value: T,
         prunePrefix: String? = null,
         maxForPrefix: Int = 0,
-    ) {
-        withContext(ioDispatcher) {
+        syncFileDescriptor: Boolean = false,
+    ): Boolean {
+        return withContext(ioDispatcher) {
             diskMutex.withLock {
                 runCatching {
                     if (!cacheDir.exists()) {
                         cacheDir.mkdirs()
                     }
-                    val encoded = json.encodeToString(serializer, value)
+                    val encodedBytes = json.encodeToString(serializer, value).toByteArray(Charsets.UTF_8)
                     val targetFile = File(cacheDir, "$key.json")
                     val tempFile = File(cacheDir, "$key.json.tmp")
-                    tempFile.writeText(encoded, Charsets.UTF_8)
+                    FileOutputStream(tempFile).use { fos ->
+                        fos.write(encodedBytes)
+                        fos.flush()
+                        if (syncFileDescriptor) {
+                            runCatching { fos.fd.sync() }
+                        }
+                    }
                     if (!tempFile.renameTo(targetFile)) {
-                        targetFile.writeText(encoded, Charsets.UTF_8)
+                        FileOutputStream(targetFile).use { fos ->
+                            fos.write(encodedBytes)
+                            fos.flush()
+                            if (syncFileDescriptor) {
+                                runCatching { fos.fd.sync() }
+                            }
+                        }
                         tempFile.delete()
                     }
                     if (prunePrefix != null && maxForPrefix > 0) {
                         pruneDiskPrefixIfNeeded(prunePrefix, maxForPrefix)
                     }
-                }
+                    true
+                }.getOrDefault(false)
             }
         }
     }
@@ -465,7 +536,8 @@ class SeekMailDiskCache(
         "${namespace}_detail_${mailId}"
 
     companion object {
-        private const val MAX_ENTRY_BYTES = 2_097_152L // 2 MB
+        private const val MAX_ENTRY_BYTES = 2_097_152L // 2 MB for transient HTTP caches
+        private const val MAX_DURABLE_STORE_BYTES = 33_554_432L // 32 MB for user local archive/tag/read stores
         private const val MAX_DETAIL_ENTRIES = 40
         private const val MAX_PAGE_ENTRIES = 20
 

@@ -16,6 +16,7 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.mail.VpsBillingMailParser
 import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CancellationException
@@ -31,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
+import java.io.OutputStream
 import java.util.UUID
 
 /**
@@ -124,12 +126,6 @@ class SeekMailRepositoryImpl(
                 }
                 throw e
             }
-        }
-
-    override suspend fun getMailbox(id: Long): Result<SeekMailbox> =
-        runMailCatching {
-            val key = requireApiKey()
-            apiClient.getMailbox(apiKey = key, id = id)
         }
 
     override suspend fun checkMailboxAvailable(address: String): Result<Boolean> =
@@ -246,7 +242,13 @@ class SeekMailRepositoryImpl(
 
             val detail = try {
                 val fresh = apiClient.getMailDetail(apiKey = key, mailId = mailId)
-                diskCache?.saveMailDetail(key, mailId, fresh)
+                val containsSensitiveSshPassword = !VpsBillingMailParser.parseDetail(fresh)?.sshPassword.isNullOrBlank()
+                diskCache?.saveMailDetail(
+                    apiKey = key,
+                    mailId = mailId,
+                    detail = fresh,
+                    persistToDisk = !containsSensitiveSshPassword,
+                )
                 fresh
             } catch (c: CancellationException) {
                 throw c
@@ -262,12 +264,6 @@ class SeekMailRepositoryImpl(
             val resolvedDetail = detail.copy(summary = detail.summary.copy(isRead = true))
             notifyAutoIngestDetail(resolvedDetail)
             resolvedDetail
-        }
-
-    override suspend fun getRawMailEml(mailId: Long): Result<String> =
-        runMailCatching {
-            val key = requireApiKey()
-            apiClient.getRawMailEml(apiKey = key, mailId = mailId)
         }
 
     override suspend fun getAttachments(mailId: Long): Result<List<SeekMailAttachment>> =
@@ -286,6 +282,21 @@ class SeekMailRepositoryImpl(
                 apiKey = key,
                 mailId = mailId,
                 attachmentId = attachmentId,
+            )
+        }
+
+    override suspend fun downloadAttachmentToStream(
+        mailId: Long,
+        attachmentId: String,
+        outputStream: OutputStream,
+    ): Result<Long> =
+        runMailCatching {
+            val key = requireApiKey()
+            apiClient.downloadAttachmentToStream(
+                apiKey = key,
+                mailId = mailId,
+                attachmentId = attachmentId,
+                outputStream = outputStream,
             )
         }
 
@@ -362,8 +373,9 @@ class SeekMailRepositoryImpl(
             val current = _locallyReadMailIds.value
             val updated = current + validIds
             if (updated == current) return
-            _locallyReadMailIds.value = updated
-            diskCache?.saveLocallyReadIds(key, updated)
+            if (diskCache == null || diskCache.saveLocallyReadIds(key, updated)) {
+                _locallyReadMailIds.value = updated
+            }
         }
     }
 
@@ -398,8 +410,13 @@ class SeekMailRepositoryImpl(
                 colorHex = safeHex,
             )
             val updated = current.copy(tags = current.tags + created)
+            if (diskCache != null && !diskCache.saveLocalTagStore(key, updated)) {
+                throw SeekMailException(
+                    kind = SeekMailErrorKind.UNKNOWN,
+                    message = "本地标签保存失败，请检查存储空间",
+                )
+            }
             _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
             created
         }
     }
@@ -417,17 +434,20 @@ class SeekMailRepositoryImpl(
                 val filtered = ids.filterNot { it == cleanId }
                 if (filtered.isEmpty()) null else mailId to filtered
             }.toMap()
+            val nextMailboxIds = current.mailMailboxIds.filterKeys { it in nextMailTags }
             val updated = SeekMailLocalTagStore(
                 tags = nextTags,
                 mailTagIds = nextMailTags,
+                mailMailboxIds = nextMailboxIds,
             )
             if (updated == current) return
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
-    override suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) {
+    override suspend fun toggleLocalTagForMail(mailId: Long, tagId: String, mailboxId: Long?) {
         if (mailId <= 0L || tagId.isBlank()) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
@@ -442,18 +462,27 @@ class SeekMailRepositoryImpl(
                 existingIds + tagId
             }
             val nextMap = current.mailTagIds.toMutableMap()
+            val nextMailboxMap = current.mailMailboxIds.toMutableMap()
             if (nextIds.isEmpty()) {
                 nextMap.remove(mailId)
+                nextMailboxMap.remove(mailId)
             } else {
                 nextMap[mailId] = nextIds
+                if (mailboxId != null && mailboxId > 0L) {
+                    nextMailboxMap[mailId] = mailboxId
+                }
             }
-            val updated = current.copy(mailTagIds = nextMap)
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            val updated = current.copy(
+                mailTagIds = nextMap,
+                mailMailboxIds = nextMailboxMap,
+            )
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
-    override suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) {
+    override suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>, mailboxId: Long?) {
         if (mailId <= 0L) return
         val key = reconcileActiveKey()
         if (key.isEmpty()) return
@@ -463,19 +492,32 @@ class SeekMailRepositoryImpl(
             val knownIds = current.tags.mapTo(HashSet()) { it.id }
             val sanitized = tagIds.filter { it in knownIds }.distinct()
             val nextMap = current.mailTagIds.toMutableMap()
+            val nextMailboxMap = current.mailMailboxIds.toMutableMap()
             if (sanitized.isEmpty()) {
                 nextMap.remove(mailId)
+                nextMailboxMap.remove(mailId)
             } else {
                 nextMap[mailId] = sanitized
+                if (mailboxId != null && mailboxId > 0L) {
+                    nextMailboxMap[mailId] = mailboxId
+                }
             }
-            val updated = current.copy(mailTagIds = nextMap)
+            val updated = current.copy(
+                mailTagIds = nextMap,
+                mailMailboxIds = nextMailboxMap,
+            )
             if (updated == current) return
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
-    override suspend fun addLocalTagToMails(mailIds: Collection<Long>, tagId: String) {
+    override suspend fun addLocalTagToMails(
+        mailIds: Collection<Long>,
+        tagId: String,
+        mailboxIdsByMailId: Map<Long, Long>,
+    ) {
         val validIds = mailIds.filter { it > 0L }
         if (validIds.isEmpty() || tagId.isBlank()) return
         val key = reconcileActiveKey()
@@ -485,6 +527,7 @@ class SeekMailRepositoryImpl(
             val current = _localTagStore.value
             if (current.tags.none { it.id == tagId }) return
             val nextMap = current.mailTagIds.toMutableMap()
+            val nextMailboxMap = current.mailMailboxIds.toMutableMap()
             var changed = false
             validIds.forEach { mailId ->
                 val existing = nextMap[mailId].orEmpty()
@@ -492,11 +535,20 @@ class SeekMailRepositoryImpl(
                     nextMap[mailId] = existing + tagId
                     changed = true
                 }
+                val mbId = mailboxIdsByMailId[mailId]
+                if (mbId != null && mbId > 0L && nextMailboxMap[mailId] != mbId) {
+                    nextMailboxMap[mailId] = mbId
+                    changed = true
+                }
             }
             if (!changed) return
-            val updated = current.copy(mailTagIds = nextMap)
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            val updated = current.copy(
+                mailTagIds = nextMap,
+                mailMailboxIds = nextMailboxMap,
+            )
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
@@ -509,19 +561,29 @@ class SeekMailRepositoryImpl(
             if (activeKey != key) return
             val current = _localTagStore.value
             val nextMap = current.mailTagIds.toMutableMap()
+            val nextMailboxMap = current.mailMailboxIds.toMutableMap()
             var changed = false
             validIds.forEach { mailId ->
                 val existing = nextMap[mailId].orEmpty()
                 if (tagId in existing) {
                     val remaining = existing.filterNot { it == tagId }
-                    if (remaining.isEmpty()) nextMap.remove(mailId) else nextMap[mailId] = remaining
+                    if (remaining.isEmpty()) {
+                        nextMap.remove(mailId)
+                        nextMailboxMap.remove(mailId)
+                    } else {
+                        nextMap[mailId] = remaining
+                    }
                     changed = true
                 }
             }
             if (!changed) return
-            val updated = current.copy(mailTagIds = nextMap)
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            val updated = current.copy(
+                mailTagIds = nextMap,
+                mailMailboxIds = nextMailboxMap,
+            )
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
@@ -534,16 +596,22 @@ class SeekMailRepositoryImpl(
             if (activeKey != key) return
             val current = _localTagStore.value
             val nextMap = current.mailTagIds.toMutableMap()
+            val nextMailboxMap = current.mailMailboxIds.toMutableMap()
             var changed = false
             validIds.forEach { mailId ->
                 if (nextMap.remove(mailId) != null) {
+                    nextMailboxMap.remove(mailId)
                     changed = true
                 }
             }
             if (!changed) return
-            val updated = current.copy(mailTagIds = nextMap)
-            _localTagStore.value = updated
-            diskCache?.saveLocalTagStore(key, updated)
+            val updated = current.copy(
+                mailTagIds = nextMap,
+                mailMailboxIds = nextMailboxMap,
+            )
+            if (diskCache == null || diskCache.saveLocalTagStore(key, updated)) {
+                _localTagStore.value = updated
+            }
         }
     }
 
@@ -574,8 +642,9 @@ class SeekMailRepositoryImpl(
                 archivedAtMillis = nextArchivedAt,
                 deletedMailIds = nextDeleted,
             )
-            _localArchiveStore.value = updated
-            diskCache?.saveLocalArchiveStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalArchiveStore(key, updated)) {
+                _localArchiveStore.value = updated
+            }
         }
     }
 
@@ -598,8 +667,9 @@ class SeekMailRepositoryImpl(
                 archivedMails = nextArchived,
                 archivedAtMillis = nextArchivedAt,
             )
-            _localArchiveStore.value = updated
-            diskCache?.saveLocalArchiveStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalArchiveStore(key, updated)) {
+                _localArchiveStore.value = updated
+            }
         }
     }
 
@@ -621,8 +691,10 @@ class SeekMailRepositoryImpl(
                 deletedMailIds = current.deletedMailIds + validIds,
             )
             if (updated == current) return
-            _localArchiveStore.value = updated
-            diskCache?.saveLocalArchiveStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalArchiveStore(key, updated)) {
+                _localArchiveStore.value = updated
+                diskCache?.deleteMailDetails(key, validIds)
+            }
         }
     }
 
@@ -663,8 +735,22 @@ class SeekMailRepositoryImpl(
                 deletedMailIds = current.deletedMailIds - validIds,
             )
             if (updated == current) return
-            _localArchiveStore.value = updated
-            diskCache?.saveLocalArchiveStore(key, updated)
+            if (diskCache == null || diskCache.saveLocalArchiveStore(key, updated)) {
+                _localArchiveStore.value = updated
+            }
+        }
+    }
+
+    override suspend fun clearCacheForCurrentKey() {
+        stateMutex.withLock {
+            val keyToClear = activeKey.ifEmpty { settingsRepository.settings.value.seekMailApiKey.trim() }
+            if (keyToClear.isNotEmpty()) {
+                diskCache?.clearForKey(keyToClear)
+            }
+            _locallyReadMailIds.value = emptySet()
+            _localTagStore.value = SeekMailLocalTagStore()
+            _localArchiveStore.value = SeekMailLocalArchiveStore()
+            loadedReadIdsForKey = null
         }
     }
 
@@ -685,8 +771,9 @@ class SeekMailRepositoryImpl(
             val current = _locallyReadMailIds.value
             if (mailId in current) return
             val updated = current + mailId
-            _locallyReadMailIds.value = updated
-            diskCache?.saveLocallyReadIds(key, updated)
+            if (diskCache == null || diskCache.saveLocallyReadIds(key, updated)) {
+                _locallyReadMailIds.value = updated
+            }
         }
     }
 
@@ -744,7 +831,7 @@ class SeekMailRepositoryImpl(
     private fun overlayReadState(summary: SeekMailSummary, readIds: Set<Long>): SeekMailSummary =
         if (summary.isRead || summary.id !in readIds) summary else summary.copy(isRead = true)
 
-    private suspend fun notifyAutoIngestSummaries(items: List<SeekMailSummary>) {
+    private fun notifyAutoIngestSummaries(items: List<SeekMailSummary>) {
         val service = vpsMailAutoIngestService ?: return
         val deletedIds = _localArchiveStore.value.deletedMailIds
         val activeItems = if (deletedIds.isEmpty()) {
@@ -753,12 +840,15 @@ class SeekMailRepositoryImpl(
             items.filterNot { it.id in deletedIds }
         }
         if (activeItems.isEmpty()) return
-        try {
-            service.processIncomingSummaries(activeItems)
-        } catch (c: CancellationException) {
-            throw c
-        } catch (_: Throwable) {
-            // Auto-ingest is best-effort and must never fail inbox loading.
+        // Launch asynchronously so inbox list loading never blocks on background detail peeks.
+        externalScope.launch {
+            try {
+                service.processIncomingSummaries(activeItems)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                // Auto-ingest is best-effort and must never fail inbox loading.
+            }
         }
     }
 

@@ -9,12 +9,14 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
+import org.jsoup.safety.Cleaner
+import org.jsoup.safety.Safelist
 import org.jsoup.select.NodeTraversor
 import org.jsoup.select.NodeVisitor
 import java.util.Locale
 
 /**
- * HTML sanitizer, themed document wrapper, plain-text fallback extractor, and auth telemetry parser
+ * Jsoup Safelist-based HTML sanitizer, plain-text fallback extractor, and auth telemetry parser
  * for Seek Mail (`seek.li`) messages.
  */
 object SeekMailHtmlSanitizer {
@@ -24,23 +26,32 @@ object SeekMailHtmlSanitizer {
         val hasRemoteImages: Boolean,
     )
 
-    private val DANGEROUS_TAGS_SELECTOR = listOf(
-        "script",
-        "iframe",
-        "object",
-        "embed",
-        "applet",
-        "form",
-        "input",
-        "button",
-        "select",
-        "textarea",
-        "base",
-        "link",
-        "meta",
-        "frame",
-        "frameset",
-    ).joinToString(separator = ", ")
+    private val EMAIL_SAFELIST: Safelist = Safelist.relaxed()
+        .preserveRelativeLinks(true)
+        .addTags(
+            "section", "article", "header", "footer", "aside", "main", "nav",
+            "center", "font", "hr", "s", "del", "ins", "mark", "abbr", "time",
+            "address", "figure", "figcaption", "picture", "source", "big",
+        )
+        .addAttributes(":all", "style", "class", "dir", "lang", "title", "align", "valign")
+        .addAttributes(
+            "table",
+            "width", "height", "border", "cellpadding", "cellspacing", "bgcolor", "background", "role",
+        )
+        .addAttributes("tr", "bgcolor", "height", "background")
+        .addAttributes("td", "width", "height", "colspan", "rowspan", "bgcolor", "background", "nowrap")
+        .addAttributes("th", "width", "height", "colspan", "rowspan", "bgcolor", "background", "scope", "nowrap")
+        .addAttributes("col", "span", "width")
+        .addAttributes("colgroup", "span", "width")
+        .addAttributes("img", "src", "srcset", "alt", "width", "height", "border", "title")
+        .addAttributes("source", "src", "srcset", "media", "type")
+        .addAttributes("a", "href", "name", "target", "rel")
+        .addAttributes("font", "color", "face", "size")
+        .addAttributes("div", "bgcolor", "background")
+        .addAttributes("p", "bgcolor")
+        .addProtocols("a", "href", "http", "https", "mailto")
+        .addProtocols("img", "src", "http", "https", "cid", "data")
+        .addProtocols("source", "src", "http", "https", "cid", "data")
 
     private val URI_ATTRIBUTES = setOf(
         "href",
@@ -53,15 +64,15 @@ object SeekMailHtmlSanitizer {
     )
 
     private val CSS_COMMENT_REGEX = Regex("""/\*[\s\S]*?\*/""")
+    private val CSS_HEX_ESCAPE_REGEX = Regex("""\\([0-9a-fA-F]{1,6})\s?""")
     private val CSS_URL_REGEX = Regex(
         pattern = """url\(\s*(?:(['"])([\s\S]*?)\1|([^)\s]+))\s*\)""",
         option = RegexOption.IGNORE_CASE,
     )
     private val DANGEROUS_CSS_PATTERN = Regex(
-        pattern = """(?:expression\s*\(|javascript\s*:|vbscript\s*:|file\s*:|intent\s*:|content\s*:|-moz-binding|behavior\s*:|@import)""",
+        pattern = """(?:expression\s*\(|javascript\s*:|vbscript\s*:|file\s*:|intent\s*:|content\s*://|-moz-binding|behavior\s*:|@import|position\s*:\s*fixed)""",
         option = RegexOption.IGNORE_CASE,
     )
-    private val SAFE_HEX_COLOR_REGEX = Regex("""^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$""")
     private val MULTI_SPACE_REGEX = Regex("""[ \t\u000B\u000C\r]+""")
     private val MULTI_NEWLINE_REGEX = Regex("""\n{3,}""")
 
@@ -107,11 +118,11 @@ object SeekMailHtmlSanitizer {
             )
         }
 
-        val document: Document = Jsoup.parse(rawHtml)
+        val parsedDoc: Document = Jsoup.parse(rawHtml)
+        // Strict Jsoup Safelist whitelist removes all non-whitelisted tags (<script>, <iframe>,
+        // <style>, <svg>, <audio>, <video>, <form>, <dialog>, <marquee>, etc.) and attributes.
+        val document: Document = Cleaner(EMAIL_SAFELIST).clean(parsedDoc)
         document.outputSettings().prettyPrint(false)
-
-        // Remove active, form, framing, and metadata elements globally (head + body).
-        document.select(DANGEROUS_TAGS_SELECTOR).remove()
 
         var hasRemoteImages = false
         val body = document.body()
@@ -125,7 +136,7 @@ object SeekMailHtmlSanitizer {
             for (key in attrKeys) {
                 val keyLower = key.trim().lowercase(Locale.ROOT)
 
-                // Strip all inline event handlers and iframe srcdoc payloads.
+                // Defense-in-depth: strip any inline event handlers or srcdoc payloads.
                 if (keyLower.startsWith("on") || keyLower == "srcdoc") {
                     element.removeAttr(key)
                     continue
@@ -153,9 +164,9 @@ object SeekMailHtmlSanitizer {
                         element.removeAttr(key)
                     } else if (isRemoteHttpUri(rawUri)) {
                         val isRemoteImageAttr = when (keyLower) {
-                            "src" -> tagLower == "img" || tagLower == "source" || tagLower == "video"
+                            "src" -> tagLower == "img" || tagLower == "source" || tagLower == "video" || tagLower == "audio"
                             "background", "poster" -> true
-                            "href", "xlink:href" -> tagLower == "image"
+                            "href", "xlink:href" -> tagLower == "image" || tagLower == "use"
                             else -> false
                         }
                         if (isRemoteImageAttr) {
@@ -180,114 +191,12 @@ object SeekMailHtmlSanitizer {
                     }
                 }
             }
-
-            if (tagLower == "style") {
-                val cssText = element.data()
-                val cssResult = sanitizeStyleBlock(cssText)
-                if (cssResult.hasRemoteUrl) {
-                    hasRemoteImages = true
-                }
-                if (cssResult.unsafe) {
-                    element.remove()
-                }
-            }
         }
 
         return SanitizedEmailHtml(
             bodyFragmentHtml = body.html().trim(),
             hasRemoteImages = hasRemoteImages,
         )
-    }
-
-    fun wrapInThemedDocument(
-        sanitizedFragmentHtml: String,
-        isDark: Boolean,
-        purePitchAmoled: Boolean,
-        fontScale: Float = 1.0f,
-        backgroundHex: String,
-        onSurfaceHex: String,
-        primaryHex: String,
-        outlineHex: String,
-        surfaceContainerHex: String,
-    ): String {
-        val clampedScale = fontScale.coerceIn(0.75f, 2.0f)
-        val bodyFontSizePx = String.format(Locale.US, "%.2f", 15f * clampedScale)
-
-        val safeBackground = sanitizeHexColor(
-            candidate = if (isDark && purePitchAmoled) "#000000" else backgroundHex,
-            fallback = if (isDark) "#101417" else "#F7FAFF",
-        )
-        val safeOnSurface = sanitizeHexColor(
-            candidate = onSurfaceHex,
-            fallback = if (isDark) "#E6E9F0" else "#1A1B1E",
-        )
-        val safePrimary = sanitizeHexColor(
-            candidate = primaryHex,
-            fallback = if (isDark) "#6BA4FF" else "#1E5EFF",
-        )
-        val safeOutline = sanitizeHexColor(
-            candidate = outlineHex,
-            fallback = if (isDark) "#2B3140" else "#DDD7CC",
-        )
-        val safeSurfaceContainer = sanitizeHexColor(
-            candidate = surfaceContainerHex,
-            fallback = if (isDark) "#111520" else "#F2EDE3",
-        )
-        val colorScheme = if (isDark) "dark" else "light"
-
-        return buildString(sanitizedFragmentHtml.length + 1024) {
-            append("<!DOCTYPE html>")
-            append("<html>")
-            append("<head>")
-            append("<meta charset=\"utf-8\">")
-            append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=3.0\">")
-            append("<meta name=\"color-scheme\" content=\"").append(colorScheme).append("\">")
-            append("<style>")
-            append(":root { color-scheme: ").append(colorScheme).append("; }\n")
-            append("*, *::before, *::after { box-sizing: border-box; }\n")
-            append("html, body { ")
-            append("margin: 0 !important; padding: 0 !important; ")
-            append("width: 100% !important; max-width: 100% !important; min-width: 0 !important; ")
-            append("overflow-x: hidden !important; ")
-            append("background-color: ").append(safeBackground).append("; ")
-            append("color: ").append(safeOnSurface).append("; ")
-            append("font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; ")
-            append("font-size: ").append(bodyFontSizePx).append("px; ")
-            append("line-height: 1.65; ")
-            append("-webkit-text-size-adjust: 100%; ")
-            append("overflow-wrap: anywhere; ")
-            append("word-break: break-word; ")
-            append("}\n")
-            append("body { padding: 12px 14px 24px 14px !important; box-sizing: border-box; }\n")
-            append("body * { max-width: 100% !important; min-width: 0 !important; }\n")
-            append("img, table, pre { max-width: 100% !important; }\n")
-            append("img, svg, video, picture { max-width: 100% !important; height: auto !important; }\n")
-            append("table { border-collapse: collapse; }\n")
-            append("th, td { border-color: ").append(safeOutline).append("; overflow-wrap: anywhere !important; word-break: break-word !important; white-space: normal !important; }\n")
-            append("a { color: ").append(safePrimary).append("; text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }\n")
-            append("blockquote { ")
-            append("margin: 10px 0; padding: 4px 12px; ")
-            append("border-left: 3px solid ").append(safeOutline).append("; ")
-            append("background-color: ").append(safeSurfaceContainer).append("; ")
-            append("border-radius: 0 6px 6px 0; ")
-            append("opacity: 0.92; ")
-            append("}\n")
-            append("pre, code { ")
-            append("font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ")
-            append("background-color: ").append(safeSurfaceContainer).append("; ")
-            append("border-radius: 6px; ")
-            append("}\n")
-            append("code { padding: 1px 5px; font-size: 0.9em; }\n")
-            append("pre { padding: 10px 12px; border: 1px solid ").append(safeOutline).append("; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }\n")
-            append("pre code { background: transparent; padding: 0; }\n")
-            append("hr { border: none; border-top: 1px solid ").append(safeOutline).append("; margin: 14px 0; }\n")
-            append("</style>")
-            append("</head>")
-            append("<body>")
-            append(sanitizedFragmentHtml)
-            append("</body>")
-            append("</html>")
-        }
     }
 
     fun extractPlainTextFallback(rawHtml: String): String {
@@ -438,8 +347,20 @@ object SeekMailHtmlSanitizer {
         val hasRemoteUrl: Boolean,
     )
 
+    private fun decodeCssEscapes(css: String): String {
+        if (!css.contains('\\')) return css
+        return CSS_HEX_ESCAPE_REGEX.replace(css) { match ->
+            val codePoint = match.groupValues[1].toIntOrNull(16)
+            if (codePoint != null && codePoint in 1..0x10FFFF && !Character.isSurrogate(codePoint.toChar())) {
+                String(Character.toChars(codePoint))
+            } else {
+                ""
+            }
+        }
+    }
+
     private fun sanitizeInlineStyle(rawStyle: String): StyleSanitizeResult {
-        val strippedComments = rawStyle.replace(CSS_COMMENT_REGEX, "")
+        val strippedComments = decodeCssEscapes(rawStyle.replace(CSS_COMMENT_REGEX, ""))
         val collapsed = strippedComments.filterNot { it.isWhitespace() || it.isISOControl() }
         if (DANGEROUS_CSS_PATTERN.containsMatchIn(collapsed)) {
             return StyleSanitizeResult(sanitized = null, hasRemoteUrl = false)
@@ -458,32 +379,6 @@ object SeekMailHtmlSanitizer {
         if (hasUnsafeUrl) {
             return StyleSanitizeResult(sanitized = null, hasRemoteUrl = false)
         }
-        return StyleSanitizeResult(sanitized = rawStyle, hasRemoteUrl = hasRemoteUrl)
-    }
-
-    private data class StyleBlockResult(
-        val unsafe: Boolean,
-        val hasRemoteUrl: Boolean,
-    )
-
-    private fun sanitizeStyleBlock(cssText: String): StyleBlockResult {
-        val strippedComments = cssText.replace(CSS_COMMENT_REGEX, "")
-        val collapsed = strippedComments.filterNot { it.isWhitespace() || it.isISOControl() }
-        val unsafe = DANGEROUS_CSS_PATTERN.containsMatchIn(collapsed)
-        var hasRemoteUrl = false
-        for (match in CSS_URL_REGEX.findAll(strippedComments)) {
-            val urlValue = (match.groupValues[2].ifEmpty { match.groupValues[3] }).trim()
-            if (isRemoteHttpUri(urlValue)) {
-                hasRemoteUrl = true
-            } else if (!isAllowedUri(urlValue)) {
-                return StyleBlockResult(unsafe = true, hasRemoteUrl = false)
-            }
-        }
-        return StyleBlockResult(unsafe = unsafe, hasRemoteUrl = hasRemoteUrl)
-    }
-
-    private fun sanitizeHexColor(candidate: String, fallback: String): String {
-        val trimmed = candidate.trim()
-        return if (SAFE_HEX_COLOR_REGEX.matches(trimmed)) trimmed else fallback
+        return StyleSanitizeResult(sanitized = strippedComments, hasRemoteUrl = hasRemoteUrl)
     }
 }
