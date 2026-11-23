@@ -39,83 +39,91 @@ open class PulseNotificationDispatcher(
 ) {
     private val appContext: Context = context.applicationContext ?: context
 
+    @Volatile
+    private var channelsEnsured: Boolean = false
+
     open fun ensureChannels() {
+        if (channelsEnsured) return
         val manager = appContext.getSystemService(NotificationManager::class.java) ?: return
-        for (legacyChannelId in LEGACY_LOW_IMPORTANCE_CHANNEL_IDS) {
-            runCatching { manager.deleteNotificationChannel(legacyChannelId) }
+        synchronized(this) {
+            if (channelsEnsured) return
+            for (legacyChannelId in LEGACY_LOW_IMPORTANCE_CHANNEL_IDS) {
+                runCatching { manager.deleteNotificationChannel(legacyChannelId) }
+            }
+            val channels = listOf(
+                NotificationChannel(
+                    CHANNEL_KEYWORD_ALERTS,
+                    "关键词雷达提醒",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "当新发布主题命中本地关键词监控规则时通知"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+                NotificationChannel(
+                    CHANNEL_TRACKED_REPLIES,
+                    "关注帖新回复",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "当已开启追更的帖子收到新楼层回复时通知"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+                NotificationChannel(
+                    CHANNEL_FORUM_INTERACTIONS,
+                    "社区回复与提及",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "收到新的帖子回复或 @提及时通知"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+                NotificationChannel(
+                    CHANNEL_DIRECT_MESSAGES,
+                    "社区私信",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "收到新的社区私信时通知"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+                NotificationChannel(
+                    CHANNEL_SSH_BENCHMARK_ONGOING,
+                    "SSH 后台测机保活",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "SSH 一键测机在后台持续运行时的进度状态通知"
+                    setShowBadge(false)
+                },
+                NotificationChannel(
+                    CHANNEL_SSH_BENCHMARK_RESULT,
+                    "SSH 测机完成提醒",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "当后台 SSH 测评脚本运行结束时通知"
+                },
+                NotificationChannel(
+                    CHANNEL_OVERSEAS_PROMOS,
+                    CHANNEL_OVERSEAS_PROMOS_NAME,
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "当海外情报监测到新的海外 VPS 与服务器促销帖时主动推送通知"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+                NotificationChannel(
+                    CHANNEL_COMMUNITY_ACTIVITIES,
+                    CHANNEL_COMMUNITY_ACTIVITIES_NAME,
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = "开启「新活动通知」后，发现新的社区抽奖、福利与专题活动时推送提醒"
+                    enableVibration(true)
+                    setShowBadge(true)
+                },
+            )
+            manager.createNotificationChannels(channels)
+            channelsEnsured = true
         }
-        val channels = listOf(
-            NotificationChannel(
-                CHANNEL_KEYWORD_ALERTS,
-                "关键词雷达提醒",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "当新发布主题命中本地关键词监控规则时通知"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-            NotificationChannel(
-                CHANNEL_TRACKED_REPLIES,
-                "关注帖新回复",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "当已开启追更的帖子收到新楼层回复时通知"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-            NotificationChannel(
-                CHANNEL_FORUM_INTERACTIONS,
-                "社区回复与提及",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "收到新的帖子回复或 @提及时通知"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-            NotificationChannel(
-                CHANNEL_DIRECT_MESSAGES,
-                "社区私信",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "收到新的社区私信时通知"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-            NotificationChannel(
-                CHANNEL_SSH_BENCHMARK_ONGOING,
-                "SSH 后台测机保活",
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                description = "SSH 一键测机在后台持续运行时的进度状态通知"
-                setShowBadge(false)
-            },
-            NotificationChannel(
-                CHANNEL_SSH_BENCHMARK_RESULT,
-                "SSH 测机完成提醒",
-                NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply {
-                description = "当后台 SSH 测评脚本运行结束时通知"
-            },
-            NotificationChannel(
-                CHANNEL_OVERSEAS_PROMOS,
-                CHANNEL_OVERSEAS_PROMOS_NAME,
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "当海外情报监测到新的海外 VPS 与服务器促销帖时主动推送通知"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-            NotificationChannel(
-                CHANNEL_COMMUNITY_ACTIVITIES,
-                CHANNEL_COMMUNITY_ACTIVITIES_NAME,
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "开启「新活动通知」后，发现新的社区抽奖、福利与专题活动时推送提醒"
-                enableVibration(true)
-                setShowBadge(true)
-            },
-        )
-        manager.createNotificationChannels(channels)
     }
 
     open fun hasPostNotificationsPermission(): Boolean {

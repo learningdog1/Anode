@@ -40,6 +40,13 @@ object RadarRuleCanonicalizer {
     const val MAX_KEYWORD_LENGTH = 64
     const val MAX_REGEX_LENGTH = 160
     private val EXCLUDE_SPLIT_REGEX = Regex("""[,，;；\n\r]+""")
+    // Reject obvious catastrophic backtracking constructs such as (a+)+, (.*)*, (\w+){2,}
+    private val NESTED_QUANTIFIER_REGEX = Regex("""\([^()]*[+*?\}][^()]*\)\s*(?:[+*]|\{\s*\d+\s*,)""")
+
+    fun isPotentiallyUnsafeRegex(pattern: String): Boolean {
+        if (pattern.length > MAX_REGEX_LENGTH) return true
+        return NESTED_QUANTIFIER_REGEX.containsMatchIn(pattern)
+    }
 
     fun normalizeCategorySlug(raw: String): String =
         raw.trim().lowercase()
@@ -82,6 +89,11 @@ object RadarRuleCanonicalizer {
         val maxLen = if (matchMode == KeywordMatchMode.REGEX) MAX_REGEX_LENGTH else MAX_KEYWORD_LENGTH
         val normalizedKeyword = trimmed.take(maxLen)
         if (matchMode == KeywordMatchMode.REGEX) {
+            if (isPotentiallyUnsafeRegex(normalizedKeyword)) {
+                return Result.failure(
+                    IllegalArgumentException("正则表达式包含嵌套量词，可能导致性能风险，请简化表达式"),
+                )
+            }
             try {
                 Regex(normalizedKeyword, RegexOption.IGNORE_CASE)
             } catch (e: PatternSyntaxException) {
