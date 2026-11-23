@@ -29,8 +29,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,6 +67,8 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * Semantic board/category micro-tag using the 15-board Anode palette with soft gradient
@@ -212,8 +217,8 @@ fun DrumstickCheckInChip(
     val containerColor by animateColorAsState(
         targetValue = when {
             !isSignedIn -> MaterialTheme.colorScheme.surfaceContainerHigh
-            checkedIn -> ext.drumstickContainer
-            else -> MaterialTheme.colorScheme.tertiaryContainer
+            checkedIn -> ext.drumstickContainer.copy(alpha = if (isDark) 0.78f else 0.86f)
+            else -> ext.drumstickContainer
         },
         label = "checkInContainer",
     )
@@ -221,7 +226,7 @@ fun DrumstickCheckInChip(
         targetValue = when {
             !isSignedIn -> MaterialTheme.colorScheme.onSurfaceVariant
             checkedIn -> ext.onDrumstickContainer
-            else -> MaterialTheme.colorScheme.onTertiaryContainer
+            else -> ext.onDrumstickContainer
         },
         label = "checkInContent",
     )
@@ -546,7 +551,23 @@ fun RelativeTimeText(
     style: TextStyle = MaterialTheme.typography.labelMedium,
     color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
-    val formatted = remember(isoTimestamp) { formatRelativeTimeChinese(isoTimestamp) }
+    val parsedEpochMillis = remember(isoTimestamp) {
+        val trimmed = isoTimestamp.trim()
+        if (trimmed.isEmpty()) null else parseTimestampEpochMillis(trimmed)
+    }
+    var nowMillis by remember(isoTimestamp) { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(isoTimestamp, parsedEpochMillis) {
+        val targetEpoch = parsedEpochMillis ?: return@LaunchedEffect
+        while (isActive) {
+            val ageMs = nowMillis - targetEpoch
+            if (ageMs !in -60_000L..7_200_000L) break
+            delay(60_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val formatted = remember(isoTimestamp, nowMillis) {
+        formatRelativeTimeChinese(isoTimestamp, nowEpochMillis = nowMillis)
+    }
     val display = if (prefix.isNotEmpty() && formatted.isNotEmpty()) "$prefix$formatted" else formatted
     Text(
         text = display,

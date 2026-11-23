@@ -354,31 +354,31 @@ class MarkdownParserTest {
             0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
         )
         assertEquals(
-            DetectedImageFormat("image/png", "png", isSvg = false),
+            DetectedImageFormat("image/png", "png", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(pngBytes, "image/jpeg", "https://img.example.com/photo.jpg"),
         )
 
         val jpgBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte())
         assertEquals(
-            DetectedImageFormat("image/jpeg", "jpg", isSvg = false),
+            DetectedImageFormat("image/jpeg", "jpg", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(jpgBytes, null, "https://img.example.com/raw"),
         )
 
         val gifBytes = "GIF89a...".toByteArray(StandardCharsets.US_ASCII)
         assertEquals(
-            DetectedImageFormat("image/gif", "gif", isSvg = false),
+            DetectedImageFormat("image/gif", "gif", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(gifBytes, null, "https://img.example.com/sticker"),
         )
 
         val webpBytes = "RIFF1234WEBP".toByteArray(StandardCharsets.US_ASCII)
         assertEquals(
-            DetectedImageFormat("image/webp", "webp", isSvg = false),
+            DetectedImageFormat("image/webp", "webp", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(webpBytes, null, "https://img.example.com/photo.jpg?fmt=webp"),
         )
 
         val bmpBytes = byteArrayOf(0x42, 0x4D, 0x10, 0x00)
         assertEquals(
-            DetectedImageFormat("image/bmp", "bmp", isSvg = false),
+            DetectedImageFormat("image/bmp", "bmp", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(bmpBytes, null, "https://img.example.com/raw"),
         )
 
@@ -388,30 +388,30 @@ class MarkdownParserTest {
             'a'.code.toByte(), 'v'.code.toByte(), 'i'.code.toByte(), 'f'.code.toByte(),
         )
         assertEquals(
-            DetectedImageFormat("image/avif", "avif", isSvg = false),
+            DetectedImageFormat("image/avif", "avif", isSvg = false, hasVerifiedSignature = true),
             detectImageFormat(avifBytes, null, "https://img.example.com/raw"),
         )
 
         val directSvg = """<svg xmlns="http://www.w3.org/2000/svg"></svg>""".toByteArray(StandardCharsets.UTF_8)
         assertEquals(
-            DetectedImageFormat("image/svg+xml", "svg", isSvg = true),
+            DetectedImageFormat("image/svg+xml", "svg", isSvg = true, hasVerifiedSignature = true),
             detectImageFormat(directSvg, null, "https://Report.Check.Place/ip/xyz"),
         )
 
         val xmlSvg = """<?xml version="1.0" encoding="UTF-8"?>  <svg viewBox="0 0 10 10"></svg>"""
             .toByteArray(StandardCharsets.UTF_8)
         assertEquals(
-            DetectedImageFormat("image/svg+xml", "svg", isSvg = true),
+            DetectedImageFormat("image/svg+xml", "svg", isSvg = true, hasVerifiedSignature = true),
             detectImageFormat(xmlSvg, null, "https://Report.Check.Place/hardware/abc"),
         )
 
         val unknownBytes = byteArrayOf(0x01, 0x02, 0x03, 0x04)
         assertEquals(
-            DetectedImageFormat("image/webp", "webp", isSvg = false),
+            DetectedImageFormat("image/webp", "webp", isSvg = false, hasVerifiedSignature = false),
             detectImageFormat(unknownBytes, "image/webp; charset=binary", "https://img.example.com/file"),
         )
         assertEquals(
-            DetectedImageFormat("image/png", "png", isSvg = false),
+            DetectedImageFormat("image/png", "png", isSvg = false, hasVerifiedSignature = false),
             detectImageFormat(unknownBytes, null, "https://img.example.com/pic.png?size=large#top"),
         )
     }
@@ -676,6 +676,115 @@ class MarkdownParserTest {
         assertEquals(
             "emoji05",
             NodeSeekStickerCatalog.resolveFromAssetUrl("https://www.nodeseek.com/static/image/sticker/emoji/05.mov")?.code,
+        )
+    }
+
+    @Test
+    fun `normalizeMarkdownImageUrl and MarkdownImageSaver reject local file content and unsafe schemes`() {
+        val blocked = listOf(
+            "file:///data/user/0/com.nodeseek.app/databases/nodeseek.db",
+            "FILE:///etc/hosts",
+            "content://com.nodeseek.app.provider/secret",
+            "android.resource://com.nodeseek.app/raw/secret",
+            "javascript:alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "intent://scan/#Intent;end",
+            "ftp://example.com/a.png",
+        )
+        blocked.forEach { raw ->
+            assertEquals("Expected blocked url: $raw", "", normalizeMarkdownImageUrl(raw))
+            assertFalse("Expected saver to reject: $raw", isAllowedSaveImageUrl(raw))
+        }
+
+        // Allowed web & data:image schemes remain valid
+        assertEquals("https://img.example.com/a.png", normalizeMarkdownImageUrl("HTTP://img.example.com/a.png"))
+        assertEquals("https://img.example.com/a.png", normalizeMarkdownImageUrl("//img.example.com/a.png"))
+        assertEquals("https://www.nodeseek.com/static/a.png", normalizeMarkdownImageUrl("/static/a.png"))
+        assertTrue(isAllowedSaveImageUrl("https://img.example.com/a.png"))
+        assertTrue(isAllowedSaveImageUrl("data:image/png;base64,iVBORw0KGgo="))
+
+        // HTML <img> with file: / content: src must not emit an ImageCard or inline Image token
+        val maliciousHtml = """
+            <img src="file:///data/user/0/com.nodeseek.app/shared_prefs/secret.xml" alt="leak" />
+            <img src="content://com.nodeseek.app/cache/db" alt="leak2" />
+        """.trimIndent()
+        val blocks = parseNodeSeekMarkdownBlocks(maliciousHtml)
+        assertFalse(blocks.any { it is MdBlock.ImageCard || it is MdBlock.ImageRow })
+        val inlineImages = tokenizeMarkdownInline(maliciousHtml).filterIsInstance<MdInlineToken.Image>()
+        assertTrue(inlineImages.isEmpty())
+    }
+
+    @Test
+    fun `copyBounded enforces max byte limit without buffering unbounded streams`() {
+        val header = ByteArray(10) { 1 }
+        val remaining = ByteArray(25) { 2 }
+        val okOut = java.io.ByteArrayOutputStream()
+        val written = copyBounded(header, remaining.inputStream(), okOut, maxBytes = 35L)
+        assertEquals(35L, written)
+        assertEquals(35, okOut.size())
+
+        val tooLargeOut = java.io.ByteArrayOutputStream()
+        val failed = runCatching {
+            copyBounded(header, remaining.inputStream(), tooLargeOut, maxBytes = 20L)
+        }
+        assertTrue(failed.isFailure)
+    }
+
+    @Test
+    fun `deeply nested blockquotes and details spoilers do not cause StackOverflowError`() {
+        val deepQuotes = (1..2_000).joinToString("\n") { depth -> "> ".repeat(depth) + "line $depth" }
+        val quoteBlocks = parseNodeSeekMarkdownBlocks(deepQuotes)
+        assertTrue(quoteBlocks.isNotEmpty())
+
+        val deepDetails = buildString {
+            repeat(500) { append("<details><summary>L$it</summary>\n") }
+            append("inner leaf\n")
+            repeat(500) { append("</details>\n") }
+        }
+        val detailBlocks = parseNodeSeekMarkdownBlocks(deepDetails)
+        assertTrue(detailBlocks.isNotEmpty())
+    }
+
+    @Test
+    fun `indented details block parses as a single spoiler without phantom nesting`() {
+        val md = """
+              <details>
+              <summary>点我查看详情</summary>
+              隐藏正文内容
+              </details>
+        """.trimIndent()
+        val blocks = parseNodeSeekMarkdownBlocks(md)
+        assertEquals(1, blocks.size)
+        val spoiler = blocks.single() as MdBlock.DetailsSpoiler
+        assertEquals("点我查看详情", spoiler.summary)
+        assertFalse(
+            "Should not create phantom nested DetailsSpoiler",
+            spoiler.children.any { it is MdBlock.DetailsSpoiler },
+        )
+        assertTrue(
+            spoiler.children.filterIsInstance<MdBlock.Paragraph>().any { it.text.contains("隐藏正文内容") },
+        )
+    }
+
+    @Test
+    fun `collectDocumentLightboxImages extracts ordered unique gallery images across blocks`() {
+        val md = """
+            ![第一张](https://img.example.com/1.png)
+
+            正文里的图片 ![第二张](https://img.example.com/2.webp) 和重复 ![重复](https://img.example.com/1.png)
+
+            > ![引用图](https://img.example.com/3.jpg)
+        """.trimIndent()
+        val doc = parseNodeSeekMarkdownDocument(md)
+        val gallery = collectDocumentLightboxImages(doc.blocks, doc.referenceLinks)
+        assertEquals(
+            listOf(
+                LightboxImageItem("https://img.example.com/1.png", "第一张"),
+                LightboxImageItem("https://img.example.com/2.webp", "第二张"),
+                LightboxImageItem("https://img.example.com/3.jpg", "引用图"),
+            ),
+            gallery,
         )
     }
 }

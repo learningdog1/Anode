@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -146,6 +147,8 @@ fun PulseNavTabIconWithBadge(
     iconSize: Dp = 20.dp,
     containerSize: Dp = 20.dp,
     iconScale: Float = 1f,
+    iconScaleProvider: (() -> Float)? = null,
+    includeIconContentDescription: Boolean = true,
 ) {
     val badgeBrush = if (tab == PulseNavTab.PULSE_HUB) {
         Brush.horizontalGradient(
@@ -177,13 +180,14 @@ fun PulseNavTabIconWithBadge(
     ) {
         Icon(
             imageVector = if (isSelected) tab.selectedIcon else tab.unselectedIcon,
-            contentDescription = tab.label,
+            contentDescription = if (includeIconContentDescription) tab.label else null,
             tint = contentColor,
             modifier = Modifier
                 .size(iconSize)
                 .graphicsLayer {
-                    scaleX = iconScale
-                    scaleY = iconScale
+                    val resolvedScale = iconScaleProvider?.invoke() ?: iconScale
+                    scaleX = resolvedScale
+                    scaleY = resolvedScale
                 },
         )
     }
@@ -310,11 +314,18 @@ fun FloatingPillDock(
                         animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
                         label = "navTabColor_${tab.name}",
                     )
-                    val iconScale by animateFloatAsState(
+                    val iconScaleState = animateFloatAsState(
                         targetValue = if (isSelected) 1.07f else 1.0f,
                         animationSpec = NodePulseMotion.microBounceSpring(),
                         label = "navTabScale_${tab.name}",
                     )
+                    val tabDescription = when {
+                        tab == PulseNavTab.PULSE_HUB && unreadNotificationCount > 0 ->
+                            "${tab.label}，${unreadNotificationCount} 条未读消息"
+                        tab == PulseNavTab.PULSE_HUB && hasPendingCheckIn ->
+                            "${tab.label}，今日待签到"
+                        else -> tab.label
+                    }
 
                     Box(
                         modifier = Modifier
@@ -325,7 +336,10 @@ fun FloatingPillDock(
                                 pressedScale = NodePulseMotion.chipPressScale,
                             )
                             .clip(PulseArchitecturalShapes.Pill)
-                            .semantics { selected = isSelected }
+                            .semantics(mergeDescendants = true) {
+                                selected = isSelected
+                                contentDescription = tabDescription
+                            }
                             .clickable(
                                 interactionSource = interactionSource,
                                 indication = null,
@@ -355,7 +369,8 @@ fun FloatingPillDock(
                                 hasPendingCheckIn = hasPendingCheckIn,
                                 iconSize = 20.dp,
                                 containerSize = 20.dp,
-                                iconScale = iconScale,
+                                iconScaleProvider = { iconScaleState.value },
+                                includeIconContentDescription = false,
                             )
                             Text(
                                 text = tab.label,
@@ -437,7 +452,7 @@ fun CollapsingSquircleFab(
         ) {
             Icon(
                 imageVector = icon,
-                contentDescription = label,
+                contentDescription = if (expanded) null else label,
                 tint = MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.size(22.dp),
             )
@@ -550,7 +565,7 @@ fun <T> SortSegmentedSwitcher(
 
     BoxWithConstraints(
         modifier = modifier
-            .height(40.dp)
+            .height(44.dp)
             .clip(PulseArchitecturalShapes.Pill)
             .background(
                 if (isDark) {
@@ -722,6 +737,7 @@ fun CollapsiblePinnedTicker(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .defaultMinSize(minHeight = 44.dp)
                 .clickable(
                     role = Role.Button,
                     onClick = {
@@ -820,6 +836,7 @@ fun CollapsiblePinnedTicker(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .defaultMinSize(minHeight = 44.dp)
                             .clickable { onTopicClick(pinned.id) }
                             .padding(horizontal = 12.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,

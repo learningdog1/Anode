@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.BasicAlertDialog
@@ -186,17 +187,6 @@ fun PulseAlertDialog(
                                 titleTrailing()
                             }
                         }
-
-                        if (!message.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = message,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
                     }
                 } else {
                     Row(
@@ -226,21 +216,40 @@ fun PulseAlertDialog(
                             )
                         }
                     }
+                }
 
-                    if (!message.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(10.dp))
+                if (!message.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(if (centerHeader) 8.dp else 10.dp))
+                    val messageContainerModifier = if (content != null) {
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState())
+                    } else {
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                    }
+                    Column(modifier = messageContainerModifier) {
                         Text(
                             text = message,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = if (centerHeader) TextAlign.Center else TextAlign.Start,
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
 
                 if (content != null) {
                     Spacer(modifier = Modifier.height(14.dp))
+                    // Use weight(1f, fill = false) without outer verticalScroll so callers passing
+                    // LazyColumn or their own verticalScroll stay finite-height and buttons stay visible.
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
                         content = content,
                     )
                 }
@@ -413,6 +422,7 @@ fun PulseDialogPrimaryButton(
     leadingIcon: ImageVector? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
+    val isDark = NodePulseThemeTokens.isDark
     val containerColor: Color
     val contentColor: Color
 
@@ -456,8 +466,8 @@ fun PulseDialogPrimaryButton(
                 contentColor = MaterialTheme.colorScheme.onPrimary
             }
             PulseDialogTone.WARM -> {
-                containerColor = MaterialTheme.colorScheme.tertiary
-                contentColor = MaterialTheme.colorScheme.onTertiary
+                containerColor = if (isDark) ext.drumstickGoldEnd else ext.onDrumstickContainer
+                contentColor = if (isDark) Color(0xFF1A1100) else Color.White
             }
             PulseDialogTone.DESTRUCTIVE -> {
                 containerColor = MaterialTheme.colorScheme.error
@@ -820,7 +830,7 @@ fun PulseDropdownMenuItem(
                 role = Role.Button,
                 onClick = onClick,
             )
-            .defaultMinSize(minHeight = 42.dp)
+            .defaultMinSize(minHeight = 48.dp)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),

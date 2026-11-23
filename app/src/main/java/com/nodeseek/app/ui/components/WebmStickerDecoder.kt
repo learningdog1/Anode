@@ -24,6 +24,7 @@ import coil3.decode.Decoder
 import coil3.decode.ImageSource
 import coil3.fetch.SourceFetchResult
 import coil3.request.Options
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -268,6 +269,8 @@ class WebmStickerDecoder(
                 }
             }
             outputEosReached
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Throwable) {
             false
         } finally {

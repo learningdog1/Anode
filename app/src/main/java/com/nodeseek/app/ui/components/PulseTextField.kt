@@ -392,105 +392,121 @@ fun PulseSearchField(
         fieldModifier = fieldModifier.onFocusChanged { onFocusChanged(it.isFocused) }
     }
 
-    BasicTextField(
-        value = value,
-        onValueChange = onValueChange,
-        modifier = fieldModifier,
-        enabled = enabled,
-        singleLine = true,
-        textStyle = textStyle,
-        cursorBrush = SolidColor(colorScheme.primary),
-        keyboardOptions = keyboardOptions,
-        keyboardActions = resolvedKeyboardActions,
-        interactionSource = resolvedInteractionSource,
-        decorationBox = { innerTextField ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = minHeight)
-                    .then(
-                        if (!isDark && elevated) {
-                            Modifier.shadow(
-                                elevation = if (isFocused) PulseElevation.CardElevated else PulseElevation.Subtle,
-                                shape = shape,
-                                clip = false,
-                                ambientColor = ext.softShadowColor,
-                                spotColor = ext.softShadowColor,
-                            )
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .clip(shape)
-                    .background(animatedContainerColor)
-                    .border(
-                        width = animatedBorderWidth,
-                        color = animatedBorderColor,
-                        shape = shape,
-                    )
-                    .padding(start = 13.dp, end = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (leadingIcon != null) {
-                    Icon(
-                        imageVector = leadingIcon,
-                        contentDescription = null,
-                        tint = animatedIconTint,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
+    val selectionColors = remember(colorScheme.primary) {
+        TextSelectionColors(
+            handleColor = colorScheme.primary,
+            backgroundColor = colorScheme.primary.copy(alpha = 0.28f),
+        )
+    }
 
-                Box(
+    CompositionLocalProvider(LocalTextSelectionColors provides selectionColors) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = fieldModifier,
+            enabled = enabled,
+            singleLine = true,
+            textStyle = textStyle,
+            cursorBrush = SolidColor(colorScheme.primary),
+            keyboardOptions = keyboardOptions,
+            keyboardActions = resolvedKeyboardActions,
+            interactionSource = resolvedInteractionSource,
+            decorationBox = { innerTextField ->
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .padding(vertical = 8.dp),
-                    contentAlignment = Alignment.CenterStart,
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = minHeight)
+                        .then(
+                            if (!isDark && elevated) {
+                                Modifier.shadow(
+                                    elevation = if (isFocused) PulseElevation.CardElevated else PulseElevation.Subtle,
+                                    shape = shape,
+                                    clip = false,
+                                    ambientColor = ext.softShadowColor,
+                                    spotColor = ext.softShadowColor,
+                                )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .clip(shape)
+                        .background(animatedContainerColor)
+                        .border(
+                            width = animatedBorderWidth,
+                            color = animatedBorderColor,
+                            shape = shape,
+                        )
+                        .padding(start = 13.dp, end = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (value.isEmpty() && placeholder.isNotEmpty()) {
-                        Text(
-                            text = placeholder,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colorScheme.onSurfaceVariant.copy(alpha = 0.74f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                    if (leadingIcon != null) {
+                        Icon(
+                            imageVector = leadingIcon,
+                            contentDescription = null,
+                            tint = animatedIconTint,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
-                    innerTextField()
-                }
 
-                AnimatedVisibility(
-                    visible = showClearButton && enabled,
-                    enter = scaleIn(NodePulseMotion.microBounceSpring()) + fadeIn(tween(120)),
-                    exit = fadeOut(tween(110)),
-                ) {
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .background(colorScheme.surfaceContainerHigh)
-                            .clickable(role = Role.Button, onClick = onClear),
-                        contentAlignment = Alignment.Center,
+                            .weight(1f)
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.CenterStart,
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "清空搜索",
-                            tint = colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(14.dp),
+                        if (value.isEmpty() && placeholder.isNotEmpty()) {
+                            Text(
+                                text = placeholder,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colorScheme.onSurfaceVariant.copy(alpha = 0.74f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        innerTextField()
+                    }
+
+                    AnimatedVisibility(
+                        visible = showClearButton && enabled,
+                        enter = scaleIn(NodePulseMotion.microBounceSpring()) + fadeIn(tween(120)),
+                        exit = fadeOut(tween(110)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .clickable(role = Role.Button, onClick = onClear),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(colorScheme.surfaceContainerHigh),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "清空搜索",
+                                    tint = colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    if (trailingContent != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            content = trailingContent,
                         )
                     }
                 }
-
-                if (trailingContent != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        content = trailingContent,
-                    )
-                }
-            }
-        },
-    )
+            },
+        )
+    }
 }
 
 @Composable

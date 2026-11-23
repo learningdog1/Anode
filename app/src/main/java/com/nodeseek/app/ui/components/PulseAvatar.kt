@@ -114,9 +114,16 @@ private val AvatarMonogramTints = listOf(
 fun normalizeNodeSeekAssetUrl(rawUrl: String?): String? {
     val trimmed = rawUrl?.trim().orEmpty()
     if (trimmed.isEmpty()) return null
+    val lower = trimmed.lowercase(java.util.Locale.US)
     return when {
-        trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-        trimmed.startsWith("http://", ignoreCase = true) -> "https://" + trimmed.removePrefix("http://")
+        lower.startsWith("file:") ||
+            lower.startsWith("content:") ||
+            lower.startsWith("android.resource:") ||
+            lower.startsWith("javascript:") ||
+            lower.startsWith("vbscript:") ||
+            lower.startsWith("data:") -> null
+        lower.startsWith("https://") -> "https://" + trimmed.drop(8)
+        lower.startsWith("http://") -> "https://" + trimmed.drop(7)
         trimmed.startsWith("//") -> "https:$trimmed"
         trimmed.startsWith("/") -> "$NODESEEK_ORIGIN$trimmed"
         else -> "$NODESEEK_ORIGIN/$trimmed"
@@ -269,6 +276,7 @@ fun PulseAvatar(
         }
 
         if (showOpBadge) {
+            val fontScale = NodePulseThemeTokens.fontScale
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -286,8 +294,8 @@ fun PulseAvatar(
                 Text(
                     text = "楼主",
                     style = MaterialTheme.typography.labelSmall.copy(
-                        fontSize = 9.sp,
-                        lineHeight = 11.sp,
+                        fontSize = (9f * fontScale).sp,
+                        lineHeight = (11f * fontScale).sp,
                         fontWeight = FontWeight.ExtraBold,
                     ),
                     color = MaterialTheme.colorScheme.onPrimary,

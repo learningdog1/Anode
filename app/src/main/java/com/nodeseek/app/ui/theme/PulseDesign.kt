@@ -1,5 +1,6 @@
 package com.nodeseek.app.ui.theme
 
+import android.animation.ValueAnimator
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -22,7 +23,6 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -34,12 +34,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -52,11 +56,50 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+
+/**
+ * Checks Android's system animator scale (`ValueAnimator.areAnimatorsEnabled()` on API 26+) so
+ * infinite shimmers and custom frame loops degrade gracefully under Reduced Motion.
+ */
+internal fun areSystemAnimatorsEnabled(): Boolean =
+    runCatching { ValueAnimator.areAnimatorsEnabled() }.getOrDefault(true)
+
+/**
+ * Optional shared shimmer progress (`0f..1f`) provided by skeleton containers so all child
+ * [PulseShimmerBox] elements animate in phase using a single `InfiniteTransition` and zero
+ * composition-phase recompositions.
+ */
+val LocalPulseShimmerProgress = compositionLocalOf<State<Float>?> { null }
+
+@Composable
+fun ProvideSharedPulseShimmer(
+    durationMillis: Int = 1250,
+    content: @Composable () -> Unit,
+) {
+    val isInspection = LocalInspectionMode.current
+    val animatorsEnabled = remember { areSystemAnimatorsEnabled() }
+    if (isInspection || !animatorsEnabled || LocalPulseShimmerProgress.current != null) {
+        content()
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "sharedPulseShimmerTransition")
+    val progress = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = durationMillis, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "sharedPulseShimmerProgress",
+    )
+    CompositionLocalProvider(LocalPulseShimmerProgress provides progress) {
+        content()
+    }
+}
 
 /**
  * Standardized elevation scale for Anode cards, hero tiles, and floating glass bars.
@@ -79,42 +122,50 @@ object PulseBrushes {
     @Composable
     fun brandGradient(horizontal: Boolean = true): Brush {
         val ext = NodePulseThemeTokens.extendedColors
-        val colors = listOf(ext.brandGradientStart, ext.brandGradientEnd)
-        return if (horizontal) {
-            Brush.horizontalGradient(colors)
-        } else {
-            Brush.linearGradient(colors)
+        return remember(ext.brandGradientStart, ext.brandGradientEnd, horizontal) {
+            val colors = listOf(ext.brandGradientStart, ext.brandGradientEnd)
+            if (horizontal) {
+                Brush.horizontalGradient(colors)
+            } else {
+                Brush.linearGradient(colors)
+            }
         }
     }
 
     @Composable
     fun brandSoftWash(alpha: Float = 0.14f): Brush {
         val ext = NodePulseThemeTokens.extendedColors
-        return Brush.linearGradient(
-            colors = listOf(
-                ext.brandGradientStart.copy(alpha = alpha),
-                ext.brandGradientEnd.copy(alpha = alpha * 0.65f),
-            ),
-        )
+        return remember(ext.brandGradientStart, ext.brandGradientEnd, alpha) {
+            Brush.linearGradient(
+                colors = listOf(
+                    ext.brandGradientStart.copy(alpha = alpha),
+                    ext.brandGradientEnd.copy(alpha = alpha * 0.65f),
+                ),
+            )
+        }
     }
 
     @Composable
     fun drumstickGoldGradient(): Brush {
         val ext = NodePulseThemeTokens.extendedColors
-        return Brush.horizontalGradient(
-            colors = listOf(ext.drumstickGoldStart, ext.drumstickGoldEnd),
-        )
+        return remember(ext.drumstickGoldStart, ext.drumstickGoldEnd) {
+            Brush.horizontalGradient(
+                colors = listOf(ext.drumstickGoldStart, ext.drumstickGoldEnd),
+            )
+        }
     }
 
     @Composable
     fun heatFlameGradient(): Brush {
         val isDark = NodePulseThemeTokens.isDark
-        val colors = if (isDark) {
-            listOf(Color(0xFFFB923C), Color(0xFFF43F5E))
-        } else {
-            listOf(Color(0xFFF97316), Color(0xFFEA580C))
+        return remember(isDark) {
+            val colors = if (isDark) {
+                listOf(Color(0xFFFB923C), Color(0xFFF43F5E))
+            } else {
+                listOf(Color(0xFFF97316), Color(0xFFEA580C))
+            }
+            Brush.horizontalGradient(colors)
         }
-        return Brush.horizontalGradient(colors)
     }
 
     @Composable
@@ -123,31 +174,33 @@ object PulseBrushes {
     ): Brush {
         val ext = NodePulseThemeTokens.extendedColors
         val isDark = NodePulseThemeTokens.isDark
-        val startWash = blendColor(
-            source = ext.cardSurfaceElevated,
-            target = accentColor,
-            fraction = if (isDark) 0.22f else 0.11f,
-        )
-        val midWash = blendColor(
-            source = ext.cardSurface,
-            target = ext.brandGradientEnd,
-            fraction = if (isDark) 0.08f else 0.04f,
-        )
-        return Brush.linearGradient(
-            colors = listOf(startWash, midWash, ext.cardSurface),
-        )
+        return remember(ext.cardSurfaceElevated, ext.cardSurface, ext.brandGradientEnd, accentColor, isDark) {
+            val startWash = blendColor(
+                source = ext.cardSurfaceElevated,
+                target = accentColor,
+                fraction = if (isDark) 0.22f else 0.11f,
+            )
+            val midWash = blendColor(
+                source = ext.cardSurface,
+                target = ext.brandGradientEnd,
+                fraction = if (isDark) 0.08f else 0.04f,
+            )
+            Brush.linearGradient(
+                colors = listOf(startWash, midWash, ext.cardSurface),
+            )
+        }
     }
 
     @Composable
     fun glassHighlightBrush(
         isDark: Boolean = NodePulseThemeTokens.isDark,
-    ): Brush {
+    ): Brush = remember(isDark) {
         val topHighlight = if (isDark) {
             Color.White.copy(alpha = 0.07f)
         } else {
             Color.White.copy(alpha = 0.45f)
         }
-        return Brush.verticalGradient(
+        Brush.verticalGradient(
             colors = listOf(topHighlight, Color.Transparent),
         )
     }
@@ -158,20 +211,22 @@ object PulseBrushes {
         isDark: Boolean = NodePulseThemeTokens.isDark,
     ): Brush {
         val ext = NodePulseThemeTokens.extendedColors
-        val topRim = if (accentColor != null) {
-            blendColor(
-                source = ext.cardBorder,
-                target = accentColor,
-                fraction = if (isDark) 0.48f else 0.32f,
+        return remember(ext.cardBorder, accentColor, isDark) {
+            val topRim = if (accentColor != null) {
+                blendColor(
+                    source = ext.cardBorder,
+                    target = accentColor,
+                    fraction = if (isDark) 0.48f else 0.32f,
+                )
+            } else if (isDark) {
+                blendColor(ext.cardBorder, Color.White, 0.12f)
+            } else {
+                blendColor(ext.cardBorder, Color.White, 0.35f)
+            }
+            Brush.verticalGradient(
+                colors = listOf(topRim, ext.cardBorder),
             )
-        } else if (isDark) {
-            blendColor(ext.cardBorder, Color.White, 0.12f)
-        } else {
-            blendColor(ext.cardBorder, Color.White, 0.35f)
         }
-        return Brush.verticalGradient(
-            colors = listOf(topRim, ext.cardBorder),
-        )
     }
 
     @Composable
@@ -180,6 +235,11 @@ object PulseBrushes {
         durationMillis: Int = 1250,
     ): Brush {
         val ext = NodePulseThemeTokens.extendedColors
+        val isInspection = LocalInspectionMode.current
+        val animatorsEnabled = remember { areSystemAnimatorsEnabled() }
+        if (isInspection || !animatorsEnabled) {
+            return remember(ext.shimmerBase) { SolidColor(ext.shimmerBase) }
+        }
         val transition = rememberInfiniteTransition(label = "pulseShimmerTransition")
         val translate by transition.animateFloat(
             initialValue = 0f,
@@ -413,15 +473,53 @@ fun Modifier.pulseBouncyClickable(
 
 /**
  * Diagonal animated shimmer background modifier for loading skeleton blocks.
+ * Reads animation progress strictly during the draw phase (`drawBehind`) and reuses any
+ * ancestor [LocalPulseShimmerProgress] to eliminate composition-phase recomposition storms.
  */
 @Composable
 fun Modifier.pulseShimmer(
     shape: Shape = RoundedCornerShape(8.dp),
 ): Modifier {
-    val brush = PulseBrushes.rememberShimmerBrush()
+    val ext = NodePulseThemeTokens.extendedColors
+    val isInspection = LocalInspectionMode.current
+    val animatorsEnabled = remember { areSystemAnimatorsEnabled() }
+    if (isInspection || !animatorsEnabled) {
+        return this
+            .clip(shape)
+            .background(ext.shimmerBase)
+    }
+
+    val sharedProgress = LocalPulseShimmerProgress.current
+    val progressState = sharedProgress ?: run {
+        val transition = rememberInfiniteTransition(label = "pulseShimmerFallbackTransition")
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1250, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "pulseShimmerFallbackProgress",
+        )
+    }
+    val shimmerColors = remember(ext.shimmerBase, ext.shimmerHighlight) {
+        listOf(ext.shimmerBase, ext.shimmerHighlight, ext.shimmerBase)
+    }
+
     return this
         .clip(shape)
-        .background(brush)
+        .drawBehind {
+            val span = (size.width.coerceAtLeast(320f)) * 1.6f
+            val bandWidth = span * 0.32f
+            val translate = -bandWidth + (span + bandWidth * 2f) * progressState.value
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = shimmerColors,
+                    start = Offset(translate - bandWidth, 0f),
+                    end = Offset(translate, bandWidth * 0.7f),
+                ),
+            )
+        }
 }
 
 /**
@@ -557,66 +655,6 @@ fun PulseSectionHeader(
 }
 
 /**
- * Polished telemetry metric pill for profile stats, hub KPIs, and topic insights.
- */
-@Composable
-fun PulseMetricPill(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier,
-    icon: ImageVector? = null,
-    accentColor: Color = MaterialTheme.colorScheme.primary,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    val extraType = NodePulseThemeTokens.extraTypography
-    val shape = PulseArchitecturalShapes.MediumBadge
-
-    Row(
-        modifier = modifier
-            .clip(shape)
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(
-                        accentColor.copy(alpha = if (isDark) 0.16f else 0.10f),
-                        accentColor.copy(alpha = if (isDark) 0.08f else 0.04f),
-                    ),
-                ),
-            )
-            .border(
-                width = 0.8.dp,
-                color = accentColor.copy(alpha = if (isDark) 0.30f else 0.18f),
-                shape = shape,
-            )
-            .padding(horizontal = 10.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
-    ) {
-        if (icon != null) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = accentColor,
-                modifier = Modifier.size(16.dp),
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(
-                text = value,
-                style = extraType.tabularBadge.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            Text(
-                text = label,
-                style = extraType.microLabel,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-        }
-    }
-}
-
-/**
  * Gradient-faded horizontal divider that avoids harsh hard-edged lines.
  */
 @Composable
@@ -654,6 +692,8 @@ fun PulseShimmerBox(
 
 /**
  * Subtle staggered fade + slide-up entrance wrapper for cards, grid tiles, and section blocks.
+ * Items beyond [maxStaggerSteps] or under Reduced Motion appear immediately at full opacity so
+ * scrolling long `LazyColumn` lists never flashes invisible rows.
  */
 @Composable
 fun PulseStaggeredEntrance(
@@ -664,16 +704,17 @@ fun PulseStaggeredEntrance(
     content: @Composable () -> Unit,
 ) {
     val isInspection = LocalInspectionMode.current
-    val effectiveEnabled = enabled && !isInspection
+    val animatorsEnabled = remember { areSystemAnimatorsEnabled() }
+    val withinInitialStagger = index in 0..maxStaggerSteps
+    val effectiveEnabled = enabled && !isInspection && animatorsEnabled && withinInitialStagger
     val progress = remember { Animatable(if (effectiveEnabled) 0f else 1f) }
     LaunchedEffect(effectiveEnabled) {
         if (!effectiveEnabled) {
             progress.snapTo(1f)
             return@LaunchedEffect
         }
-        val clampedStep = index.coerceIn(0, maxStaggerSteps)
-        if (clampedStep > 0) {
-            delay(clampedStep * 26L)
+        if (index > 0) {
+            delay(index * 26L)
         }
         progress.animateTo(
             targetValue = 1f,

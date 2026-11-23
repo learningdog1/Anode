@@ -55,7 +55,7 @@ data class NodePulseExtraTypography(
 )
 
 fun buildNodePulseTypography(fontScale: Float = 0.90f): Typography {
-    val s = fontScale.coerceIn(0.85f, 1.35f)
+    val s = fontScale.coerceIn(0.85f, 1.30f)
     return Typography(
         displaySmall = TextStyle(
             fontFamily = FontFamily.SansSerif,
@@ -149,7 +149,7 @@ fun buildNodePulseTypography(fontScale: Float = 0.90f): Typography {
 }
 
 fun buildNodePulseExtraTypography(fontScale: Float = 0.90f): NodePulseExtraTypography {
-    val s = fontScale.coerceIn(0.85f, 1.35f)
+    val s = fontScale.coerceIn(0.85f, 1.30f)
     return NodePulseExtraTypography(
         titleMediumUnread = TextStyle(
             fontFamily = FontFamily.SansSerif,

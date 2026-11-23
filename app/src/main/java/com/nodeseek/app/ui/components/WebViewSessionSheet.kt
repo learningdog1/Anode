@@ -55,6 +55,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -147,26 +148,36 @@ fun WebViewSessionSheet(
     val displayHost = remember(currentUrl) {
         runCatching { URI(currentUrl).host ?: "www.nodeseek.com" }.getOrDefault("www.nodeseek.com")
     }
-
-    // Gentle read-only polling while the sheet is open so SPA/AJAX login transitions on
-    // signIn.html or challenge completions are picked up even when no full-page navigation fires.
-    LaunchedEffect(webViewRef, hasFinishedPageOnNodeSeek) {
-        while (webViewRef != null) {
-            delay(1200)
-            if (hasFinishedPageOnNodeSeek) {
-                webViewRef?.let { wv ->
-                    probeWindowConfigReadOnly(wv) { probed ->
-                        sessionStatus = probed
-                    }
-                }
-            }
-        }
+    val isCurrentUrlHttps = remember(currentUrl) {
+        currentUrl.trim().startsWith("https://", ignoreCase = true)
     }
+    val latestOnSessionVerified by rememberUpdatedState(onSessionVerified)
 
     val meetsCompletionCriteria = if (requireSignedInUser) {
         sessionStatus.isAuthenticated && hasFinishedPageOnNodeSeek && !isPageLoading
     } else {
         hasFinishedPageOnNodeSeek && sessionStatus.configReady && !isPageLoading
+    }
+
+    // Gentle read-only polling while the sheet is open and not yet satisfied so SPA/AJAX login
+    // transitions on signIn.html or challenge completions are picked up without redundant disk I/O.
+    LaunchedEffect(webViewRef, hasFinishedPageOnNodeSeek, meetsCompletionCriteria) {
+        if (meetsCompletionCriteria) return@LaunchedEffect
+        while (webViewRef != null && !meetsCompletionCriteria) {
+            delay(1200)
+            if (hasFinishedPageOnNodeSeek) {
+                webViewRef?.let { wv ->
+                    probeWindowConfigReadOnly(wv) { probed ->
+                        if (probed != sessionStatus) {
+                            if (probed.configReady || probed.isAuthenticated) {
+                                CookieManager.getInstance().flush()
+                            }
+                            sessionStatus = probed
+                        }
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(meetsCompletionCriteria, autoDismissWhenVerified) {
@@ -176,17 +187,13 @@ fun WebViewSessionSheet(
             delay(650L)
             CookieManager.getInstance().flush()
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            onSessionVerified(sessionStatus)
+            latestOnSessionVerified(sessionStatus)
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
             CookieManager.getInstance().flush()
-            popupWebViewRef?.apply {
-                stopLoading()
-                destroy()
-            }
             popupWebViewRef = null
             webViewRef?.apply {
                 stopLoading()
@@ -226,7 +233,6 @@ fun WebViewSessionSheet(
                         CookieManager.getInstance().flush()
                         onDismiss()
                     },
-                    modifier = Modifier.size(38.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
@@ -250,9 +256,9 @@ fun WebViewSessionSheet(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.Lock,
-                        contentDescription = "HTTPS 加密连接",
-                        tint = MaterialTheme.colorScheme.secondary,
+                        imageVector = if (isCurrentUrlHttps) Icons.Rounded.Lock else Icons.Rounded.ErrorOutline,
+                        contentDescription = if (isCurrentUrlHttps) "HTTPS 加密连接" else "非 HTTPS 连接",
+                        tint = if (isCurrentUrlHttps) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(14.dp),
                     )
                     Text(
@@ -266,7 +272,6 @@ fun WebViewSessionSheet(
 
                 IconButton(
                     onClick = { webViewRef?.reload() },
-                    modifier = Modifier.size(38.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
@@ -276,8 +281,13 @@ fun WebViewSessionSheet(
                 }
 
                 IconButton(
-                    onClick = { runCatching { uriHandler.openUri(currentUrl) } },
-                    modifier = Modifier.size(38.dp),
+                    onClick = {
+                        if (currentUrl.startsWith("https://", ignoreCase = true) ||
+                            currentUrl.startsWith("http://", ignoreCase = true)
+                        ) {
+                            runCatching { uriHandler.openUri(currentUrl) }
+                        }
+                    },
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.OpenInBrowser,
@@ -422,7 +432,9 @@ fun WebViewSessionSheet(
                                 loadsImagesAutomatically = true
                                 javaScriptCanOpenWindowsAutomatically = true
                                 setSupportMultipleWindows(true)
-                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                allowFileAccess = false
+                                allowContentAccess = false
+                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 // Leave native WebView UA untouched when using system default so Chromium
                                 // sends genuine Sec-CH-UA client hints during Cloudflare verification.
                                 if (!useSystemDefaultUserAgent && !userAgentOverride.isNullOrBlank()) {
@@ -465,7 +477,9 @@ fun WebViewSessionSheet(
                                             loadsImagesAutomatically = true
                                             javaScriptCanOpenWindowsAutomatically = true
                                             setSupportMultipleWindows(true)
-                                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                            allowFileAccess = false
+                                            allowContentAccess = false
+                                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                             if (!useSystemDefaultUserAgent && !userAgentOverride.isNullOrBlank()) {
                                                 userAgentString = userAgentOverride
                                             }
@@ -477,8 +491,9 @@ fun WebViewSessionSheet(
                                         webChromeClient = object : WebChromeClient() {
                                             override fun onCloseWindow(window: WebView?) {
                                                 CookieManager.getInstance().flush()
-                                                popupWebViewRef = null
-                                                window?.destroy()
+                                                if (popupWebViewRef === window) {
+                                                    popupWebViewRef = null
+                                                }
                                             }
                                         }
                                         webViewClient = object : WebViewClient() {
@@ -488,9 +503,14 @@ fun WebViewSessionSheet(
                                             ): Boolean {
                                                 val target = request?.url?.toString().orEmpty()
                                                 if (!isTrustedVerificationPopupUrl(target)) {
-                                                    runCatching { uriHandler.openUri(target) }
-                                                    popupWebViewRef = null
-                                                    v?.destroy()
+                                                    if (target.startsWith("https://", ignoreCase = true) ||
+                                                        target.startsWith("http://", ignoreCase = true)
+                                                    ) {
+                                                        runCatching { uriHandler.openUri(target) }
+                                                    }
+                                                    if (popupWebViewRef === v) {
+                                                        popupWebViewRef = null
+                                                    }
                                                     return true
                                                 }
                                                 return false
@@ -501,7 +521,6 @@ fun WebViewSessionSheet(
                                             }
                                         }
                                     }
-                                    popupWebViewRef?.destroy()
                                     popupWebViewRef = childWebView
                                     transport.webView = childWebView
                                     resultMsg.sendToTarget()
@@ -513,7 +532,19 @@ fun WebViewSessionSheet(
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView?,
                                     request: WebResourceRequest?,
-                                ): Boolean = false
+                                ): Boolean {
+                                    if (request?.isForMainFrame == false) return false
+                                    val target = request?.url?.toString().orEmpty()
+                                    if (isTrustedSessionNavigationUrl(target)) {
+                                        return false
+                                    }
+                                    if (target.startsWith("https://", ignoreCase = true) ||
+                                        target.startsWith("http://", ignoreCase = true)
+                                    ) {
+                                        runCatching { uriHandler.openUri(target) }
+                                    }
+                                    return true
+                                }
 
                                 override fun onPageStarted(
                                     view: WebView?,
@@ -530,8 +561,7 @@ fun WebViewSessionSheet(
                                     isPageLoading = false
                                     if (!url.isNullOrBlank()) {
                                         currentUrl = url
-                                        val finishedHost = runCatching { URI(url).host.orEmpty() }.getOrDefault("")
-                                        if (finishedHost.endsWith("nodeseek.com", ignoreCase = true)) {
+                                        if (isNodeSeekHttpsUrl(url)) {
                                             hasFinishedPageOnNodeSeek = true
                                         }
                                     }
@@ -551,33 +581,43 @@ fun WebViewSessionSheet(
                 )
 
                 popupWebViewRef?.let { childPopup ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface),
-                    ) {
-                        AndroidView(
-                            modifier = Modifier.fillMaxSize(),
-                            factory = { childPopup },
-                        )
-                        IconButton(
-                            onClick = {
+                    key(childPopup) {
+                        DisposableEffect(childPopup) {
+                            onDispose {
                                 CookieManager.getInstance().flush()
-                                popupWebViewRef = null
+                                (childPopup.parent as? ViewGroup)?.removeView(childPopup)
                                 childPopup.stopLoading()
                                 childPopup.destroy()
-                            },
+                            }
+                        }
+                        Box(
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(8.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f)),
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surface),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "关闭验证弹窗",
-                                tint = MaterialTheme.colorScheme.onSurface,
+                            AndroidView(
+                                modifier = Modifier.fillMaxSize(),
+                                factory = { childPopup },
                             )
+                            IconButton(
+                                onClick = {
+                                    CookieManager.getInstance().flush()
+                                    if (popupWebViewRef === childPopup) {
+                                        popupWebViewRef = null
+                                    }
+                                },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(8.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f)),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "关闭验证弹窗",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
                         }
                     }
                 }
@@ -586,17 +626,35 @@ fun WebViewSessionSheet(
     }
 }
 
-private fun isTrustedVerificationPopupUrl(rawUrl: String): Boolean {
-    if (rawUrl.isBlank() || rawUrl.startsWith("about:", ignoreCase = true)) return true
-    val host = runCatching { URI(rawUrl).host?.lowercase().orEmpty() }.getOrDefault("")
+internal fun isNodeSeekHttpsUrl(rawUrl: String): Boolean {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isEmpty()) return false
+    val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+    if (!uri.scheme.equals("https", ignoreCase = true)) return false
+    val host = uri.host?.lowercase(Locale.US).orEmpty()
     if (host.isEmpty()) return false
-    return host == "nodeseek.com" ||
-        host.endsWith(".nodeseek.com") ||
+    return NodeSeekUrlNormalizer.isNodeSeekHost(host)
+}
+
+internal fun isTrustedSessionNavigationUrl(rawUrl: String): Boolean {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isEmpty() || trimmed.equals("about:blank", ignoreCase = true)) return true
+    val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+    if (!uri.scheme.equals("https", ignoreCase = true)) return false
+    val host = uri.host?.lowercase(Locale.US).orEmpty()
+    if (host.isEmpty()) return false
+    return NodeSeekUrlNormalizer.isNodeSeekHost(host) ||
         host == "cloudflare.com" ||
         host.endsWith(".cloudflare.com") ||
         host == "oauth.telegram.org" ||
-        host.endsWith(".telegram.org")
+        host.endsWith(".telegram.org") ||
+        host == "challenges.cloudflare.com" ||
+        host == "hcaptcha.com" ||
+        host.endsWith(".hcaptcha.com")
 }
+
+internal fun isTrustedVerificationPopupUrl(rawUrl: String): Boolean =
+    isTrustedSessionNavigationUrl(rawUrl)
 
 private const val READ_ONLY_CONFIG_PROBE_JS = """
 (function() {
@@ -791,13 +849,12 @@ fun TurnstileVerificationWidget(
                     latestOnTokenCleared()
                     manualReloadCount += 1
                 },
-                modifier = Modifier.size(28.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Refresh,
                     contentDescription = "刷新人机验证",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
@@ -844,7 +901,9 @@ fun TurnstileVerificationWidget(
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
                                 loadsImagesAutomatically = true
-                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                allowFileAccess = false
+                                allowContentAccess = false
+                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                             }
 
                             setOnTouchListener { v, _ ->
@@ -908,14 +967,16 @@ fun TurnstileVerificationWidget(
                                 ): Boolean {
                                     if (request?.isForMainFrame != true) return false
                                     val target = request.url?.toString().orEmpty()
+                                    if (isNodeSeekHttpsUrl(target)) return false
                                     if (request.hasGesture() &&
                                         (target.startsWith("http://", ignoreCase = true) ||
                                             target.startsWith("https://", ignoreCase = true))
                                     ) {
                                         runCatching { uriHandler.openUri(target) }
-                                        return true
                                     }
-                                    return false
+                                    // Always block main-frame navigation away from nodeseek.com so untrusted
+                                    // pages can never reach __NodePulseTurnstileBridge.
+                                    return true
                                 }
                             }
 
@@ -1124,8 +1185,7 @@ private fun probeWindowConfigReadOnly(
     onResult: (WebViewSessionStatus) -> Unit,
 ) {
     val pageUrl = webView.url.orEmpty()
-    val host = runCatching { URI(pageUrl).host.orEmpty() }.getOrDefault("")
-    if (!host.endsWith("nodeseek.com", ignoreCase = true)) return
+    if (!isNodeSeekHttpsUrl(pageUrl)) return
 
     webView.evaluateJavascript(READ_ONLY_CONFIG_PROBE_JS) { rawJsonLiteral ->
         val decoded = decodeEvaluateJavascriptString(rawJsonLiteral) ?: return@evaluateJavascript
@@ -1134,9 +1194,6 @@ private fun probeWindowConfigReadOnly(
             val ready = obj.optBoolean("ready", false)
             val uid = if (obj.has("uid") && !obj.isNull("uid")) obj.optLong("uid", 0L) else 0L
             val name = if (obj.has("name") && !obj.isNull("name")) obj.optString("name", "") else ""
-            if (ready || uid > 0L) {
-                CookieManager.getInstance().flush()
-            }
             onResult(
                 WebViewSessionStatus(
                     configReady = ready,

@@ -9,6 +9,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import java.net.URLDecoder
+import java.util.Locale
 
 private const val STICKER_BASE_URL = "https://www.nodeseek.com/static/image/sticker"
 
@@ -56,12 +57,12 @@ object NodeSeekStickerCatalog {
     )
 
     private val acFiles: List<String> = buildList {
-        for (i in 1..54) add("%02d.png".format(i))
+        for (i in 1..54) add(String.format(Locale.US, "%02d.png", i))
         for (i in 1001..1040) add("$i.png")
         for (i in 2001..2055) add("$i.png")
     }
 
-    private val yctFiles: List<String> = (1..22).map { "%03d.gif".format(it) }
+    private val yctFiles: List<String> = (1..22).map { String.format(Locale.US, "%03d.gif", it) }
 
     private val xhjFiles: List<String> = listOf(
         "001.png", "002.png", "003.png", "004.gif", "005.png", "006.png", "007.png", "008.gif",
@@ -70,7 +71,7 @@ object NodeSeekStickerCatalog {
         "025.png", "026.gif", "027.gif", "028.gif", "029.gif", "030.gif", "031.png", "032.png",
     )
 
-    private val emojiFiles: List<String> = (0..48).map { "%02d".format(it) }
+    private val emojiFiles: List<String> = (0..48).map { String.format(Locale.US, "%02d", it) }
 
     private val lookupMap: Map<String, NodeSeekSticker> by lazy {
         buildMap {

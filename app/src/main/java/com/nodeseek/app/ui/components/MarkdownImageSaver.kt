@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaScannerConnection
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -25,6 +24,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
@@ -38,19 +40,69 @@ internal data class DetectedImageFormat(
     val mimeType: String,
     val extension: String,
     val isSvg: Boolean = false,
+    val hasVerifiedSignature: Boolean = false,
 )
 
-private data class RetrievedImagePayload(
-    val bytes: ByteArray,
-    val contentTypeHeader: String?,
-)
+private const val MAX_IMAGE_SAVE_BYTES: Long = 32L * 1024L * 1024L
+private const val HEADER_PEEK_BYTES: Int = 512
+private const val COPY_BUFFER_BYTES: Int = 8 * 1024
+
+private sealed interface ImageSourceStream : AutoCloseable {
+    val contentTypeHeader: String?
+    val contentLength: Long
+    val inputStream: InputStream
+}
+
+private class ByteArrayImageSource(
+    bytes: ByteArray,
+    override val contentTypeHeader: String?,
+) : ImageSourceStream {
+    override val contentLength: Long = bytes.size.toLong()
+    override val inputStream: InputStream = bytes.inputStream()
+    override fun close() = inputStream.close()
+}
+
+private class FileImageSource(
+    file: File,
+    override val contentTypeHeader: String?,
+    private val closeExtra: (() -> Unit)? = null,
+) : ImageSourceStream {
+    override val contentLength: Long = file.length()
+    override val inputStream: InputStream = FileInputStream(file)
+    override fun close() {
+        runCatching { inputStream.close() }
+        closeExtra?.let { runCatching(it) }
+    }
+}
+
+private class OkHttpImageSource(
+    private val response: okhttp3.Response,
+    override val contentTypeHeader: String?,
+    override val contentLength: Long,
+    override val inputStream: InputStream,
+) : ImageSourceStream {
+    override fun close() {
+        runCatching { inputStream.close() }
+        runCatching { response.close() }
+    }
+}
+
+internal fun isAllowedSaveImageUrl(resolvedUrl: String): Boolean {
+    val lower = resolvedUrl.trim().lowercase(Locale.US)
+    if (lower.isEmpty()) return false
+    return lower.startsWith("https://") ||
+        lower.startsWith("http://") ||
+        lower.startsWith("data:image/")
+}
 
 /**
  * Downloads (or reads from Coil's disk cache) post/reply/lightbox images and saves them
  * into the public system gallery (`Pictures/Anode`) via [MediaStore].
  *
- * - Raster & animated formats (PNG/JPEG/GIF/WEBP/AVIF/HEIC/BMP) are written byte-for-byte
- *   so animated stickers/GIFs keep animation and photos suffer zero recompression.
+ * - Strictly rejects `file:`, `content:`, and `android.resource:` URIs to prevent exporting
+ *   app-private sandbox files from untrusted Markdown content.
+ * - Raster & animated formats (PNG/JPEG/GIF/WEBP/AVIF/HEIC/BMP) are verified by binary magic
+ *   bytes and streamed directly to MediaStore with a bounded size cap (no full-file heap buffer).
  * - SVG reports (such as NodeQuality / Check.Place / IPQuality) are rasterized to high-res PNG
  *   because Android Gallery apps cannot index raw `.svg` files in `MediaStore.Images`.
  */
@@ -76,8 +128,8 @@ object MarkdownImageSaver {
     ) {
         val appContext = context.applicationContext ?: context
         val resolvedUrl = normalizeMarkdownImageUrl(rawImageUrl)
-        if (resolvedUrl.isBlank()) {
-            postToast(appContext, "保存失败：图片地址无效")
+        if (!isAllowedSaveImageUrl(resolvedUrl)) {
+            postToast(appContext, "保存失败：图片地址无效或不受支持")
             return
         }
         if (!inFlightUrls.add(resolvedUrl)) {
@@ -87,40 +139,64 @@ object MarkdownImageSaver {
 
         saverScope.launch {
             try {
-                val retrieved = loadImageBytes(appContext, resolvedUrl)
-                val detected = detectImageFormat(
-                    bytes = retrieved.bytes,
-                    contentTypeHeader = retrieved.contentTypeHeader,
-                    url = resolvedUrl,
-                )
+                openImageSource(appContext, resolvedUrl).use { source ->
+                    if (source.contentLength > MAX_IMAGE_SAVE_BYTES) {
+                        throw IllegalStateException("图片体积超过 32MB 上限")
+                    }
+                    val headerBuf = readUpTo(source.inputStream, HEADER_PEEK_BYTES)
+                    if (headerBuf.isEmpty()) {
+                        throw IllegalStateException("图片数据为空")
+                    }
 
-                val contentTypeLower = retrieved.contentTypeHeader?.lowercase().orEmpty()
-                if (contentTypeLower.contains("text/html") && !detected.isSvg) {
-                    throw IllegalStateException("图片源返回了网页而非图片")
+                    val detected = detectImageFormat(
+                        bytes = headerBuf,
+                        contentTypeHeader = source.contentTypeHeader,
+                        url = resolvedUrl,
+                    )
+
+                    val contentTypeLower = source.contentTypeHeader?.lowercase(Locale.US).orEmpty()
+                    if (contentTypeLower.contains("text/html") && !detected.isSvg) {
+                        throw IllegalStateException("图片源返回了网页而非图片")
+                    }
+                    if (!detected.hasVerifiedSignature) {
+                        throw IllegalStateException("文件内容不是受支持的图片格式")
+                    }
+
+                    if (detected.isSvg) {
+                        val pngBytes = rasterizeSvgToPng(appContext, resolvedUrl)
+                            ?: throw IllegalStateException("SVG 图片转换失败")
+                        val fileName = buildSavedImageFileName(
+                            altText = altText,
+                            url = resolvedUrl,
+                            extension = "png",
+                            nowMillis = System.currentTimeMillis(),
+                        )
+                        writeStreamToPicturesDirectory(
+                            context = appContext,
+                            fileName = fileName,
+                            mimeType = "image/png",
+                            headerBytes = pngBytes,
+                            remainingStream = null,
+                        )
+                    } else {
+                        val fileName = buildSavedImageFileName(
+                            altText = altText,
+                            url = resolvedUrl,
+                            extension = detected.extension,
+                            nowMillis = System.currentTimeMillis(),
+                        )
+                        writeStreamToPicturesDirectory(
+                            context = appContext,
+                            fileName = fileName,
+                            mimeType = detected.mimeType,
+                            headerBytes = headerBuf,
+                            remainingStream = source.inputStream,
+                        )
+                    }
                 }
-
-                val (finalBytes, finalMime, finalExt) = if (detected.isSvg) {
-                    val pngBytes = rasterizeSvgToPng(appContext, resolvedUrl)
-                        ?: throw IllegalStateException("SVG 图片转换失败")
-                    Triple(pngBytes, "image/png", "png")
-                } else {
-                    Triple(retrieved.bytes, detected.mimeType, detected.extension)
-                }
-
-                val fileName = buildSavedImageFileName(
-                    altText = altText,
-                    url = resolvedUrl,
-                    extension = finalExt,
-                    nowMillis = System.currentTimeMillis(),
-                )
-                writeToPicturesDirectory(
-                    context = appContext,
-                    fileName = fileName,
-                    mimeType = finalMime,
-                    bytes = finalBytes,
-                )
                 postToast(appContext, "已保存到相册 (Pictures/$GALLERY_SUBDIR)")
             } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
                 val reason = t.message?.takeIf { it.isNotBlank() } ?: "请检查网络或存储权限"
                 postToast(appContext, "保存图片失败：$reason")
             } finally {
@@ -129,41 +205,41 @@ object MarkdownImageSaver {
         }
     }
 
-    private suspend fun loadImageBytes(
+    private fun openImageSource(
         appContext: Context,
         resolvedUrl: String,
-    ): RetrievedImagePayload {
-        val lower = resolvedUrl.lowercase()
-        if (lower.startsWith("data:")) {
+    ): ImageSourceStream {
+        val lower = resolvedUrl.lowercase(Locale.US)
+        if (lower.startsWith("data:image/")) {
             val (bytes, mime) = decodeDataUriImage(resolvedUrl)
                 ?: throw IllegalArgumentException("无法解析内嵌图片数据")
-            return RetrievedImagePayload(bytes = bytes, contentTypeHeader = mime)
+            if (bytes.size.toLong() > MAX_IMAGE_SAVE_BYTES) {
+                throw IllegalStateException("图片体积超过 32MB 上限")
+            }
+            return ByteArrayImageSource(bytes = bytes, contentTypeHeader = mime)
         }
 
-        if (lower.startsWith("content:") || lower.startsWith("file:")) {
-            val uri = Uri.parse(resolvedUrl)
-            val mime = appContext.contentResolver.getType(uri)
-            val bytes = appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("无法读取本地图片")
-            if (bytes.isEmpty()) throw IllegalStateException("图片内容为空")
-            return RetrievedImagePayload(bytes = bytes, contentTypeHeader = mime)
+        if (!lower.startsWith("https://") && !lower.startsWith("http://")) {
+            throw SecurityException("不支持的图片协议")
         }
 
         // Fast path: check Coil 3 disk cache first before making a network call.
-        val cachedBytes = runCatching {
+        val cachedSnapshot = runCatching {
             val imageLoader = SingletonImageLoader.get(appContext)
-            imageLoader.diskCache?.openSnapshot(resolvedUrl)?.use { snapshot ->
-                val cacheFile = File(snapshot.data.toString())
-                if (cacheFile.isFile && cacheFile.length() > 0L) {
-                    cacheFile.readBytes()
-                } else {
-                    null
-                }
-            }
+            imageLoader.diskCache?.openSnapshot(resolvedUrl)
         }.getOrNull()
 
-        if (cachedBytes != null && cachedBytes.isNotEmpty()) {
-            return RetrievedImagePayload(bytes = cachedBytes, contentTypeHeader = null)
+        if (cachedSnapshot != null) {
+            val cacheFile = File(cachedSnapshot.data.toString())
+            if (cacheFile.isFile && cacheFile.length() > 0L) {
+                return FileImageSource(
+                    file = cacheFile,
+                    contentTypeHeader = null,
+                    closeExtra = { cachedSnapshot.close() },
+                )
+            } else {
+                runCatching { cachedSnapshot.close() }
+            }
         }
 
         postToast(appContext, "正在下载原图…")
@@ -178,19 +254,29 @@ object MarkdownImageSaver {
                 .header("Accept", CoilHttpClientFactory.IMAGE_ACCEPT_HEADER)
         }
 
-        client.newCall(requestBuilder.build()).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("HTTP ${response.code}")
-            }
-            val body = response.body ?: throw IllegalStateException("响应内容为空")
-            val contentType = body.contentType()?.let { "${it.type}/${it.subtype}" }
-                ?: response.header("Content-Type")
-            val bytes = body.bytes()
-            if (bytes.isEmpty()) {
-                throw IllegalStateException("图片数据为空")
-            }
-            return RetrievedImagePayload(bytes = bytes, contentTypeHeader = contentType)
+        val response = client.newCall(requestBuilder.build()).execute()
+        if (!response.isSuccessful) {
+            val code = response.code
+            response.close()
+            throw IllegalStateException("HTTP $code")
         }
+        val body = response.body ?: run {
+            response.close()
+            throw IllegalStateException("响应内容为空")
+        }
+        val contentLength = body.contentLength()
+        if (contentLength > MAX_IMAGE_SAVE_BYTES) {
+            response.close()
+            throw IllegalStateException("图片体积超过 32MB 上限")
+        }
+        val contentType = body.contentType()?.let { "${it.type}/${it.subtype}" }
+            ?: response.header("Content-Type")
+        return OkHttpImageSource(
+            response = response,
+            contentTypeHeader = contentType,
+            contentLength = contentLength,
+            inputStream = body.byteStream(),
+        )
     }
 
     private suspend fun rasterizeSvgToPng(
@@ -214,11 +300,12 @@ object MarkdownImageSaver {
         }
     }
 
-    private fun writeToPicturesDirectory(
+    private fun writeStreamToPicturesDirectory(
         context: Context,
         fileName: String,
         mimeType: String,
-        bytes: ByteArray,
+        headerBytes: ByteArray,
+        remainingStream: InputStream?,
     ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
@@ -235,7 +322,7 @@ object MarkdownImageSaver {
                 ?: throw IllegalStateException("无法创建相册文件")
             try {
                 resolver.openOutputStream(itemUri)?.use { out ->
-                    out.write(bytes)
+                    copyBounded(headerBytes, remainingStream, out, MAX_IMAGE_SAVE_BYTES)
                     out.flush()
                 } ?: throw IllegalStateException("无法写入相册流")
 
@@ -255,7 +342,15 @@ object MarkdownImageSaver {
                 throw IllegalStateException("无法创建图片目录")
             }
             val outFile = File(targetDir, fileName)
-            outFile.writeBytes(bytes)
+            try {
+                outFile.outputStream().use { out ->
+                    copyBounded(headerBytes, remainingStream, out, MAX_IMAGE_SAVE_BYTES)
+                    out.flush()
+                }
+            } catch (t: Throwable) {
+                runCatching { outFile.delete() }
+                throw t
+            }
             MediaScannerConnection.scanFile(
                 context,
                 arrayOf(outFile.absolutePath),
@@ -270,6 +365,48 @@ object MarkdownImageSaver {
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
     }
+}
+
+internal fun readUpTo(input: InputStream, maxBytes: Int): ByteArray {
+    if (maxBytes <= 0) return ByteArray(0)
+    val out = ByteArrayOutputStream(maxBytes.coerceAtMost(HEADER_PEEK_BYTES))
+    val buf = ByteArray(minOf(maxBytes, COPY_BUFFER_BYTES))
+    var remaining = maxBytes
+    while (remaining > 0) {
+        val read = input.read(buf, 0, minOf(buf.size, remaining))
+        if (read <= 0) break
+        out.write(buf, 0, read)
+        remaining -= read
+    }
+    return out.toByteArray()
+}
+
+internal fun copyBounded(
+    headerBytes: ByteArray,
+    remainingStream: InputStream?,
+    output: OutputStream,
+    maxBytes: Long,
+): Long {
+    var written = headerBytes.size.toLong()
+    if (written > maxBytes) {
+        throw IllegalStateException("图片体积超过 32MB 上限")
+    }
+    if (headerBytes.isNotEmpty()) {
+        output.write(headerBytes)
+    }
+    if (remainingStream != null) {
+        val buf = ByteArray(COPY_BUFFER_BYTES)
+        while (true) {
+            val read = remainingStream.read(buf)
+            if (read <= 0) break
+            written += read.toLong()
+            if (written > maxBytes) {
+                throw IllegalStateException("图片体积超过 32MB 上限")
+            }
+            output.write(buf, 0, read)
+        }
+    }
+    return written
 }
 
 internal fun detectImageFormat(
@@ -288,7 +425,7 @@ internal fun detectImageFormat(
         bytes[6] == 0x1A.toByte() &&
         bytes[7] == 0x0A.toByte()
     ) {
-        return DetectedImageFormat(mimeType = "image/png", extension = "png")
+        return DetectedImageFormat(mimeType = "image/png", extension = "png", hasVerifiedSignature = true)
     }
 
     if (bytes.size >= 3 &&
@@ -296,13 +433,13 @@ internal fun detectImageFormat(
         bytes[1] == 0xD8.toByte() &&
         bytes[2] == 0xFF.toByte()
     ) {
-        return DetectedImageFormat(mimeType = "image/jpeg", extension = "jpg")
+        return DetectedImageFormat(mimeType = "image/jpeg", extension = "jpg", hasVerifiedSignature = true)
     }
 
     if (bytes.size >= 6) {
         val header6 = String(bytes, 0, 6, StandardCharsets.US_ASCII)
         if (header6 == "GIF87a" || header6 == "GIF89a") {
-            return DetectedImageFormat(mimeType = "image/gif", extension = "gif")
+            return DetectedImageFormat(mimeType = "image/gif", extension = "gif", hasVerifiedSignature = true)
         }
     }
 
@@ -310,29 +447,29 @@ internal fun detectImageFormat(
         val riff = String(bytes, 0, 4, StandardCharsets.US_ASCII)
         val webp = String(bytes, 8, 4, StandardCharsets.US_ASCII)
         if (riff == "RIFF" && webp == "WEBP") {
-            return DetectedImageFormat(mimeType = "image/webp", extension = "webp")
+            return DetectedImageFormat(mimeType = "image/webp", extension = "webp", hasVerifiedSignature = true)
         }
     }
 
     if (bytes.size >= 2 && bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) {
-        return DetectedImageFormat(mimeType = "image/bmp", extension = "bmp")
+        return DetectedImageFormat(mimeType = "image/bmp", extension = "bmp", hasVerifiedSignature = true)
     }
 
     if (bytes.size >= 12 && String(bytes, 4, 4, StandardCharsets.US_ASCII) == "ftyp") {
-        val brand = String(bytes, 8, 4, StandardCharsets.US_ASCII).lowercase()
+        val brand = String(bytes, 8, 4, StandardCharsets.US_ASCII).lowercase(Locale.US)
         when (brand) {
-            "avif", "avis" -> return DetectedImageFormat(mimeType = "image/avif", extension = "avif")
-            "heic", "heix", "hevc", "mif1" -> return DetectedImageFormat(mimeType = "image/heic", extension = "heic")
+            "avif", "avis" -> return DetectedImageFormat(mimeType = "image/avif", extension = "avif", hasVerifiedSignature = true)
+            "heic", "heix", "hevc", "mif1" -> return DetectedImageFormat(mimeType = "image/heic", extension = "heic", hasVerifiedSignature = true)
         }
     }
 
     // 2. Inspect XML/SVG text signature or SVG Content-Type header.
-    val peekLen = bytes.size.coerceAtMost(512)
+    val peekLen = bytes.size.coerceAtMost(HEADER_PEEK_BYTES)
     val headText = if (peekLen > 0) {
         String(bytes, 0, peekLen, StandardCharsets.UTF_8)
             .removePrefix("\uFEFF")
             .trimStart()
-            .lowercase()
+            .lowercase(Locale.US)
     } else {
         ""
     }
@@ -342,14 +479,19 @@ internal fun detectImageFormat(
     val normalizedMime = contentTypeHeader
         ?.substringBefore(';')
         ?.trim()
-        ?.lowercase()
+        ?.lowercase(Locale.US)
         .orEmpty()
 
     if (looksLikeSvgMarkup || normalizedMime == "image/svg+xml" || normalizedMime.contains("svg")) {
-        return DetectedImageFormat(mimeType = "image/svg+xml", extension = "svg", isSvg = true)
+        return DetectedImageFormat(
+            mimeType = "image/svg+xml",
+            extension = "svg",
+            isSvg = true,
+            hasVerifiedSignature = looksLikeSvgMarkup,
+        )
     }
 
-    // 3. Fallback to Content-Type header.
+    // 3. Fallback to Content-Type header (not magic-byte verified).
     when (normalizedMime) {
         "image/png" -> return DetectedImageFormat(mimeType = "image/png", extension = "png")
         "image/jpeg", "image/jpg" -> return DetectedImageFormat(mimeType = "image/jpeg", extension = "jpg")
@@ -360,10 +502,10 @@ internal fun detectImageFormat(
         "image/bmp" -> return DetectedImageFormat(mimeType = "image/bmp", extension = "bmp")
     }
 
-    // 4. Fallback to URL path extension (ignoring ?query and #fragment).
+    // 4. Fallback to URL path extension (ignoring ?query and #fragment; not magic-byte verified).
     val cleanPath = url.substringBefore('?').substringBefore('#')
     val lastSegment = cleanPath.substringAfterLast('/', "")
-    val ext = lastSegment.substringAfterLast('.', "").lowercase()
+    val ext = lastSegment.substringAfterLast('.', "").lowercase(Locale.US)
     return when (ext) {
         "png" -> DetectedImageFormat(mimeType = "image/png", extension = "png")
         "jpg", "jpeg" -> DetectedImageFormat(mimeType = "image/jpeg", extension = "jpg")

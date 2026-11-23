@@ -9,6 +9,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
@@ -32,9 +33,12 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -73,6 +77,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.HowToVote
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -174,6 +179,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -182,6 +188,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 import kotlin.math.ceil
 
 /**
@@ -332,12 +339,14 @@ fun MarkdownRenderer(
 
     val triggerImageLongPress: (String, String, String?) -> Unit = remember(haptics) {
         { url, alt, linkUrl ->
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            actionSheetImage = ImageActionTarget(
-                imageUrl = url,
-                altText = alt,
-                linkUrl = linkUrl,
-            )
+            if (normalizeMarkdownImageUrl(url).isNotBlank()) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                actionSheetImage = ImageActionTarget(
+                    imageUrl = url,
+                    altText = alt,
+                    linkUrl = linkUrl,
+                )
+            }
         }
     }
 
@@ -384,12 +393,28 @@ fun MarkdownRenderer(
         }
     }
 
+    val documentLightboxImages = remember(parsedDoc) {
+        collectDocumentLightboxImages(parsedDoc.blocks, parsedDoc.referenceLinks)
+    }
+
     lightboxImageState?.let { (imageUrl, altText) ->
+        val normalizedClicked = normalizeMarkdownImageUrl(imageUrl)
+        val matchedIndex = if (normalizedClicked.isNotBlank()) {
+            documentLightboxImages.indexOfFirst { it.url == normalizedClicked }
+        } else {
+            -1
+        }
+        val galleryImages = if (matchedIndex >= 0 && documentLightboxImages.isNotEmpty()) {
+            documentLightboxImages
+        } else {
+            listOf(LightboxImageItem(url = normalizedClicked.ifBlank { imageUrl }, altText = altText))
+        }
+        val initialIndex = matchedIndex.coerceAtLeast(0)
         PulseImageLightboxDialog(
-            imageUrl = imageUrl,
-            altText = altText,
+            images = galleryImages,
+            initialIndex = initialIndex,
             onDismiss = { lightboxImageState = null },
-            onOpenExternal = { effectiveUrlClick(imageUrl) },
+            onOpenExternal = { url -> effectiveUrlClick(url) },
         )
     }
 
@@ -1159,6 +1184,17 @@ fun PulseCodeBlockCard(
             }
 
             Column(modifier = Modifier.fillMaxWidth()) {
+                val copyCodeAction: () -> Unit = {
+                    val plainToCopy = if (hasAnsi) {
+                        AnsiAndCodeFormatter.stripAnsiEscapes(code)
+                    } else {
+                        code
+                    }
+                    copyPlainTextToClipboard(context, plainToCopy)
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    copied = true
+                }
+
                 if (showHeaderChrome) {
                     Row(
                         modifier = Modifier
@@ -1220,6 +1256,64 @@ fun PulseCodeBlockCard(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(copyBg)
+                                    .border(0.8.dp, copyBorderColor, RoundedCornerShape(7.dp))
+                                    .pulseBouncyClickable(
+                                        pressedScale = NodePulseMotion.chipPressScale,
+                                        role = Role.Button,
+                                        onClick = copyCodeAction,
+                                    )
+                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                                    contentDescription = null,
+                                    tint = copyFg,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = if (copied) "已复制" else "复制代码",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = copyFg,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        thickness = 0.8.dp,
+                        color = ext.codeBorder.copy(alpha = 0.8f),
+                    )
+                } else {
+                    // Compact utility bar for ANSI / terminal benchmark reports: exposes fit-to-width
+                    // toggle (`已适配` / `1:1原宽`) and 1-tap plain-text copy even in text-selection mode.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(ext.codeHeaderSurface.copy(alpha = 0.65f))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = headerLabel,
+                            style = codeTypography.codeLabel,
+                            color = ext.onCodeMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
                             if (canToggleFit) {
                                 Row(
                                     modifier = Modifier
@@ -1242,9 +1336,10 @@ fun PulseCodeBlockCard(
                                         )
                                         .pulseBouncyClickable(
                                             pressedScale = NodePulseMotion.chipPressScale,
+                                            role = Role.Button,
                                             onClick = { fitToWidth = !fitToWidth },
                                         )
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        .padding(horizontal = 8.dp, vertical = 3.5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
@@ -1252,10 +1347,10 @@ fun PulseCodeBlockCard(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (fitToWidth) Color(0xFF93C5FD) else ext.onCodeSurface,
                                         maxLines = 1,
+                                        softWrap = false,
                                     )
                                 }
                             }
-
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(7.dp))
@@ -1263,40 +1358,32 @@ fun PulseCodeBlockCard(
                                     .border(0.8.dp, copyBorderColor, RoundedCornerShape(7.dp))
                                     .pulseBouncyClickable(
                                         pressedScale = NodePulseMotion.chipPressScale,
-                                        onClick = {
-                                            val plainToCopy = if (hasAnsi) {
-                                                AnsiAndCodeFormatter.stripAnsiEscapes(code)
-                                            } else {
-                                                code
-                                            }
-                                            copyPlainTextToClipboard(context, plainToCopy)
-                                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            copied = true
-                                        },
+                                        role = Role.Button,
+                                        onClick = copyCodeAction,
                                     )
-                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                    .padding(horizontal = 8.dp, vertical = 3.5.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 Icon(
                                     imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                                    contentDescription = "复制代码",
+                                    contentDescription = null,
                                     tint = copyFg,
-                                    modifier = Modifier.size(13.dp),
+                                    modifier = Modifier.size(12.5.dp),
                                 )
                                 Text(
-                                    text = if (copied) "已复制" else "复制代码",
+                                    text = if (copied) "已复制" else "复制",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = copyFg,
                                     maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
                         }
                     }
-
                     HorizontalDivider(
-                        thickness = 0.8.dp,
-                        color = ext.codeBorder.copy(alpha = 0.8f),
+                        thickness = 0.6.dp,
+                        color = ext.codeBorder.copy(alpha = 0.6f),
                     )
                 }
 
@@ -2480,16 +2567,20 @@ internal fun normalizeMarkdownImageUrl(rawUrl: String?): String {
         ?.trim()
         .orEmpty()
     if (trimmed.isEmpty()) return ""
-    val lower = trimmed.lowercase()
+    val lower = trimmed.lowercase(java.util.Locale.US)
     return when {
-        lower.startsWith("data:") ||
+        lower.startsWith("file:") ||
             lower.startsWith("content:") ||
-            lower.startsWith("file:") ||
-            lower.startsWith("android.resource:") -> trimmed
+            lower.startsWith("android.resource:") ||
+            lower.startsWith("javascript:") ||
+            lower.startsWith("vbscript:") -> ""
+        lower.startsWith("data:") -> {
+            if (lower.startsWith("data:image/")) trimmed else ""
+        }
         lower.startsWith("https://") -> "https://" + trimmed.substring(8)
         lower.startsWith("http://") -> {
             val rest = trimmed.substring(7)
-            val host = rest.substringBefore('/').substringBefore(':').lowercase()
+            val host = rest.substringBefore('/').substringBefore(':').lowercase(java.util.Locale.US)
             if (host == "localhost" || host == "127.0.0.1") {
                 "http://$rest"
             } else {
@@ -2497,7 +2588,16 @@ internal fun normalizeMarkdownImageUrl(rawUrl: String?): String {
             }
         }
         trimmed.startsWith("//") -> "https:$trimmed"
-        else -> normalizeNodeSeekAssetUrl(trimmed) ?: trimmed
+        else -> {
+            // Reject arbitrary unknown URI schemes (e.g. `intent:`, `ftp:`) while keeping relative paths.
+            val schemeColon = trimmed.indexOf(':')
+            val firstSlash = trimmed.indexOf('/')
+            if (schemeColon > 0 && (firstSlash < 0 || schemeColon < firstSlash)) {
+                ""
+            } else {
+                normalizeNodeSeekAssetUrl(trimmed) ?: trimmed
+            }
+        }
     }
 }
 
@@ -3165,6 +3265,8 @@ fun PulseZoomableImageCard(
                         )
                         loadStatus = ImageLoadStatus.SUCCESS
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (_: Throwable) {
                     // Fall back to regular AsyncImage request if prefetch was cancelled or failed.
                 } finally {
@@ -3258,14 +3360,12 @@ fun PulseZoomableImageCard(
                                 asyncSucceeded = false
                                 loadStatus = ImageLoadStatus.LOADING
                                 retryNonce++
-                            } else {
-                                onClick()
                             }
-                        } else {
+                        } else if (resolvedUrl.isNotBlank()) {
                             onClick()
                         }
                     },
-                    onLongClick = onLongClick,
+                    onLongClick = if (resolvedUrl.isNotBlank()) onLongClick else null,
                 ),
             contentAlignment = if (isCompact) Alignment.CenterStart else Alignment.Center,
         ) {
@@ -3284,34 +3384,38 @@ fun PulseZoomableImageCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
-                        text = altText.ifBlank { "图片加载失败，点按重试" },
+                        text = altText.ifBlank {
+                            if (resolvedUrl.isBlank()) "图片地址无效或不受支持" else "图片加载失败，点按重试"
+                        },
                         style = if (isCompact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
-                        modifier = Modifier.clickable(onClick = onClick),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    if (resolvedUrl.isNotBlank()) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                            modifier = Modifier.clickable(onClick = onClick),
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                contentDescription = "打开原图",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(12.dp),
-                            )
-                            Text(
-                                text = "原图",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = "打开原图",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(12.dp),
+                                )
+                                Text(
+                                    text = "原图",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                )
+                            }
                         }
                     }
                 }
@@ -3486,8 +3590,106 @@ fun PulseZoomableImageCard(
     }
 }
 
+@Immutable
+data class LightboxImageItem(
+    val url: String,
+    val altText: String = "",
+)
+
+internal fun collectDocumentLightboxImages(
+    blocks: List<MdBlock>,
+    referenceLinks: Map<String, Pair<String, String?>> = emptyMap(),
+): List<LightboxImageItem> {
+    val ordered = LinkedHashMap<String, String>()
+
+    fun record(rawUrl: String, alt: String) {
+        val normalized = normalizeMarkdownImageUrl(rawUrl)
+        if (normalized.isBlank() || isBadgeOrSmallGraphicUrl(normalized)) return
+        val existing = ordered[normalized]
+        if (existing == null || (existing.isBlank() && alt.isNotBlank())) {
+            ordered[normalized] = alt
+        }
+    }
+
+    fun collectInline(tokens: List<MdInlineToken>) {
+        for (token in tokens) {
+            when (token) {
+                is MdInlineToken.Image -> record(token.url, token.alt)
+                is MdInlineToken.Link -> collectInline(token.labelTokens)
+                is MdInlineToken.Styled -> collectInline(token.children)
+                else -> Unit
+            }
+        }
+    }
+
+    fun walkBlocks(list: List<MdBlock>) {
+        for (block in list) {
+            when (block) {
+                is MdBlock.ImageCard -> record(block.url, block.alt)
+                is MdBlock.ImageRow -> block.items.forEach { record(it.imageUrl, it.alt) }
+                is MdBlock.Paragraph -> collectInline(tokenizeMarkdownInline(block.text, referenceLinks))
+                is MdBlock.Blockquote -> walkBlocks(block.children)
+                is MdBlock.DetailsSpoiler -> walkBlocks(block.children)
+                is MdBlock.TabsContainer -> block.tabs.forEach { walkBlocks(it.children) }
+                is MdBlock.ListContainer -> block.items.forEach { item ->
+                    collectInline(tokenizeMarkdownInline(item.text, referenceLinks))
+                }
+                is MdBlock.Table -> {
+                    val unwrapped = extractImageTableCardsOrNull(block, referenceLinks)
+                    if (unwrapped != null) {
+                        unwrapped.forEach { record(it.image.imageUrl, it.image.alt) }
+                    } else {
+                        block.rows.forEach { row ->
+                            row.forEach { cell ->
+                                val cellImages = parseStandaloneImageRowLine(cell.trim(), referenceLinks)
+                                if (cellImages != null) {
+                                    cellImages.forEach { record(it.imageUrl, it.alt) }
+                                } else {
+                                    collectInline(tokenizeMarkdownInline(cell, referenceLinks))
+                                }
+                            }
+                        }
+                    }
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    walkBlocks(blocks)
+    return ordered.entries.map { (url, alt) -> LightboxImageItem(url = url, altText = alt) }
+}
+
+private fun shareMarkdownImageUrl(
+    context: Context,
+    url: String,
+    altText: String,
+) {
+    val safeUrl = normalizeMarkdownImageUrl(url)
+    if (safeUrl.isBlank()) {
+        Toast.makeText(context, "不支持分享该图片链接", Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        val shareText = if (altText.isNotBlank()) "$altText\n$safeUrl" else safeUrl
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, shareText)
+            if (altText.isNotBlank()) {
+                putExtra(Intent.EXTRA_SUBJECT, altText)
+            }
+        }
+        val chooser = Intent.createChooser(sendIntent, "分享图片").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
+    }.onFailure {
+        Toast.makeText(context, "未找到可用的分享应用", Toast.LENGTH_SHORT).show()
+    }
+}
+
 /**
- * Full-screen Pinch-to-Zoom & Double-Tap Zoom Lightbox Dialog.
+ * Full-screen Pinch-to-Zoom & Double-Tap Zoom Lightbox Dialog (single-image convenience overload).
  */
 @Composable
 fun PulseImageLightboxDialog(
@@ -3496,42 +3698,53 @@ fun PulseImageLightboxDialog(
     onDismiss: () -> Unit,
     onOpenExternal: (() -> Unit)? = null,
 ) {
-    val context = LocalContext.current
-    val haptics = LocalHapticFeedback.current
-    val saveImage = rememberMarkdownImageSaveAction()
-    val resolvedUrl = remember(imageUrl) { normalizeMarkdownImageUrl(imageUrl) }
-    var retryNonce by remember(resolvedUrl) { mutableIntStateOf(0) }
-    var loadStatus by remember(resolvedUrl, retryNonce) {
-        mutableStateOf(if (resolvedUrl.isBlank()) ImageLoadStatus.ERROR else ImageLoadStatus.LOADING)
-    }
-    val imageRequest = remember(context, resolvedUrl, retryNonce) {
-        buildMarkdownCoilRequest(
-            context = context,
-            resolvedUrl = resolvedUrl,
-            retryNonce = retryNonce,
-        )
-    }
+    PulseImageLightboxDialog(
+        images = listOf(LightboxImageItem(url = imageUrl, altText = altText)),
+        initialIndex = 0,
+        onDismiss = onDismiss,
+        onOpenExternal = onOpenExternal?.let { callback -> { _ -> callback() } },
+    )
+}
 
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+/**
+ * Full-screen Multi-Image Gallery Lightbox Dialog with HorizontalPager swiping,
+ * viewport-clamped pinch-to-zoom & pan, double-tap zoom, vertical swipe-to-dismiss,
+ * 1-tap share, and MediaStore save.
+ */
+@Composable
+fun PulseImageLightboxDialog(
+    images: List<LightboxImageItem>,
+    initialIndex: Int = 0,
+    onDismiss: () -> Unit,
+    onOpenExternal: ((String) -> Unit)? = null,
+) {
+    if (images.isEmpty()) return
+    val context = LocalContext.current
+    val saveImage = rememberMarkdownImageSaveAction()
+    val safeInitialIndex = initialIndex.coerceIn(0, images.lastIndex)
+    val pagerState = rememberPagerState(initialPage = safeInitialIndex, pageCount = { images.size })
+    val latestOnDismiss by rememberUpdatedState(onDismiss)
+    val latestOnOpenExternal by rememberUpdatedState(onOpenExternal)
+
+    var activePageScale by remember { mutableFloatStateOf(1f) }
+    var dismissDragY by remember { mutableFloatStateOf(0f) }
     var showActionCard by remember { mutableStateOf(false) }
 
-    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-        val newScale = (scale * zoomChange).coerceIn(1f, 8f)
-        scale = newScale
-        offset = if (newScale <= 1.01f) {
-            Offset.Zero
-        } else {
-            offset + panChange
-        }
+    LaunchedEffect(pagerState.currentPage) {
+        activePageScale = 1f
+        dismissDragY = 0f
     }
+
+    val currentItem = images.getOrElse(pagerState.currentPage) { images.first() }
+    val currentResolvedUrl = remember(currentItem.url) { normalizeMarkdownImageUrl(currentItem.url) }
+    val bgAlpha = (0.96f * (1f - (abs(dismissDragY) / 720f).coerceIn(0f, 0.72f))).coerceIn(0.24f, 0.96f)
 
     Dialog(
         onDismissRequest = {
             if (showActionCard) {
                 showActionCard = false
             } else {
-                onDismiss()
+                latestOnDismiss()
             }
         },
         properties = DialogProperties(
@@ -3541,109 +3754,41 @@ fun PulseImageLightboxDialog(
     ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
-            color = Color.Black.copy(alpha = 0.96f),
+            color = Color.Black.copy(alpha = bgAlpha),
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                if (loadStatus != ImageLoadStatus.ERROR) {
-                    key(resolvedUrl, retryNonce) {
-                        AsyncImage(
-                            model = imageRequest,
-                            contentDescription = altText.ifBlank { "放大图片" },
-                            contentScale = ContentScale.Fit,
-                            onLoading = { loadStatus = ImageLoadStatus.LOADING },
-                            onSuccess = { loadStatus = ImageLoadStatus.SUCCESS },
-                            onError = { loadStatus = ImageLoadStatus.ERROR },
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectTapGestures(
-                                        onDoubleTap = {
-                                            if (scale > 1.2f) {
-                                                scale = 1f
-                                                offset = Offset.Zero
-                                            } else {
-                                                scale = 2.5f
-                                            }
-                                        },
-                                        onTap = {
-                                            if (showActionCard) {
-                                                showActionCard = false
-                                            } else if (scale <= 1.05f) {
-                                                onDismiss()
-                                            }
-                                        },
-                                        onLongPress = {
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            showActionCard = true
-                                        },
-                                    )
-                                }
-                                .transformable(state = transformState)
-                                .graphicsLayer {
-                                    scaleX = scale
-                                    scaleY = scale
-                                    translationX = offset.x
-                                    translationY = offset.y
-                                },
-                        )
-                    }
-                }
-
-                if (loadStatus == ImageLoadStatus.LOADING) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.5.dp,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(34.dp),
-                    )
-                }
-
-                if (loadStatus == ImageLoadStatus.ERROR) {
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text(
-                            text = "原图加载失败，请重试或在浏览器打开",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.88f),
-                            textAlign = TextAlign.Center,
-                        )
-                        Surface(
-                            shape = CircleShape,
-                            color = Color.White.copy(alpha = 0.16f),
-                            modifier = Modifier
-                                .border(0.8.dp, Color.White.copy(alpha = 0.28f), CircleShape)
-                                .clickable {
-                                    if (resolvedUrl.isNotBlank()) {
-                                        loadStatus = ImageLoadStatus.LOADING
-                                        retryNonce++
-                                    }
-                                },
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Text(
-                                    text = "重新加载",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = Color.White,
-                                )
+                HorizontalPager(
+                    state = pagerState,
+                    userScrollEnabled = activePageScale <= 1.05f && !showActionCard && images.size > 1,
+                    beyondViewportPageCount = 1,
+                    modifier = Modifier.fillMaxSize(),
+                ) { pageIndex ->
+                    val item = images[pageIndex]
+                    val isCurrentPage = pagerState.currentPage == pageIndex
+                    LightboxZoomableImagePage(
+                        item = item,
+                        isCurrentPage = isCurrentPage,
+                        showActionCard = showActionCard,
+                        onScaleChanged = { newScale ->
+                            if (isCurrentPage) {
+                                activePageScale = newScale
                             }
-                        }
-                    }
+                        },
+                        onDismissDragChanged = { newDragY ->
+                            if (isCurrentPage) {
+                                dismissDragY = newDragY
+                            }
+                        },
+                        onTap = {
+                            if (showActionCard) {
+                                showActionCard = false
+                            } else {
+                                latestOnDismiss()
+                            }
+                        },
+                        onDismissGesture = { latestOnDismiss() },
+                        onLongPress = { showActionCard = true },
+                    )
                 }
 
                 // Top controls bar
@@ -3656,7 +3801,7 @@ fun PulseImageLightboxDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     IconButton(
-                        onClick = onDismiss,
+                        onClick = { latestOnDismiss() },
                         modifier = Modifier
                             .clip(CircleShape)
                             .background(Color.White.copy(alpha = 0.14f))
@@ -3669,18 +3814,40 @@ fun PulseImageLightboxDialog(
                         )
                     }
 
-                    if (altText.isNotBlank()) {
-                        Text(
-                            text = altText,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color.White.copy(alpha = 0.88f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 12.dp),
-                            textAlign = TextAlign.Center,
-                        )
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    ) {
+                        if (images.size > 1) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.56f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                            ) {
+                                Text(
+                                    text = "${pagerState.currentPage + 1} / ${images.size}",
+                                    style = NodePulseThemeTokens.extraTypography.tabularBadge,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
+                        }
+                        if (currentItem.altText.isNotBlank()) {
+                            Text(
+                                text = currentItem.altText,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White.copy(alpha = 0.88f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
 
                     Row(
@@ -3689,7 +3856,27 @@ fun PulseImageLightboxDialog(
                     ) {
                         IconButton(
                             onClick = {
-                                saveImage(resolvedUrl.ifBlank { imageUrl }, altText)
+                                shareMarkdownImageUrl(
+                                    context = context,
+                                    url = currentResolvedUrl.ifBlank { currentItem.url },
+                                    altText = currentItem.altText,
+                                )
+                            },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.14f))
+                                .border(0.8.dp, Color.White.copy(alpha = 0.24f), CircleShape),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Share,
+                                contentDescription = "分享图片",
+                                tint = Color.White,
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                saveImage(currentResolvedUrl.ifBlank { currentItem.url }, currentItem.altText)
                             },
                             modifier = Modifier
                                 .clip(CircleShape)
@@ -3703,9 +3890,13 @@ fun PulseImageLightboxDialog(
                             )
                         }
 
-                        if (onOpenExternal != null) {
+                        if (latestOnOpenExternal != null) {
                             IconButton(
-                                onClick = onOpenExternal,
+                                onClick = {
+                                    if (currentResolvedUrl.isNotBlank()) {
+                                        latestOnOpenExternal?.invoke(currentResolvedUrl)
+                                    }
+                                },
                                 modifier = Modifier
                                     .clip(CircleShape)
                                     .background(Color.White.copy(alpha = 0.14f))
@@ -3721,26 +3912,13 @@ fun PulseImageLightboxDialog(
                     }
                 }
 
-                AnimatedVisibility(
-                    visible = scale > 1.05f && !showActionCard,
+                LightboxZoomBadge(
+                    scale = activePageScale,
+                    visible = activePageScale > 1.05f && !showActionCard,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 36.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.65f))
-                            .border(0.8.dp, Color.White.copy(alpha = 0.22f), CircleShape)
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
-                    ) {
-                        Text(
-                            text = "${(scale * 100).toInt()}% · 双击还原",
-                            style = NodePulseThemeTokens.extraTypography.tabularBadge,
-                            color = Color.White.copy(alpha = 0.92f),
-                        )
-                    }
-                }
+                )
 
                 if (showActionCard) {
                     Box(
@@ -3757,7 +3935,7 @@ fun PulseImageLightboxDialog(
                     exit = fadeOut() + slideOutVertically { it / 2 },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 ) {
-                    val targetUrl = resolvedUrl.ifBlank { imageUrl }
+                    val targetUrl = currentResolvedUrl.ifBlank { currentItem.url }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3779,7 +3957,23 @@ fun PulseImageLightboxDialog(
                             highlightPrimary = true,
                             onClick = {
                                 showActionCard = false
-                                saveImage(targetUrl, altText)
+                                saveImage(targetUrl, currentItem.altText)
+                            },
+                        )
+                        PulseGradientDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                            modifier = Modifier.padding(horizontal = 14.dp),
+                        )
+                        MarkdownImageActionSheetRow(
+                            icon = Icons.Rounded.Share,
+                            title = "分享图片",
+                            onClick = {
+                                showActionCard = false
+                                shareMarkdownImageUrl(
+                                    context = context,
+                                    url = targetUrl,
+                                    altText = currentItem.altText,
+                                )
                             },
                         )
                         PulseGradientDivider(
@@ -3795,7 +3989,7 @@ fun PulseImageLightboxDialog(
                                 showActionCard = false
                             },
                         )
-                        if (onOpenExternal != null) {
+                        if (latestOnOpenExternal != null && currentResolvedUrl.isNotBlank()) {
                             PulseGradientDivider(
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
                                 modifier = Modifier.padding(horizontal = 14.dp),
@@ -3805,7 +3999,7 @@ fun PulseImageLightboxDialog(
                                 title = "在浏览器打开",
                                 onClick = {
                                     showActionCard = false
-                                    onOpenExternal()
+                                    latestOnOpenExternal?.invoke(currentResolvedUrl)
                                 },
                             )
                         }
@@ -3817,6 +4011,235 @@ fun PulseImageLightboxDialog(
                             icon = Icons.Rounded.Close,
                             title = "取消",
                             onClick = { showActionCard = false },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LightboxZoomBadge(
+    scale: Float,
+    visible: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.65f))
+                .border(0.8.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+        ) {
+            Text(
+                text = "${(scale * 100).toInt()}% · 双击还原",
+                style = NodePulseThemeTokens.extraTypography.tabularBadge,
+                color = Color.White.copy(alpha = 0.92f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LightboxZoomableImagePage(
+    item: LightboxImageItem,
+    isCurrentPage: Boolean,
+    showActionCard: Boolean,
+    onScaleChanged: (Float) -> Unit,
+    onDismissDragChanged: (Float) -> Unit,
+    onTap: () -> Unit,
+    onDismissGesture: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val resolvedUrl = remember(item.url) { normalizeMarkdownImageUrl(item.url) }
+    var retryNonce by remember(resolvedUrl) { mutableIntStateOf(0) }
+    var loadStatus by remember(resolvedUrl, retryNonce) {
+        mutableStateOf(if (resolvedUrl.isBlank()) ImageLoadStatus.ERROR else ImageLoadStatus.LOADING)
+    }
+    val imageRequest = remember(context, resolvedUrl, retryNonce) {
+        buildMarkdownCoilRequest(
+            context = context,
+            resolvedUrl = resolvedUrl,
+            retryNonce = retryNonce,
+        )
+    }
+
+    var scale by remember(resolvedUrl) { mutableFloatStateOf(1f) }
+    var offset by remember(resolvedUrl) { mutableStateOf(Offset.Zero) }
+    var dismissDragY by remember(resolvedUrl) { mutableFloatStateOf(0f) }
+
+    val latestOnTap by rememberUpdatedState(onTap)
+    val latestOnDismissGesture by rememberUpdatedState(onDismissGesture)
+    val latestOnLongPress by rememberUpdatedState(onLongPress)
+    val latestOnScaleChanged by rememberUpdatedState(onScaleChanged)
+    val latestOnDismissDragChanged by rememberUpdatedState(onDismissDragChanged)
+    val latestShowActionCard by rememberUpdatedState(showActionCard)
+
+    LaunchedEffect(isCurrentPage) {
+        if (!isCurrentPage && (scale != 1f || offset != Offset.Zero || dismissDragY != 0f)) {
+            scale = 1f
+            offset = Offset.Zero
+            dismissDragY = 0f
+        }
+    }
+
+    val dismissThresholdPx = remember(density) { with(density) { 140.dp.toPx() } }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val viewportWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+        val viewportHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+
+        val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+            val newScale = (scale * zoomChange).coerceIn(1f, 8f)
+            scale = newScale
+            latestOnScaleChanged(newScale)
+            if (newScale <= 1.01f) {
+                offset = Offset.Zero
+            } else {
+                val maxX = ((newScale - 1f) * viewportWidthPx / 2f).coerceAtLeast(0f)
+                val maxY = ((newScale - 1f) * viewportHeightPx / 2f).coerceAtLeast(0f)
+                offset = Offset(
+                    x = (offset.x + panChange.x).coerceIn(-maxX, maxX),
+                    y = (offset.y + panChange.y).coerceIn(-maxY, maxY),
+                )
+            }
+        }
+
+        if (loadStatus != ImageLoadStatus.ERROR) {
+            key(resolvedUrl, retryNonce) {
+                AsyncImage(
+                    model = imageRequest,
+                    contentDescription = item.altText.ifBlank { "放大图片" },
+                    contentScale = ContentScale.Fit,
+                    onLoading = { loadStatus = ImageLoadStatus.LOADING },
+                    onSuccess = { loadStatus = ImageLoadStatus.SUCCESS },
+                    onError = { loadStatus = ImageLoadStatus.ERROR },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(resolvedUrl) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    if (scale > 1.2f) {
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        scale = 2.5f
+                                    }
+                                    latestOnScaleChanged(scale)
+                                },
+                                onTap = {
+                                    if (latestShowActionCard || scale <= 1.05f) {
+                                        latestOnTap()
+                                    }
+                                },
+                                onLongPress = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    latestOnLongPress()
+                                },
+                            )
+                        }
+                        .pointerInput(resolvedUrl, scale <= 1.05f) {
+                            if (scale <= 1.05f) {
+                                detectVerticalDragGestures(
+                                    onDragEnd = {
+                                        if (abs(dismissDragY) >= dismissThresholdPx) {
+                                            latestOnDismissGesture()
+                                        } else {
+                                            dismissDragY = 0f
+                                            latestOnDismissDragChanged(0f)
+                                        }
+                                    },
+                                    onDragCancel = {
+                                        dismissDragY = 0f
+                                        latestOnDismissDragChanged(0f)
+                                    },
+                                    onVerticalDrag = { _, dragAmount ->
+                                        if (!latestShowActionCard && scale <= 1.05f) {
+                                            dismissDragY += dragAmount
+                                            latestOnDismissDragChanged(dismissDragY)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                        .transformable(
+                            state = transformState,
+                            canPan = { scale > 1.05f },
+                        )
+                        .graphicsLayer {
+                            val dragScaleFactor = if (scale <= 1.05f) {
+                                (1f - (abs(dismissDragY) / 1400f).coerceIn(0f, 0.16f))
+                            } else {
+                                1f
+                            }
+                            scaleX = scale * dragScaleFactor
+                            scaleY = scale * dragScaleFactor
+                            translationX = offset.x
+                            translationY = offset.y + if (scale <= 1.05f) dismissDragY else 0f
+                        },
+                )
+            }
+        }
+
+        if (loadStatus == ImageLoadStatus.LOADING) {
+            CircularProgressIndicator(
+                color = Color.White,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(34.dp),
+            )
+        }
+
+        if (loadStatus == ImageLoadStatus.ERROR) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "原图加载失败，请重试或在浏览器打开",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.88f),
+                    textAlign = TextAlign.Center,
+                )
+                Surface(
+                    shape = CircleShape,
+                    color = Color.White.copy(alpha = 0.16f),
+                    modifier = Modifier
+                        .border(0.8.dp, Color.White.copy(alpha = 0.28f), CircleShape)
+                        .clickable {
+                            if (resolvedUrl.isNotBlank()) {
+                                loadStatus = ImageLoadStatus.LOADING
+                                retryNonce++
+                            }
+                        },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            text = "重新加载",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White,
                         )
                     }
                 }
@@ -4176,6 +4599,11 @@ private fun RichInlineTextTokens(
                     compactInlineSticker -> 15.sp
                     else -> 24.sp
                 }
+                val inlineRequest = buildMarkdownCoilRequest(
+                    context = context,
+                    resolvedUrl = normalized,
+                    enableCrossfade = !insideTabs,
+                )
                 put(
                     id,
                     InlineTextContent(
@@ -4186,11 +4614,7 @@ private fun RichInlineTextTokens(
                         )
                     ) {
                         AsyncImage(
-                            model = buildMarkdownCoilRequest(
-                                context = context,
-                                resolvedUrl = normalized,
-                                enableCrossfade = !insideTabs,
-                            ),
+                            model = inlineRequest,
                             contentDescription = img.alt,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
@@ -5114,34 +5538,44 @@ private fun parseInlineLinkDestination(text: String, openParenIdx: Int): Pair<St
     return null
 }
 
+private fun isDisallowedHtmlImageScheme(candidate: String): Boolean {
+    val lower = candidate.trim().lowercase(java.util.Locale.US)
+    return lower.startsWith("javascript:") ||
+        lower.startsWith("vbscript:") ||
+        lower.startsWith("file:") ||
+        lower.startsWith("content:") ||
+        lower.startsWith("android.resource:")
+}
+
 private fun resolveHtmlImageSrc(attrs: Map<String, String>): String? {
     val lazyKeys = listOf("data-src", "data-original", "data-lazy-src", "data-url", "data-actualsrc")
     for (key in lazyKeys) {
         val candidate = attrs[key]?.let(::decodeHtmlEntitiesMinimal)?.trim()
         if (!candidate.isNullOrBlank() &&
             !candidate.startsWith("data:image/", ignoreCase = true) &&
-            !candidate.startsWith("javascript:", ignoreCase = true)
+            !isDisallowedHtmlImageScheme(candidate)
         ) {
-            return normalizeMarkdownImageUrl(candidate)
+            return normalizeMarkdownImageUrl(candidate).takeIf { it.isNotBlank() }
         }
     }
     val directSrc = attrs["src"]?.let(::decodeHtmlEntitiesMinimal)?.trim()
     if (!directSrc.isNullOrBlank() &&
         !directSrc.startsWith("data:image/", ignoreCase = true) &&
-        !directSrc.startsWith("javascript:", ignoreCase = true)
+        !isDisallowedHtmlImageScheme(directSrc)
     ) {
-        return normalizeMarkdownImageUrl(directSrc)
+        return normalizeMarkdownImageUrl(directSrc).takeIf { it.isNotBlank() }
     }
     val srcset = (attrs["data-srcset"] ?: attrs["srcset"])?.let(::decodeHtmlEntitiesMinimal)?.trim()
     if (!srcset.isNullOrBlank()) {
         val first = srcset.substringBefore(',').trim().substringBefore(' ').trim()
-        if (first.isNotEmpty() && !first.startsWith("javascript:", ignoreCase = true)) {
-            return normalizeMarkdownImageUrl(first)
+        if (first.isNotEmpty() && !isDisallowedHtmlImageScheme(first)) {
+            return normalizeMarkdownImageUrl(first).takeIf { it.isNotBlank() }
         }
     }
     return directSrc
-        ?.takeIf { it.isNotBlank() && !it.startsWith("javascript:", ignoreCase = true) }
+        ?.takeIf { it.isNotBlank() && !isDisallowedHtmlImageScheme(it) }
         ?.let(::normalizeMarkdownImageUrl)
+        ?.takeIf { it.isNotBlank() }
 }
 
 private fun parseHtmlAttributes(attrText: String): Map<String, String> {
@@ -5403,7 +5837,8 @@ private val LIST_ITEM_REGEX =
     Regex("""^(\s*)(?:([-*+])|(\d+)\.)\s+(?:\[([ xX])]\s+)?(.+)$""")
 private val TABLE_DIVIDER_CELL_REGEX = Regex("""^:?-{1,}:?$""")
 private val REF_LINK_DEF_REGEX = Regex("""^\s*\[([^\]]+)]\s*:\s*(?:<([^>\s]+)>|(\S+))(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?\s*$""")
-private val DETAILS_OPEN_REGEX = Regex("""^<details\b[^>]*>""", RegexOption.IGNORE_CASE)
+private const val MAX_BLOCK_DEPTH = 8
+private val DETAILS_OPEN_REGEX = Regex("""^\s*<details\b[^>]*>""", RegexOption.IGNORE_CASE)
 private val DETAILS_CLOSE_REGEX = Regex("""</details>\s*$""", RegexOption.IGNORE_CASE)
 private val SUMMARY_INLINE_REGEX = Regex("""<summary\b[^>]*>(.*?)</summary>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
 
@@ -5472,7 +5907,13 @@ private fun extractReferenceDefinitionsOutsideFences(
 private fun parseBlocksInternal(
     lines: List<String>,
     referenceLinks: Map<String, Pair<String, String?>>,
+    depth: Int = 0,
 ): List<MdBlock> {
+    if (lines.isEmpty()) return emptyList()
+    if (depth >= MAX_BLOCK_DEPTH) {
+        val fallbackText = lines.joinToString("\n").trim()
+        return if (fallbackText.isNotEmpty()) listOf(MdBlock.Paragraph(fallbackText)) else emptyList()
+    }
     val result = mutableListOf<MdBlock>()
     var i = 0
 
@@ -5497,7 +5938,7 @@ private fun parseBlocksInternal(
                 if (title != null) {
                     tabItems += MdTabItem(
                         title = title,
-                        children = parseBlocksInternal(currentLines, referenceLinks),
+                        children = parseBlocksInternal(currentLines, referenceLinks, depth + 1),
                     )
                 }
                 currentTitle = null
@@ -5540,6 +5981,9 @@ private fun parseBlocksInternal(
                 }
                 i++
             }
+            if (detailLines.isNotEmpty()) {
+                detailLines[0] = detailLines[0].trimStart()
+            }
             val joined = detailLines.joinToString("\n")
                 .replaceFirst(DETAILS_OPEN_REGEX, "")
                 .let { if (foundClose) it.replaceFirst(DETAILS_CLOSE_REGEX, "") else it }
@@ -5552,7 +5996,7 @@ private fun parseBlocksInternal(
             }
             result += MdBlock.DetailsSpoiler(
                 summary = summary,
-                children = parseBlocksInternal(bodyText.lines(), referenceLinks),
+                children = parseBlocksInternal(bodyText.lines(), referenceLinks, depth + 1),
             )
             continue
         }
@@ -5706,7 +6150,7 @@ private fun parseBlocksInternal(
                 quoteLines += lines[i].trimStart().removePrefix(">").removePrefix(" ")
                 i++
             }
-            val nested = parseBlocksInternal(quoteLines, referenceLinks)
+            val nested = parseBlocksInternal(quoteLines, referenceLinks, depth + 1)
             if (nested.isNotEmpty()) {
                 result += MdBlock.Blockquote(nested)
             }
