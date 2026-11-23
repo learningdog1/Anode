@@ -813,7 +813,9 @@ data class MessageListResponseDto(
         }
         val threads = groupedRows.entries.map { (peerId, rows) ->
             val latest = rows.maxWith(
-                compareBy<DirectMessageRowDto> { it.createdAt }.thenBy { it.id },
+                compareBy<DirectMessageRowDto> { parseMessageTimestampMillis(it.createdAt) ?: Long.MIN_VALUE }
+                    .thenBy { it.createdAt }
+                    .thenBy { it.id },
             )
             val isSystemThread = peerId <= 0L || rows.any { it.isSystemMessage(viewerUid) }
             val explicitPeerName = rows.asSequence()
@@ -850,9 +852,29 @@ data class MessageListResponseDto(
             )
         }
         return threads.sortedWith(
-            compareByDescending<GroupedMessageThreadDto> { it.createdAt }
+            compareByDescending<GroupedMessageThreadDto> { parseMessageTimestampMillis(it.createdAt) ?: Long.MIN_VALUE }
+                .thenByDescending { it.createdAt }
                 .thenByDescending { it.latestMessageId ?: 0L },
         )
+    }
+
+    companion object {
+        private val SQL_MESSAGE_TIME_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+        internal fun parseMessageTimestampMillis(raw: String?): Long? {
+            val trimmed = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            runCatching { return Instant.parse(trimmed).toEpochMilli() }
+            runCatching { return OffsetDateTime.parse(trimmed).toInstant().toEpochMilli() }
+            runCatching {
+                val clean = trimmed.substringBefore('.')
+                return LocalDateTime.parse(clean, SQL_MESSAGE_TIME_FORMATTER)
+                    .atZone(AttendanceBoardResponseDto.BEIJING_ZONE)
+                    .toInstant()
+                    .toEpochMilli()
+            }
+            return null
+        }
     }
 }
 

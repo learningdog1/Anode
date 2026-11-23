@@ -69,6 +69,17 @@ object NodeSeekUrlNormalizer {
     }
 
     /**
+     * Strictly verifies that [rawUrl] is an `https://` URL whose host is `nodeseek.com` or
+     * a subdomain `*.nodeseek.com` (rejecting lookalike suffix hosts such as `evilnodeseek.com`
+     * and non-HTTPS schemes such as `http://`, `file://`, or `javascript:`).
+     */
+    fun isNodeSeekHttpsUrl(rawUrl: String?): Boolean {
+        val trimmed = rawUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val parsed = trimmed.toHttpUrlOrNull() ?: return false
+        return parsed.scheme.equals("https", ignoreCase = true) && isNodeSeekHost(parsed.host)
+    }
+
+    /**
      * NodeSeek treats literal `+` in query strings as a space `' '`.
      * Replaces `+` with `%2B` in the encoded query component while keeping `%20` spaces intact.
      */

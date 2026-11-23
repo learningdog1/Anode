@@ -100,13 +100,15 @@ class NodeSeekApiClient(
     // 1. HTML Document Endpoints (Feed, Curated, Search, Thread, Session, Directory)
     // =========================================================================
 
-    suspend fun fetchSessionConfig(): ConfigPayloadDto {
+    suspend fun fetchSessionConfig(notifyObserver: Boolean = true): ConfigPayloadDto {
         val url = NodeSeekUrlNormalizer.buildUrl(path = "/", baseOrigin = baseOrigin)
         val html = executeHtmlGet(url = url, checkingPostAccess = false, requireTempScript = true)
         val config = withContext(Dispatchers.Default) {
             TempScriptParser.extractFromHtml(html, baseUri = url.toString(), requireAllCategory = true)
         } ?: throw CloudflareChallengeException(url = url.toString())
-        onConfigObserved?.invoke(config)
+        if (notifyObserver) {
+            onConfigObserved?.invoke(config)
+        }
         return config
     }
 
@@ -310,8 +312,11 @@ class NodeSeekApiClient(
                 }
                 val fallbackHeaders = buildSameOriginPostHeaders(
                     path = "/api/account/signOut",
+                    fullUrl = url.toString(),
+                    rawBody = "",
                     extraHeaders = emptyMap(),
                     hasJsonBody = false,
+                    transport = fallback!!,
                 )
                 val resp = fallback!!.executeApiRequest(
                     method = "POST",
@@ -394,7 +399,7 @@ class NodeSeekApiClient(
             .build()
         val raw = executeForumCall(request) { status, headers, body ->
             CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
-            ensureApiSuccess(status, body)
+            ensureApiSuccess(status, body, retryAfterSeconds = parseRetryAfterSeconds(headers))
         }
         return json.decodeFromString(BasicApiResponseDto.serializer(), raw)
     }
@@ -854,6 +859,122 @@ class NodeSeekApiClient(
     // 9. NodeImage Official Image Hosting (`https://api.nodeimage.com`)
     // =========================================================================
 
+    suspend fun verifyNodeImageApiKey(apiKey: String) {
+        val trimmedKey = apiKey.trim()
+        if (!NODE_IMAGE_KEY_REGEX.matches(trimmedKey)) {
+            throw NodeSeekApiException("NodeImage API Key 格式无效，请检查设置中的 32–128 位十六进制密钥。")
+        }
+        if (hasUserInfo(nodeImageOrigin) || !isAllowedCredentialOrigin(nodeImageOrigin)) {
+            throw NodeSeekApiException(
+                "安全校验失败：NodeImage 图床请求必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送 API Key。",
+            )
+        }
+        val listUrl = nodeImageOrigin.resolve("/api/v1/images")
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
+        if (hasUserInfo(listUrl) || !isAllowedCredentialOrigin(listUrl) || !isSameOrigin(nodeImageOrigin, listUrl)) {
+            throw NodeSeekApiException(
+                "安全校验失败：禁止向非预期源站发送 NodeImage API Key。",
+            )
+        }
+        executeNodeImageGetWithRedirects(
+            initialUrl = listUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+        )
+    }
+
+    private suspend fun executeNodeImageGetWithRedirects(
+        initialUrl: HttpUrl,
+        expectedOrigin: HttpUrl,
+        apiKey: String,
+    ): String {
+        var currentUrl = initialUrl
+        for (hop in 0..MAX_REDIRECT_HOPS) {
+            if (hasUserInfo(currentUrl) ||
+                !isAllowedCredentialOrigin(currentUrl) ||
+                !isSameOrigin(expectedOrigin, currentUrl)
+            ) {
+                throw NodeSeekApiException(
+                    "安全校验失败：禁止向非同源或非加密地址发送 NodeImage API Key。",
+                )
+            }
+
+            val request = Request.Builder()
+                .url(currentUrl)
+                .get()
+                .header("Accept", "application/json")
+                .header("X-API-Key", apiKey)
+                .build()
+
+            val raw = nodeImageHttpClient.newCall(request).awaitRawResponse()
+            val status = raw.code
+
+            if (status in REDIRECT_STATUS_CODES) {
+                if (hop >= MAX_REDIRECT_HOPS) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。",
+                        statusCode = status,
+                    )
+                }
+                val rawLocation = raw.headers["Location"]?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向响应缺少 Location 头 ($status)。",
+                        statusCode = status,
+                    )
+                val nextUrl = currentUrl.resolve(rawLocation)
+                    ?: throw NodeSeekApiException(
+                        message = "安全校验失败：图床重定向目标地址无效或协议不受支持 ($status)。",
+                        statusCode = status,
+                    )
+                if (hasUserInfo(nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝重定向至包含内嵌用户信息的图床地址 ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (currentUrl.scheme.equals("https", ignoreCase = true) &&
+                    !nextUrl.scheme.equals("https", ignoreCase = true)
+                ) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝将图床请求从 HTTPS 降级重定向至明文 HTTP ($status)。",
+                        statusCode = status,
+                    )
+                }
+                if (!isAllowedCredentialOrigin(nextUrl) || !isSameOrigin(expectedOrigin, nextUrl)) {
+                    throw NodeSeekApiException(
+                        message = "安全校验失败：拒绝跨源重定向图床请求，已阻止泄露 API Key ($status)。",
+                        statusCode = status,
+                    )
+                }
+                currentUrl = nextUrl
+                continue
+            }
+
+            if (status in 300..399) {
+                throw NodeSeekApiException(
+                    message = "安全校验失败：图床返回不受支持的重定向状态 ($status)。",
+                    statusCode = status,
+                )
+            }
+
+            val body = raw.body
+            val parsedError = runCatching {
+                json.decodeFromString(NodeImageUploadResponseDto.serializer(), body)
+            }.getOrNull()
+            if (status !in 200..299 || parsedError?.success == false) {
+                val msg = parsedError?.message?.takeIf { it.isNotBlank() }
+                    ?: if (status == 401 || status == 403) {
+                        "图床密钥无效或没有权限，请检查 API Key。"
+                    } else {
+                        parsedError?.error?.takeIf { it.isNotBlank() } ?: "图床连通性校验失败 ($status)。"
+                    }
+                throw NodeSeekApiException(msg, statusCode = status, serverMessage = msg)
+            }
+            return body
+        }
+        throw NodeSeekApiException("安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。")
+    }
+
     suspend fun uploadImageToNodeImage(
         imageBytes: ByteArray,
         apiKey: String,
@@ -1194,14 +1315,17 @@ class NodeSeekApiClient(
                 throw challengeError
             }
             val refererUrl = extraHeaders["Referer"] ?: "${NodeSeekUrlNormalizer.ORIGIN}/"
+            val fallbackHeaders = buildSameOriginGetHeaders(
+                path = path,
+                fullUrl = url.toString(),
+                extraHeaders = extraHeaders,
+                transport = fallback,
+            )
             val resp = fallback.executeApiRequest(
                 method = "GET",
                 url = url.toString(),
                 refererUrl = refererUrl,
-                headers = mapOf(
-                    "Accept" to "application/json",
-                    "X-Requested-With" to "XMLHttpRequest",
-                ),
+                headers = fallbackHeaders,
             )
             CloudflareChallengeDetector.inspectApiResponse(
                 statusCode = resp.statusCode,
@@ -1275,8 +1399,11 @@ class NodeSeekApiClient(
 
             val fallbackHeaders = buildSameOriginPostHeaders(
                 path = path,
+                fullUrl = url.toString(),
+                rawBody = encodedJson,
                 extraHeaders = extraHeaders,
                 hasJsonBody = true,
+                transport = fallback,
             )
             val refererUrl = extraHeaders["Referer"] ?: "${NodeSeekUrlNormalizer.ORIGIN}/"
             val resp = fallback.executeApiRequest(
@@ -1343,8 +1470,11 @@ class NodeSeekApiClient(
 
             val fallbackHeaders = buildSameOriginPostHeaders(
                 path = path,
+                fullUrl = url.toString(),
+                rawBody = "",
                 extraHeaders = extraHeaders,
                 hasJsonBody = false,
+                transport = fallback,
             )
             val refererUrl = extraHeaders["Referer"] ?: "${NodeSeekUrlNormalizer.ORIGIN}/"
             val resp = fallback.executeApiRequest(
@@ -1369,10 +1499,41 @@ class NodeSeekApiClient(
         }
     }
 
+    private fun buildSameOriginGetHeaders(
+        path: String,
+        fullUrl: String,
+        extraHeaders: Map<String, String>,
+        transport: SameOriginTransport,
+    ): Map<String, String> = buildMap {
+        put("Accept", "application/json")
+        put("X-Requested-With", "XMLHttpRequest")
+        for ((k, v) in extraHeaders) {
+            if (!k.equals("Referer", ignoreCase = true) && !k.equals("Origin", ignoreCase = true)) {
+                put(k, v)
+            }
+        }
+        if (path.startsWith("/api/vote/") || path.startsWith("/api/stardust/")) {
+            transport.getUserAgent()?.takeIf { it.isNotBlank() }?.let { ua ->
+                put(
+                    "x-dynamic-sign",
+                    computeDynamicSign(
+                        method = "GET",
+                        fullUrl = fullUrl,
+                        userAgent = ua,
+                        rawBody = "",
+                    ),
+                )
+            }
+        }
+    }
+
     private fun buildSameOriginPostHeaders(
         path: String,
+        fullUrl: String,
+        rawBody: String,
         extraHeaders: Map<String, String>,
         hasJsonBody: Boolean,
+        transport: SameOriginTransport,
     ): Map<String, String> = buildMap {
         put("Accept", "application/json")
         put("X-Requested-With", "XMLHttpRequest")
@@ -1385,9 +1546,27 @@ class NodeSeekApiClient(
         if (path in SIMPLE_CSRF_CHALLENGE_PATHS) {
             put("x-csrf-challenge", "simple-token")
         }
+        if (path == "/api/invite/buyOne") {
+            transport.getCsrfToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                put("x-csrf-token", token)
+            }
+        }
         for ((k, v) in extraHeaders) {
             if (!k.equals("Referer", ignoreCase = true) && !k.equals("Origin", ignoreCase = true)) {
                 put(k, v)
+            }
+        }
+        if (path.startsWith("/api/vote/") || path.startsWith("/api/stardust/")) {
+            transport.getUserAgent()?.takeIf { it.isNotBlank() }?.let { ua ->
+                put(
+                    "x-dynamic-sign",
+                    computeDynamicSign(
+                        method = "POST",
+                        fullUrl = fullUrl,
+                        userAgent = ua,
+                        rawBody = rawBody,
+                    ),
+                )
             }
         }
     }
