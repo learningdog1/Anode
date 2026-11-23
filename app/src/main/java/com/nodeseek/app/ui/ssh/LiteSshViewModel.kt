@@ -187,6 +187,7 @@ data class LiteSshUiState(
     val isSyncingProbes: Boolean = false,
     val probePanels: List<ProbePanelConfig> = emptyList(),
     val lastProbeSyncSummary: String? = null,
+    val vaultLoadError: String? = null,
 ) {
     val configuredProbePanelCount: Int
         get() = probePanels.count { it.enabled }
@@ -502,6 +503,8 @@ class LiteSshViewModel(
     fun dismissServerEditor() = sessionManager.dismissServerEditor()
     fun saveServer(draft: SshServerDraft) = sessionManager.saveServer(draft)
     fun deleteServer(serverId: String) = sessionManager.deleteServer(serverId)
+    fun retryLoadVault() = sessionManager.retryLoadVault()
+    fun resetCorruptedVault() = sessionManager.resetCorruptedVault()
 
     fun selectPreset(presetId: String) = sessionManager.selectPreset(presetId)
     fun updatePresetSearchQuery(query: String) = sessionManager.updatePresetSearchQuery(query)

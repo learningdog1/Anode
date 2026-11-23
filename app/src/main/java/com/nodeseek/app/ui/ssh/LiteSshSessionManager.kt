@@ -104,6 +104,7 @@ class LiteSshSessionManager(
         LiteSshUiState(
             liveBufferAccessor = liveBufferAccessor,
             collapseState = vaultRepository.collapseStateFlow.value,
+            vaultLoadError = vaultRepository.vaultLoadErrorFlow.value,
         ),
     )
     val uiState: StateFlow<LiteSshUiState> = _uiState.asStateFlow()
@@ -180,6 +181,14 @@ class LiteSshSessionManager(
             vaultRepository.collapseStateFlow.collect { collapse ->
                 _uiState.update { it.copy(collapseState = collapse) }
             }
+        }
+        externalScope.launch {
+            vaultRepository.vaultLoadErrorFlow.collect { err ->
+                _uiState.update { it.copy(vaultLoadError = err) }
+            }
+        }
+        externalScope.launch {
+            runCatching { vaultRepository.ensureLoaded() }
         }
         if (fleetRepository != null) {
             attachFleetIntegration(fleetRepository)
@@ -278,11 +287,16 @@ class LiteSshSessionManager(
 
     fun setServerConnectionMode(serverId: String, mode: SshConnectionMode) {
         externalScope.launch {
-            vaultRepository.updateServerConnectionMode(serverId, mode)
-            _uiState.update { state ->
-                val server = state.servers.firstOrNull { it.id == serverId }
-                val label = server?.displayName ?: "主机"
-                state.copy(statusMessage = "已将「$label」切换为${mode.label}模式")
+            runCatching {
+                vaultRepository.updateServerConnectionMode(serverId, mode)
+            }.onSuccess {
+                _uiState.update { state ->
+                    val server = state.servers.firstOrNull { it.id == serverId }
+                    val label = server?.displayName ?: "主机"
+                    state.copy(statusMessage = "已将「$label」切换为${mode.label}模式")
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "切换连接模式失败") }
             }
         }
     }
@@ -481,12 +495,51 @@ class LiteSshSessionManager(
 
     fun deleteServer(serverId: String) {
         externalScope.launch {
-            vaultRepository.deleteServer(serverId)
-            _uiState.update { state ->
-                state.copy(
-                    iperf3Attachments = state.iperf3Attachments.filterKeys { it.serverId != serverId },
-                    statusMessage = "已从本地保险库删除主机",
-                )
+            runCatching {
+                vaultRepository.deleteServer(serverId)
+            }.onSuccess {
+                _uiState.update { state ->
+                    state.copy(
+                        iperf3Attachments = state.iperf3Attachments.filterKeys { it.serverId != serverId },
+                        statusMessage = "已从本地保险库删除主机",
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "删除主机失败") }
+            }
+        }
+    }
+
+    fun retryLoadVault() {
+        externalScope.launch {
+            runCatching {
+                vaultRepository.retryLoadVault()
+            }.onSuccess { loaded ->
+                _uiState.update {
+                    it.copy(
+                        statusMessage = if (loaded) {
+                            "已成功重新加载 SSH 保险库"
+                        } else {
+                            "SSH 保险库文件仍无法解析，原文件已保留备份"
+                        },
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "重新加载保险库失败") }
+            }
+        }
+    }
+
+    fun resetCorruptedVault() {
+        externalScope.launch {
+            runCatching {
+                vaultRepository.resetCorruptedVault()
+            }.onSuccess {
+                _uiState.update {
+                    it.copy(statusMessage = "已备份损坏文件并重置 SSH 保险库，现在可以重新添加主机")
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "重置保险库失败") }
             }
         }
     }
@@ -603,8 +656,13 @@ class LiteSshSessionManager(
 
     fun deleteCustomPreset(presetId: String) {
         externalScope.launch {
-            vaultRepository.deleteCustomPreset(presetId)
-            _uiState.update { it.copy(statusMessage = "已删除自定义脚本") }
+            runCatching {
+                vaultRepository.deleteCustomPreset(presetId)
+            }.onSuccess {
+                _uiState.update { it.copy(statusMessage = "已删除自定义脚本") }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "删除自定义脚本失败") }
+            }
         }
     }
 
