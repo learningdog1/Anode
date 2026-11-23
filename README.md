@@ -33,7 +33,7 @@
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
 | **当前版本** | `v2.11.2`（`versionCode = 23`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 13 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · JSON 完整备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 15 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · 核心数据 JSON 备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
@@ -43,7 +43,7 @@
 
 - **清雾冰蓝浅色 (`Cool Mist Light`)**：清透冰蓝雾白画布（`#F7FAFF`）搭配纯白底板（`#FFFFFF`）、细密边框（`#C0C7CD`）与沉稳青钢蓝主色（`#2D637E` / 容器 `#CDE7FB`），清爽护眼、层次分明。
 - **深岩钢蓝深色 (`Slate Steel Dark`)**：低辉度岩灰暗色画布（`#101417`）与板岩容器（`#1C2024`），配合澄澈天青蓝（`#9ACAEC` / 容器 `#114B66`）高对比点缀。
-- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#14181B`），专为 OLED 屏幕优化夜间阅读对比度。
+- **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#111518`），专为 OLED 屏幕优化夜间阅读对比度。
 - **Material You 壁纸动态取色与默认 `90%` 紧凑排版**：默认关闭动态取色以呈现标志性的清雾浅色 / 深岩深色主题（支持在设置中一键开启 Android 12+ Material You 壁纸动态取色）；全局默认字号与排版缩放调优为 **`90%`**（支持 `85%–130%` 自由调节）。开启壁纸动态取色时，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
 
 <div align="center">
@@ -86,7 +86,7 @@
 - **高密度通透信息流**：
   - **CollapsiblePinnedTicker**：轻量化透明线框置顶公告条，默认折叠，一键展开查看全站置顶。
   - **PulseTopicCard**：剔除厚重卡片底色与左侧竖条，采用通透圆角线框卡片并优化垂直排布密度（单屏可完整浏览 5+ 篇主题）；版块标识以无底色语义小圆点 + 文字置于卡片右下角，已读/未读通过字重与墨色清晰区分，并支持 `读至 #N 楼` 续读标签、热帖火焰徽章与一键收藏。
-  - **RSS 快速降级通道**：未登录或触发临时安全校验时自动切换 RSS 快速预览，保证随时可读。
+  - **RSS 快速降级通道**：未登录游客态在首页第 1 页（非内版）触发临时安全校验或开启偏好时自动切换 RSS 快速预览，保证随时可读。
 - **单手拇指区与大屏适配**：悬浮毛玻璃药丸底栏采用 **`首页` / `功能栏` / `我的`** 三标签架构，配以弹性渐隐 Squircle `发帖` FAB；在首页再次点按「首页」自动平滑置顶并触发刷新；在平板与展开折叠屏（`width >= 600dp`）下通过 `AdaptiveLayout` 自动切换为左侧 `NavigationRail` 与主从双栏阅读视图。
 
 ---
@@ -154,7 +154,7 @@
   - 版块选择器（自动过滤管理员版块并明确提示 `inside` 消耗 `5 🍗`），阅读权限分级选择器（`Lv.0 公开` ~ `Lv.6+` 及 `Lv.255 私有帖`）。
   - 快捷工具栏覆盖标题、粗斜体、代码块、引用、表格、`:::: tabs` 测评模板、贴纸面板、相册/文件图片上传（`api.nodeimage.com`）与草稿恢复。
 - **VPS 剩余价值折算器 (`VpsValuationBottomSheet`)**：
-  - **高精度 `BigDecimal` 算力引擎**：支持 **13 种主流货币**（`CNY / USD / EUR / GBP / HKD / JPY / CAD / AUD / SGD / CHF / KRW / TRY / BRL`），自动同步 Frankfurter 实时汇率（24 小时本地缓存 + 离线兜底 + 单币种手动覆写）。
+  - **高精度 `BigDecimal` 算力引擎**：支持 **15 种货币**（其中 `CNY / USD / EUR / GBP / HKD / JPY / CAD / AUD / SGD / CHF / KRW / TRY / BRL` 13 种支持 Frankfurter/ECB 在线实时汇率同步与 24 小时本地缓存，`TWD / RUB` 因 ECB 源不提供而使用内置参考汇率，全币种均支持离线兜底与手动校准）。
   - **自然周期与闰年感知**：支持固定天数（月/季/半年/年/自定义）与自然日历周期（精确识别 365 / 366 闰年天数及 `Asia/Shanghai` 精确到时分计算）。
   - **二手交易与费用分摊**：支持出让挂牌价溢价/折价实时遥测标签、Push 过户费及中介费分摊（买家/卖家/各半平摊），一键生成**精简摘要卡**或**三栏核算表** Markdown 直接插入发帖或回帖光标处。
 
@@ -224,7 +224,7 @@
 - **本地规则引擎 (`PulseRadarScreen`)**：
   - 支持新增「包含关键词」或「正则表达式 (`REGEX`)」监控规则，可按指定版块（如 `trade` / `info`）过滤并配置英文逗号分隔的排除词（如过滤 `求购,收`），避免求购贴误报。
   - 任意帖子阅读页顶栏可一键开启「追更」，新楼层产生时记录提醒并直达目标楼层。
-- **可调巡检与免打扰策略**：内置环境诊断横幅（通知权限、电池优化白名单、系统勿扰检测），可分别配置前台轮询（1–30 分钟）、后台轮询（3–60 分钟）、仅 Wi-Fi 后台巡检及夜间免打扰时段（默认 `23:00–07:00`），无论是否登录均可依赖 RSS + Web 双通道工作。
+- **可调巡检与免打扰策略**：内置环境诊断横幅（通知权限、电池优化白名单、系统勿扰检测），可分别配置前台轮询（1–30 分钟）、后台轮询（15–60 分钟，受 Android WorkManager 最小周期限制）、仅 Wi-Fi 后台巡检及夜间免打扰时段（默认 `23:00–07:00`，支持自定义起止时间），无论是否登录均可依赖 RSS + Web 双通道工作。
 
 ---
 
@@ -293,10 +293,10 @@
 </table>
 </div>
 
-- **功能栏聚合中心与社区活动专题 (`FeatureHubScreen` · `ActivityScreen`)**：底部中间「功能栏」主标签按 **社区服务**（`邮箱` / `活动`）、**情报与监控**（`海外情报` / `补货监控`）、**主机与网络**（`我的服务器` / `手机端测机`）与 Hero **轻量 SSH** 分组汇聚全部效率入口，实时展示 Seek 邮箱配置状态、进行中社区活动场次、补货监控启用数与未读提醒、探针主机数量与 SSH 保险库台数；「活动」页正式接入 **ForumWatch 社区活动签名加密 API**（TLS 证书/SPKI 双重固定、`HMAC-SHA256` 请求签名、`AES-256-GCM` 响应信封解密、`ETag/304` 零字节条件缓存与同源帖子去重），基于明确抽奖/开奖链接精准区分「抽奖」与抢楼/赠送福利/限时特惠等「其他活动」，提供 **Material 3 二级筛选栏**（`全部 / 抽奖 / 其他活动` + 仅在「抽奖」下展开的 `进行中 / 即将开始 / 已结束` 开奖状态子筛选）、开奖时间提取与紧凑卡片、1 楼 Markdown 详情底栏、NodeSeek 帖子原生直跳，以及页内默认关闭的可选「新活动通知」开关（首次开启静默建档防历史刷屏，支持前后台低频巡检与点击通知直达原帖）。
+- **功能栏聚合中心与社区活动专题 (`FeatureHubScreen` · `ActivityScreen`)**：底部中间「功能栏」主标签按 **社区服务**（`邮箱` / `活动`）、**情报与监控**（`海外情报` / `补货监控`）、**主机与网络**（`我的服务器` / `手机端测机`）与 Hero **轻量 SSH** 分组汇聚全部效率入口，实时展示 Seek 邮箱配置状态、进行中社区活动场次、补货监控启用数与未读提醒、探针主机数量与 SSH 保险库台数；「活动」页正式接入 **ForumWatch 社区活动签名加密 API**（TLS 证书/SPKI 固定与备用 Pin 轮换支持、`HMAC-SHA256` 请求签名、`AES-256-GCM` 响应信封解密——用于传输校验与基础防爬，不涉及用户个人账号/隐私数据、`ETag/304` 零字节条件缓存与同源帖子去重），基于明确抽奖/开奖链接精准区分「抽奖」与抢楼/赠送福利/限时特惠等「其他活动」，提供 **Material 3 二级筛选栏**（`全部 / 抽奖 / 其他活动` + 仅在「抽奖」下展开的 `进行中 / 即将开始 / 已结束` 开奖状态子筛选）、开奖时间提取与紧凑卡片、1 楼 Markdown 详情底栏、NodeSeek 帖子原生直跳，以及页内默认关闭的可选「新活动通知」开关（首次开启静默建档防历史刷屏，支持前后台低频巡检与点击通知直达原帖）。
 - **VPS 补货 / 抢购监控 (`RestockMonitorScreen`)**：自动识别 WHMCS / SolusVM / HostBill / VirtFusion 面板购买页（支持顶栏粘贴链接或帖子内长按商品链接加入监控），后台 `缺货 → 有货` 波次去重巡检并发送高优先级通知，点击直跳下单页，亦支持一键导入资产账本。
 - **交易前“查一查”卖家信誉卡 (`SellerTrustCardSheet` · `SellerTrustQuickBadge`)**：采用 **内存 LRU + 本地磁盘两级缓存（v2）**（正结果 18 小时 / 部分失败 15 分钟 / 负结果 3 分钟 / 7 天过期兜底）、单飞请求合并与 `429/503` 退避冷却保护；通过**本地缓存版块交叉回填 + 真实交易语料/成交结帖标题识别 + 自适应低频多页扫描（默认最多 6 页 90 篇，支持一键断点续扫更早历史）**精准统计卖家历史交易帖；默认打开通过共享 `/categories/expose` 曝光版快照匹配（**零 `/search` 流量**），并提供按需单次深度 `/search` 查验、Google `site:www.nodeseek.com` 站外兜底、全版块帖子与主页一致常驻的快捷查信誉徽章及本机私人标签备注；同时支持在设置中配置 **NodeSeek 官方交易平台（`agent.nodeseek.org`）** API Key（Android Keystore 本机加密保存、不随备份导出），在信誉卡中独立展示卖家成功交易场次、累计成交金额（¥）、最近成交时间与买家/卖家/中介分角色明细（重名账号自动逐条标注平台用户 ID，快捷徽章仅零网络读取本地缓存展示官方成交标记）。
-- **我的服务器：2s 探针实时遥测 + VPS 资产账本 (`MyServersScreen`)**：同时接入哪吒探针 v0/v1 与 Komari（含官方 RPC2）面板 API，前台可见态下 **2s 静默平滑刷新**主机实时在线状态、2x2 Bento（CPU / 内存 / 硬盘 / 实时带宽）、月流量耗尽预测、80% 流量告警与掉线/闲置洞察（绘制阶段无闪烁动画与去重精简顶栏）；内置 Material 3 Expressive 多币种续费资产账本，支持**多选预设/自定义标签芯片**、到期与逾期提醒、**一键「已续费」自动按周期顺延到期日**（含月末/闰年钳位与多周期逾期顺延）、**「自动续费」到期自动滚动**，以及点击「不想续了 · 一键出机」直接联动估值器生成交易帖并跳入发帖页。
+- **我的服务器：2s 探针实时遥测 + VPS 资产账本 (`MyServersScreen`)**：同时接入哪吒探针 v0/v1 与 Komari（含官方 RPC2）面板 API，前台可见态下 **2s 静默平滑刷新**主机实时在线状态，提供紧凑四列横条卡片与虚拟化紧凑列表（实时展示 CPU / 内存 / 硬盘 / 带宽）、月流量耗尽预测、80% 流量告警与掉线/闲置洞察（绘制阶段无闪烁动画与去重精简顶栏）；内置 Material 3 Expressive 多币种续费资产账本，支持**多选预设/自定义标签芯片**、到期与逾期提醒、**一键「已续费」自动按周期顺延到期日**（含月末/闰年钳位与多周期逾期顺延）、**「自动续费」到期自动滚动**，以及点击「不想续了 · 一键出机」直接联动估值器生成交易帖并跳入发帖页。
 - **手机端测机 (`MobileNetBenchScreen`)**：
   - **内核级物理绑定 ICMP Ping + TCPing 双重探测**：采用原生非阻塞 `AF_INET/AF_INET6` `SOCK_DGRAM` `IPPROTO_ICMP` 套接字配合 `Network.bindSocket` 真正绕过 VPN/代理直连物理蜂窝/Wi-Fi 网卡（外部 `/system/bin/ping` 仅作权限降级兜底），搭配防 Fake-IP 物理链路 DoH 解析与 `Proxy.NO_PROXY` TCPing，协同绘制零分配 `Canvas` 波形。
   - **双出口 IP 解析与物理网络绑定 (`NetBenchNetworkSelection` / `NetBenchNetworkBinding`)**：支持通过 `ConnectivityManager` 将 ICMP Ping、TCPing、iperf3 与 IP 查询绑定至真实蜂窝/Wi-Fi 物理网卡，清晰对照**真实本机出口 IP** 与**代理/VPN 出口 IP**。
@@ -307,7 +307,7 @@
   - **非交互自动应答与独立通道联动测速**：支持预设脚本自动应答引擎（`SshPromptAutoResponder` 回显去重、防抖与静默进度检测）、分组执行历史，以及通过独立 SSH 通道并发装/启/停远端 VPS `iperf3 -s`。
   - **通用终端自适应缩放 (`SshTerminalAutoFit`)**：支持 `AUTO_FIT`（按宽行自动计算字号避免表格折行）与 `FIXED` 模式切换、双指捏合（`0.50x–1.80x`）与 `+/-` 缩放重置，并向远端 PTY 实时同步 `window-change` 窗口尺寸（防反馈循环与历史视图误触发）。
   - **NodeQuality 零 ANR 流水线与官方格式导出 (`NodeQualityReportFormatter` · `SshResultPublishSheet`)**：采用 `\r` 进度压缩、多行 TrueColor 横幅 `CSI A/F` 擦除、零正则 `IpPrivacyMasker` 脱敏、词法高亮、`LazyColumn` 虚拟化与分块异步渲染彻底消除大日志卡顿；支持完美导出官方 `nodequality.com` 四标签（`💻基本信息 / 🎬IP质量 / 🌐网络质量 / 📍回程路由`）`:::: tabs` 与纯文本复制、多轮测评合并布局 (`SshMergeLayout`)、`ComposerPrefillStore` 大体量发帖传递及回帖情境下的 `发测评` 快捷按钮。
-- **海外情报聚合与主动监控 (`OverseasIntelScreen`)**：接入 **LowEndTalk Promotion Monitor 签名加密 API**（`OverseasApiCrypto` 请求 `HMAC-SHA256` 签名 + `AES-256-GCM` 响应信封解密、时钟偏差自愈与 `ETag/304` 条件缓存+单飞请求合并）；内置 WorkManager 后台新促销主动雷达巡检与系统推送通知（页内一键开关）、可配置垃圾/求购杂讯过滤 (`OverseasOfferQualityFilter`)、清爽去噪卡片与一键中文搬运发帖。
+- **海外情报聚合与主动监控 (`OverseasIntelScreen`)**：接入 **LowEndTalk Promotion Monitor 签名加密 API**（`OverseasApiCrypto` 请求 `HMAC-SHA256` 签名 + `AES-256-GCM` 响应信封解密——用于传输校验与基础防爬，不涉及用户个人账号/隐私数据，支持时钟偏差自愈与 `ETag/304` 条件缓存+单飞请求合并）；内置 WorkManager 后台新促销主动雷达巡检与系统推送通知（页内一键开关）、可配置垃圾/求购杂讯过滤 (`OverseasOfferQualityFilter`)、清爽去噪卡片与一键中文搬运发帖。
 
 ---
 
@@ -326,7 +326,7 @@
 </table>
 </div>
 
-- **设置中心、内容过滤与全量备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、**`BackupRestoreSection` 版本化 JSON 完整备份与预览合并/覆盖恢复**、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与在线升级（剔除与邮箱页重复的 Seek Mail 配置项）。
+- **设置中心、内容过滤与核心数据备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、**`BackupRestoreSection` 核心数据版本化 JSON 备份与预览合并/覆盖恢复**（覆盖偏好设置、脉搏雷达规则与追踪主题、内容过滤与屏蔽名单、本地收藏与编辑草稿；不含 VPS 资产账本、补货监控规则、卖家信任备注、浏览历史、海外情报/社区活动、SeekMail 缓存、测速历史与 SSH 保险库凭据；导出默认脱敏排除 API Key，需手动勾选才写入）、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与安全在线升级（官方 HTTPS 源站校验、APK 包名/签名证书一致性与防降级校验，及 Release 提供摘要时的 SHA-256 校验；剔除与邮箱页重复的 Seek Mail 配置项）。
 
 ---
 
@@ -373,7 +373,7 @@ app/src/main/java/com/nodeseek/app/
 │   └── valuation/                   # BigDecimal VPS 剩余价值与过户交易估值引擎
 ├── data/
 │   ├── activity/                    # ForumWatchActivityApiClient（TLS Pinning / HMAC / AES-GCM / ETag）、磁盘缓存与新活动巡检 Worker
-│   ├── backup/                      # BackupManagerImpl 全量配置/雷达/书签/草稿/过滤规则序列化恢复
+│   ├── backup/                      # BackupManagerImpl 核心数据（偏好/雷达/收藏/草稿/过滤规则）序列化恢复
 │   ├── fleet/                       # 哪吒 v0/v1 / Komari 探针 API 客户端、资产持久化与巡检 Worker
 │   ├── local/                       # Room 数据库（离线收藏快照、阅读进度、雷达规则、版块）与 DataStore
 │   ├── mail/                        # 会话隔离 SeekMailApiClient、Jsoup HTML 消毒器与磁盘缓存
@@ -403,7 +403,7 @@ app/src/main/java/com/nodeseek/app/
     ├── fleet/                       # 我的服务器（探针遥测、资产账本与一键出机估值弹窗）
     ├── netbench/                    # 手机端测机主界面、iperf3 服务端弹窗、波形图与长按快捷探测弹窗
     ├── ssh/                         # 轻量 SSH 主机保险库、虚拟化自适应 ANSI 控制台、前台服务与测评合并导出面板
-    ├── overseas/                    # 海外情报聚合列表、层级化优惠卡片、结构化详情页与列表翻译配置
+    ├── overseas/                    # 海外情报聚合列表、层级化优惠卡片、可配置质量过滤与结构化详情页
     ├── mail/                        # SeekMailScreen（含页内 API Key 弹窗）、SeekMailViewModel 与隔离式 SeekMailWebView
     ├── radar/                       # PulseRadarScreen & ViewModel（规则管理、提醒流与追更追踪）
     ├── update/                      # AppUpdateDialog（更新提醒弹窗、日志渲染与下载安装进度）
@@ -446,7 +446,7 @@ app/src/main/java/com/nodeseek/app/
 ```
 产物输出目录：
 - Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.11.2-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v2.11.0-debug.apk`
+- Debug：`app/build/outputs/apk/debug/Anode-v2.11.2-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 
@@ -461,6 +461,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：论坛登录会话 Cookie、阅读记录、脉搏雷达规则、卖家本地私人备注（`seller_trust_notes.json`）及可选的 `NodeImage` / `Seek Mail` API Key 均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token 与 `NodeSeek` 官方交易平台 API Key 额外采用 **Android Keystore `AES-256-GCM`** 硬件级密钥在本地加密存储，绝不上传至任何第三方统计或中转服务器；外站图床、邮件、社区活动与海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）以及测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
+- **本地凭据安全**：应用已关闭 Android 系统云备份与设备迁移（`allowBackup="false"`），论坛登录会话 Cookie、阅读记录、脉搏雷达规则与卖家本地私人备注（`seller_trust_notes.json`）均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token、`NodeSeek` 官方交易平台 API Key 以及 `NodeImage` / `Seek Mail` API Key 均优先采用 **Android Keystore `AES-256-GCM`** 硬件/系统级密钥在本地加密存储（在部分不支持 Keystore 的设备或 JVM 环境下会降级为应用私有无备份目录的软件 `AES-256-GCM` 密钥并在相关界面明确提示），绝不上传至任何第三方统计或中转服务器；外站图床、邮件、社区活动与海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）以及测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。
