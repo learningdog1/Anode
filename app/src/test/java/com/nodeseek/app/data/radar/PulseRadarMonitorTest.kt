@@ -1158,7 +1158,7 @@ class PulseRadarMonitorTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `background inbox loop delivers reply mention and DM system notifications when app leaves foreground with zero keyword rules`() = runTest {
+    fun `background WorkManager poll delivers reply mention and DM system notifications without spawning an in-process background loop`() = runTest {
         var phase = 1
         var serverUnreadCount = 0
         val selfUserJson = """{"member_id":101,"member_name":"Me","coin":100}"""
@@ -1220,46 +1220,32 @@ class PulseRadarMonitorTest {
             currentMinuteOfDay = { fakeMinuteOfDay },
         )
 
-        suspend fun advanceUntil(maxVirtualMs: Long, predicate: suspend () -> Boolean) {
-            var advanced = 0L
-            while (advanced <= maxVirtualMs) {
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                withContext(Dispatchers.Default) { delay(10L) }
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                val step = minOf(500L, (maxVirtualMs - advanced).coerceAtLeast(0L))
-                if (step == 0L) break
-                loopScheduler.advanceTimeBy(step)
-                advanced += step
-            }
-            repeat(100) {
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                withContext(Dispatchers.Default) { delay(10L) }
-            }
-            assertTrue("Timed out waiting for condition after advancing ${maxVirtualMs}ms", predicate())
-        }
-
         val popups = mutableListOf<InAppMessagePopup>()
         val popupJob = launch(UnconfinedTestDispatcher(testScheduler)) {
             sharedInbox.inAppPopupEvents.collect { popups.add(it) }
         }
         try {
-            // User enters background immediately after signing in -> baseline seeds promptly in background
+            // P1-61: Entering background + start() must NOT launch any in-process polling loop
+            val requestsBeforeBgStart = server.requestCount
             monitor.onForegroundChanged(false)
             monitor.start()
+            loopScheduler.advanceTimeBy(5 * 60_000L)
             loopScheduler.runCurrent()
             assertFalse(monitor.isForegroundLoopActive())
-            assertTrue(monitor.isBackgroundInboxLoopActive())
+            assertFalse(monitor.isBackgroundInboxLoopActive())
+            assertEquals(requestsBeforeBgStart, server.requestCount)
 
-            advanceUntil(5_000L) { preferencesStore.getWatermarks().dmInitialized }
+            // Phase 1: WorkManager background pass seeds watermarks without firing notifications
+            val pass1 = monitor.runBackgroundPollPass()
+            assertTrue(pass1 is RadarBackgroundPollOutcome.Completed)
+            assertTrue(preferencesStore.getWatermarks().dmInitialized)
             assertTrue(dispatcher.directMessages.isEmpty())
             assertTrue(dispatcher.interactions.isEmpty())
 
-            // Phase 2: New DM arrives (even with unread-count == 0 and id == 0!) while app is in background
+            // Phase 2: New DM arrives (even with unread-count == 0 and id == 0!) on next WorkManager pass
             phase = 2
-            advanceUntil(20_000L) { dispatcher.directMessages.size == 1 }
+            val pass2 = monitor.runBackgroundPollPass()
+            assertTrue(pass2 is RadarBackgroundPollOutcome.Completed)
             assertEquals(1, dispatcher.directMessages.size)
             assertEquals(888L, dispatcher.directMessages.single().peerUid)
             assertEquals("后台无ID私信测试", dispatcher.directMessages.single().previewText)
@@ -1268,7 +1254,8 @@ class PulseRadarMonitorTest {
             // Phase 3: New reply arrives while app stays in background -> system notification fires, DM not duplicated
             phase = 3
             serverUnreadCount = 1
-            advanceUntil(50_000L) { dispatcher.interactions.size == 1 }
+            val pass3 = monitor.runBackgroundPollPass()
+            assertTrue(pass3 is RadarBackgroundPollOutcome.Completed)
             assertEquals(1, dispatcher.interactions.size)
             assertEquals(900L, dispatcher.interactions.single().topicId)
             assertEquals(6, dispatcher.interactions.single().floorNumber)
@@ -1696,37 +1683,18 @@ class PulseRadarMonitorTest {
             currentMinuteOfDay = { fakeMinuteOfDay },
         )
 
-        suspend fun advanceUntil(maxVirtualMs: Long, predicate: suspend () -> Boolean) {
-            var advanced = 0L
-            while (advanced <= maxVirtualMs) {
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                withContext(Dispatchers.Default) { delay(10L) }
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                val step = minOf(500L, (maxVirtualMs - advanced).coerceAtLeast(0L))
-                if (step == 0L) break
-                loopScheduler.advanceTimeBy(step)
-                advanced += step
-            }
-            repeat(100) {
-                loopScheduler.runCurrent()
-                if (predicate()) return
-                withContext(Dispatchers.Default) { delay(10L) }
-            }
-            assertTrue("Timed out waiting for condition", predicate())
-        }
-
         try {
             // Seed in foreground first
             sharedInbox.syncForegroundInbox(forceListSync = true).getOrThrow()
 
-            // Background #1: unread-count jumps to 3 -> 3 OS notifications emitted
+            // Background #1: WorkManager pass sees unread-count jump to 3 -> 3 OS notifications emitted
             monitor.onForegroundChanged(false)
             monitor.start()
+            assertFalse(monitor.isBackgroundInboxLoopActive())
             stage = 1
             serverUnreadCount = 3
-            advanceUntil(20_000L) { dispatcher.interactions.size == 3 }
+            val bgPass1 = monitor.runBackgroundPollPass()
+            assertTrue(bgPass1 is RadarBackgroundPollOutcome.Completed)
             assertEquals(3, dispatcher.interactions.size)
 
             // Return to foreground (RESUMED) -> must NOT re-emit popups for 601..603, and user reads all (unread=0)
@@ -1747,7 +1715,8 @@ class PulseRadarMonitorTest {
             stage = 3
             serverUnreadCount = 1
             monitor.onForegroundChanged(false)
-            advanceUntil(20_000L) { dispatcher.interactions.size == 4 }
+            val bgPass2 = monitor.runBackgroundPollPass()
+            assertTrue(bgPass2 is RadarBackgroundPollOutcome.Completed)
             assertEquals(4, dispatcher.interactions.size)
             assertEquals(604L, dispatcher.interactions.last().itemId)
             monitor.stop()

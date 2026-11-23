@@ -307,4 +307,44 @@ class RadarMatcherAndTapTargetTest {
         assertEquals("pulse_keyword_alerts_v2", PulseNotificationDispatcher.CHANNEL_KEYWORD_ALERTS)
         assertEquals("pulse_direct_messages", PulseNotificationDispatcher.CHANNEL_DIRECT_MESSAGES)
     }
+
+    @Test
+    fun `keyword matcher matches topic excerpt as well as title and respects exclude words in excerpt`() {
+        val rule = KeywordWatchRule(
+            id = 10L,
+            keyword = "cn2 gia",
+            excludeWords = "已出",
+            categorySlug = "trade",
+            matchMode = KeywordMatchMode.CONTAINS,
+            isEnabled = true,
+        )
+        val excerptHit = sampleTopic(title = "出几台闲置小鸡").copy(
+            excerpt = "洛杉矶 CN2 GIA 年付特价款",
+        )
+        assertEquals(rule, RadarKeywordMatcher.findMatchingRule(excerptHit, listOf(rule)))
+
+        val excerptExcluded = excerptHit.copy(
+            excerpt = "洛杉矶 CN2 GIA 年付特价款，已出封帖",
+        )
+        assertNull(RadarKeywordMatcher.findMatchingRule(excerptExcluded, listOf(rule)))
+    }
+
+    @Test
+    fun `nested quantifier regex patterns are rejected by canonicalizer and ignored safely by matcher`() {
+        assertTrue(RadarRuleCanonicalizer.isPotentiallyUnsafeRegex("(a+)+$"))
+        assertTrue(RadarRuleCanonicalizer.isPotentiallyUnsafeRegex("([a-zA-Z]+)*foo"))
+        assertFalse(RadarRuleCanonicalizer.isPotentiallyUnsafeRegex("""\b(?:dmit|claw)\s*(?:hk|jp)\b"""))
+
+        val validation = RadarRuleCanonicalizer.validateAndNormalizeKeyword("(a+)+$", KeywordMatchMode.REGEX)
+        assertTrue(validation.isFailure)
+
+        val dangerousRule = KeywordWatchRule(
+            id = 11L,
+            keyword = "(a+)+$",
+            matchMode = KeywordMatchMode.REGEX,
+            isEnabled = true,
+        )
+        val evilTopic = sampleTopic(title = "aaaaaaaaaaaaaaaaaaaaaaaaaaaa!")
+        assertNull(RadarKeywordMatcher.findMatchingRule(evilTopic, listOf(dangerousRule)))
+    }
 }

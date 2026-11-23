@@ -3,9 +3,16 @@ package com.nodeseek.app.domain.valuation
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRefreshOutcome
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -532,6 +539,121 @@ class VpsValuationEngineTest {
             assertFalse(clearedState.quoteFor(ValuationCurrency.USD).hasManualOverride)
             assertEquals(0, clearedState.rateFor(ValuationCurrency.USD).compareTo(BigDecimal("8")))
             assertEquals(FxRateSource.ONLINE_CACHED, clearedState.quoteFor(ValuationCurrency.USD).source)
+            assertTrue(clearedState.isCacheExpired)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun currenciesIncludeTryAndBrlWithOnlineSupportAndMarkTwdRubOffline() = runTest {
+        assertTrue(ValuationCurrency.entries.contains(ValuationCurrency.TRY))
+        assertTrue(ValuationCurrency.entries.contains(ValuationCurrency.BRL))
+        assertTrue(ValuationCurrency.TRY.supportsOnlineSync)
+        assertTrue(ValuationCurrency.BRL.supportsOnlineSync)
+        assertFalse(ValuationCurrency.TWD.supportsOnlineSync)
+        assertFalse(ValuationCurrency.RUB.supportsOnlineSync)
+
+        val server = MockWebServer()
+        server.start()
+        try {
+            val cacheFile = File(tempFolder.newFolder("fx_try_brl"), ExchangeRateRepository.CACHE_FILE_NAME)
+            val repo = ExchangeRateRepository(
+                cacheFile = cacheFile,
+                endpointUrl = server.url("/v1/latest?base=CNY").toString(),
+                ioDispatcher = Dispatchers.IO,
+            )
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"amount":1.0,"base":"CNY","date":"2026-06-01","rates":{"TRY":5.0,"BRL":0.8}}"""),
+            )
+            val outcome = repo.ensureFreshRates() as FxRefreshOutcome.Success
+            assertEquals(0, outcome.state.rateFor(ValuationCurrency.TRY).compareTo(BigDecimal("0.2")))
+            assertEquals(0, outcome.state.rateFor(ValuationCurrency.BRL).compareTo(BigDecimal("1.25")))
+            assertEquals(FxRateSource.ONLINE_FRESH, outcome.state.quoteFor(ValuationCurrency.TRY).source)
+            assertEquals(FxRateSource.ONLINE_FRESH, outcome.state.quoteFor(ValuationCurrency.BRL).source)
+            assertFalse(outcome.state.isCacheExpired)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun overCyclePreRenewalPreservesTrueRemainingRatioPercentWhileClampingProgressBar() {
+        val valuation = LocalDateTime.of(2026, 6, 1, 0, 0)
+        val outcome = VpsValuationEngine.calculate(
+            VpsValuationInput(
+                machineLabel = "Pre-renewed Annual VPS",
+                renewalAmount = BigDecimal("365.00"),
+                currency = ValuationCurrency.CNY,
+                cyclePreset = BillingCyclePreset.ANNUAL,
+                valuationDateTime = valuation,
+                expiryDateTime = valuation.plusDays(500),
+            ),
+        ) as VpsValuationOutcome.Success
+
+        val result = outcome.result
+        assertEquals(1.0f, result.remainingRatio, 0.0001f)
+        assertEquals(BigDecimal("137.0"), result.remainingRatioPercent)
+        assertEquals(BigDecimal("500.00"), result.remainingValueCny)
+
+        val markdown = VpsValuationEngine.formatMarkdown(result)
+        assertTrue("Expected true 137.0% in Markdown, got:\n$markdown", markdown.contains("137.0%"))
+        assertFalse(markdown.contains("100.0%"))
+    }
+
+    @Test
+    fun exchangeRateRepository_resetsIsRefreshingOnCancellationAndCoalescesConcurrentRefreshes() = runTest {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val cacheFile = File(tempFolder.newFolder("fx_cancel"), ExchangeRateRepository.CACHE_FILE_NAME)
+            val repo = ExchangeRateRepository(
+                cacheFile = cacheFile,
+                endpointUrl = server.url("/v1/latest?base=CNY").toString(),
+                ioDispatcher = Dispatchers.IO,
+            )
+
+            // 1. P1-62: Cancelling refresh mid-flight must reset isRefreshing back to false
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeadersDelay(5, TimeUnit.SECONDS)
+                    .setBody("""{"amount":1.0,"base":"CNY","date":"2026-06-01","rates":{"USD":0.14}}"""),
+            )
+            val job = launch(Dispatchers.Default) {
+                repo.refreshOnline()
+            }
+            withContext(Dispatchers.Default) {
+                var waitedMs = 0L
+                while (!repo.state.value.isRefreshing && waitedMs < 2_000L) {
+                    delay(10L)
+                    waitedMs += 10L
+                }
+            }
+            assertTrue(repo.state.value.isRefreshing)
+            job.cancelAndJoin()
+            assertFalse("Expected isRefreshing to reset to false after cancellation", repo.state.value.isRefreshing)
+
+            // 2. P3-37: Concurrent ensureFreshRates() calls coalesce into a single HTTP request
+            val countBeforeConcurrent = server.requestCount
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeadersDelay(150, TimeUnit.MILLISECONDS)
+                    .setBody("""{"amount":1.0,"base":"CNY","date":"2026-06-02","rates":{"USD":0.125}}"""),
+            )
+            val outcomes = withContext(Dispatchers.Default) {
+                listOf(
+                    async { repo.ensureFreshRates(force = true) },
+                    async { repo.ensureFreshRates(force = true) },
+                    async { repo.ensureFreshRates(force = true) },
+                ).awaitAll()
+            }
+            assertTrue(outcomes.all { it is FxRefreshOutcome.Success })
+            assertEquals(countBeforeConcurrent + 1, server.requestCount)
+            assertFalse(repo.state.value.isRefreshing)
         } finally {
             server.shutdown()
         }

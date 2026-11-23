@@ -126,4 +126,26 @@ class FlareSolverrClientTest {
 
         assertFalse(client.ping(FlareSolverrConfig(enabled = true, baseUrl = "")))
     }
+
+    @Test
+    fun `requestGet propagates upstream HTTP status code from FlareSolverr solution`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """
+                    {"status":"ok","message":"Challenge solved!","solution":{
+                      "url":"https://cf-shop.example.com/cart.php?a=add&pid=404",
+                      "status":404,
+                      "userAgent":"Mozilla/5.0 CF",
+                      "response":"<html><body>Not Found</body></html>"
+                    }}
+                """.trimIndent(),
+            ),
+        )
+
+        val solved = client.requestGet(
+            config = config(),
+            targetUrl = "https://cf-shop.example.com/cart.php?a=add&pid=404",
+        ) as FlareSolverrOutcome.Solved
+        assertEquals(404, solved.httpStatusCode)
+    }
 }
