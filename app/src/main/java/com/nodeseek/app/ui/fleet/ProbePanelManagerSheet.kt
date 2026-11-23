@@ -57,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,6 +81,7 @@ import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseSectionHeader
 import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
+import kotlinx.coroutines.flow.first
 import java.util.UUID
 
 /**
@@ -120,9 +122,16 @@ internal fun ProbePanelManagerSheet(
     var notifyOnOffline by remember { mutableStateOf(true) }
     var notifyOnRecovery by remember { mutableStateOf(false) }
 
+    var hasAutoScrolledToMonitor by remember(initialSection) { mutableStateOf(false) }
+
     LaunchedEffect(initialSection) {
-        if (initialSection == PanelManagerSection.MONITOR_SETTINGS) {
-            scrollState.animateScrollTo(scrollState.maxValue)
+        if (initialSection == PanelManagerSection.MONITOR_SETTINGS && !hasAutoScrolledToMonitor) {
+            val targetMax = snapshotFlow { scrollState.maxValue }
+                .first { it != Int.MAX_VALUE }
+            hasAutoScrolledToMonitor = true
+            if (targetMax > 0) {
+                scrollState.animateScrollTo(targetMax)
+            }
         }
     }
 

@@ -1835,10 +1835,7 @@ private fun VpsAssetCard(
     val isDark = NodePulseThemeTokens.isDark
     val urgency = renewalItem?.urgency
 
-    val isRenewalDue = renewalItem?.isRenewalDue == true ||
-        urgency == AssetExpiryUrgency.EXPIRED ||
-        urgency == AssetExpiryUrgency.CRITICAL ||
-        urgency == AssetExpiryUrgency.WARNING
+    val isRenewalDue = renewalItem?.isRenewalDue == true
 
     val displayTags = remember(asset.tags, asset.routeTag) { asset.resolvedTags }
 
@@ -1848,10 +1845,15 @@ private fun VpsAssetCard(
             "已过期 ${overdue}天"
         }
         AssetExpiryUrgency.CRITICAL -> {
-            if (renewalItem.daysRemaining == 0L) "今日到期" else "剩 ${renewalItem.daysRemaining} 天 · 待续费"
+            when {
+                renewalItem.daysRemaining == 0L -> "今日到期"
+                isRenewalDue -> "剩 ${renewalItem.daysRemaining} 天 · 待续费"
+                else -> "剩 ${renewalItem.daysRemaining} 天"
+            }
         }
-        AssetExpiryUrgency.WARNING -> "剩 ${renewalItem.daysRemaining} 天 · 待续费"
-        AssetExpiryUrgency.NORMAL -> if (isRenewalDue) {
+        AssetExpiryUrgency.WARNING,
+        AssetExpiryUrgency.NORMAL,
+        -> if (isRenewalDue) {
             "剩 ${renewalItem.daysRemaining} 天 · 待续费"
         } else {
             "剩 ${renewalItem.daysRemaining} 天"
