@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.VpnLock
@@ -39,7 +40,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -74,6 +74,7 @@ import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.TcpPortPreset
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
@@ -334,14 +335,21 @@ fun NetBenchQuickBottomSheet(
                 )
 
                 // Target input
-                OutlinedTextField(
+                PulseTextField(
                     value = uiState.targetInput,
                     onValueChange = controller::updateTargetInput,
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !uiState.isRunning,
                     singleLine = true,
-                    label = { Text("目标 IP / IPv6 / 域名") },
-                    placeholder = { Text("如 1.1.1.1 或 lg.example.com:443") },
+                    label = "目标 IP / IPv6 / 域名",
+                    placeholder = "如 1.1.1.1 或 lg.example.com:443",
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Router,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
                     trailingIcon = {
                         NetBenchTargetTrailingActions(
                             hasText = uiState.targetInput.isNotEmpty(),
@@ -363,7 +371,6 @@ fun NetBenchQuickBottomSheet(
                             controller.startBenchmark()
                         },
                     ),
-                    shape = PulseArchitecturalShapes.MediumBadge,
                 )
 
                 // Recent targets
@@ -466,15 +473,16 @@ fun NetBenchQuickBottomSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            OutlinedTextField(
+                            PulseTextField(
                                 value = uiState.iperfPortText,
                                 onValueChange = controller::updateIperfPortText,
-                                modifier = Modifier.width(96.dp),
+                                modifier = Modifier.width(100.dp),
                                 enabled = !uiState.isRunning,
                                 singleLine = true,
-                                label = { Text("端口") },
+                                label = "端口",
+                                placeholder = Iperf3Config.DEFAULT_PORT.toString(),
+                                minHeight = 42.dp,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                shape = PulseArchitecturalShapes.SmallChip,
                             )
                             Iperf3TestMode.entries.forEach { mode ->
                                 NetBenchSelectableChip(

@@ -24,8 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Check
@@ -35,7 +33,6 @@ import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LocalOffer
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -46,7 +43,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -62,7 +58,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -71,6 +66,7 @@ import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
+import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -178,7 +174,7 @@ internal fun NetBenchTargetTrailingActions(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.padding(end = 4.dp),
+        modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -390,51 +386,25 @@ internal fun VaultHostPickerSheet(
                     )
                 } else {
                     // Search bar
-                    OutlinedTextField(
+                    PulseSearchField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        placeholder = { Text("搜索主机名称 / IP / 域名 / 分组 / 标签…") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.Search,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        trailingIcon = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.padding(end = 4.dp),
-                            ) {
-                                if (isFiltering) {
-                                    PulseAccentPill(
-                                        text = "${filteredServers.size}/${servers.size}",
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                                if (searchQuery.isNotEmpty()) {
-                                    IconButton(
-                                        onClick = { searchQuery = "" },
-                                        modifier = Modifier.size(32.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Clear,
-                                            contentDescription = "清空搜索",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(16.dp),
-                                        )
-                                    }
-                                }
+                        placeholder = "搜索主机名称 / IP / 域名 / 分组 / 标签…",
+                        elevated = false,
+                        onClear = { searchQuery = "" },
+                        onSearch = { keyboardController?.hide() },
+                        trailingContent = if (isFiltering) {
+                            {
+                                PulseAccentPill(
+                                    text = "${filteredServers.size}/${servers.size}",
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
+                        } else {
+                            null
                         },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide() }),
-                        shape = PulseArchitecturalShapes.MediumBadge,
                     )
 
                     // Group filter chips
