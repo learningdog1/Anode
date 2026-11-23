@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -100,6 +101,7 @@ import androidx.compose.ui.unit.sp
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.SshAuthMethod
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
@@ -138,6 +140,7 @@ internal fun SshServerEditorDialog(
     servers: List<SshServerProfile> = emptyList(),
 ) {
     val isEditing = existing != null
+    val isProbeSynced = existing?.isProbeSynced == true
     var alias by rememberSaveable(existing?.id) { mutableStateOf(existing?.cleanAlias.orEmpty()) }
     var groupTag by rememberSaveable(existing?.id) { mutableStateOf(existing?.resolvedGroup.orEmpty()) }
     var host by rememberSaveable(existing?.id) { mutableStateOf(existing?.host.orEmpty()) }
@@ -149,6 +152,9 @@ internal fun SshServerEditorDialog(
     }
     var authMethod by rememberSaveable(existing?.id) {
         mutableStateOf(existing?.authMethod ?: SshAuthMethod.PASSWORD)
+    }
+    var connectionMode by rememberSaveable(existing?.id) {
+        mutableStateOf(existing?.effectiveConnectionMode ?: SshConnectionMode.DIRECT_SSH)
     }
     var secret by rememberSaveable(existing?.id) { mutableStateOf("") }
     var passphrase by rememberSaveable(existing?.id) { mutableStateOf("") }
@@ -172,10 +178,15 @@ internal fun SshServerEditorDialog(
     val hasSavedSecret = existing?.encryptedSecret?.isNotEmpty() == true
     val hasSavedPassphrase = !existing?.encryptedPassphrase.isNullOrEmpty()
     val parsedPort = portText.trim().toIntOrNull()
-    val canSubmit = host.trim().isNotEmpty() &&
-        parsedPort != null &&
+    val panelTerminalModeSelected = isProbeSynced && connectionMode == SshConnectionMode.PANEL_TERMINAL
+    val canSubmit = parsedPort != null &&
         parsedPort in 1..65535 &&
-        (secret.isNotEmpty() || (isEditing && hasSavedSecret && authMethod == existing?.authMethod))
+        (
+            panelTerminalModeSelected || (
+                host.trim().isNotEmpty() &&
+                    (secret.isNotEmpty() || (isEditing && hasSavedSecret && authMethod == existing?.authMethod))
+                )
+            )
 
     PulseAlertDialog(
         onDismissRequest = onDismiss,
@@ -198,9 +209,11 @@ internal fun SshServerEditorDialog(
                 null
             }
             when {
-                host.trim().isEmpty() -> validationError = "请输入服务器 IP 或域名"
+                !panelTerminalModeSelected && host.trim().isEmpty() -> validationError = "请输入服务器 IP 或域名"
                 port == null || port !in 1..65535 -> validationError = "端口必须在 1 ~ 65535 之间"
-                secret.isEmpty() && !(isEditing && hasSavedSecret && authMethod == existing?.authMethod) ->
+                !panelTerminalModeSelected &&
+                    secret.isEmpty() &&
+                    !(isEditing && hasSavedSecret && authMethod == existing?.authMethod) ->
                     validationError = if (authMethod == SshAuthMethod.PASSWORD) "请输入 SSH 密码" else "请粘贴 PEM / OpenSSH 私钥"
                 jumpCheckError != null -> validationError = jumpCheckError
                 else -> {
@@ -219,6 +232,8 @@ internal fun SshServerEditorDialog(
                             jumpHostId = selectedJumpHostId,
                             groupTag = groupTag.trim(),
                             groupEdited = true,
+                            connectionMode = if (isProbeSynced) connectionMode else SshConnectionMode.DIRECT_SSH,
+                            preserveProbeLink = true,
                         ),
                     )
                 }
@@ -233,6 +248,90 @@ internal fun SshServerEditorDialog(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (existing != null && existing.isProbeSynced) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CloudSync,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Text(
+                            text = "已关联探针：${existing.probePanelName ?: existing.probePanelShortLabel ?: "探针面板"} · 节点 #${existing.probeServerId}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (existing.probeRegion.isNotBlank() || existing.probeTags.isNotEmpty()) {
+                        val meta = buildList {
+                            if (existing.probeRegion.isNotBlank()) add(existing.probeRegion)
+                            addAll(existing.probeTags)
+                        }.joinToString(" · ")
+                        Text(
+                            text = meta,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AuthMethodChoicePill(
+                            label = "探针终端",
+                            icon = Icons.Rounded.Terminal,
+                            selected = connectionMode == SshConnectionMode.PANEL_TERMINAL,
+                            onClick = {
+                                connectionMode = SshConnectionMode.PANEL_TERMINAL
+                                validationError = null
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AuthMethodChoicePill(
+                            label = "直连 SSH",
+                            icon = Icons.Rounded.Dns,
+                            selected = connectionMode == SshConnectionMode.DIRECT_SSH,
+                            onClick = {
+                                connectionMode = SshConnectionMode.DIRECT_SSH
+                                validationError = null
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Text(
+                        text = if (panelTerminalModeSelected) {
+                            if (existing.supportsPanelTerminalProtocol) {
+                                "探针终端复用面板令牌经 WebSocket 连接（无需填写 SSH 密码；也可补充下方 IP/凭据作为直连备用）"
+                            } else {
+                                "提示：哪吒 v0 仅支持只读 API，无法使用探针终端，请切换为「直连 SSH」并填写凭据"
+                            }
+                        } else {
+                            "直连 SSH 通过 JSch 直接连接目标主机，需填写主机地址与密码/私钥（重新同步探针时会自动保留你的凭据）"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2084,12 +2183,39 @@ internal fun SshServerQuickPickerSheet(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
                                 ) {
-                                    PulseAccentPill(
-                                        text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
-                                        icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                    if (server.isProbeSynced) {
+                                        PulseAccentPill(
+                                            text = server.probePanelShortLabel ?: "探针",
+                                            icon = Icons.Rounded.CloudSync,
+                                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        )
+                                        PulseAccentPill(
+                                            text = server.effectiveConnectionMode.label,
+                                            icon = if (server.effectiveConnectionMode == SshConnectionMode.PANEL_TERMINAL) {
+                                                Icons.Rounded.Terminal
+                                            } else {
+                                                Icons.Rounded.Dns
+                                            },
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        )
+                                    }
+                                    if (server.hasDirectSshCredentials) {
+                                        PulseAccentPill(
+                                            text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
+                                            icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
+                                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    } else if (server.isProbeSynced) {
+                                        PulseAccentPill(
+                                            text = "待补 SSH 凭据",
+                                            icon = Icons.Rounded.Lock,
+                                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                     if (server.hasTrustedHostKey) {
                                         PulseAccentPill(
                                             text = "TOFU 已校验",

@@ -123,6 +123,7 @@ class LiteSshExecutor @JvmOverloads constructor(
             }
             val autoResponder = SshPromptAutoResponder(config = effectiveAutoConfig)
             val stdinWriterRef = AtomicReference<SshStdinWriter?>(null)
+            val outerStdinCallback = coroutineContext[SshStdinCallbackContext]?.onStdinReady
             val responderLock = Any()
             var pendingDebounceJob: Job? = null
             emitEvent(LiteSshExecutionEvent.Connecting)
@@ -132,7 +133,10 @@ class LiteSshExecutor @JvmOverloads constructor(
                 transport.execute(
                     request = request,
                     command = command,
-                    onStdinReady = { writer -> stdinWriterRef.set(writer) },
+                    onStdinReady = { writer ->
+                        stdinWriterRef.set(writer)
+                        outerStdinCallback?.invoke(writer)
+                    },
                 ).collect { event ->
                     when (event) {
                         is SshStreamEvent.HostKeyObserved -> {

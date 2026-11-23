@@ -1,6 +1,7 @@
 package com.nodeseek.app.data.ssh
 
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.HostKey
 import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
@@ -92,6 +93,7 @@ internal interface ManagedSshSession {
     ): Int
     fun delPortForwardingL(bindAddress: String, localPort: Int)
     fun openExecChannel(): ManagedExecChannel
+    fun openShellChannel(): ManagedExecChannel = openExecChannel()
     fun disconnect()
 }
 
@@ -352,9 +354,16 @@ class JSchSshTransport internal constructor(
                     heightPx = request.ptyHeightPx,
                 ).normalized()
 
-                val channel = targetEntry.session.openExecChannel()
+                val isInteractiveShell = request.interactiveShell || command.isBlank()
+                val channel = if (isInteractiveShell) {
+                    targetEntry.session.openShellChannel()
+                } else {
+                    targetEntry.session.openExecChannel()
+                }
                 channelRef.set(channel)
-                channel.setCommand(command)
+                if (!isInteractiveShell) {
+                    channel.setCommand(command)
+                }
                 channel.setInputStream(null)
                 channel.setPty(true)
                 channel.setPtyType(
@@ -592,8 +601,50 @@ class JSchSshTransport internal constructor(
             return JschManagedExecChannel(channel)
         }
 
+        override fun openShellChannel(): ManagedExecChannel {
+            val channel = session.openChannel("shell") as ChannelShell
+            return JschManagedShellChannel(channel)
+        }
+
         override fun disconnect() {
             session.disconnect()
+        }
+    }
+
+    private class JschManagedShellChannel(
+        private val channel: ChannelShell,
+    ) : ManagedExecChannel {
+        override val inputStream: InputStream
+            get() = channel.inputStream
+        override val outputStream: OutputStream
+            get() = channel.outputStream
+        override val isClosed: Boolean
+            get() = channel.isClosed
+        override val exitStatus: Int
+            get() = channel.exitStatus
+
+        override fun setInputStream(inputStream: InputStream?) {
+            channel.setInputStream(inputStream)
+        }
+
+        override fun setPty(enable: Boolean) {
+            channel.setPty(enable)
+        }
+
+        override fun setPtyType(ptyType: String, col: Int, row: Int, wp: Int, hp: Int) {
+            channel.setPtyType(ptyType, col, row, wp, hp)
+        }
+
+        override fun setPtySize(col: Int, row: Int, wp: Int, hp: Int) {
+            channel.setPtySize(col, row, wp, hp)
+        }
+
+        override fun connect(connectTimeoutMillis: Int) {
+            channel.connect(connectTimeoutMillis)
+        }
+
+        override fun disconnect() {
+            channel.disconnect()
         }
     }
 

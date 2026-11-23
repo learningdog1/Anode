@@ -47,6 +47,11 @@ data class SshConnectionRequest(
     val jumpHosts: List<SshJumpHop> = emptyList(),
     val ptyWidthPx: Int = 0,
     val ptyHeightPx: Int = 0,
+    val connectionMode: SshConnectionMode = SshConnectionMode.DIRECT_SSH,
+    val interactiveShell: Boolean = false,
+    val probePanelId: String? = null,
+    val probeServerId: String? = null,
+    val probePanelType: String? = null,
 ) {
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MILLIS: Int = 15_000

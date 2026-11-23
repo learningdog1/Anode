@@ -15,6 +15,80 @@ enum class SshAuthMethod {
 }
 
 /**
+ * Transport mode used to connect to a vaulted VPS host.
+ *
+ * - [DIRECT_SSH]: Traditional TCP SSH via JSch using host, port, username, and password/private key.
+ * - [PANEL_TERMINAL]: WebSocket PTY terminal proxied through a configured Nezha v1 or Komari probe panel.
+ */
+@Serializable
+enum class SshConnectionMode(val label: String) {
+    DIRECT_SSH("直连 SSH"),
+    PANEL_TERMINAL("探针终端"),
+}
+
+/**
+ * Persisted collapse/expand UI state for the SSH host vault (`主机保险库`).
+ *
+ * Stored alongside server profiles in `lite_ssh_vault.json` so collapsing the whole VPS list,
+ * individual groups, or expanding specific host detail drawers survives navigation and restarts.
+ */
+@Immutable
+@Serializable
+data class SshVaultCollapseState(
+    val isVaultListCollapsed: Boolean = false,
+    val collapsedGroupKeys: Set<String> = emptySet(),
+    val expandedServerIds: Set<String> = emptySet(),
+) {
+    fun toggleVaultListCollapsed(): SshVaultCollapseState =
+        copy(isVaultListCollapsed = !isVaultListCollapsed)
+
+    fun toggleGroupCollapsed(groupKey: String): SshVaultCollapseState {
+        val clean = groupKey.trim().lowercase()
+        if (clean.isEmpty()) return this
+        val next = if (clean in collapsedGroupKeys) {
+            collapsedGroupKeys - clean
+        } else {
+            collapsedGroupKeys + clean
+        }
+        return copy(collapsedGroupKeys = next)
+    }
+
+    fun isGroupCollapsed(groupKey: String): Boolean =
+        groupKey.trim().lowercase() in collapsedGroupKeys
+
+    fun setAllGroupsCollapsed(
+        groupKeys: Collection<String>,
+        collapsed: Boolean,
+    ): SshVaultCollapseState {
+        val normalized = groupKeys.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
+        return if (collapsed) {
+            copy(collapsedGroupKeys = collapsedGroupKeys + normalized)
+        } else {
+            copy(collapsedGroupKeys = collapsedGroupKeys - normalized)
+        }
+    }
+
+    fun toggleServerExpanded(serverId: String): SshVaultCollapseState {
+        if (serverId.isBlank()) return this
+        val next = if (serverId in expandedServerIds) {
+            expandedServerIds - serverId
+        } else {
+            expandedServerIds + serverId
+        }
+        return copy(expandedServerIds = next)
+    }
+
+    fun isServerExpanded(serverId: String): Boolean = serverId in expandedServerIds
+
+    fun pruneServerId(serverId: String): SshVaultCollapseState =
+        if (serverId in expandedServerIds) {
+            copy(expandedServerIds = expandedServerIds - serverId)
+        } else {
+            this
+        }
+}
+
+/**
  * Category grouping for curated and custom VPS benchmark presets.
  */
 @Serializable
@@ -60,6 +134,16 @@ data class SshServerProfile(
     val createdAtEpochMillis: Long = 0L,
     val jumpHostId: String? = null,
     val groupTag: String = "",
+    val probePanelId: String? = null,
+    val probePanelName: String? = null,
+    val probePanelType: String? = null,
+    val probeServerId: String? = null,
+    val probeRegion: String = "",
+    val probeTags: List<String> = emptyList(),
+    val probeSyncedAtEpochMillis: Long? = null,
+    val probeReportedHost: String = "",
+    val probeReportedName: String = "",
+    val connectionMode: SshConnectionMode = SshConnectionMode.DIRECT_SSH,
 ) {
     val resolvedGroup: String?
         get() = SshVaultCatalogFilter.parseAliasGroup(alias = alias, explicitGroupTag = groupTag).group
@@ -68,12 +152,59 @@ data class SshServerProfile(
         get() = SshVaultCatalogFilter.parseAliasGroup(alias = alias, explicitGroupTag = groupTag).cleanAlias
 
     val displayName: String
-        get() = cleanAlias.ifBlank { host.trim() }
+        get() = cleanAlias.ifBlank { host.trim().ifBlank { probeServerId?.let { "节点 #$it" } ?: "未命名主机" } }
+
+    val probeKey: String?
+        get() {
+            val panelId = probePanelId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val remoteId = probeServerId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return "$panelId:$remoteId"
+        }
+
+    val isProbeSynced: Boolean
+        get() = probeKey != null
+
+    val hasDirectSshHost: Boolean
+        get() = host.trim().isNotEmpty()
+
+    val hasDirectSshCredentials: Boolean
+        get() = encryptedSecret.isNotEmpty()
+
+    val canDirectSsh: Boolean
+        get() = hasDirectSshHost && hasDirectSshCredentials
+
+    val supportsPanelTerminalProtocol: Boolean
+        get() = isProbeSynced && (
+            probePanelType.equals("NEZHA_V1", ignoreCase = true) ||
+                probePanelType.equals("KOMARI", ignoreCase = true)
+            )
+
+    val effectiveConnectionMode: SshConnectionMode
+        get() = if (connectionMode == SshConnectionMode.PANEL_TERMINAL && isProbeSynced) {
+            SshConnectionMode.PANEL_TERMINAL
+        } else {
+            SshConnectionMode.DIRECT_SSH
+        }
+
+    val probePanelShortLabel: String?
+        get() = when {
+            !isProbeSynced -> null
+            probePanelType.equals("NEZHA_V1", ignoreCase = true) -> "哪吒 v1"
+            probePanelType.equals("NEZHA_V0", ignoreCase = true) -> "哪吒 v0"
+            probePanelType.equals("KOMARI", ignoreCase = true) -> "Komari"
+            else -> "探针"
+        }
 
     val displayAddress: String
         get() {
             val cleanUser = username.trim().ifBlank { DEFAULT_USERNAME }
             val cleanHost = host.trim()
+            if (cleanHost.isEmpty() && isProbeSynced) {
+                val panelLabel = probePanelName?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: probePanelShortLabel
+                    ?: "探针面板"
+                return "探针节点 · $panelLabel"
+            }
             return if (port == DEFAULT_PORT) {
                 "$cleanUser@$cleanHost"
             } else {
@@ -111,6 +242,17 @@ data class SshServerDraft(
     val jumpHostId: String? = null,
     val groupTag: String = "",
     val groupEdited: Boolean = false,
+    val connectionMode: SshConnectionMode = SshConnectionMode.DIRECT_SSH,
+    val preserveProbeLink: Boolean = true,
+    val probePanelId: String? = null,
+    val probePanelName: String? = null,
+    val probePanelType: String? = null,
+    val probeServerId: String? = null,
+    val probeRegion: String = "",
+    val probeTags: List<String> = emptyList(),
+    val probeSyncedAtEpochMillis: Long? = null,
+    val probeReportedHost: String = "",
+    val probeReportedName: String = "",
 )
 
 /**

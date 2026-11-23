@@ -42,6 +42,17 @@ data class SshPresetFilterOption(
 }
 
 /**
+ * Collapsible section bucket for displaying grouped VPS servers inside the SSH Host Vault.
+ */
+@Immutable
+data class SshVaultServerGroup(
+    val key: String,
+    val label: String,
+    val servers: List<SshServerProfile>,
+    val isProbeSourceGroup: Boolean = false,
+)
+
+/**
  * Parsed group tag and clean server remark extracted from an [SshServerProfile].
  */
 @Immutable
@@ -279,6 +290,108 @@ object SshVaultCatalogFilter {
     }
 
     /**
+     * Groups [filteredServers] into collapsible sections for the SSH Host Vault UI.
+     *
+     * - When any server carries a group tag, partitions by group (keeping the selected server's
+     *   group first) and places ungrouped entries under `"未分组"`.
+     * - When no server carries a group tag but both probe-synced and manual entries exist,
+     *   partitions into `"探针同步"` and `"手动添加"` sections.
+     * - Otherwise returns a single collapsible `"全部主机"` section.
+     */
+    fun groupServersForCollapsibleVault(
+        filteredServers: List<SshServerProfile>,
+        selectedServerId: String? = null,
+    ): List<SshVaultServerGroup> {
+        if (filteredServers.isEmpty()) return emptyList()
+
+        val hasAnyNamedGroup = filteredServers.any { !it.resolvedGroup.isNullOrBlank() }
+        if (hasAnyNamedGroup) {
+            val grouped = LinkedHashMap<String, MutableList<SshServerProfile>>()
+            val labels = LinkedHashMap<String, String>()
+            val ungrouped = ArrayList<SshServerProfile>()
+
+            for (server in filteredServers) {
+                val grp = server.resolvedGroup?.trim()?.takeIf { it.isNotEmpty() }
+                if (grp == null) {
+                    ungrouped += server
+                } else {
+                    val normKey = grp.lowercase()
+                    labels.putIfAbsent(normKey, grp)
+                    grouped.getOrPut(normKey) { ArrayList() }.add(server)
+                }
+            }
+
+            val sections = buildList {
+                grouped.forEach { (key, list) ->
+                    add(
+                        SshVaultServerGroup(
+                            key = key,
+                            label = labels[key] ?: key,
+                            servers = list,
+                            isProbeSourceGroup = list.all { it.isProbeSynced },
+                        ),
+                    )
+                }
+                if (ungrouped.isNotEmpty()) {
+                    add(
+                        SshVaultServerGroup(
+                            key = SshServerGroupOption.KEY_UNGROUPED.lowercase(),
+                            label = "未分组",
+                            servers = ungrouped,
+                            isProbeSourceGroup = ungrouped.all { it.isProbeSynced },
+                        ),
+                    )
+                }
+            }
+            return pinSelectedGroupFirst(sections, selectedServerId)
+        }
+
+        val probeSynced = filteredServers.filter { it.isProbeSynced }
+        val manual = filteredServers.filterNot { it.isProbeSynced }
+        if (probeSynced.isNotEmpty() && manual.isNotEmpty()) {
+            val sections = listOf(
+                SshVaultServerGroup(
+                    key = "__source_probe__",
+                    label = "探针同步主机",
+                    servers = probeSynced,
+                    isProbeSourceGroup = true,
+                ),
+                SshVaultServerGroup(
+                    key = "__source_manual__",
+                    label = "手动添加主机",
+                    servers = manual,
+                    isProbeSourceGroup = false,
+                ),
+            )
+            return pinSelectedGroupFirst(sections, selectedServerId)
+        }
+
+        return listOf(
+            SshVaultServerGroup(
+                key = "__all_servers__",
+                label = if (probeSynced.isNotEmpty()) "探针同步主机" else "全部主机",
+                servers = filteredServers,
+                isProbeSourceGroup = probeSynced.isNotEmpty(),
+            ),
+        )
+    }
+
+    private fun pinSelectedGroupFirst(
+        sections: List<SshVaultServerGroup>,
+        selectedServerId: String?,
+    ): List<SshVaultServerGroup> {
+        if (selectedServerId.isNullOrBlank() || sections.size <= 1) return sections
+        val idx = sections.indexOfFirst { section -> section.servers.any { it.id == selectedServerId } }
+        if (idx <= 0) return sections
+        return buildList(sections.size) {
+            add(sections[idx])
+            for (i in sections.indices) {
+                if (i != idx) add(sections[i])
+            }
+        }
+    }
+
+    /**
      * Computes the visible slice of [filteredServers] in inline collapsed vs expanded state.
      */
     fun visibleServersForInlineSection(
@@ -412,9 +525,20 @@ object SshVaultCatalogFilter {
         val addressLower = server.displayAddress.lowercase()
         val groupLower = server.resolvedGroup?.lowercase().orEmpty()
         val jumpLower = jumpHostDisplayName.lowercase()
+        val probePanelLower = server.probePanelName?.lowercase().orEmpty()
+        val probeTypeLower = server.probePanelShortLabel?.lowercase().orEmpty()
+        val probeTypeRawLower = server.probePanelType?.lowercase().orEmpty()
+        val probeRegionLower = server.probeRegion.lowercase()
+        val probeServerIdLower = server.probeServerId?.lowercase().orEmpty()
+        val probeTagsLower = if (server.probeTags.isEmpty()) {
+            ""
+        } else {
+            server.probeTags.joinToString(" ").lowercase()
+        }
+        val probeSourceMarker = if (server.isProbeSynced) "探针 probe synced" else "手动 manual"
 
         val compactIdentity = COMPACT_STRIP_REGEX.replace(
-            "$displayNameLower$groupLower$hostLower$userLower",
+            "$displayNameLower$groupLower$hostLower$userLower$probePanelLower$probeRegionLower$probeTagsLower",
             "",
         )
 
@@ -427,6 +551,13 @@ object SshVaultCatalogFilter {
                 addressLower.contains(token) ||
                 groupLower.contains(token) ||
                 jumpLower.contains(token) ||
+                probePanelLower.contains(token) ||
+                probeTypeLower.contains(token) ||
+                probeTypeRawLower.contains(token) ||
+                probeRegionLower.contains(token) ||
+                probeServerIdLower.contains(token) ||
+                probeTagsLower.contains(token) ||
+                probeSourceMarker.contains(token) ||
                 (token.length >= 2 && compactIdentity.contains(COMPACT_STRIP_REGEX.replace(token, "")))
         }
     }
