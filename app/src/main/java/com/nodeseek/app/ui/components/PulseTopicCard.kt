@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
+import com.nodeseek.app.ui.theme.ProvideSharedPulseShimmer
 import com.nodeseek.app.ui.theme.PulseShimmerBox
 import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.pulsePressScale
@@ -171,7 +173,7 @@ fun PulseTopicCard(
                         }
                     }
                 }
-                .semantics {
+                .semantics(mergeDescendants = true) {
                     selected = isSelected
                     stateDescription = if (topic.isRead) "已读" else "未读"
                 }
@@ -182,7 +184,7 @@ fun PulseTopicCard(
                 )
                 .padding(horizontal = 13.dp, vertical = 10.dp),
         ) {
-            // ── Row 1: Compact Author + Time + Borderless 1-Tap Bookmark ──
+            // ── Row 1: Compact Author + Time (Bookmark rendered as 48dp sibling at TopEnd) ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -191,26 +193,37 @@ fun PulseTopicCard(
                     ((topic.authorId != null && topic.authorId > 0L) || topic.authorName.isNotBlank())
                 val resolvedAuthorId = topic.authorId ?: 0L
 
-                PulseAvatar(
-                    avatarUrl = topic.authorAvatarUrl,
-                    username = topic.authorName,
-                    size = 24.dp,
-                    rankLevel = null,
-                    ringWidth = 0.85.dp,
-                    onClick = if (canClickAuthor) {
-                        { onAuthorClick?.invoke(resolvedAuthorId) }
-                    } else {
-                        null
-                    },
-                )
-
-                Spacer(modifier = Modifier.width(7.dp))
-
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .then(
+                            if (canClickAuthor) {
+                                Modifier
+                                    .heightIn(min = 32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(
+                                        role = Role.Button,
+                                        onClickLabel = "查看用户主页",
+                                        onClick = { onAuthorClick?.invoke(resolvedAuthorId) },
+                                    )
+                                    .padding(end = 4.dp)
+                            } else {
+                                Modifier
+                            },
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
+                    PulseAvatar(
+                        avatarUrl = topic.authorAvatarUrl,
+                        username = topic.authorName,
+                        size = 24.dp,
+                        rankLevel = topic.authorLevel,
+                        ringWidth = if (topic.authorLevel != null) 1.4.dp else 0.85.dp,
+                        onClick = null,
+                    )
+
+                    Spacer(modifier = Modifier.width(7.dp))
+
                     Text(
                         text = topic.authorName.ifBlank { "匿名用户" },
                         style = MaterialTheme.typography.labelMedium.copy(
@@ -221,63 +234,25 @@ fun PulseTopicCard(
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .then(
-                                if (canClickAuthor) {
-                                    Modifier
-                                        .clip(RoundedCornerShape(5.dp))
-                                        .clickable(
-                                            role = Role.Button,
-                                            onClickLabel = "查看用户主页",
-                                            onClick = { onAuthorClick?.invoke(resolvedAuthorId) },
-                                        )
-                                } else {
-                                    Modifier
-                                },
-                            ),
                     )
-                    if (topic.lastActivityIso.isNotBlank()) {
-                        Text(
-                            text = "·",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        )
-                        RelativeTimeText(isoTimestamp = topic.lastActivityIso)
-                    }
                 }
 
+                if (topic.lastActivityIso.isNotBlank()) {
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "·",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    RelativeTimeText(isoTimestamp = topic.lastActivityIso)
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
                 if (onBookmarkToggle != null) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .clickable(
-                                role = Role.Button,
-                                onClickLabel = if (topic.isBookmarked) "取消收藏" else "收藏帖子",
-                                onClick = {
-                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    onBookmarkToggle()
-                                },
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = if (topic.isBookmarked) {
-                                Icons.Rounded.Bookmark
-                            } else {
-                                Icons.Rounded.BookmarkBorder
-                            },
-                            contentDescription = if (topic.isBookmarked) "取消收藏" else "收藏帖子",
-                            tint = if (topic.isBookmarked) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                            },
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                    // Reserve horizontal clearance for the 48dp sibling IconButton at TopEnd
+                    Spacer(modifier = Modifier.width(34.dp))
                 }
             }
 
@@ -432,6 +407,31 @@ fun PulseTopicCard(
                 }
             }
         }
+
+        if (onBookmarkToggle != null) {
+            IconButton(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onBookmarkToggle()
+                },
+                modifier = Modifier.align(Alignment.TopEnd),
+            ) {
+                Icon(
+                    imageVector = if (topic.isBookmarked) {
+                        Icons.Rounded.Bookmark
+                    } else {
+                        Icons.Rounded.BookmarkBorder
+                    },
+                    contentDescription = if (topic.isBookmarked) "取消收藏" else "收藏帖子",
+                    tint = if (topic.isBookmarked) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                    },
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
     }
 }
 
@@ -446,23 +446,25 @@ private fun PulseCardCategoryTag(
     val fontScale = NodePulseThemeTokens.fontScale
     val categorySpec = NodePulseThemeTokens.categorySpec(categorySlug)
     val categoryLabel = categoryName.ifBlank { categorySpec.defaultTitle }
-    val categoryShape = RoundedCornerShape(4.dp)
+    val categoryShape = RoundedCornerShape(6.dp)
+    val isClickable = onCategoryClick != null && categorySlug.isNotBlank()
 
     Row(
         modifier = modifier
+            .then(if (isClickable) Modifier.heightIn(min = 28.dp) else Modifier)
             .clip(categoryShape)
             .then(
-                if (onCategoryClick != null && categorySlug.isNotBlank()) {
+                if (isClickable) {
                     Modifier.clickable(
                         role = Role.Button,
                         onClickLabel = "筛选$categoryLabel",
-                        onClick = { onCategoryClick(categorySlug) },
+                        onClick = { onCategoryClick?.invoke(categorySlug) },
                     )
                 } else {
                     Modifier
                 },
             )
-            .padding(horizontal = 2.dp, vertical = 2.dp),
+            .padding(horizontal = if (isClickable) 4.dp else 2.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -506,82 +508,84 @@ fun PulseTopicCardSkeleton(
     val ext = NodePulseThemeTokens.extendedColors
     val cardShape = RoundedCornerShape(14.dp)
 
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(contentPadding),
-    ) {
-        Column(
-            modifier = Modifier
+    ProvideSharedPulseShimmer {
+        Box(
+            modifier = modifier
                 .fillMaxWidth()
-                .clip(cardShape)
-                .border(
-                    width = 0.85.dp,
-                    color = ext.cardBorder,
-                    shape = cardShape,
-                )
-                .padding(horizontal = 13.dp, vertical = 10.dp),
+                .padding(contentPadding),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                PulseShimmerBox(
-                    modifier = Modifier.size(24.dp),
-                    shape = CircleShape,
-                )
-                Spacer(modifier = Modifier.width(7.dp))
-                PulseShimmerBox(
-                    modifier = Modifier
-                        .width(88.dp)
-                        .height(12.dp),
-                    shape = RoundedCornerShape(4.dp),
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                PulseShimmerBox(
-                    modifier = Modifier.size(16.dp),
-                    shape = RoundedCornerShape(4.dp),
-                )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            PulseShimmerBox(
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth(0.92f)
-                    .height(15.dp),
-                shape = RoundedCornerShape(4.dp),
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            PulseShimmerBox(
-                modifier = Modifier
-                    .fillMaxWidth(0.62f)
-                    .height(15.dp),
-                shape = RoundedCornerShape(4.dp),
-            )
-            Spacer(modifier = Modifier.height(7.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    .fillMaxWidth()
+                    .clip(cardShape)
+                    .border(
+                        width = 0.85.dp,
+                        color = ext.cardBorder,
+                        shape = cardShape,
+                    )
+                    .padding(horizontal = 13.dp, vertical = 10.dp),
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PulseShimmerBox(
+                        modifier = Modifier.size(24.dp),
+                        shape = CircleShape,
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    PulseShimmerBox(
+                        modifier = Modifier
+                            .width(88.dp)
+                            .height(12.dp),
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    PulseShimmerBox(
+                        modifier = Modifier.size(16.dp),
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
                 PulseShimmerBox(
                     modifier = Modifier
-                        .width(48.dp)
-                        .height(20.dp),
-                    shape = CircleShape,
-                )
-                PulseShimmerBox(
-                    modifier = Modifier
-                        .width(40.dp)
-                        .height(14.dp),
+                        .fillMaxWidth(0.92f)
+                        .height(15.dp),
                     shape = RoundedCornerShape(4.dp),
                 )
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(6.dp))
                 PulseShimmerBox(
                     modifier = Modifier
-                        .width(38.dp)
-                        .height(13.dp),
+                        .fillMaxWidth(0.62f)
+                        .height(15.dp),
                     shape = RoundedCornerShape(4.dp),
                 )
+                Spacer(modifier = Modifier.height(7.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    PulseShimmerBox(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .height(20.dp),
+                        shape = CircleShape,
+                    )
+                    PulseShimmerBox(
+                        modifier = Modifier
+                            .width(40.dp)
+                            .height(14.dp),
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    PulseShimmerBox(
+                        modifier = Modifier
+                            .width(38.dp)
+                            .height(13.dp),
+                        shape = RoundedCornerShape(4.dp),
+                    )
+                }
             }
         }
     }

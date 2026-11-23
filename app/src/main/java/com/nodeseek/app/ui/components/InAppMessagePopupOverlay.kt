@@ -90,14 +90,9 @@ import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
-import com.nodeseek.app.ui.theme.ObsidianPrimary
-import com.nodeseek.app.ui.theme.ObsidianSecondary
-import com.nodeseek.app.ui.theme.ObsidianTertiary
-import com.nodeseek.app.ui.theme.PaperPrimary
-import com.nodeseek.app.ui.theme.PaperSecondary
-import com.nodeseek.app.ui.theme.PaperTertiary
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseBrushes
+import com.nodeseek.app.ui.theme.areSystemAnimatorsEnabled
 import com.nodeseek.app.ui.theme.blendColor
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlin.math.abs
@@ -173,103 +168,55 @@ private fun rememberPopupSemanticStyle(
     kind: InAppMessageKind,
     isDark: Boolean,
 ): PopupSemanticStyle {
-    return remember(kind, isDark) {
+    val colorScheme = MaterialTheme.colorScheme
+    val ext = NodePulseThemeTokens.extendedColors
+    val techSpec = NodePulseThemeTokens.categorySpec("tech")
+    return remember(kind, isDark, colorScheme, ext, techSpec) {
+        val borderAlpha = if (isDark) 0.42f else 0.26f
         when (kind) {
-            InAppMessageKind.REPLY -> if (isDark) {
-                PopupSemanticStyle(
-                    accentColor = ObsidianPrimary,
-                    secondaryAccentColor = Color(0xFF64B5F6),
-                    badgeContainerColor = Color(0xFF1A2960),
-                    badgeContentColor = Color(0xFFDDE3FF),
-                    badgeBorderColor = ObsidianPrimary.copy(alpha = 0.42f),
-                    badgeLabel = "回复了你",
-                    icon = Icons.Rounded.ChatBubbleOutline,
-                    actionLabel = "直达",
-                )
-            } else {
-                PopupSemanticStyle(
-                    accentColor = PaperPrimary,
-                    secondaryAccentColor = Color(0xFF5D7DF5),
-                    badgeContainerColor = Color(0xFFE5EBFF),
-                    badgeContentColor = Color(0xFF142E96),
-                    badgeBorderColor = PaperPrimary.copy(alpha = 0.24f),
-                    badgeLabel = "回复了你",
-                    icon = Icons.Rounded.ChatBubbleOutline,
-                    actionLabel = "直达",
-                )
-            }
+            InAppMessageKind.REPLY -> PopupSemanticStyle(
+                accentColor = colorScheme.primary,
+                secondaryAccentColor = blendColor(colorScheme.primary, colorScheme.secondary, 0.35f),
+                badgeContainerColor = colorScheme.primaryContainer,
+                badgeContentColor = colorScheme.onPrimaryContainer,
+                badgeBorderColor = colorScheme.primary.copy(alpha = borderAlpha),
+                badgeLabel = "回复了你",
+                icon = Icons.Rounded.ChatBubbleOutline,
+                actionLabel = "直达",
+            )
 
-            InAppMessageKind.MENTION -> if (isDark) {
-                PopupSemanticStyle(
-                    accentColor = ObsidianSecondary,
-                    secondaryAccentColor = Color(0xFF2DD4BF),
-                    badgeContainerColor = Color(0xFF0A3B38),
-                    badgeContentColor = Color(0xFFA2F7EF),
-                    badgeBorderColor = ObsidianSecondary.copy(alpha = 0.42f),
-                    badgeLabel = "@提到了你",
-                    icon = Icons.Rounded.AlternateEmail,
-                    actionLabel = "直达",
-                )
-            } else {
-                PopupSemanticStyle(
-                    accentColor = PaperSecondary,
-                    secondaryAccentColor = Color(0xFF14B8A6),
-                    badgeContainerColor = Color(0xFFD1F5EF),
-                    badgeContentColor = Color(0xFF044D4A),
-                    badgeBorderColor = PaperSecondary.copy(alpha = 0.24f),
-                    badgeLabel = "@提到了你",
-                    icon = Icons.Rounded.AlternateEmail,
-                    actionLabel = "直达",
-                )
-            }
+            InAppMessageKind.MENTION -> PopupSemanticStyle(
+                accentColor = colorScheme.secondary,
+                secondaryAccentColor = blendColor(colorScheme.secondary, colorScheme.primary, 0.35f),
+                badgeContainerColor = colorScheme.secondaryContainer,
+                badgeContentColor = colorScheme.onSecondaryContainer,
+                badgeBorderColor = colorScheme.secondary.copy(alpha = borderAlpha),
+                badgeLabel = "@提到了你",
+                icon = Icons.Rounded.AlternateEmail,
+                actionLabel = "直达",
+            )
 
-            InAppMessageKind.DIRECT_MESSAGE -> if (isDark) {
-                PopupSemanticStyle(
-                    accentColor = ObsidianTertiary,
-                    secondaryAccentColor = Color(0xFFFCD34D),
-                    badgeContainerColor = Color(0xFF3E2908),
-                    badgeContentColor = Color(0xFFFFE5BD),
-                    badgeBorderColor = ObsidianTertiary.copy(alpha = 0.44f),
-                    badgeLabel = "新私信",
-                    icon = Icons.Rounded.Mail,
-                    actionLabel = "去聊天",
-                )
-            } else {
-                PopupSemanticStyle(
-                    accentColor = PaperTertiary,
-                    secondaryAccentColor = Color(0xFFF59E0B),
-                    badgeContainerColor = Color(0xFFFFEAD0),
-                    badgeContentColor = Color(0xFF78350F),
-                    badgeBorderColor = PaperTertiary.copy(alpha = 0.26f),
-                    badgeLabel = "新私信",
-                    icon = Icons.Rounded.Mail,
-                    actionLabel = "去聊天",
-                )
-            }
+            InAppMessageKind.DIRECT_MESSAGE -> PopupSemanticStyle(
+                accentColor = if (isDark) ext.drumstickGoldEnd else ext.onDrumstickContainer,
+                secondaryAccentColor = ext.drumstickGoldStart,
+                badgeContainerColor = ext.drumstickContainer,
+                badgeContentColor = ext.onDrumstickContainer,
+                badgeBorderColor = ext.drumstickGoldEnd.copy(alpha = if (isDark) 0.44f else 0.30f),
+                badgeLabel = "新私信",
+                icon = Icons.Rounded.Mail,
+                actionLabel = "去聊天",
+            )
 
-            InAppMessageKind.SSH_BENCHMARK_COMPLETED -> if (isDark) {
-                PopupSemanticStyle(
-                    accentColor = ObsidianSecondary,
-                    secondaryAccentColor = Color(0xFF34D399),
-                    badgeContainerColor = Color(0xFF08392D),
-                    badgeContentColor = Color(0xFFA7F3D0),
-                    badgeBorderColor = ObsidianSecondary.copy(alpha = 0.45f),
-                    badgeLabel = "测机完成",
-                    icon = Icons.Rounded.Terminal,
-                    actionLabel = "看报告",
-                )
-            } else {
-                PopupSemanticStyle(
-                    accentColor = PaperSecondary,
-                    secondaryAccentColor = Color(0xFF10B981),
-                    badgeContainerColor = Color(0xFFD1FAE5),
-                    badgeContentColor = Color(0xFF065F46),
-                    badgeBorderColor = PaperSecondary.copy(alpha = 0.26f),
-                    badgeLabel = "测机完成",
-                    icon = Icons.Rounded.Terminal,
-                    actionLabel = "看报告",
-                )
-            }
+            InAppMessageKind.SSH_BENCHMARK_COMPLETED -> PopupSemanticStyle(
+                accentColor = techSpec.spineColor,
+                secondaryAccentColor = blendColor(techSpec.spineColor, colorScheme.secondary, 0.32f),
+                badgeContainerColor = techSpec.containerColor,
+                badgeContentColor = techSpec.contentColor,
+                badgeBorderColor = techSpec.spineColor.copy(alpha = borderAlpha),
+                badgeLabel = "测机完成",
+                icon = Icons.Rounded.Terminal,
+                actionLabel = "看报告",
+            )
         }
     }
 }
@@ -345,6 +292,7 @@ private fun InAppMessagePopupCard(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
+    val fontScale = NodePulseThemeTokens.fontScale
     val isPurePitch = isDark && MaterialTheme.colorScheme.background == Color.Black
     val style = rememberPopupSemanticStyle(kind = popup.kind, isDark = isDark)
     val haptics = LocalHapticFeedback.current
@@ -367,7 +315,7 @@ private fun InAppMessagePopupCard(
     var dragY by remember(popup.dedupKey) { mutableFloatStateOf(0f) }
     var lastTapOffset by remember(popup.dedupKey) { mutableStateOf(Offset.Unspecified) }
 
-    val animatedDragX by animateFloatAsState(
+    val animatedDragXState = animateFloatAsState(
         targetValue = dragX,
         animationSpec = when {
             isDragging -> snap()
@@ -376,7 +324,7 @@ private fun InAppMessagePopupCard(
         },
         label = "popupDragX",
     )
-    val animatedDragY by animateFloatAsState(
+    val animatedDragYState = animateFloatAsState(
         targetValue = dragY,
         animationSpec = when {
             isDragging -> snap()
@@ -386,7 +334,7 @@ private fun InAppMessagePopupCard(
         label = "popupDragY",
     )
 
-    val pressScale by animateFloatAsState(
+    val pressScaleState = animateFloatAsState(
         targetValue = if (isPressedVisual && !isActivating) 0.955f else 1f,
         animationSpec = NodePulseMotion.microBounceSpring(),
         label = "popupPressScale",
@@ -399,6 +347,10 @@ private fun InAppMessagePopupCard(
     val activateLiftAlpha = remember(popup.dedupKey) { Animatable(1f) }
 
     LaunchedEffect(popup.dedupKey) {
+        if (!areSystemAnimatorsEnabled()) {
+            sweepProgress.snapTo(1f)
+            return@LaunchedEffect
+        }
         sweepProgress.snapTo(0f)
         sweepProgress.animateTo(
             targetValue = 1f,
@@ -462,40 +414,27 @@ private fun InAppMessagePopupCard(
         }
     }
 
-    val hRatio = if (cardWidthPx > 0f) (abs(animatedDragX) / (cardWidthPx * 0.65f)).coerceIn(0f, 1f) else 0f
-    val vRatio = if (animatedDragY < 0f && cardHeightPx > 0f) {
-        (abs(animatedDragY) / (cardHeightPx * 0.95f)).coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-    val dragFadeAlpha = (1f - maxOf(hRatio, vRatio) * 0.72f).coerceIn(0.18f, 1f)
-
-    val dragScale = if (animatedDragY < 0f) {
-        val factor = (abs(animatedDragY) / 360f).coerceIn(0f, 0.06f)
-        1f - factor
-    } else {
-        1f
-    }
-
-    // Theme-specific layered surface & rim styling
-    val surfaceBrush = remember(isDark, isPurePitch, style.accentColor) {
+    // Theme-specific layered surface & rim styling aligned with Cool Mist / Slate Steel / Pure Pitch
+    val surfaceLow = MaterialTheme.colorScheme.surfaceContainerLow
+    val surfaceLowest = MaterialTheme.colorScheme.surfaceContainerLowest
+    val surfaceBrush = remember(isDark, isPurePitch, style.accentColor, ext.cardSurfaceElevated, surfaceLow, surfaceLowest) {
         when {
             isPurePitch -> Brush.verticalGradient(
                 colors = listOf(
-                    blendColor(Color(0xFF0E121D), style.accentColor, 0.16f).copy(alpha = 0.96f),
-                    Color(0xFF06080D).copy(alpha = 0.97f),
+                    blendColor(ext.cardSurfaceElevated, style.accentColor, 0.14f).copy(alpha = 0.96f),
+                    Color(0xFF0A0D10).copy(alpha = 0.97f),
                 ),
             )
             isDark -> Brush.verticalGradient(
                 colors = listOf(
-                    blendColor(Color(0xFF171C2A), style.accentColor, 0.16f).copy(alpha = 0.95f),
-                    Color(0xFF10131D).copy(alpha = 0.96f),
+                    blendColor(ext.cardSurfaceElevated, style.accentColor, 0.14f).copy(alpha = 0.96f),
+                    surfaceLow.copy(alpha = 0.97f),
                 ),
             )
             else -> Brush.verticalGradient(
                 colors = listOf(
-                    blendColor(Color(0xFFFFFEFA), style.accentColor, 0.06f).copy(alpha = 0.97f),
-                    Color(0xFFFAF6EE).copy(alpha = 0.97f),
+                    blendColor(ext.cardSurfaceElevated, style.accentColor, 0.05f).copy(alpha = 0.98f),
+                    blendColor(surfaceLowest, surfaceLow, 0.35f).copy(alpha = 0.98f),
                 ),
             )
         }
@@ -565,16 +504,34 @@ private fun InAppMessagePopupCard(
             }
             .offset {
                 IntOffset(
-                    x = animatedDragX.roundToInt(),
-                    y = animatedDragY.roundToInt(),
+                    x = animatedDragXState.value.roundToInt(),
+                    y = animatedDragYState.value.roundToInt(),
                 )
             }
             .graphicsLayer {
-                val combinedScale = pressScale * clickBounceScale.value * dragScale
+                val curDragX = animatedDragXState.value
+                val curDragY = animatedDragYState.value
+                val hRatio = if (cardWidthPx > 0f) {
+                    (abs(curDragX) / (cardWidthPx * 0.65f)).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+                val vRatio = if (curDragY < 0f && cardHeightPx > 0f) {
+                    (abs(curDragY) / (cardHeightPx * 0.95f)).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+                val dragFadeAlpha = (1f - maxOf(hRatio, vRatio) * 0.72f).coerceIn(0.18f, 1f)
+                val dragScale = if (curDragY < 0f) {
+                    1f - (abs(curDragY) / 360f).coerceIn(0f, 0.06f)
+                } else {
+                    1f
+                }
+                val combinedScale = pressScaleState.value * clickBounceScale.value * dragScale
                 scaleX = combinedScale
                 scaleY = combinedScale
                 alpha = dragFadeAlpha * activateLiftAlpha.value
-                rotationZ = (animatedDragX / 48f).coerceIn(-4.5f, 4.5f)
+                rotationZ = (curDragX / 48f).coerceIn(-4.5f, 4.5f)
             }
             .shadow(
                 elevation = if (isDark) 12.dp else 11.dp,
@@ -831,7 +788,7 @@ private fun InAppMessagePopupCard(
                         Icon(
                             imageVector = style.icon,
                             contentDescription = null,
-                            tint = Color.White,
+                            tint = if (isDark) Color(0xFF101417) else Color.White,
                             modifier = Modifier.size(10.dp),
                         )
                     }
@@ -870,8 +827,8 @@ private fun InAppMessagePopupCard(
                             Text(
                                 text = style.badgeLabel,
                                 style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                                    fontSize = 9.8.sp,
-                                    lineHeight = 12.sp,
+                                    fontSize = (9.8f * fontScale).sp,
+                                    lineHeight = (12f * fontScale).sp,
                                 ),
                                 color = style.badgeContentColor,
                                 maxLines = 1,
@@ -903,8 +860,8 @@ private fun InAppMessagePopupCard(
                                 Text(
                                     text = floorBadgeText,
                                     style = NodePulseThemeTokens.extraTypography.tabularBadge.copy(
-                                        fontSize = 9.8.sp,
-                                        lineHeight = 12.sp,
+                                        fontSize = (9.8f * fontScale).sp,
+                                        lineHeight = (12f * fontScale).sp,
                                     ),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -917,7 +874,8 @@ private fun InAppMessagePopupCard(
                             text = timeDisplay,
                             style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
                                 fontWeight = FontWeight.Medium,
-                                fontSize = 10.sp,
+                                fontSize = (10f * fontScale).sp,
+                                lineHeight = (13f * fontScale).sp,
                             ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                             maxLines = 1,
@@ -970,8 +928,8 @@ private fun InAppMessagePopupCard(
                             Text(
                                 text = "+$queuedCount",
                                 style = NodePulseThemeTokens.extraTypography.tabularBadge.copy(
-                                    fontSize = 9.5.sp,
-                                    lineHeight = 12.sp,
+                                    fontSize = (9.5f * fontScale).sp,
+                                    lineHeight = (12f * fontScale).sp,
                                 ),
                                 color = style.accentColor,
                                 maxLines = 1,
@@ -1003,7 +961,8 @@ private fun InAppMessagePopupCard(
                         Text(
                             text = style.actionLabel,
                             style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                                fontSize = 10.5.sp,
+                                fontSize = (10.5f * fontScale).sp,
+                                lineHeight = (13f * fontScale).sp,
                             ),
                             color = if (isDark) style.badgeContentColor else style.accentColor,
                             maxLines = 1,
