@@ -1306,10 +1306,10 @@ private fun NativeCredentialSignInDialog(
     onSwitchToWebView: () -> Unit,
 ) {
     var username by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var turnstileToken by remember { mutableStateOf("") }
-    var otpCode by rememberSaveable { mutableStateOf("") }
-    var showPassword by rememberSaveable { mutableStateOf(false) }
+    var otpCode by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
 
     val isOtpStep = state.otpSession != null
 

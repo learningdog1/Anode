@@ -305,10 +305,6 @@ private val SHOWCASE_PULSE_HUB_STATE = PulseHubUiState(
             categorySlug = "tech",
         ),
     ),
-    seekMailConfigured = true,
-    seekMailboxCount = 2,
-    seekMailPrimaryAddress = "ops@seek.li",
-    seekMailUnreadCount = 2,
 )
 
 private val SHOWCASE_OP_MARKDOWN = """
