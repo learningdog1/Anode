@@ -174,6 +174,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -1161,6 +1162,17 @@ fun PulseCodeBlockCard(
             }
 
             Column(modifier = Modifier.fillMaxWidth()) {
+                val copyCodeAction: () -> Unit = {
+                    val plainToCopy = if (hasAnsi) {
+                        AnsiAndCodeFormatter.stripAnsiEscapes(code)
+                    } else {
+                        code
+                    }
+                    copyPlainTextToClipboard(context, plainToCopy)
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    copied = true
+                }
+
                 if (showHeaderChrome) {
                     Row(
                         modifier = Modifier
@@ -1222,6 +1234,64 @@ fun PulseCodeBlockCard(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(copyBg)
+                                    .border(0.8.dp, copyBorderColor, RoundedCornerShape(7.dp))
+                                    .pulseBouncyClickable(
+                                        pressedScale = NodePulseMotion.chipPressScale,
+                                        role = Role.Button,
+                                        onClick = copyCodeAction,
+                                    )
+                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                                    contentDescription = null,
+                                    tint = copyFg,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = if (copied) "已复制" else "复制代码",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = copyFg,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        thickness = 0.8.dp,
+                        color = ext.codeBorder.copy(alpha = 0.8f),
+                    )
+                } else {
+                    // Compact utility bar for ANSI / terminal benchmark reports: exposes fit-to-width
+                    // toggle (`已适配` / `1:1原宽`) and 1-tap plain-text copy even in text-selection mode.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(ext.codeHeaderSurface.copy(alpha = 0.65f))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = headerLabel,
+                            style = codeTypography.codeLabel,
+                            color = ext.onCodeMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
                             if (canToggleFit) {
                                 Row(
                                     modifier = Modifier
@@ -1244,9 +1314,10 @@ fun PulseCodeBlockCard(
                                         )
                                         .pulseBouncyClickable(
                                             pressedScale = NodePulseMotion.chipPressScale,
+                                            role = Role.Button,
                                             onClick = { fitToWidth = !fitToWidth },
                                         )
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        .padding(horizontal = 8.dp, vertical = 3.5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
@@ -1254,10 +1325,10 @@ fun PulseCodeBlockCard(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (fitToWidth) Color(0xFF93C5FD) else ext.onCodeSurface,
                                         maxLines = 1,
+                                        softWrap = false,
                                     )
                                 }
                             }
-
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(7.dp))
@@ -1265,40 +1336,32 @@ fun PulseCodeBlockCard(
                                     .border(0.8.dp, copyBorderColor, RoundedCornerShape(7.dp))
                                     .pulseBouncyClickable(
                                         pressedScale = NodePulseMotion.chipPressScale,
-                                        onClick = {
-                                            val plainToCopy = if (hasAnsi) {
-                                                AnsiAndCodeFormatter.stripAnsiEscapes(code)
-                                            } else {
-                                                code
-                                            }
-                                            copyPlainTextToClipboard(context, plainToCopy)
-                                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            copied = true
-                                        },
+                                        role = Role.Button,
+                                        onClick = copyCodeAction,
                                     )
-                                    .padding(horizontal = 9.dp, vertical = 4.dp),
+                                    .padding(horizontal = 8.dp, vertical = 3.5.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 Icon(
                                     imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                                    contentDescription = "复制代码",
+                                    contentDescription = null,
                                     tint = copyFg,
-                                    modifier = Modifier.size(13.dp),
+                                    modifier = Modifier.size(12.5.dp),
                                 )
                                 Text(
-                                    text = if (copied) "已复制" else "复制代码",
+                                    text = if (copied) "已复制" else "复制",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = copyFg,
                                     maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
                         }
                     }
-
                     HorizontalDivider(
-                        thickness = 0.8.dp,
-                        color = ext.codeBorder.copy(alpha = 0.8f),
+                        thickness = 0.6.dp,
+                        color = ext.codeBorder.copy(alpha = 0.6f),
                     )
                 }
 
@@ -3180,6 +3243,8 @@ fun PulseZoomableImageCard(
                         )
                         loadStatus = ImageLoadStatus.SUCCESS
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (_: Throwable) {
                     // Fall back to regular AsyncImage request if prefetch was cancelled or failed.
                 } finally {
@@ -5430,7 +5495,8 @@ private val LIST_ITEM_REGEX =
     Regex("""^(\s*)(?:([-*+])|(\d+)\.)\s+(?:\[([ xX])]\s+)?(.+)$""")
 private val TABLE_DIVIDER_CELL_REGEX = Regex("""^:?-{1,}:?$""")
 private val REF_LINK_DEF_REGEX = Regex("""^\s*\[([^\]]+)]\s*:\s*(?:<([^>\s]+)>|(\S+))(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?\s*$""")
-private val DETAILS_OPEN_REGEX = Regex("""^<details\b[^>]*>""", RegexOption.IGNORE_CASE)
+private const val MAX_BLOCK_DEPTH = 8
+private val DETAILS_OPEN_REGEX = Regex("""^\s*<details\b[^>]*>""", RegexOption.IGNORE_CASE)
 private val DETAILS_CLOSE_REGEX = Regex("""</details>\s*$""", RegexOption.IGNORE_CASE)
 private val SUMMARY_INLINE_REGEX = Regex("""<summary\b[^>]*>(.*?)</summary>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
 
@@ -5499,7 +5565,13 @@ private fun extractReferenceDefinitionsOutsideFences(
 private fun parseBlocksInternal(
     lines: List<String>,
     referenceLinks: Map<String, Pair<String, String?>>,
+    depth: Int = 0,
 ): List<MdBlock> {
+    if (lines.isEmpty()) return emptyList()
+    if (depth >= MAX_BLOCK_DEPTH) {
+        val fallbackText = lines.joinToString("\n").trim()
+        return if (fallbackText.isNotEmpty()) listOf(MdBlock.Paragraph(fallbackText)) else emptyList()
+    }
     val result = mutableListOf<MdBlock>()
     var i = 0
 
@@ -5524,7 +5596,7 @@ private fun parseBlocksInternal(
                 if (title != null) {
                     tabItems += MdTabItem(
                         title = title,
-                        children = parseBlocksInternal(currentLines, referenceLinks),
+                        children = parseBlocksInternal(currentLines, referenceLinks, depth + 1),
                     )
                 }
                 currentTitle = null
@@ -5567,6 +5639,9 @@ private fun parseBlocksInternal(
                 }
                 i++
             }
+            if (detailLines.isNotEmpty()) {
+                detailLines[0] = detailLines[0].trimStart()
+            }
             val joined = detailLines.joinToString("\n")
                 .replaceFirst(DETAILS_OPEN_REGEX, "")
                 .let { if (foundClose) it.replaceFirst(DETAILS_CLOSE_REGEX, "") else it }
@@ -5579,7 +5654,7 @@ private fun parseBlocksInternal(
             }
             result += MdBlock.DetailsSpoiler(
                 summary = summary,
-                children = parseBlocksInternal(bodyText.lines(), referenceLinks),
+                children = parseBlocksInternal(bodyText.lines(), referenceLinks, depth + 1),
             )
             continue
         }
@@ -5733,7 +5808,7 @@ private fun parseBlocksInternal(
                 quoteLines += lines[i].trimStart().removePrefix(">").removePrefix(" ")
                 i++
             }
-            val nested = parseBlocksInternal(quoteLines, referenceLinks)
+            val nested = parseBlocksInternal(quoteLines, referenceLinks, depth + 1)
             if (nested.isNotEmpty()) {
                 result += MdBlock.Blockquote(nested)
             }
