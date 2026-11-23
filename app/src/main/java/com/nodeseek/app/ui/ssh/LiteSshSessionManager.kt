@@ -201,13 +201,22 @@ class LiteSshSessionManager(
             )
             fleetPanelsObserveJob?.cancel()
             fleetPanelsObserveJob = externalScope.launch {
-                if (!fleetRepository.isPersistedStateLoadedFlow.value) {
-                    runCatching { fleetRepository.loadPersistedState() }
-                }
+                loadFleetPersistedStateBestEffort(fleetRepository)
                 fleetRepository.panelsFlow.collect { panels ->
                     _uiState.update { it.copy(probePanels = panels) }
                 }
             }
+        }
+    }
+
+    private suspend fun loadFleetPersistedStateBestEffort(fleetRepository: FleetRepository) {
+        if (fleetRepository.isPersistedStateLoadedFlow.value) return
+        try {
+            fleetRepository.loadPersistedState()
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            // Best-effort cold load; proceed with currently loaded fleet panels.
         }
     }
 
@@ -292,9 +301,7 @@ class LiteSshSessionManager(
         probeSyncJob = externalScope.launch {
             _uiState.update { it.copy(isSyncingProbes = true) }
             try {
-                if (!fleetRepo.isPersistedStateLoadedFlow.value) {
-                    runCatching { fleetRepo.loadPersistedState() }
-                }
+                loadFleetPersistedStateBestEffort(fleetRepo)
                 val panels = fleetRepo.panelsFlow.value.filter { it.enabled }
                 if (panels.isEmpty()) {
                     _uiState.update {

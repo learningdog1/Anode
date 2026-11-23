@@ -451,13 +451,19 @@ class ProbeVaultSyncClient(
                 val parsed = parseNezhaV0Machines(panelId, panelName, root, !apiToken.isNullOrBlank())
                 // Enrich missing IPv4/IPv6/tag from /server/list if details omitted them
                 if (parsed.any { it.preferredHost.isEmpty() }) {
-                    val listResp = runCatching {
+                    val listResp = try {
                         executeGet(
                             initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "list"),
                             headers = headers,
                             expectedOrigin = originUrl,
                         )
-                    }.getOrNull()
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (s: ProbeCredentialBoundaryException) {
+                        throw s
+                    } catch (_: Throwable) {
+                        null
+                    }
                     if (listResp?.isSuccessful == true) {
                         val listRoot = parseJsonOrNull(listResp.body)
                         if (listRoot != null) {
@@ -506,16 +512,32 @@ class ProbeVaultSyncClient(
             emptyList()
         }
 
-        val listResp = executeGet(
-            initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "list"),
-            headers = headers,
-            expectedOrigin = originUrl,
-        )
+        val listResp = try {
+            executeGet(
+                initialUrl = buildEndpointUrl(originUrl, "api", "v1", "server", "list"),
+                headers = headers,
+                expectedOrigin = originUrl,
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (s: ProbeCredentialBoundaryException) {
+            throw s
+        } catch (t: Throwable) {
+            if (detailsMachines.isNotEmpty()) return detailsMachines
+            throw t
+        }
         if (listResp.isSuccessful) {
             val listRoot = parseJsonOrNull(listResp.body)
             if (listRoot != null) {
-                validateNezhaV0Code(listRoot)
-                val listMachines = parseNezhaV0Machines(panelId, panelName, listRoot, !apiToken.isNullOrBlank())
+                val listMachines = try {
+                    validateNezhaV0Code(listRoot)
+                    parseNezhaV0Machines(panelId, panelName, listRoot, !apiToken.isNullOrBlank())
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    if (detailsMachines.isNotEmpty()) return detailsMachines
+                    throw t
+                }
                 return if (detailsMachines.isNotEmpty()) {
                     mergeNezhaV0DetailsAndList(detailsMachines, listMachines)
                 } else {

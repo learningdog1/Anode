@@ -11,6 +11,7 @@ import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshStdinWriter
 import com.nodeseek.app.domain.ssh.SshStreamEvent
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.Response
@@ -66,6 +67,95 @@ class ProbePanelTerminalTransportTest {
         assertTrue(fullOutput.contains("hello world"))
         assertFalse(fullOutput.contains("__ANODE_START_"))
         assertFalse(fullOutput.contains("__ANODE_EXIT_"))
+    }
+
+    @Test
+    fun `PanelTerminalCommandFraming wrapCommand safely wraps trailing semicolons multiline comments and blank commands`() {
+        val framing = PanelTerminalCommandFraming(nonce = "112233445566")
+
+        // Trailing semicolon must not produce POSIX-invalid `;;`
+        val trailingSemi = framing.wrapCommand("echo ok;")
+        assertFalse("Must not contain ';;': $trailingSemi", trailingSemi.contains(";;"))
+        assertTrue(trailingSemi.contains("{\necho ok;\n};"))
+
+        // Multi-line script ending with a `# comment` must place closing `}` on its own line
+        val trailingComment = framing.wrapCommand("echo line1\r\n# trailing comment")
+        assertTrue(trailingComment.contains("{\necho line1\n# trailing comment\n};"))
+        assertFalse("CRLF should be normalized to LF", trailingComment.contains("\r"))
+
+        // Blank command falls back to POSIX no-op `:`
+        val blankWrapped = framing.wrapCommand("   \n  ")
+        assertTrue(blankWrapped.contains("{\n:\n};"))
+    }
+
+    @Test
+    fun `panel terminal backpressure preserves all bursty frames beyond 64-slot callbackFlow buffer`() = runBlocking {
+        val frameCount = 150
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/admin/client/burst-node/terminal" -> MockResponse().withWebSocketUpgrade(
+                    object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) {
+                            webSocket.send("""{"type":"ready"}""")
+                            for (i in 0 until frameCount) {
+                                webSocket.send("BURST_LINE_${"%03d".format(i)}\n".encodeUtf8())
+                            }
+                            webSocket.send("""{"type":"terminate"}""")
+                            webSocket.close(1000, "done")
+                        }
+                    },
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        try {
+            val panel = ProbePanelConfig(
+                id = "km-burst",
+                name = "Komari Burst",
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                panelType = ProbePanelType.KOMARI,
+                apiToken = "burst_token",
+            )
+            val transport = ProbePanelTerminalTransport(
+                panelLookup = { if (it == "km-burst") panel else null },
+                allowLoopbackHttpWithCredentials = true,
+            )
+
+            val receivedChunks = mutableListOf<String>()
+            var sawConnected = false
+            var sawCompleted = false
+            transport.execute(
+                request = SshConnectionRequest(
+                    host = "",
+                    connectionMode = SshConnectionMode.PANEL_TERMINAL,
+                    interactiveShell = true,
+                    probePanelId = "km-burst",
+                    probeServerId = "burst-node",
+                ),
+                command = "",
+            ).collect { event ->
+                // Simulate a slower UI consumer so the 64-slot callbackFlow buffer fills up
+                delay(2L)
+                when (event) {
+                    SshStreamEvent.Connected -> sawConnected = true
+                    is SshStreamEvent.OutputChunk -> receivedChunks += event.rawText
+                    is SshStreamEvent.Completed -> sawCompleted = true
+                    is SshStreamEvent.HostKeyObserved -> Unit
+                }
+            }
+
+            assertTrue("Connected event must not be dropped", sawConnected)
+            assertTrue("Completed event must be emitted", sawCompleted)
+            val combined = receivedChunks.joinToString("")
+            for (i in 0 until frameCount) {
+                val expectedLine = "BURST_LINE_${"%03d".format(i)}\n"
+                assertTrue("Missing burst line $i (received ${receivedChunks.size} chunks)", combined.contains(expectedLine))
+            }
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

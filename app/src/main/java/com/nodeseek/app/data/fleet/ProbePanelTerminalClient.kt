@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -83,8 +84,9 @@ internal class PanelTerminalCommandFraming(
     )
 
     fun wrapCommand(command: String): String {
-        val cleanCmd = command.trimEnd('\r', '\n')
-        return "printf '\\n%s%s\\n' '$START_PREFIX' '$nonce'; { $cleanCmd; }; __anode_rc=\$?; " +
+        val cleanCmd = command.replace("\r\n", "\n").replace('\r', '\n').trimEnd('\n')
+        val body = if (cleanCmd.isBlank()) ":" else cleanCmd
+        return "printf '\\n%s%s\\n' '$START_PREFIX' '$nonce'; {\n$body\n}; __anode_rc=\$?; " +
             "printf '\\n%s%s:%d__\\n' '$EXIT_PREFIX' '$nonce' \"\$__anode_rc\"; exit \"\$__anode_rc\"\n"
     }
 
@@ -437,19 +439,19 @@ class ProbePanelTerminalTransport(
                     if (chunk.isEmpty() || closedFlag.get()) return
                     firstOutputArrived.complete(Unit)
                     if (framing == null) {
-                        trySend(SshStreamEvent.OutputChunk(chunk))
+                        emitFromWebSocketCallback(SshStreamEvent.OutputChunk(chunk), closedFlag)
                         return
                     }
                     if (!commandSent.get()) {
                         // Ignore pre-command MOTD/prompt noise unless agent explicitly rejected exec
                         if (chunk.contains("禁止命令执行") || chunk.contains("disable", ignoreCase = true)) {
-                            trySend(SshStreamEvent.OutputChunk(chunk))
+                            emitFromWebSocketCallback(SshStreamEvent.OutputChunk(chunk), closedFlag)
                         }
                         return
                     }
                     val filtered = synchronized(decodeLock) { framing.feed(chunk) }
                     if (filtered.outputToEmit.isNotEmpty()) {
-                        trySend(SshStreamEvent.OutputChunk(filtered.outputToEmit))
+                        emitFromWebSocketCallback(SshStreamEvent.OutputChunk(filtered.outputToEmit), closedFlag)
                     }
                     if (filtered.completedExitCode != null) {
                         sessionFinished.complete(filtered.completedExitCode)
@@ -493,7 +495,7 @@ class ProbePanelTerminalTransport(
                             framing.flushFallbackWithoutStartMarker() + framing.flushRemainingOnClose()
                         }
                         if (remaining.isNotEmpty()) {
-                            trySend(SshStreamEvent.OutputChunk(remaining))
+                            emitFromWebSocketCallback(SshStreamEvent.OutputChunk(remaining), closedFlag)
                         }
                     }
                     sessionFinished.complete(0)
@@ -509,7 +511,7 @@ class ProbePanelTerminalTransport(
             throw IOException("连接哪吒 v1 探针终端超时，请确认面板反代已开启 /api/v1/ws/terminal WebSocket 转发")
         }
 
-        trySend(SshStreamEvent.Connected)
+        send(SshStreamEvent.Connected)
         registerCallbacks(
             stdinWriter = SshStdinWriter { input ->
                 if (!closedFlag.get() && input.isNotEmpty()) {
@@ -534,7 +536,7 @@ class ProbePanelTerminalTransport(
                 if (!sessionFinished.isCompleted && !closedFlag.get()) {
                     val fallback = synchronized(decodeLock) { framing.flushFallbackWithoutStartMarker() }
                     if (fallback.isNotEmpty()) {
-                        trySend(SshStreamEvent.OutputChunk(fallback))
+                        send(SshStreamEvent.OutputChunk(fallback))
                     }
                 }
             }
@@ -713,7 +715,10 @@ class ProbePanelTerminalTransport(
                             KOMARI_CTRL_ABORT -> {
                                 if (!sessionFinished.isCompleted) {
                                     if (isInteractive) {
-                                        trySend(SshStreamEvent.OutputChunk("\r\n[Komari 提示：被控端连接暂时中断]\r\n"))
+                                        emitFromWebSocketCallback(
+                                            SshStreamEvent.OutputChunk("\r\n[Komari 提示：被控端连接暂时中断]\r\n"),
+                                            closedFlag,
+                                        )
                                     } else {
                                         sessionFinished.completeExceptionally(
                                             IOException("Komari 被控端终端连接中断（节点可能离线）"),
@@ -737,13 +742,13 @@ class ProbePanelTerminalTransport(
                 private fun handlePtyOutput(chunk: String) {
                     if (chunk.isEmpty() || closedFlag.get()) return
                     if (framing == null) {
-                        trySend(SshStreamEvent.OutputChunk(chunk))
+                        emitFromWebSocketCallback(SshStreamEvent.OutputChunk(chunk), closedFlag)
                         return
                     }
                     if (!commandSent.get()) return
                     val filtered = synchronized(decodeLock) { framing.feed(chunk) }
                     if (filtered.outputToEmit.isNotEmpty()) {
-                        trySend(SshStreamEvent.OutputChunk(filtered.outputToEmit))
+                        emitFromWebSocketCallback(SshStreamEvent.OutputChunk(filtered.outputToEmit), closedFlag)
                     }
                     if (filtered.completedExitCode != null) {
                         sessionFinished.complete(filtered.completedExitCode)
@@ -800,7 +805,7 @@ class ProbePanelTerminalTransport(
                             framing.flushFallbackWithoutStartMarker() + framing.flushRemainingOnClose()
                         }
                         if (remaining.isNotEmpty()) {
-                            trySend(SshStreamEvent.OutputChunk(remaining))
+                            emitFromWebSocketCallback(SshStreamEvent.OutputChunk(remaining), closedFlag)
                         }
                     }
                     if (!agentReady.isCompleted) {
@@ -848,7 +853,7 @@ class ProbePanelTerminalTransport(
             return KomariAttemptOutcome(error = t, isAuthRetryable = false)
         }
 
-        trySend(SshStreamEvent.Connected)
+        send(SshStreamEvent.Connected)
         registerCallbacks(
             stdinWriter = SshStdinWriter { input ->
                 if (!closedFlag.get() && input.isNotEmpty()) {
@@ -880,7 +885,7 @@ class ProbePanelTerminalTransport(
                 if (!sessionFinished.isCompleted && !closedFlag.get()) {
                     val fallback = synchronized(decodeLock) { framing.flushFallbackWithoutStartMarker() }
                     if (fallback.isNotEmpty()) {
-                        trySend(SshStreamEvent.OutputChunk(fallback))
+                        send(SshStreamEvent.OutputChunk(fallback))
                     }
                 }
             }
@@ -903,6 +908,19 @@ class ProbePanelTerminalTransport(
     }
 
     // ── Framing & HTTP Helpers ────────────────────────────────────────────────
+
+    /**
+     * Delivers events from OkHttp's non-suspending [WebSocketListener] thread into [callbackFlow]
+     * using [trySendBlocking] so bursty stdout applies natural backpressure instead of silently
+     * dropping frames when the 64-slot buffer fills, while unblocking immediately on channel close.
+     */
+    private fun kotlinx.coroutines.channels.ProducerScope<SshStreamEvent>.emitFromWebSocketCallback(
+        event: SshStreamEvent,
+        closedFlag: AtomicBoolean,
+    ) {
+        if (closedFlag.get()) return
+        runCatching { trySendBlocking(event) }
+    }
 
     private fun kotlinx.coroutines.channels.ProducerScope<SshStreamEvent>.registerCallbacks(
         stdinWriter: SshStdinWriter,
@@ -1114,7 +1132,13 @@ class ProbePanelTerminalTransport(
             fleetRepository: FleetRepository,
         ): suspend (String) -> ProbePanelConfig? = { panelId ->
             if (!fleetRepository.isPersistedStateLoadedFlow.value) {
-                kotlin.runCatching { fleetRepository.loadPersistedState() }
+                try {
+                    fleetRepository.loadPersistedState()
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    // Best-effort cold load; fall back to whatever panels are currently in memory.
+                }
             }
             fleetRepository.panelsFlow.value.firstOrNull { it.id == panelId }
         }

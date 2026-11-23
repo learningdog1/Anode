@@ -40,6 +40,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -643,6 +644,72 @@ class SshProbeSyncAndCollapseTest {
             panelGate.complete(Unit)
             assertFalse(viewModel.uiState.value.isRunning)
             manager.disposeOwnedScopeForTests()
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `Nezha v0 sync keeps details machines when secondary server list call fails with network or API error`() = runBlocking {
+        val server = MockWebServer()
+        var listMode = "disconnect"
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/api/v1/server/details" -> MockResponse()
+                    .setResponseCode(200)
+                    .setBody(
+                        """
+                        {
+                          "code": 0,
+                          "message": "success",
+                          "result": [
+                            {
+                              "id": 11,
+                              "name": "Legacy-V0-HK",
+                              "tag": "香港",
+                              "ipv4": "203.0.113.44",
+                              "host": { "CountryCode": "hk" }
+                            }
+                          ]
+                        }
+                        """.trimIndent(),
+                    )
+                "/api/v1/server/list" -> if (listMode == "disconnect") {
+                    MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                } else {
+                    MockResponse()
+                        .setResponseCode(200)
+                        .setBody("""{"code":500,"message":"temporary list error"}""")
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        try {
+            val client = ProbeVaultSyncClient(
+                ioDispatcher = testDispatcher,
+                allowLoopbackHttpWithCredentials = true,
+            )
+            val panel = ProbePanelConfig(
+                id = "nz0-resilient",
+                name = "Nezha V0",
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                panelType = ProbePanelType.NEZHA_V0,
+                apiToken = "v0-api-token",
+            )
+
+            // 1. Secondary /list fails with network disconnect -> detailsMachines preserved
+            val afterDisconnect = client.fetchPanelMachines(panel)
+            assertEquals(1, afterDisconnect.size)
+            assertEquals("Legacy-V0-HK", afterDisconnect.single().name)
+            assertEquals("203.0.113.44", afterDisconnect.single().ipv4)
+
+            // 2. Secondary /list returns Nezha v0 error code=500 -> detailsMachines preserved
+            listMode = "api_error"
+            val afterApiError = client.fetchPanelMachines(panel)
+            assertEquals(1, afterApiError.size)
+            assertEquals("Legacy-V0-HK", afterApiError.single().name)
+            assertEquals("203.0.113.44", afterApiError.single().ipv4)
         } finally {
             server.shutdown()
         }
