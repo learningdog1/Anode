@@ -12,6 +12,7 @@ import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshRunStatus
 import com.nodeseek.app.domain.ssh.SshServerDraft
+import com.nodeseek.app.domain.ssh.SshVaultCorruptedException
 import com.nodeseek.app.ui.components.MdBlock
 import com.nodeseek.app.ui.components.parseNodeSeekMarkdownBlocks
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -266,6 +267,158 @@ class SshVaultAndFormatterTest {
         // maskIp = false preserves original IP
         val unmasked = SshBenchmarkPostFormatter.format(listOf(run1), maskIp = false)
         assertTrue(unmasked.markdownContent.contains("203.0.113.42"))
+    }
+
+    @Test
+    fun `corrupted vault JSON creates backup, surfaces load error, blocks overwrite and recovers via reset`() = runTest {
+        val vaultFile = File(tempFolder.root, "corrupt_vault.json")
+        val corruptRaw = "{ \"schemaVersion\": 2, \"servers\": [ BROKEN_JSON"
+        vaultFile.writeText(corruptRaw, Charsets.UTF_8)
+
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val vault = SshServerVault(
+            vaultFile = vaultFile,
+            cipher = InMemoryTestCipher(),
+            ioDispatcher = dispatcher,
+            clock = { 1_760_000_000_000L },
+        )
+
+        // Error is surfaced and corrupt backup is created
+        val loadError = vault.vaultLoadErrorFlow.value
+        assertTrue("Expected vaultLoadErrorFlow to be populated", !loadError.isNullOrBlank())
+        val backupFile = File(tempFolder.root, "corrupt_vault.json.corrupt.1760000000000")
+        assertTrue("Expected .corrupt backup file to exist", backupFile.isFile)
+        assertEquals(corruptRaw, backupFile.readText(Charsets.UTF_8))
+
+        // Collapse state update must NOT overwrite corrupted vault file
+        vault.updateCollapseState { it.toggleVaultListCollapsed() }
+        assertEquals(corruptRaw, vaultFile.readText(Charsets.UTF_8))
+
+        // User-initiated saveServer must fail with SshVaultCorruptedException and keep original file intact
+        var threwCorrupted = false
+        try {
+            vault.saveServer(
+                SshServerDraft(
+                    alias = "Should Fail",
+                    host = "203.0.113.5",
+                    secret = "pw",
+                ),
+            )
+        } catch (_: SshVaultCorruptedException) {
+            threwCorrupted = true
+        }
+        assertTrue("Expected SshVaultCorruptedException when saving to corrupted vault", threwCorrupted)
+        assertEquals(corruptRaw, vaultFile.readText(Charsets.UTF_8))
+        assertTrue(vault.serversFlow.value.isEmpty())
+
+        // Retry still reports false while file remains corrupt
+        assertFalse(vault.retryLoadVault())
+        assertTrue(!vault.vaultLoadErrorFlow.value.isNullOrBlank())
+
+        // Explicit user reset backs up and initializes a clean writable vault
+        vault.resetCorruptedVault()
+        assertNull(vault.vaultLoadErrorFlow.value)
+        val saved = vault.saveServer(
+            SshServerDraft(
+                alias = "Recovered VPS",
+                host = "203.0.113.88",
+                secret = "pw-ok",
+            ),
+        )
+        assertEquals("Recovered VPS", saved.alias)
+        assertEquals(1, vault.serversFlow.value.size)
+        // Backup file must still remain intact after reset
+        assertEquals(corruptRaw, backupFile.readText(Charsets.UTF_8))
+    }
+
+    @Test
+    fun `recentRuns are persisted in sibling runs file and legacy inline runs migrate without bloating primary vault`() = runTest {
+        val vaultFile = File(tempFolder.root, "split_vault.json")
+        val runsFile = File(tempFolder.root, "split_vault_runs.json")
+        val cipher = InMemoryTestCipher()
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+
+        // Write a legacy single-file vault containing an inline recentRun
+        val legacyVaultJson = """
+            {
+              "schemaVersion": 2,
+              "servers": [
+                {
+                  "id": "srv-legacy",
+                  "alias": "Legacy Node",
+                  "host": "198.51.100.1",
+                  "port": 22,
+                  "username": "root",
+                  "authMethod": "PASSWORD",
+                  "encryptedSecret": "${cipher.encrypt("pw")}"
+                }
+              ],
+              "customPresets": [],
+              "recentRuns": [
+                {
+                  "id": "legacy-run-1",
+                  "serverId": "srv-legacy",
+                  "serverAlias": "Legacy Node",
+                  "serverHost": "198.51.100.1",
+                  "presetId": "quick_check",
+                  "presetName": "Quick Check",
+                  "tabTitle": "Quick",
+                  "command": "uname -a",
+                  "sanitizedAnsiOutput": "LEGACY_LARGE_OUTPUT_PAYLOAD_MARKER",
+                  "exitCode": 0,
+                  "status": "SUCCEEDED",
+                  "startedAtEpochMillis": 1700000000000,
+                  "durationMillis": 1000
+                }
+              ]
+            }
+        """.trimIndent()
+        vaultFile.writeText(legacyVaultJson, Charsets.UTF_8)
+
+        val vault = SshServerVault(vaultFile = vaultFile, cipher = cipher, ioDispatcher = dispatcher)
+        assertEquals(1, vault.serversFlow.value.size)
+        assertEquals(1, vault.recentRunsFlow.value.size)
+        assertEquals("legacy-run-1", vault.recentRunsFlow.value.single().id)
+
+        // Updating collapse state migrates legacy runs into sibling _runs.json and strips them from vaultFile
+        vault.updateCollapseState { it.toggleVaultListCollapsed() }
+        assertTrue("Expected sibling runs file to be created", runsFile.isFile)
+        assertTrue(runsFile.readText(Charsets.UTF_8).contains("LEGACY_LARGE_OUTPUT_PAYLOAD_MARKER"))
+        assertFalse(
+            "Primary vault file should no longer duplicate large run outputs",
+            vaultFile.readText(Charsets.UTF_8).contains("LEGACY_LARGE_OUTPUT_PAYLOAD_MARKER"),
+        )
+        // Compact JSON (prettyPrint = false) has no pretty indentation
+        assertFalse(vaultFile.readText(Charsets.UTF_8).contains("\n    "))
+
+        // Reload restores both servers and split runs
+        val reloaded = SshServerVault(vaultFile = vaultFile, cipher = cipher, ioDispatcher = dispatcher)
+        assertEquals(1, reloaded.serversFlow.value.size)
+        assertEquals(1, reloaded.recentRunsFlow.value.size)
+        assertEquals("legacy-run-1", reloaded.recentRunsFlow.value.single().id)
+    }
+
+    @Test
+    fun `deferInitialLoad skips synchronous disk IO in constructor and loads on ensureLoaded`() = runTest {
+        val vaultFile = File(tempFolder.root, "deferred_vault.json")
+        val cipher = InMemoryTestCipher()
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+
+        val writer = SshServerVault(vaultFile = vaultFile, cipher = cipher, ioDispatcher = dispatcher)
+        writer.saveServer(SshServerDraft(alias = "Deferred Host", host = "203.0.113.77", secret = "pw"))
+
+        val lazyVault = SshServerVault(
+            vaultFile = vaultFile,
+            cipher = cipher,
+            ioDispatcher = dispatcher,
+            deferInitialLoad = true,
+        )
+        // Before ensureLoaded(), no disk read has occurred yet
+        assertTrue(lazyVault.serversFlow.value.isEmpty())
+
+        lazyVault.ensureLoaded()
+        assertEquals(1, lazyVault.serversFlow.value.size)
+        assertEquals("Deferred Host", lazyVault.serversFlow.value.single().alias)
     }
 
     private fun sampleRun(

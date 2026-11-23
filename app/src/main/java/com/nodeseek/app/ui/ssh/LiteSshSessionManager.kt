@@ -47,6 +47,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +63,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
 import java.util.UUID
 
 /**
@@ -90,6 +92,7 @@ class LiteSshSessionManager(
     fleetRepository: FleetRepository? = null,
     private val probeSyncClientOverride: ProbeVaultSyncClient? = null,
     private val panelTerminalExecutorOverride: LiteSshExecutor? = null,
+    private val baseHttpClient: OkHttpClient? = null,
 ) {
     private val _consoleStreamState = MutableStateFlow(SshConsoleStreamState())
     val consoleStreamState: StateFlow<SshConsoleStreamState> = _consoleStreamState.asStateFlow()
@@ -104,6 +107,7 @@ class LiteSshSessionManager(
         LiteSshUiState(
             liveBufferAccessor = liveBufferAccessor,
             collapseState = vaultRepository.collapseStateFlow.value,
+            vaultLoadError = vaultRepository.vaultLoadErrorFlow.value,
         ),
     )
     val uiState: StateFlow<LiteSshUiState> = _uiState.asStateFlow()
@@ -127,6 +131,7 @@ class LiteSshSessionManager(
     private var elapsedTickerJob: Job? = null
     private var lastForegroundNotifyMillis: Long = 0L
     private var lastForegroundStatusLine: String = ""
+    @Volatile
     private var runGenerationCounter: Long = 0L
     @Volatile
     private var latestOutputTimestampMillis: Long? = null
@@ -140,8 +145,14 @@ class LiteSshSessionManager(
     private var activeStdinWriter: SshStdinWriter? = null
     @Volatile
     private var activeStdinWriterGeneration: Long = 0L
+    private val stdinWriteChannel = Channel<Pair<SshStdinWriter, String>>(Channel.UNLIMITED)
 
     init {
+        externalScope.launch(Dispatchers.IO) {
+            for ((writer, payload) in stdinWriteChannel) {
+                runCatching { writer.write(payload) }
+            }
+        }
         externalScope.launch {
             vaultRepository.serversFlow.collect { servers ->
                 _uiState.update { state ->
@@ -181,6 +192,14 @@ class LiteSshSessionManager(
                 _uiState.update { it.copy(collapseState = collapse) }
             }
         }
+        externalScope.launch {
+            vaultRepository.vaultLoadErrorFlow.collect { err ->
+                _uiState.update { it.copy(vaultLoadError = err) }
+            }
+        }
+        externalScope.launch {
+            runCatching { vaultRepository.ensureLoaded() }
+        }
         if (fleetRepository != null) {
             attachFleetIntegration(fleetRepository)
         }
@@ -194,9 +213,20 @@ class LiteSshSessionManager(
         synchronized(fleetAttachLock) {
             if (attachedFleetRepository === fleetRepository) return
             attachedFleetRepository = fleetRepository
-            defaultProbeSyncClient = probeSyncClientOverride ?: ProbeVaultSyncClient()
+            defaultProbeSyncClient = probeSyncClientOverride ?: if (baseHttpClient != null) {
+                ProbeVaultSyncClient(httpClient = baseHttpClient)
+            } else {
+                ProbeVaultSyncClient()
+            }
             defaultPanelTerminalExecutor = panelTerminalExecutorOverride ?: LiteSshExecutor(
-                transport = ProbePanelTerminalTransport(fleetRepository = fleetRepository),
+                transport = if (baseHttpClient != null) {
+                    ProbePanelTerminalTransport(
+                        fleetRepository = fleetRepository,
+                        httpClient = baseHttpClient,
+                    )
+                } else {
+                    ProbePanelTerminalTransport(fleetRepository = fleetRepository)
+                },
                 processingDispatcher = Dispatchers.Default,
             )
             fleetPanelsObserveJob?.cancel()
@@ -278,11 +308,16 @@ class LiteSshSessionManager(
 
     fun setServerConnectionMode(serverId: String, mode: SshConnectionMode) {
         externalScope.launch {
-            vaultRepository.updateServerConnectionMode(serverId, mode)
-            _uiState.update { state ->
-                val server = state.servers.firstOrNull { it.id == serverId }
-                val label = server?.displayName ?: "主机"
-                state.copy(statusMessage = "已将「$label」切换为${mode.label}模式")
+            runCatching {
+                vaultRepository.updateServerConnectionMode(serverId, mode)
+            }.onSuccess {
+                _uiState.update { state ->
+                    val server = state.servers.firstOrNull { it.id == serverId }
+                    val label = server?.displayName ?: "主机"
+                    state.copy(statusMessage = "已将「$label」切换为${mode.label}模式")
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "切换连接模式失败") }
             }
         }
     }
@@ -312,7 +347,13 @@ class LiteSshSessionManager(
                     }
                     return@launch
                 }
-                val syncClient = probeSyncClientOverride ?: defaultProbeSyncClient ?: ProbeVaultSyncClient()
+                val syncClient = probeSyncClientOverride
+                    ?: defaultProbeSyncClient
+                    ?: if (baseHttpClient != null) {
+                        ProbeVaultSyncClient(httpClient = baseHttpClient)
+                    } else {
+                        ProbeVaultSyncClient()
+                    }
                 val fetched = syncClient.fetchAllPanels(
                     panels = panels,
                     fallbackSnapshots = fleetRepo.snapshotsFlow.value,
@@ -426,15 +467,14 @@ class LiteSshSessionManager(
     }
 
     /**
-     * Sends raw text or control sequences (`Ctrl+C`, `Tab`, `Esc`, arrows) to the active PTY stdin.
+     * Sends raw text or control sequences (`Ctrl+C`, `Tab`, `Esc`, arrows) to the active PTY stdin
+     * through a strictly serialized FIFO channel to preserve keystroke ordering.
      */
     fun sendTerminalInput(text: String, appendNewline: Boolean = false) {
         val writer = activeStdinWriter ?: return
         val payload = if (appendNewline) "$text\r" else text
         if (payload.isEmpty()) return
-        externalScope.launch(Dispatchers.IO) {
-            runCatching { writer.write(payload) }
-        }
+        stdinWriteChannel.trySend(writer to payload)
     }
 
     fun openServerQuickPickerSheet() {
@@ -481,12 +521,51 @@ class LiteSshSessionManager(
 
     fun deleteServer(serverId: String) {
         externalScope.launch {
-            vaultRepository.deleteServer(serverId)
-            _uiState.update { state ->
-                state.copy(
-                    iperf3Attachments = state.iperf3Attachments.filterKeys { it.serverId != serverId },
-                    statusMessage = "已从本地保险库删除主机",
-                )
+            runCatching {
+                vaultRepository.deleteServer(serverId)
+            }.onSuccess {
+                _uiState.update { state ->
+                    state.copy(
+                        iperf3Attachments = state.iperf3Attachments.filterKeys { it.serverId != serverId },
+                        statusMessage = "已从本地保险库删除主机",
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "删除主机失败") }
+            }
+        }
+    }
+
+    fun retryLoadVault() {
+        externalScope.launch {
+            runCatching {
+                vaultRepository.retryLoadVault()
+            }.onSuccess { loaded ->
+                _uiState.update {
+                    it.copy(
+                        statusMessage = if (loaded) {
+                            "已成功重新加载 SSH 保险库"
+                        } else {
+                            "SSH 保险库文件仍无法解析，原文件已保留备份"
+                        },
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "重新加载保险库失败") }
+            }
+        }
+    }
+
+    fun resetCorruptedVault() {
+        externalScope.launch {
+            runCatching {
+                vaultRepository.resetCorruptedVault()
+            }.onSuccess {
+                _uiState.update {
+                    it.copy(statusMessage = "已备份损坏文件并重置 SSH 保险库，现在可以重新添加主机")
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "重置保险库失败") }
             }
         }
     }
@@ -603,8 +682,13 @@ class LiteSshSessionManager(
 
     fun deleteCustomPreset(presetId: String) {
         externalScope.launch {
-            vaultRepository.deleteCustomPreset(presetId)
-            _uiState.update { it.copy(statusMessage = "已删除自定义脚本") }
+            runCatching {
+                vaultRepository.deleteCustomPreset(presetId)
+            }.onSuccess {
+                _uiState.update { it.copy(statusMessage = "已删除自定义脚本") }
+            }.onFailure { err ->
+                _uiState.update { it.copy(statusMessage = err.message ?: "删除自定义脚本失败") }
+            }
         }
     }
 
@@ -650,7 +734,8 @@ class LiteSshSessionManager(
                 fingerprintSha256 = prompt.actualHostKey.fingerprintSha256,
                 algorithm = prompt.actualHostKey.algorithm,
             )
-            val refreshed = _uiState.value.servers.firstOrNull { it.id == server.id }
+            val refreshed = vaultRepository.serversFlow.value.firstOrNull { it.id == server.id }
+                ?: _uiState.value.servers.firstOrNull { it.id == server.id }
                 ?: if (prompt.mismatchServerId == server.id) {
                     server.copy(
                         knownHostKeyFingerprint = prompt.actualHostKey.fingerprintSha256,
@@ -659,6 +744,9 @@ class LiteSshSessionManager(
                 } else {
                     server
                 }
+            // Retry with strict verification (allowHostKeyMismatchOverride = false): the exact
+            // user-approved fingerprint has just been persisted into the vault, so only that key
+            // will succeed and a swapped third key during retry is still rejected.
             if (prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
                 executeIperf3ServiceCommand(
                     server = refreshed,
@@ -668,16 +756,16 @@ class LiteSshSessionManager(
                         ?: Iperf3RemoteServerCommands.validatePort(_uiState.value.iperf3ServerPortText)
                         ?: Iperf3RemoteServerCommands.DEFAULT_PORT,
                     autoOpenFirewall = prompt.iperf3AutoOpenFirewall,
-                    allowHostKeyMismatchOverride = true,
-                    mismatchOverrideServerId = prompt.mismatchServerId,
+                    allowHostKeyMismatchOverride = false,
+                    mismatchOverrideServerId = null,
                 )
             } else {
                 executePresetOnServer(
                     server = refreshed,
                     preset = prompt.preset,
                     command = prompt.command,
-                    allowHostKeyMismatchOverride = true,
-                    mismatchOverrideServerId = prompt.mismatchServerId,
+                    allowHostKeyMismatchOverride = false,
+                    mismatchOverrideServerId = null,
                     connectionModeOverride = SshConnectionMode.DIRECT_SSH,
                     interactiveShell = prompt.preset.id == PRESET_ID_INTERACTIVE_TERMINAL,
                 )
@@ -709,6 +797,7 @@ class LiteSshSessionManager(
     fun cancelExecution() {
         val activeJob = executionJob ?: return
         val state = _uiState.value
+        ++runGenerationCounter
         executionJob = null
         activePtyResizer = null
         activeStdinWriter = null
@@ -734,12 +823,12 @@ class LiteSshSessionManager(
             val server = state.selectedServer
             val cancelledRecord = SshExecutionRecord(
                 id = idGenerator(),
-                serverId = server?.id.orEmpty(),
+                serverId = state.activeServerId ?: server?.id.orEmpty(),
                 serverAlias = state.activeServerAlias ?: server?.displayName ?: "VPS",
                 serverHost = state.activeServerHost ?: server?.host.orEmpty(),
                 presetId = state.activePresetId ?: state.selectedPreset.id,
                 presetName = state.activePresetName ?: state.selectedPreset.name,
-                tabTitle = state.selectedPreset.tabTitle,
+                tabTitle = state.activeTabTitle ?: state.selectedPreset.tabTitle,
                 command = state.activeCommand,
                 sanitizedAnsiOutput = partialOutput,
                 exitCode = null,
@@ -1492,6 +1581,7 @@ class LiteSshSessionManager(
         iperf3ServiceJob?.cancel()
         fleetPanelsObserveJob?.cancel()
         probeSyncJob?.cancel()
+        stdinWriteChannel.close()
         externalScope.cancel()
     }
 
@@ -1507,12 +1597,12 @@ class LiteSshSessionManager(
         connectionModeOverride: SshConnectionMode? = null,
         interactiveShell: Boolean = false,
     ) {
+        val currentRunGeneration = ++runGenerationCounter
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
 
         val effectiveMode = connectionModeOverride ?: server.effectiveConnectionMode
         val startedAt = clock()
-        val currentRunGeneration = ++runGenerationCounter
         latestOutputTimestampMillis = null
         val autoRespondEnabled = !interactiveShell && _uiState.value.autoRespondPrompts
         val initialProgress = SshStageDetector.detect(
@@ -1541,10 +1631,12 @@ class LiteSshSessionManager(
                 isInteractiveSession = interactiveShell,
                 activeConnectionMode = effectiveMode,
                 connectionPhase = SshConnectionPhase.CONNECTING,
+                activeServerId = server.id,
                 activeServerAlias = server.displayName,
                 activeServerHost = server.host,
                 activePresetId = preset.id,
                 activePresetName = preset.name,
+                activeTabTitle = preset.tabTitle,
                 activeCommand = command,
                 liveAnsiOutput = "",
                 hasLiveOutputFlag = false,
@@ -1890,11 +1982,13 @@ class LiteSshSessionManager(
                 if (activeStdinWriterGeneration == currentRunGeneration) {
                     activeStdinWriter = null
                 }
-                elapsedTickerJob?.cancel()
-                elapsedTickerJob = null
-                executionJob = null
-                syncGlobalBarState()
-                foregroundServiceController.onSessionFinished()
+                if (runGenerationCounter == currentRunGeneration) {
+                    elapsedTickerJob?.cancel()
+                    elapsedTickerJob = null
+                    executionJob = null
+                    syncGlobalBarState()
+                    foregroundServiceController.onSessionFinished()
+                }
             }
         }
     }

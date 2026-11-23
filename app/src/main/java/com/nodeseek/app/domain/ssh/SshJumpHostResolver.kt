@@ -214,6 +214,7 @@ object SshJumpHostResolver {
         connectionModeOverride: SshConnectionMode? = null,
         interactiveShell: Boolean = false,
     ): SshConnectionRequest {
+        vaultRepository.ensureLoaded()
         val effectiveMode = connectionModeOverride ?: server.effectiveConnectionMode
         if (effectiveMode == SshConnectionMode.PANEL_TERMINAL && server.isProbeSynced) {
             return SshConnectionRequest(

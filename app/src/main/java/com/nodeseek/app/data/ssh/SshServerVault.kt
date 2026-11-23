@@ -14,18 +14,27 @@ import com.nodeseek.app.domain.ssh.SshProbeSyncOutcome
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultCollapseState
+import com.nodeseek.app.domain.ssh.SshVaultCorruptedException
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileOutputStream
+import java.io.SyncFailedException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 @Serializable
@@ -41,11 +50,25 @@ private data class SshVaultFilePayload(
     }
 }
 
+@Serializable
+private data class SshRunsFilePayload(
+    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+    val recentRuns: List<SshExecutionRecord> = emptyList(),
+) {
+    companion object {
+        const val CURRENT_SCHEMA_VERSION: Int = 1
+    }
+}
+
 /**
- * Local encrypted SSH Server Vault persisted to `context.filesDir/lite_ssh_vault.json`.
+ * Local encrypted SSH Server Vault persisted to `context.filesDir/lite_ssh_vault.json`,
+ * with large benchmark run outputs stored separately in `lite_ssh_vault_runs.json` to avoid
+ * write amplification on frequent UI metadata updates.
  *
  * Encrypts all passwords, private keys, and optional key passphrases through [cipher] before
- * persisting, and performs atomic temp-file swaps protected by a [Mutex].
+ * persisting, writes via fsynced temp files + atomic moves protected by a [Mutex], and refuses
+ * to silently overwrite a corrupted vault file (backing it up to `.corrupt.<timestamp>` and
+ * surfacing the error via [vaultLoadErrorFlow]).
  */
 class SshServerVault(
     private val vaultFile: File,
@@ -53,32 +76,99 @@ class SshServerVault(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val idGenerator: () -> String = { UUID.randomUUID().toString() },
+    deferInitialLoad: Boolean = false,
 ) : SshVaultRepository {
 
     private val mutex = Mutex()
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
-        prettyPrint = true
+        prettyPrint = false
     }
 
-    private val initialPayload = readPayloadSync()
+    private val runsFile: File = File(
+        vaultFile.parentFile,
+        "${vaultFile.nameWithoutExtension}_runs.json",
+    )
 
-    private val _serversFlow = MutableStateFlow(initialPayload.servers)
+    @Volatile
+    private var isLoaded: Boolean = false
+
+    @Volatile
+    private var vaultCorrupted: Boolean = false
+
+    @Volatile
+    private var corruptBackupPath: String? = null
+
+    private var hasSplitRunsFile: Boolean = false
+
+    private val _serversFlow = MutableStateFlow<List<SshServerProfile>>(emptyList())
     override val serversFlow: StateFlow<List<SshServerProfile>> = _serversFlow.asStateFlow()
 
-    private val _customPresetsFlow = MutableStateFlow(initialPayload.customPresets)
+    private val _customPresetsFlow = MutableStateFlow<List<CustomSshPreset>>(emptyList())
     override val customPresetsFlow: StateFlow<List<CustomSshPreset>> = _customPresetsFlow.asStateFlow()
 
-    private val _recentRunsFlow = MutableStateFlow(initialPayload.recentRuns)
+    private val _recentRunsFlow = MutableStateFlow<List<SshExecutionRecord>>(emptyList())
     override val recentRunsFlow: StateFlow<List<SshExecutionRecord>> = _recentRunsFlow.asStateFlow()
 
-    private val _collapseStateFlow = MutableStateFlow(initialPayload.collapseState)
+    private val _collapseStateFlow = MutableStateFlow(SshVaultCollapseState())
     override val collapseStateFlow: StateFlow<SshVaultCollapseState> = _collapseStateFlow.asStateFlow()
+
+    private val _vaultLoadErrorFlow = MutableStateFlow<String?>(null)
+    override val vaultLoadErrorFlow: StateFlow<String?> = _vaultLoadErrorFlow.asStateFlow()
+
+    init {
+        if (!deferInitialLoad) {
+            loadInitialStateLocked()
+        }
+    }
+
+    override suspend fun ensureLoaded() {
+        if (isLoaded) return
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked()
+            }
+        }
+    }
+
+    override suspend fun retryLoadVault(): Boolean =
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                isLoaded = false
+                loadInitialStateLocked()
+                !vaultCorrupted
+            }
+        }
+
+    override suspend fun resetCorruptedVault() {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked()
+                if (vaultFile.isFile) {
+                    ensureCorruptBackupLocked(vaultFile, isPrimaryVault = true)
+                }
+                vaultCorrupted = false
+                _vaultLoadErrorFlow.value = null
+                val emptyPayload = SshVaultFilePayload()
+                atomicWriteText(
+                    target = vaultFile,
+                    content = json.encodeToString(SshVaultFilePayload.serializer(), emptyPayload),
+                )
+                _serversFlow.value = emptyList()
+                _customPresetsFlow.value = emptyList()
+                _collapseStateFlow.value = SshVaultCollapseState()
+                isLoaded = true
+            }
+        }
+    }
 
     override suspend fun saveServer(draft: SshServerDraft): SshServerProfile =
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 val existingList = _serversFlow.value
                 val existing = draft.id?.let { targetId ->
                     existingList.firstOrNull { it.id == targetId }
@@ -184,8 +274,13 @@ class SshServerVault(
                 } else {
                     listOf(saved) + existingList
                 }
+                persistVaultStateLocked(
+                    servers = updated,
+                    customPresets = _customPresetsFlow.value,
+                    collapseState = _collapseStateFlow.value,
+                    throwOnCorrupt = true,
+                )
                 _serversFlow.value = updated
-                persistCurrentStateLocked()
                 saved
             }
         }
@@ -193,6 +288,9 @@ class SshServerVault(
     override suspend fun deleteServer(serverId: String) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 val remaining = _serversFlow.value.filterNot { it.id == serverId }
                 if (remaining.size != _serversFlow.value.size) {
                     val cleaned = remaining.map { profile ->
@@ -202,9 +300,15 @@ class SshServerVault(
                             profile
                         }
                     }
+                    val prunedCollapse = _collapseStateFlow.value.pruneServerId(serverId)
+                    persistVaultStateLocked(
+                        servers = cleaned,
+                        customPresets = _customPresetsFlow.value,
+                        collapseState = prunedCollapse,
+                        throwOnCorrupt = true,
+                    )
                     _serversFlow.value = cleaned
-                    _collapseStateFlow.value = _collapseStateFlow.value.pruneServerId(serverId)
-                    persistCurrentStateLocked()
+                    _collapseStateFlow.value = prunedCollapse
                 }
             }
         }
@@ -213,6 +317,9 @@ class SshServerVault(
     override suspend fun syncProbeMachines(machines: List<ProbeSyncMachine>): SshProbeSyncOutcome =
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 val outcome = SshProbeSyncMerger.merge(
                     existingServers = _serversFlow.value,
                     incomingMachines = machines,
@@ -220,8 +327,13 @@ class SshServerVault(
                     idGenerator = idGenerator,
                 )
                 if (outcome.mergedServers != _serversFlow.value) {
+                    persistVaultStateLocked(
+                        servers = outcome.mergedServers,
+                        customPresets = _customPresetsFlow.value,
+                        collapseState = _collapseStateFlow.value,
+                        throwOnCorrupt = true,
+                    )
                     _serversFlow.value = outcome.mergedServers
-                    persistCurrentStateLocked()
                 }
                 outcome
             }
@@ -233,6 +345,9 @@ class SshServerVault(
     ) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 var changed = false
                 val updated = _serversFlow.value.map { profile ->
                     if (profile.id == serverId) {
@@ -248,8 +363,13 @@ class SshServerVault(
                     }
                 }
                 if (changed) {
+                    persistVaultStateLocked(
+                        servers = updated,
+                        customPresets = _customPresetsFlow.value,
+                        collapseState = _collapseStateFlow.value,
+                        throwOnCorrupt = true,
+                    )
                     _serversFlow.value = updated
-                    persistCurrentStateLocked()
                 }
             }
         }
@@ -260,11 +380,21 @@ class SshServerVault(
     ) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
                 val current = _collapseStateFlow.value
                 val next = transform(current)
                 if (next != current) {
+                    if (vaultCorrupted) {
+                        // Never overwrite a corrupted vault file from a UI collapse toggle.
+                        return@withLock
+                    }
+                    persistVaultStateLocked(
+                        servers = _serversFlow.value,
+                        customPresets = _customPresetsFlow.value,
+                        collapseState = next,
+                        throwOnCorrupt = false,
+                    )
                     _collapseStateFlow.value = next
-                    persistCurrentStateLocked()
                 }
             }
         }
@@ -293,6 +423,9 @@ class SshServerVault(
     ) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                if (vaultCorrupted) return@withLock
+
                 val normalized = HostKeyTrustPolicy.normalizeFingerprint(fingerprintSha256)
                     ?: fingerprintSha256.trim()
                 val updated = _serversFlow.value.map { profile ->
@@ -306,8 +439,13 @@ class SshServerVault(
                         profile
                     }
                 }
+                persistVaultStateLocked(
+                    servers = updated,
+                    customPresets = _customPresetsFlow.value,
+                    collapseState = _collapseStateFlow.value,
+                    throwOnCorrupt = false,
+                )
                 _serversFlow.value = updated
-                persistCurrentStateLocked()
             }
         }
     }
@@ -318,6 +456,9 @@ class SshServerVault(
     ) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                if (vaultCorrupted) return@withLock
+
                 val updated = _serversFlow.value.map { profile ->
                     if (profile.id == serverId) {
                         profile.copy(lastConnectedEpochMillis = timestampMillis)
@@ -325,8 +466,13 @@ class SshServerVault(
                         profile
                     }
                 }
+                persistVaultStateLocked(
+                    servers = updated,
+                    customPresets = _customPresetsFlow.value,
+                    collapseState = _collapseStateFlow.value,
+                    throwOnCorrupt = false,
+                )
                 _serversFlow.value = updated
-                persistCurrentStateLocked()
             }
         }
     }
@@ -334,6 +480,9 @@ class SshServerVault(
     override suspend fun saveCustomPreset(preset: CustomSshPreset): CustomSshPreset =
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 val cleanName = preset.name.trim()
                 val cleanCommand = preset.command.trim()
                 require(cleanName.isNotEmpty()) { "脚本名称不能为空" }
@@ -356,8 +505,13 @@ class SshServerVault(
                 } else {
                     listOf(saved) + existingList
                 }
+                persistVaultStateLocked(
+                    servers = _serversFlow.value,
+                    customPresets = updated,
+                    collapseState = _collapseStateFlow.value,
+                    throwOnCorrupt = true,
+                )
                 _customPresetsFlow.value = updated
-                persistCurrentStateLocked()
                 saved
             }
         }
@@ -365,10 +519,18 @@ class SshServerVault(
     override suspend fun deleteCustomPreset(presetId: String) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
                 val updated = _customPresetsFlow.value.filterNot { it.id == presetId }
                 if (updated.size != _customPresetsFlow.value.size) {
+                    persistVaultStateLocked(
+                        servers = _serversFlow.value,
+                        customPresets = updated,
+                        collapseState = _collapseStateFlow.value,
+                        throwOnCorrupt = true,
+                    )
                     _customPresetsFlow.value = updated
-                    persistCurrentStateLocked()
                 }
             }
         }
@@ -377,6 +539,7 @@ class SshServerVault(
     override suspend fun saveRunRecord(record: SshExecutionRecord) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
                 val boundedOutput = if (record.sanitizedAnsiOutput.length > MAX_PERSISTED_OUTPUT_CHARS) {
                     record.sanitizedAnsiOutput.takeLast(MAX_PERSISTED_OUTPUT_CHARS)
                 } else {
@@ -385,8 +548,8 @@ class SshServerVault(
                 val boundedRecord = record.copy(sanitizedAnsiOutput = boundedOutput)
                 val updated = (listOf(boundedRecord) + _recentRunsFlow.value.filterNot { it.id == boundedRecord.id })
                     .take(MAX_RECENT_RUNS)
+                persistRunsStateLocked(updated)
                 _recentRunsFlow.value = updated
-                persistCurrentStateLocked()
             }
         }
     }
@@ -394,10 +557,11 @@ class SshServerVault(
     override suspend fun deleteRunRecord(runId: String) {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
                 val updated = _recentRunsFlow.value.filterNot { it.id == runId }
                 if (updated.size != _recentRunsFlow.value.size) {
+                    persistRunsStateLocked(updated)
                     _recentRunsFlow.value = updated
-                    persistCurrentStateLocked()
                 }
             }
         }
@@ -406,22 +570,72 @@ class SshServerVault(
     override suspend fun clearRunRecords() {
         withContext(ioDispatcher) {
             mutex.withLock {
+                ensureLoadedLocked()
                 if (_recentRunsFlow.value.isNotEmpty()) {
+                    persistRunsStateLocked(emptyList())
                     _recentRunsFlow.value = emptyList()
-                    persistCurrentStateLocked()
                 }
             }
         }
     }
 
-    private fun readPayloadSync(): SshVaultFilePayload {
-        if (!vaultFile.isFile) return SshVaultFilePayload()
-        return runCatching {
+    private fun ensureLoadedLocked() {
+        if (!isLoaded) {
+            loadInitialStateLocked()
+        }
+    }
+
+    private fun ensureVaultWritableLocked() {
+        if (vaultCorrupted) {
+            throw SshVaultCorruptedException(
+                message = _vaultLoadErrorFlow.value
+                    ?: "本地 SSH 保险库文件已损坏，已暂停写入以保护原始数据",
+                backupPath = corruptBackupPath,
+            )
+        }
+    }
+
+    private fun loadInitialStateLocked() {
+        val vaultPayload = readPrimaryVaultFileLocked()
+        val runs = readRunsFileLocked(legacyFallbackRuns = vaultPayload?.recentRuns.orEmpty())
+
+        if (vaultPayload != null) {
+            _serversFlow.value = vaultPayload.servers
+            _customPresetsFlow.value = vaultPayload.customPresets
+            _collapseStateFlow.value = vaultPayload.collapseState
+        } else {
+            _serversFlow.value = emptyList()
+            _customPresetsFlow.value = emptyList()
+            _collapseStateFlow.value = SshVaultCollapseState()
+        }
+        _recentRunsFlow.value = runs
+        isLoaded = true
+    }
+
+    /**
+     * Reads [vaultFile]. Returns `null` when [vaultFile] exists, is non-blank, and fails to read
+     * or parse — in which case [vaultCorrupted] is set to `true`, a `.corrupt.<timestamp>` backup
+     * is created, and [_vaultLoadErrorFlow] is populated without modifying [vaultFile].
+     */
+    private fun readPrimaryVaultFileLocked(): SshVaultFilePayload? {
+        if (!vaultFile.isFile) {
+            vaultCorrupted = false
+            corruptBackupPath = null
+            _vaultLoadErrorFlow.value = null
+            return SshVaultFilePayload()
+        }
+        return try {
             val raw = vaultFile.readText(Charsets.UTF_8)
             if (raw.isBlank()) {
+                vaultCorrupted = false
+                corruptBackupPath = null
+                _vaultLoadErrorFlow.value = null
                 SshVaultFilePayload()
             } else {
                 val decoded = json.decodeFromString<SshVaultFilePayload>(raw)
+                vaultCorrupted = false
+                corruptBackupPath = null
+                _vaultLoadErrorFlow.value = null
                 decoded.copy(
                     servers = decoded.servers.map { server ->
                         val normalizedJump = SshJumpHostResolver.normalizeJumpHostId(server.jumpHostId)
@@ -429,23 +643,136 @@ class SshServerVault(
                     },
                 )
             }
-        }.getOrDefault(SshVaultFilePayload())
+        } catch (_: Throwable) {
+            val backupFile = ensureCorruptBackupLocked(vaultFile, isPrimaryVault = true)
+            vaultCorrupted = true
+            val backupHint = backupFile?.name?.let { "（已备份至 $it）" }.orEmpty()
+            _vaultLoadErrorFlow.value =
+                "检测到本地 SSH 保险库文件损坏$backupHint，已暂停写入以防止覆盖原数据；可尝试「重试读取」或「备份并重置」。"
+            null
+        }
     }
 
-    private fun persistCurrentStateLocked() {
+    private fun readRunsFileLocked(legacyFallbackRuns: List<SshExecutionRecord>): List<SshExecutionRecord> {
+        if (!runsFile.isFile) {
+            hasSplitRunsFile = false
+            return legacyFallbackRuns
+        }
+        hasSplitRunsFile = true
+        return try {
+            val raw = runsFile.readText(Charsets.UTF_8)
+            if (raw.isBlank()) {
+                emptyList()
+            } else {
+                json.decodeFromString<SshRunsFilePayload>(raw).recentRuns
+            }
+        } catch (_: Throwable) {
+            ensureCorruptBackupLocked(runsFile, isPrimaryVault = false)
+            emptyList()
+        }
+    }
+
+    private fun ensureCorruptBackupLocked(
+        sourceFile: File,
+        isPrimaryVault: Boolean,
+    ): File? {
+        if (isPrimaryVault) {
+            val existingPath = corruptBackupPath
+            if (existingPath != null) {
+                val existingBackup = File(existingPath)
+                if (existingBackup.isFile) return existingBackup
+            }
+        }
+        if (!sourceFile.isFile) return null
+        return runCatching {
+            val parent = sourceFile.parentFile
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs()
+            }
+            val ts = clock()
+            var candidate = File(parent, "${sourceFile.name}.corrupt.$ts")
+            var suffix = 1
+            while (candidate.exists()) {
+                candidate = File(parent, "${sourceFile.name}.corrupt.$ts.$suffix")
+                suffix++
+            }
+            sourceFile.copyTo(candidate, overwrite = false)
+            if (isPrimaryVault) {
+                corruptBackupPath = candidate.absolutePath
+            }
+            candidate
+        }.getOrNull()
+    }
+
+    private fun persistVaultStateLocked(
+        servers: List<SshServerProfile>,
+        customPresets: List<CustomSshPreset>,
+        collapseState: SshVaultCollapseState,
+        throwOnCorrupt: Boolean,
+    ) {
+        if (vaultCorrupted) {
+            if (throwOnCorrupt) {
+                ensureVaultWritableLocked()
+            }
+            return
+        }
+        // Migrate legacy inline recentRuns into the sibling runs file before stripping them from
+        // the primary vault payload so no history records are ever dropped.
+        val currentRuns = _recentRunsFlow.value
+        if (!hasSplitRunsFile && currentRuns.isNotEmpty()) {
+            persistRunsStateLocked(currentRuns)
+        }
         val payload = SshVaultFilePayload(
-            servers = _serversFlow.value,
-            customPresets = _customPresetsFlow.value,
-            recentRuns = _recentRunsFlow.value,
-            collapseState = _collapseStateFlow.value,
+            servers = servers,
+            customPresets = customPresets,
+            recentRuns = emptyList(),
+            collapseState = collapseState,
         )
         val encoded = json.encodeToString(SshVaultFilePayload.serializer(), payload)
-        vaultFile.parentFile?.mkdirs()
-        val tempFile = File(vaultFile.parentFile, "${vaultFile.name}.tmp")
-        tempFile.writeText(encoded, Charsets.UTF_8)
-        if (!tempFile.renameTo(vaultFile)) {
-            vaultFile.writeText(encoded, Charsets.UTF_8)
-            tempFile.delete()
+        atomicWriteText(target = vaultFile, content = encoded)
+    }
+
+    private fun persistRunsStateLocked(runs: List<SshExecutionRecord>) {
+        val payload = SshRunsFilePayload(recentRuns = runs)
+        val encoded = json.encodeToString(SshRunsFilePayload.serializer(), payload)
+        atomicWriteText(target = runsFile, content = encoded)
+        hasSplitRunsFile = true
+    }
+
+    private fun atomicWriteText(target: File, content: String) {
+        val parent = target.parentFile
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs()
+        }
+        val tempFile = File(parent, "${target.name}.tmp")
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        try {
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                try {
+                    fos.fd.sync()
+                } catch (_: SyncFailedException) {
+                    // Best-effort sync on filesystems where regular file fsync is unsupported.
+                }
+            }
+            try {
+                Files.move(
+                    tempFile.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    tempFile.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } catch (t: Throwable) {
+            runCatching { tempFile.delete() }
+            throw t
         }
     }
 
@@ -457,17 +784,26 @@ class SshServerVault(
         @Volatile
         private var sharedInstance: SshServerVault? = null
 
+        private val backgroundLoadScope: CoroutineScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
         /**
          * Returns the process-wide [SshServerVault] backed by `context.filesDir/lite_ssh_vault.json`
          * and [AndroidKeystoreAesGcmCipher], ensuring `LiteSshScreen` and `SshQuickInsertSheet`
-         * share live state automatically.
+         * share live state automatically without blocking the main thread on cold startup.
          */
         fun getDefault(context: Context): SshServerVault {
             return sharedInstance ?: synchronized(this) {
                 sharedInstance ?: SshServerVault(
                     vaultFile = File(context.applicationContext.filesDir, VAULT_FILE_NAME),
                     cipher = AndroidKeystoreAesGcmCipher(),
-                ).also { sharedInstance = it }
+                    deferInitialLoad = true,
+                ).also { vault ->
+                    sharedInstance = vault
+                    backgroundLoadScope.launch {
+                        vault.ensureLoaded()
+                    }
+                }
             }
         }
     }

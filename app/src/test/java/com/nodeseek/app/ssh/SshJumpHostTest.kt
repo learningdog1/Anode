@@ -755,4 +755,141 @@ class SshJumpHostTest {
         )
         assertTrue(events.any { it is SshStreamEvent.Completed && it.exitCode == 0 })
     }
+
+    @Test
+    fun `lazy jumpHostId resolution does not propagate target allowHostKeyMismatchOverride to jump hops`() = runTest {
+        val vault = createVault()
+        val bastion = vault.saveServer(
+            SshServerDraft(
+                id = "hop-bastion",
+                alias = "Bastion",
+                host = "198.51.100.1",
+                port = 22,
+                username = "root",
+                secret = "pw-hop",
+            ),
+        )
+        vault.updateHostKeyFingerprint(bastion.id, "SHA256:bastionExpectedFp", "ssh-ed25519")
+
+        val observedSpecs = Collections.synchronizedList(mutableListOf<SshHopEndpointSpec>())
+        val connector = SshSessionConnector { spec ->
+            observedSpecs += spec
+            object : ManagedSshSession {
+                override val lastTunnelError: String? = null
+                override fun connect(connectTimeoutMillis: Int): HostKeyVerificationResult? = null
+                override fun setPortForwardingL(
+                    bindAddress: String,
+                    localPort: Int,
+                    targetHost: String,
+                    targetPort: Int,
+                    connectTimeoutMillis: Int,
+                ): Int = 52001
+                override fun delPortForwardingL(bindAddress: String, localPort: Int) = Unit
+                override fun openExecChannel(): ManagedExecChannel = object : ManagedExecChannel {
+                    override val inputStream: InputStream = ByteArrayInputStream("ok\n".toByteArray())
+                    override val isClosed: Boolean = true
+                    override val exitStatus: Int = 0
+                    override fun connect(connectTimeoutMillis: Int) = Unit
+                    override fun disconnect() = Unit
+                }
+                override fun disconnect() = Unit
+            }
+        }
+
+        val transport = JSchSshTransport(testDispatcher, vault, connector)
+        val lazyRequest = com.nodeseek.app.domain.ssh.SshConnectionRequest(
+            host = "10.0.0.9",
+            port = 22,
+            username = "root",
+            authMethod = SshAuthMethod.PASSWORD,
+            secret = "pw-target",
+            allowHostKeyMismatchOverride = true,
+            serverId = "target-only",
+            alias = "Target",
+            jumpHostId = bastion.id,
+            jumpHosts = emptyList(),
+        )
+
+        transport.execute(lazyRequest, "hostname").toList()
+
+        val hopSpec = observedSpecs.first { it.serverId == bastion.id }
+        val targetSpec = observedSpecs.first { it.serverId == "target-only" }
+        assertFalse(
+            "Target allowHostKeyMismatchOverride must NEVER leak to lazily resolved jump hop",
+            hopSpec.allowHostKeyMismatchOverride,
+        )
+        assertTrue(targetSpec.allowHostKeyMismatchOverride)
+    }
+
+    @Test
+    fun `PasswordAndInteractiveUserInfo answers single hidden password prompt and refuses echo multi-prompt and OTP`() {
+        val userInfo = JSchSshTransport.PasswordAndInteractiveUserInfo("s3cr3t!")
+
+        // Standard single hidden password prompt succeeds
+        val okResp = userInfo.promptKeyboardInteractive(
+            destination = "root@host",
+            name = "",
+            instruction = "",
+            prompt = arrayOf("Password: "),
+            echo = booleanArrayOf(false),
+        )
+        assertNotNull(okResp)
+        assertEquals(listOf("s3cr3t!"), okResp!!.toList())
+
+        // Empty prompt list returns empty array
+        val emptyResp = userInfo.promptKeyboardInteractive("root@host", "", "", emptyArray(), BooleanArray(0))
+        assertNotNull(emptyResp)
+        assertEquals(0, emptyResp!!.size)
+
+        // Echoed prompt must be refused (null) so password is never echoed
+        assertNull(
+            userInfo.promptKeyboardInteractive(
+                destination = "root@host",
+                name = "",
+                instruction = "",
+                prompt = arrayOf("Password: "),
+                echo = booleanArrayOf(true),
+            ),
+        )
+
+        // Multi-prompt challenge must be refused (null)
+        assertNull(
+            userInfo.promptKeyboardInteractive(
+                destination = "root@host",
+                name = "",
+                instruction = "",
+                prompt = arrayOf("Password: ", "Verification code: "),
+                echo = booleanArrayOf(false, false),
+            ),
+        )
+
+        // 2FA / OTP / Verification prompts must be refused even when echo=false
+        assertNull(
+            userInfo.promptKeyboardInteractive(
+                destination = "root@host",
+                name = "",
+                instruction = "",
+                prompt = arrayOf("Verification code: "),
+                echo = booleanArrayOf(false),
+            ),
+        )
+        assertNull(
+            userInfo.promptKeyboardInteractive(
+                destination = "root@host",
+                name = "",
+                instruction = "",
+                prompt = arrayOf("Google Authenticator OTP: "),
+                echo = booleanArrayOf(false),
+            ),
+        )
+        assertNull(
+            userInfo.promptKeyboardInteractive(
+                destination = "root@host",
+                name = "",
+                instruction = "",
+                prompt = arrayOf("请输入动态验证码: "),
+                echo = booleanArrayOf(false),
+            ),
+        )
+    }
 }

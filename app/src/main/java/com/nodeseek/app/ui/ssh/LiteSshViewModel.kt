@@ -129,10 +129,12 @@ data class LiteSshUiState(
         .associate { it.id to it.defaultEnabledFlagIds },
     val isRunning: Boolean = false,
     val connectionPhase: SshConnectionPhase = SshConnectionPhase.IDLE,
+    val activeServerId: String? = null,
     val activeServerAlias: String? = null,
     val activeServerHost: String? = null,
     val activePresetId: String? = null,
     val activePresetName: String? = null,
+    val activeTabTitle: String? = null,
     val activeCommand: String = "",
     val liveAnsiOutput: String = "",
     val hasLiveOutputFlag: Boolean = false,
@@ -187,6 +189,7 @@ data class LiteSshUiState(
     val isSyncingProbes: Boolean = false,
     val probePanels: List<ProbePanelConfig> = emptyList(),
     val lastProbeSyncSummary: String? = null,
+    val vaultLoadError: String? = null,
 ) {
     val configuredProbePanelCount: Int
         get() = probePanels.count { it.enabled }
@@ -402,12 +405,12 @@ data class LiteSshUiState(
                 return listOf(
                     SshExecutionRecord(
                         id = "live_snapshot",
-                        serverId = selectedServer?.id.orEmpty(),
+                        serverId = activeServerId ?: selectedServer?.id.orEmpty(),
                         serverAlias = activeServerAlias ?: selectedServer?.displayName ?: "VPS",
                         serverHost = activeServerHost ?: selectedServer?.host.orEmpty(),
-                        presetId = selectedPreset.id,
+                        presetId = activePresetId ?: selectedPreset.id,
                         presetName = activePresetName ?: selectedPreset.name,
-                        tabTitle = selectedPreset.tabTitle,
+                        tabTitle = activeTabTitle ?: selectedPreset.tabTitle,
                         command = activeCommand.ifBlank { resolvedSelectedCommand },
                         sanitizedAnsiOutput = liveText,
                         exitCode = exitCode,
@@ -502,6 +505,8 @@ class LiteSshViewModel(
     fun dismissServerEditor() = sessionManager.dismissServerEditor()
     fun saveServer(draft: SshServerDraft) = sessionManager.saveServer(draft)
     fun deleteServer(serverId: String) = sessionManager.deleteServer(serverId)
+    fun retryLoadVault() = sessionManager.retryLoadVault()
+    fun resetCorruptedVault() = sessionManager.resetCorruptedVault()
 
     fun selectPreset(presetId: String) = sessionManager.selectPreset(presetId)
     fun updatePresetSearchQuery(query: String) = sessionManager.updatePresetSearchQuery(query)

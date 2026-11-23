@@ -133,6 +133,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.ssh.CustomSshPreset
+import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
 import com.nodeseek.app.domain.ssh.SshConnectionMode
@@ -206,6 +207,7 @@ fun LiteSshScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var pendingDeleteServer by remember { mutableStateOf<SshServerProfile?>(null) }
     var pendingDeleteCustomPreset by remember { mutableStateOf<CustomSshPreset?>(null) }
+    var showResetCorruptedVaultConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.statusMessage) {
         val msg = uiState.statusMessage ?: return@LaunchedEffect
@@ -224,8 +226,12 @@ fun LiteSshScreen(
 
     val copyToClipboard: (String, String) -> Unit = remember(context, scope, snackbarHostState) {
         { text, toastMsg ->
-            copyTextToClipboard(context, text)
-            scope.launch { snackbarHostState.showSnackbar(toastMsg) }
+            val finalMsg = when (copyTextToClipboard(context, text)) {
+                ClipboardCopyResult.COPIED -> toastMsg
+                ClipboardCopyResult.TRUNCATED -> "$toastMsg（输出较长，已截取末尾部分）"
+                ClipboardCopyResult.FAILED -> "复制失败：文本超出系统剪贴板上限或剪贴板不可用"
+            }
+            scope.launch { snackbarHostState.showSnackbar(finalMsg) }
         }
     }
 
@@ -291,6 +297,16 @@ fun LiteSshScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            uiState.vaultLoadError?.let { vaultError ->
+                item(key = "vault_load_error_banner") {
+                    VaultCorruptionErrorBanner(
+                        errorMessage = vaultError,
+                        onRetry = viewModel::retryLoadVault,
+                        onRequestReset = { showResetCorruptedVaultConfirm = true },
+                    )
+                }
+            }
+
             // 1. Encrypted & Probe-Integrated Collapsible SSH Server Vault
             serverVaultItems(
                 servers = uiState.servers,
@@ -453,10 +469,25 @@ fun LiteSshScreen(
                     },
                     onCopyOutput = {
                         val currentState = previewUiState ?: viewModel.uiState.value
-                        val raw = currentState.displayedConsoleOutput
+                        val raw = currentState.rawConsoleOutput
                         if (raw.isNotBlank()) {
-                            val plain = AnsiAndCodeFormatter.stripAnsiEscapes(raw)
-                            copyToClipboard(plain, "已复制终端纯文本输出")
+                            val shouldMaskIp = currentState.maskServerIp
+                            val hostToMask = currentState.viewingRun?.serverHost
+                                ?: currentState.activeServerHost
+                                ?: currentState.selectedServer?.host
+                            scope.launch {
+                                val plain = withContext(Dispatchers.Default) {
+                                    val masked = if (shouldMaskIp) {
+                                        IpPrivacyMasker.mask(raw, knownServerHost = hostToMask)
+                                    } else {
+                                        raw
+                                    }
+                                    AnsiAndCodeFormatter.stripAnsiEscapes(masked)
+                                }
+                                if (plain.isNotBlank()) {
+                                    copyToClipboard(plain, "已复制终端纯文本输出")
+                                }
+                            }
                         }
                     },
                 )
@@ -616,6 +647,89 @@ fun LiteSshScreen(
                 pendingDeleteCustomPreset = null
             },
         )
+    }
+
+    if (showResetCorruptedVaultConfirm) {
+        PulseConfirmDialog(
+            onDismissRequest = { showResetCorruptedVaultConfirm = false },
+            title = "备份并重置 SSH 保险库？",
+            message = "已将原损坏文件保留为本地备份（.corrupt.*），重置后会新建空白 SSH 保险库以恢复主机保存功能。确定继续吗？",
+            icon = Icons.Rounded.RestartAlt,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            confirmText = "确认重置",
+            onConfirm = {
+                showResetCorruptedVaultConfirm = false
+                viewModel.resetCorruptedVault()
+            },
+        )
+    }
+}
+
+@Composable
+private fun VaultCorruptionErrorBanner(
+    errorMessage: String,
+    onRetry: () -> Unit,
+    onRequestReset: () -> Unit,
+) {
+    val bannerShape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(bannerShape)
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.45f),
+                shape = bannerShape,
+            )
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ErrorOutline,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = "SSH 保险库读取异常（已启用防覆盖保护）",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
+        Text(
+            text = errorMessage,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = onRetry,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = "重试读取",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            TextButton(
+                onClick = onRequestReset,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = "备份并重置",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
     }
 }
 
@@ -3315,9 +3429,28 @@ private fun LiteSshExportDock(
     }
 }
 
-internal fun copyTextToClipboard(context: Context, text: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", text))
+internal enum class ClipboardCopyResult {
+    COPIED,
+    TRUNCATED,
+    FAILED,
+}
+
+private const val MAX_CLIPBOARD_CHARS: Int = 240_000
+
+internal fun copyTextToClipboard(context: Context, text: String): ClipboardCopyResult {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        ?: return ClipboardCopyResult.FAILED
+    val truncated = text.length > MAX_CLIPBOARD_CHARS
+    val payload = if (truncated) {
+        "... [内容过长，已自动截取末尾 ${MAX_CLIPBOARD_CHARS} 字符以符合系统剪贴板上限] ...\n" +
+            text.takeLast(MAX_CLIPBOARD_CHARS)
+    } else {
+        text
+    }
+    return runCatching {
+        clipboard.setPrimaryClip(ClipData.newPlainText("Anode Lite SSH", payload))
+        if (truncated) ClipboardCopyResult.TRUNCATED else ClipboardCopyResult.COPIED
+    }.getOrDefault(ClipboardCopyResult.FAILED)
 }
 
 private val CLOCK_TIME_FORMATTER: DateTimeFormatter =
