@@ -89,9 +89,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination.Companion.hasRoute
@@ -107,6 +110,7 @@ import com.nodeseek.app.di.DefaultAppContainer
 import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
 import com.nodeseek.app.domain.model.AppSettings
+import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.radar.InAppMessageKind
@@ -153,7 +157,6 @@ import com.nodeseek.app.ui.overseas.OverseasIntelScreen
 import com.nodeseek.app.ui.overseas.openOverseasAppNotificationSettings
 import com.nodeseek.app.ui.overseas.rememberOverseasPromoNotificationBinding
 import com.nodeseek.app.ui.radar.PulseRadarScreen
-import com.nodeseek.app.ui.restock.AddRestockWatchBottomSheet
 import com.nodeseek.app.ui.restock.RestockMonitorScreen
 import com.nodeseek.app.ui.ssh.LITE_SSH_REVIEW_CATEGORY_SLUG
 import com.nodeseek.app.ui.ssh.LiteSshScreen
@@ -168,6 +171,7 @@ import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.topic.TopicDetailScreen
 import com.nodeseek.app.ui.trust.LocalSellerTrustRepository
 import com.nodeseek.app.ui.update.AppUpdateDialog
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -183,13 +187,6 @@ private data class WebViewAuthRequest(
     val url: String,
     val requireSignedInUser: Boolean,
     val autoDismissWhenVerified: Boolean = true,
-)
-
-private data class RestockWatchPrefillRequest(
-    val url: String,
-    val title: String,
-    val priceHint: String = "",
-    val sourceTopicId: Long? = null,
 )
 
 /**
@@ -306,6 +303,7 @@ fun NodePulseNavHost(
     var exploreRefreshOnScrollToTop by rememberSaveable { mutableStateOf(false) }
     var featureHubScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
     var pendingExploreCategorySlug by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExploreSort by rememberSaveable { mutableStateOf<FeedSort?>(null) }
     var lastSelectedCategorySlug by rememberSaveable { mutableStateOf("") }
 
     // Dual-pane master-detail & fold/unfold continuity state
@@ -319,9 +317,9 @@ fun NodePulseNavHost(
 
     // Centralized WebView session / challenge sheet state
     var activeWebViewRequest by remember { mutableStateOf<WebViewAuthRequest?>(null) }
-    var pendingRestockWatchRequest by remember { mutableStateOf<RestockWatchPrefillRequest?>(null) }
     var pendingComposerSlugAfterAuth by rememberSaveable { mutableStateOf<String?>(null) }
     var challengeBannerDismissed by rememberSaveable { mutableStateOf(false) }
+    var userResolveJob by remember { mutableStateOf<Job?>(null) }
 
     val currentBackStackEntry by navController.currentBackStackEntryAsState()
     val activeDmPeerUid = remember(currentBackStackEntry) {
@@ -522,14 +520,6 @@ fun NodePulseNavHost(
         }
     }
 
-    // Clear external category trigger after ExploreScreen observes it so re-selecting the same board works
-    LaunchedEffect(selectedTab, pendingExploreCategorySlug) {
-        if (selectedTab == PulseNavTab.EXPLORE && pendingExploreCategorySlug != null) {
-            delay(150)
-            pendingExploreCategorySlug = null
-        }
-    }
-
     // Reset detail maximize flag whenever switching away from Explore tab
     LaunchedEffect(selectedTab) {
         if (selectedTab != PulseNavTab.EXPLORE && isDetailPaneMaximized) {
@@ -642,13 +632,25 @@ fun NodePulseNavHost(
                         titleHint = titleHint,
                     )
                 } else {
-                    navController.navigate(
-                        TopicDetailRoute(
-                            topicId = topicId,
-                            initialFloor = sanitizedFloor,
-                            titleHint = titleHint,
-                        ),
-                    )
+                    val topTopic = navController.currentBackStackEntry?.let { entry ->
+                        if (entry.destination.hasRoute<TopicDetailRoute>()) {
+                            runCatching { entry.toRoute<TopicDetailRoute>() }.getOrNull()
+                        } else {
+                            null
+                        }
+                    }
+                    if (topTopic == null ||
+                        topTopic.topicId != topicId ||
+                        topTopic.initialFloor != sanitizedFloor
+                    ) {
+                        navController.navigate(
+                            TopicDetailRoute(
+                                topicId = topicId,
+                                initialFloor = sanitizedFloor,
+                                titleHint = titleHint,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -684,13 +686,25 @@ fun NodePulseNavHost(
                     }
 
                     else -> {
-                        navController.navigate(
-                            TopicDetailRoute(
-                                topicId = topicId,
-                                initialFloor = sanitizedFloor,
-                                titleHint = titleHint,
-                            ),
-                        )
+                        val topTopic = navController.currentBackStackEntry?.let { entry ->
+                            if (entry.destination.hasRoute<TopicDetailRoute>()) {
+                                runCatching { entry.toRoute<TopicDetailRoute>() }.getOrNull()
+                            } else {
+                                null
+                            }
+                        }
+                        if (topTopic == null ||
+                            topTopic.topicId != topicId ||
+                            topTopic.initialFloor != sanitizedFloor
+                        ) {
+                            navController.navigate(
+                                TopicDetailRoute(
+                                    topicId = topicId,
+                                    initialFloor = sanitizedFloor,
+                                    titleHint = titleHint,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -763,7 +777,9 @@ fun NodePulseNavHost(
                     peerUid = peerUid,
                     peerName = peerName,
                 ),
-            )
+            ) {
+                launchSingleTop = true
+            }
         }
     }
 
@@ -908,7 +924,9 @@ fun NodePulseNavHost(
                             peerUid = target.peerUid,
                             peerName = target.peerName,
                         )
-                    )
+                    ) {
+                        launchSingleTop = true
+                    }
                 }
 
                 NotificationTapTarget.OpenRadarAlerts -> {
@@ -924,9 +942,21 @@ fun NodePulseNavHost(
         }
     }
 
+    val publishSshToComposer: (suggestedTitle: String, markdownContent: String) -> Unit =
+        remember(openComposerWithPrefill) {
+            { suggestedTitle, markdownContent ->
+                openComposerWithPrefill(
+                    LITE_SSH_REVIEW_CATEGORY_SLUG,
+                    suggestedTitle,
+                    markdownContent,
+                )
+            }
+        }
+
     val navigateToUser: (uid: Long, usernameHint: String) -> Unit = remember(navController, container) {
         { uid, usernameHint ->
             if (uid > 0L) {
+                userResolveJob?.cancel()
                 navController.navigate(
                     UserProfileRoute(
                         uid = uid,
@@ -936,18 +966,21 @@ fun NodePulseNavHost(
             } else {
                 val cleanName = usernameHint.removePrefix("@").trim()
                 if (cleanName.isNotEmpty()) {
-                    appScope.launch {
+                    val originEntryId = navController.currentBackStackEntry?.id
+                    userResolveJob?.cancel()
+                    userResolveJob = appScope.launch {
                         val searchResult = container.userRepository.searchUsers(cleanName)
                         val matches = searchResult.getOrDefault(emptyList())
                         val resolved = matches.firstOrNull { it.username.equals(cleanName, ignoreCase = true) }
-                            ?: matches.firstOrNull()
                         if (resolved != null && resolved.uid > 0L) {
-                            navController.navigate(
-                                UserProfileRoute(
-                                    uid = resolved.uid,
-                                    usernameHint = resolved.username,
+                            if (originEntryId == null || navController.currentBackStackEntry?.id == originEntryId) {
+                                navController.navigate(
+                                    UserProfileRoute(
+                                        uid = resolved.uid,
+                                        usernameHint = resolved.username,
+                                    )
                                 )
-                            )
+                            }
                         } else if (container.sessionRepository.sessionState.value == null && searchResult.isFailure) {
                             rootSnackbarHostState.showSnackbar("通过 @$cleanName 查找用户需要先登录账号")
                         } else {
@@ -982,6 +1015,10 @@ fun NodePulseNavHost(
             }
             is NodePulseDeepLink.CategoryBoard -> {
                 selectBoardAndOpenExplore(parsed.slug)
+            }
+            NodePulseDeepLink.CuratedFeed -> {
+                pendingExploreSort = FeedSort.CURATED
+                selectBoardAndOpenExplore("")
             }
             is NodePulseDeepLink.UserSpace -> {
                 navigateToUser(parsed.uid, "")
@@ -1167,6 +1204,7 @@ fun NodePulseNavHost(
                                             onStartDirectMessage = openDirectMessage,
                                             onOpenFullNetBench = openMobileNetBench,
                                             onOpenFullLiteSsh = openLiteSsh,
+                                            onPublishSshToComposer = publishSshToComposer,
                                         ) {
                                             ExploreScreen(
                                                 onOpenTopic = openTopic,
@@ -1175,12 +1213,27 @@ fun NodePulseNavHost(
                                                         launchSingleTop = true
                                                     }
                                                 },
-                                                onOpenBoardsTab = {},
+                                                onOpenBoardsTab = {
+                                                    navController.navigate(BoardsRoute) {
+                                                        launchSingleTop = true
+                                                    }
+                                                },
                                                 onOpenAuthorProfile = navigateToUser,
                                                 onRequestWebViewAuth = {
                                                     openWebViewAuth(SIGN_IN_URL, session == null)
                                                 },
                                                 externalCategorySlug = pendingExploreCategorySlug,
+                                                onExternalCategoryConsumed = {
+                                                    pendingExploreCategorySlug = null
+                                                },
+                                                externalSort = pendingExploreSort,
+                                                onExternalSortConsumed = {
+                                                    pendingExploreSort = null
+                                                },
+                                                onSelectedCategoryChanged = { slug ->
+                                                    lastSelectedCategorySlug = slug
+                                                },
+                                                refreshTrigger = refreshTrigger,
                                                 scrollToTopTrigger = exploreScrollToTopTrigger,
                                                 onScrollToTopConsumed = {
                                                     exploreScrollToTopTrigger = 0
@@ -1299,14 +1352,46 @@ fun NodePulseNavHost(
                 }
             }
 
-            // Defensive aliases in case any caller navigates to BoardsRoute / PulseHubRoute directly
-            composable<BoardsRoute> {
-                LaunchedEffect(Unit) {
-                    selectedTab = PulseNavTab.EXPLORE
-                    navController.popBackStack(ExploreRoute, inclusive = false)
-                    navController.navigate(SearchRoute) {
-                        launchSingleTop = true
-                    }
+            // Bento Board Directory & Pin Management
+            composable<BoardsRoute> { backStackEntry ->
+                val refreshTrigger by backStackEntry.savedStateHandle
+                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
+                    .collectAsStateWithLifecycle()
+                AdaptiveMasterDetailContainer(
+                    adaptiveLayout = adaptiveLayout,
+                    selectedPaneTopic = selectedPaneTopic,
+                    isDetailPaneMaximized = isDetailPaneMaximized,
+                    allowBackToCloseDetail = false,
+                    refreshTrigger = refreshTrigger,
+                    onCloseDetailPane = closeDualPaneTopic,
+                    onToggleMaximizePane = toggleDualPaneMaximize,
+                    onNavigateToUser = navigateToUser,
+                    onNavigateToCategory = selectBoardAndOpenExplore,
+                    onOpenTopic = openTopic,
+                    onEditTopic = editTopic,
+                    onRequestWebViewAuth = requestTopicWebViewAuth,
+                    onStartDirectMessage = openDirectMessage,
+                    onOpenFullNetBench = openMobileNetBench,
+                    onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
+                ) {
+                    BoardsScreen(
+                        onOpenTopic = openTopic,
+                        autoFocusSearch = false,
+                        standaloneSearchMode = false,
+                        onBack = safePopBackStack,
+                        onSelectBoard = selectBoardAndOpenExplore,
+                        onOpenUserProfile = navigateToUser,
+                        onRequestWebViewAuth = {
+                            openWebViewAuth(SIGN_IN_URL, session == null)
+                        },
+                        bottomContentPadding = searchBottomPadding,
+                        selectedTopicId = if (adaptiveLayout.isDualPane) {
+                            selectedPaneTopic?.topicId
+                        } else {
+                            null
+                        },
+                    )
                 }
             }
 
@@ -1339,6 +1424,7 @@ fun NodePulseNavHost(
                     onStartDirectMessage = openDirectMessage,
                     onOpenFullNetBench = openMobileNetBench,
                     onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
                 ) {
                     BoardsScreen(
                         onOpenTopic = openTopic,
@@ -1383,6 +1469,7 @@ fun NodePulseNavHost(
                     onStartDirectMessage = openDirectMessage,
                     onOpenFullNetBench = openMobileNetBench,
                     onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
                 ) {
                     HubCollectionScreen(
                         initialTab = route.initialTab,
@@ -1419,6 +1506,7 @@ fun NodePulseNavHost(
                     onStartDirectMessage = openDirectMessage,
                     onOpenFullNetBench = openMobileNetBench,
                     onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
                 )
             }
 
@@ -1436,16 +1524,19 @@ fun NodePulseNavHost(
                     initialTitle = resolvedTitle,
                     initialMarkdown = resolvedMarkdown,
                     prefillKey = route.prefillId,
-                    onBack = safePopBackStack,
-                    onTopicPublished = { editedTopicId ->
+                    onBack = {
                         if (route.prefillId.isNotBlank()) {
                             ComposerPrefillStore.remove(route.prefillId)
                         }
-                        if (editedTopicId != null) {
-                            navController.previousBackStackEntry
-                                ?.savedStateHandle
-                                ?.set(EDITED_TOPIC_REFRESH_KEY, System.currentTimeMillis())
+                        safePopBackStack()
+                    },
+                    onTopicPublished = { _ ->
+                        if (route.prefillId.isNotBlank()) {
+                            ComposerPrefillStore.remove(route.prefillId)
                         }
+                        navController.previousBackStackEntry
+                            ?.savedStateHandle
+                            ?.set(EDITED_TOPIC_REFRESH_KEY, System.currentTimeMillis())
                         safePopBackStack()
                     },
                     onRequestWebViewAuth = { url ->
@@ -1481,20 +1572,13 @@ fun NodePulseNavHost(
                     onStartDirectMessage = openDirectMessage,
                     onOpenFullNetBench = openMobileNetBench,
                     onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
                 ) {
                     InboxScreen(
                         initialTab = route.initialTab,
                         onBack = safePopBackStack,
                         onOpenTopic = openTopic,
-                        onOpenDirectMessage = { peerUid, peerName ->
-                            isDetailPaneMaximized = false
-                            navController.navigate(
-                                DirectMessageRoute(
-                                    peerUid = peerUid,
-                                    peerName = peerName,
-                                ),
-                            )
-                        },
+                        onOpenDirectMessage = openDirectMessage,
                         onOpenUserProfile = navigateToUser,
                         onOpenRadar = openRadar,
                         onOpenSeekMail = { openSeekMail(0L, 0L) },
@@ -1523,14 +1607,7 @@ fun NodePulseNavHost(
                     usernameHint = route.usernameHint,
                     onBack = safePopBackStack,
                     onOpenTopic = openTopic,
-                    onOpenDirectMessage = { peerUid, peerName ->
-                        navController.navigate(
-                            DirectMessageRoute(
-                                peerUid = peerUid,
-                                peerName = peerName,
-                            )
-                        )
-                    },
+                    onOpenDirectMessage = openDirectMessage,
                     onOpenUserProfile = navigateToUser,
                     onOpenCategory = selectBoardAndOpenExplore,
                     onRequestWebViewAuth = openWebViewAuth,
@@ -1576,6 +1653,7 @@ fun NodePulseNavHost(
                     onStartDirectMessage = openDirectMessage,
                     onOpenFullNetBench = openMobileNetBench,
                     onOpenFullLiteSsh = openLiteSsh,
+                    onPublishSshToComposer = publishSshToComposer,
                 ) {
                     PulseRadarScreen(
                         initialTab = route.initialTab,
@@ -1725,6 +1803,8 @@ fun NodePulseNavHost(
                         },
                     )
                 }
+                // Integration note (P2-55 / #69): once fix/fleet merges `initialHighlightAssetId` on MyServersScreen,
+                // pass `initialHighlightAssetId = route.highlightAssetId.takeIf { it.isNotBlank() }`.
                 MyServersScreen(
                     onBack = safePopBackStack,
                     onCreateSalePost = { suggestedTitle, markdownBody ->
@@ -1733,7 +1813,11 @@ fun NodePulseNavHost(
                     fleetRepository = container.fleetRepository,
                     exchangeRateRepository = container.exchangeRateRepository,
                     fleetWorkScheduler = container.fleetWorkScheduler,
-                    initialTab = if (route.initialTab == 1) MyServersTab.ASSETS else MyServersTab.PROBES,
+                    initialTab = if (route.initialTab == 1 || route.highlightAssetId.isNotBlank()) {
+                        MyServersTab.ASSETS
+                    } else {
+                        MyServersTab.PROBES
+                    },
                     pendingRestockPrefill = pendingImportPrefill,
                     onConsumeRestockPrefill = { pendingImportPrefill = null },
                 )
@@ -1749,11 +1833,15 @@ fun NodePulseNavHost(
                         openComposerWithPrefill("review", "", markdown)
                     },
                     onOpenLiteSshIperf3Setup = { targetHost, port ->
-                        container.sshSessionManager.openIperf3ServerDialog(
-                            preferredHost = targetHost,
-                            preferredPort = port,
-                        )
-                        navController.navigate(LiteSshRoute)
+                        if (port > 0) {
+                            container.sshSessionManager.openIperf3ServerDialog(
+                                preferredHost = targetHost,
+                                preferredPort = port,
+                            )
+                        }
+                        navController.navigate(LiteSshRoute) {
+                            launchSingleTop = true
+                        }
                     },
                     insertActionLabel = "一键发测评帖",
                 )
@@ -1856,7 +1944,9 @@ fun NodePulseNavHost(
                                 peerUid = target.peerUid,
                                 peerName = target.peerName,
                             )
-                        )
+                        ) {
+                            launchSingleTop = true
+                        }
                     }
 
                     NotificationTapTarget.OpenLiteSsh -> {
@@ -1946,24 +2036,6 @@ fun NodePulseNavHost(
                                 )
                             }
                         }
-                    }
-                },
-            )
-        }
-
-        // Shared cross-feature Add-to-Restock-Monitor sheet (invoked from Deals Hub & Overseas Intel)
-        pendingRestockWatchRequest?.let { request ->
-            AddRestockWatchBottomSheet(
-                repository = container.restockRepository,
-                controller = container.restockMonitorController,
-                onDismiss = { pendingRestockWatchRequest = null },
-                initialUrl = request.url,
-                initialTitle = request.title,
-                initialPriceHint = request.priceHint,
-                sourceTopicId = request.sourceTopicId,
-                onWatchSaved = { saved ->
-                    appScope.launch {
-                        rootSnackbarHostState.showSnackbar("已加入补货监控：${saved.title}")
                     }
                 },
             )
@@ -2109,6 +2181,7 @@ private fun AdaptiveMasterDetailContainer(
     onStartDirectMessage: ((peerUid: Long, peerName: String) -> Unit)? = null,
     onOpenFullNetBench: ((initialTarget: String) -> Unit)? = null,
     onOpenFullLiteSsh: (() -> Unit)? = null,
+    onPublishSshToComposer: ((suggestedTitle: String, markdownContent: String) -> Unit)? = null,
     listContent: @Composable () -> Unit,
 ) {
     val movableList = remember {
@@ -2132,26 +2205,39 @@ private fun AdaptiveMasterDetailContainer(
             },
             detailPane = {
                 if (selectedPaneTopic != null) {
-                    key(selectedPaneTopic.topicId, selectedPaneTopic.initialFloor) {
-                        TopicDetailScreen(
-                            topicId = selectedPaneTopic.topicId,
-                            onBack = onCloseDetailPane,
-                            initialFloor = selectedPaneTopic.initialFloor,
-                            titleHint = selectedPaneTopic.titleHint,
-                            refreshTrigger = refreshTrigger,
-                            onNavigateToUser = onNavigateToUser,
-                            onNavigateToCategory = onNavigateToCategory,
-                            onOpenTopic = onOpenTopic,
-                            onEditTopic = onEditTopic,
-                            onRequestWebViewAuth = onRequestWebViewAuth,
-                            onStartDirectMessage = onStartDirectMessage,
-                            onOpenFullNetBench = onOpenFullNetBench,
-                            onOpenFullLiteSsh = onOpenFullLiteSsh,
-                            isEmbeddedInDualPane = true,
-                            isDetailPaneMaximized = isDetailPaneMaximized,
-                            onCloseDetailPane = onCloseDetailPane,
-                            onToggleMaximizePane = onToggleMaximizePane,
-                        )
+                    key(selectedPaneTopic.topicId) {
+                        val paneStoreOwner = remember(selectedPaneTopic.topicId) {
+                            object : ViewModelStoreOwner {
+                                override val viewModelStore: ViewModelStore = ViewModelStore()
+                            }
+                        }
+                        DisposableEffect(paneStoreOwner) {
+                            onDispose {
+                                paneStoreOwner.viewModelStore.clear()
+                            }
+                        }
+                        CompositionLocalProvider(LocalViewModelStoreOwner provides paneStoreOwner) {
+                            TopicDetailScreen(
+                                topicId = selectedPaneTopic.topicId,
+                                onBack = onCloseDetailPane,
+                                initialFloor = selectedPaneTopic.initialFloor,
+                                titleHint = selectedPaneTopic.titleHint,
+                                refreshTrigger = refreshTrigger,
+                                onNavigateToUser = onNavigateToUser,
+                                onNavigateToCategory = onNavigateToCategory,
+                                onOpenTopic = onOpenTopic,
+                                onEditTopic = onEditTopic,
+                                onRequestWebViewAuth = onRequestWebViewAuth,
+                                onStartDirectMessage = onStartDirectMessage,
+                                onOpenFullNetBench = onOpenFullNetBench,
+                                onOpenFullLiteSsh = onOpenFullLiteSsh,
+                                onPublishSshToComposer = onPublishSshToComposer,
+                                isEmbeddedInDualPane = true,
+                                isDetailPaneMaximized = isDetailPaneMaximized,
+                                onCloseDetailPane = onCloseDetailPane,
+                                onToggleMaximizePane = onToggleMaximizePane,
+                            )
+                        }
                     }
                 }
             },
