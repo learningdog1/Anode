@@ -14,6 +14,43 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.lang.ref.WeakReference
+
+internal class ActivitySettingsLoadGate(
+    val isLoaded: () -> Boolean,
+    val awaitLoaded: suspend () -> Unit,
+)
+
+internal object ActivitySettingsLoadRegistry {
+    private val lock = Any()
+    private val entries = ArrayList<Pair<WeakReference<StateFlow<ActivityMonitorSettings>>, ActivitySettingsLoadGate>>()
+
+    fun register(
+        flow: StateFlow<ActivityMonitorSettings>,
+        gate: ActivitySettingsLoadGate,
+    ) {
+        synchronized(lock) {
+            entries.removeAll { it.first.get() == null || it.first.get() === flow }
+            entries.add(WeakReference(flow) to gate)
+        }
+    }
+
+    fun find(flow: Any): ActivitySettingsLoadGate? {
+        synchronized(lock) {
+            val iterator = entries.iterator()
+            while (iterator.hasNext()) {
+                val (ref, gate) = iterator.next()
+                val target = ref.get()
+                if (target == null) {
+                    iterator.remove()
+                } else if (target === flow) {
+                    return gate
+                }
+            }
+            return null
+        }
+    }
+}
 
 @Serializable
 internal data class ActivityMonitorStoreSnapshot(
@@ -64,7 +101,15 @@ class ActivityPreferencesStore(
     private var state: ActivityMonitorStoreSnapshot = ActivityMonitorStoreSnapshot()
 
     private val _settingsFlow = MutableStateFlow(state.settings.normalized())
-    val settingsFlow: StateFlow<ActivityMonitorSettings> = _settingsFlow.asStateFlow()
+    val settingsFlow: StateFlow<ActivityMonitorSettings> = _settingsFlow.asStateFlow().also { flow ->
+        ActivitySettingsLoadRegistry.register(
+            flow = flow,
+            gate = ActivitySettingsLoadGate(
+                isLoaded = { loaded },
+                awaitLoaded = { ensureLoaded() },
+            ),
+        )
+    }
 
     val currentBaselineInitialized: Boolean
         get() = state.baselineInitialized

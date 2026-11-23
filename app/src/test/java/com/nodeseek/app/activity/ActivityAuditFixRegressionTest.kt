@@ -2,12 +2,16 @@ package com.nodeseek.app.activity
 
 import android.content.Context
 import android.content.ContextWrapper
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ListenableWorker
+import androidx.work.PeriodicWorkRequest
 import androidx.work.testing.TestListenableWorkerBuilder
 import com.nodeseek.app.data.activity.ActivityMonitorControllerImpl
 import com.nodeseek.app.data.activity.ActivityMonitorHost
 import com.nodeseek.app.data.activity.ActivityMonitorWorker
 import com.nodeseek.app.data.activity.ActivityPreferencesStore
+import com.nodeseek.app.data.activity.ActivityWorkManagerGateway
+import com.nodeseek.app.data.activity.ActivityWorkScheduler
 import com.nodeseek.app.data.activity.ForumWatchActivityApiClient
 import com.nodeseek.app.data.activity.ForumWatchActivityRepositoryImpl
 import com.nodeseek.app.data.activity.ForumWatchActivitySecretVault
@@ -21,11 +25,14 @@ import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityDetail
 import com.nodeseek.app.domain.activity.ForumWatchActivityItem
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -276,5 +283,58 @@ class ActivityAuditFixRegressionTest {
         }
         val worker = TestListenableWorkerBuilder<ActivityMonitorWorker>(coldHostContext).build()
         assertEquals(ListenableWorker.Result.retry(), worker.doWork())
+    }
+
+    @Test
+    fun activityWorkSchedulerObserveAwaitsLazyDiskLoadAndNeverCancelsPersistedEnabledWork() = runTest {
+        val storeFile = File(tempFolder.root, "activity_cold_start_prefs.json")
+        val seedStore = ActivityPreferencesStore(
+            storeFile = storeFile,
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+        seedStore.setNotificationsEnabled(enabled = true, seedBaselineIds = listOf("act-1"))
+        assertTrue(seedStore.getSettings().notificationsEnabled)
+
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val coldStore = ActivityPreferencesStore(
+            storeFile = storeFile,
+            ioDispatcher = ioDispatcher,
+        )
+        assertFalse("Fresh lazy store starts unloaded with default false", coldStore.settingsFlow.value.notificationsEnabled)
+
+        var enqueueCount = 0
+        var cancelCount = 0
+        val gateway = object : ActivityWorkManagerGateway {
+            override fun enqueueUniquePeriodicWork(
+                uniqueWorkName: String,
+                existingPeriodicWorkPolicy: ExistingPeriodicWorkPolicy,
+                request: PeriodicWorkRequest,
+            ) {
+                enqueueCount++
+            }
+
+            override fun cancelUniqueWork(uniqueWorkName: String) {
+                cancelCount++
+            }
+        }
+        val schedulerScope = CoroutineScope(ioDispatcher)
+        val scheduler = ActivityWorkScheduler(gateway)
+        try {
+            scheduler.observe(schedulerScope, coldStore.settingsFlow)
+            scheduler.onAppEnteredBackground(coldStore.settingsFlow.value)
+            advanceUntilIdle()
+
+            assertEquals("observe() must never cancelUniqueWork before lazy disk load completes", 0, cancelCount)
+            assertEquals(
+                "observe() should enqueue periodic work directly from persisted true " +
+                    "(enabled=${coldStore.settingsFlow.value.notificationsEnabled}, fileExists=${storeFile.exists()}, len=${storeFile.length()})",
+                1,
+                enqueueCount,
+            )
+            assertTrue(coldStore.settingsFlow.value.notificationsEnabled)
+        } finally {
+            scheduler.stopObserving()
+            schedulerScope.cancel()
+        }
     }
 }

@@ -362,12 +362,16 @@ class OverseasPromoMonitorTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val gateway = RecordingPromoWorkManagerGateway()
         val scheduler = OverseasPromoWorkScheduler(gateway)
+        val deterministicStore = OverseasPromoPreferencesStore(
+            storeFile = storeFile,
+            ioDispatcher = testDispatcher,
+        )
 
         val controllerScope = CoroutineScope(testDispatcher)
         fakeRepository.serverOffers = listOf(sampleOffer(id = "base-1"))
         val controller = OverseasPromoMonitorControllerImpl(
             repository = fakeRepository,
-            preferencesStore = preferencesStore,
+            preferencesStore = deterministicStore,
             notificationDispatcher = notificationSpy,
             scope = controllerScope,
             clockMillis = { fakeClockMillis },

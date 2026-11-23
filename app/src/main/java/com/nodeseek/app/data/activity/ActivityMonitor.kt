@@ -696,6 +696,9 @@ class ActivityWorkScheduler internal constructor(
     private val observerLock = Any()
     private var observerJob: Job? = null
 
+    @Volatile
+    private var observedLoadGate: ActivitySettingsLoadGate? = null
+
     private data class ScheduleSignature(
         val shouldSchedule: Boolean,
         val intervalMinutes: Long,
@@ -709,7 +712,10 @@ class ActivityWorkScheduler internal constructor(
     ) {
         synchronized(observerLock) {
             observerJob?.cancel()
+            val loadGate = ActivitySettingsLoadRegistry.find(settingsFlow)
+            observedLoadGate = loadGate
             observerJob = scope.launch {
+                loadGate?.awaitLoaded?.invoke()
                 settingsFlow
                     .map { settings -> settings to toSignature(settings) }
                     .distinctUntilChanged { old, new -> old.second == new.second }
@@ -724,6 +730,7 @@ class ActivityWorkScheduler internal constructor(
         synchronized(observerLock) {
             observerJob?.cancel()
             observerJob = null
+            observedLoadGate = null
         }
     }
 
@@ -741,6 +748,12 @@ class ActivityWorkScheduler internal constructor(
     }
 
     fun onAppEnteredBackground(settings: ActivityMonitorSettings) {
+        val loadGate = observedLoadGate
+        if (loadGate != null && !loadGate.isLoaded()) {
+            // Avoid cancelling or overwriting WorkManager state with unloaded default settings;
+            // observe() will immediately sync once disk loading finishes.
+            return
+        }
         if (shouldSchedule(settings)) {
             val request = buildPeriodicWorkRequest(settings)
             workManagerGateway.enqueueUniquePeriodicWork(

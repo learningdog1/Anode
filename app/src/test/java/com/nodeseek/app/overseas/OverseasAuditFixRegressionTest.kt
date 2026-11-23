@@ -2,7 +2,9 @@ package com.nodeseek.app.overseas
 
 import android.content.Context
 import android.content.ContextWrapper
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ListenableWorker
+import androidx.work.PeriodicWorkRequest
 import androidx.work.testing.TestListenableWorkerBuilder
 import com.nodeseek.app.data.overseas.OverseasApiCrypto
 import com.nodeseek.app.data.overseas.OverseasApiSecretVault
@@ -11,6 +13,8 @@ import com.nodeseek.app.data.overseas.OverseasIntelRepositoryImpl
 import com.nodeseek.app.data.overseas.OverseasPromoMonitorControllerImpl
 import com.nodeseek.app.data.overseas.OverseasPromoMonitorHost
 import com.nodeseek.app.data.overseas.OverseasPromoPreferencesStore
+import com.nodeseek.app.data.overseas.OverseasPromoWorkManagerGateway
+import com.nodeseek.app.data.overseas.OverseasPromoWorkScheduler
 import com.nodeseek.app.data.overseas.OverseasPromoWorker
 import com.nodeseek.app.data.overseas.OverseasTranslator
 import com.nodeseek.app.data.overseas.TranslationTier
@@ -26,9 +30,11 @@ import com.nodeseek.app.domain.overseas.OverseasSyncStatus
 import com.nodeseek.app.domain.overseas.VpsGlossaryTranslator
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import com.nodeseek.app.ui.overseas.OverseasIntelViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -386,6 +392,56 @@ class OverseasAuditFixRegressionTest {
         }
         val worker = TestListenableWorkerBuilder<OverseasPromoWorker>(coldHostContext).build()
         assertEquals(ListenableWorker.Result.retry(), worker.doWork())
+    }
+
+    @Test
+    fun workSchedulerObserveAwaitsLazyDiskLoadAndNeverSyncsUnloadedDefaults() = runTest {
+        val storeFile = File(tempFolder.root, "overseas_cold_start_prefs.json")
+        val seedStore = OverseasPromoPreferencesStore(
+            storeFile = storeFile,
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+        // Overseas default is notificationsEnabled = true; persist false on disk to detect premature default sync.
+        seedStore.setNotificationsEnabled(enabled = false)
+        assertFalse(seedStore.getSettings().notificationsEnabled)
+
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val coldStore = OverseasPromoPreferencesStore(
+            storeFile = storeFile,
+            ioDispatcher = ioDispatcher,
+        )
+        assertTrue("Fresh lazy overseas store starts unloaded with default true", coldStore.settingsFlow.value.notificationsEnabled)
+
+        var enqueueCount = 0
+        var cancelCount = 0
+        val gateway = object : OverseasPromoWorkManagerGateway {
+            override fun enqueueUniquePeriodicWork(
+                uniqueWorkName: String,
+                existingPeriodicWorkPolicy: ExistingPeriodicWorkPolicy,
+                request: PeriodicWorkRequest,
+            ) {
+                enqueueCount++
+            }
+
+            override fun cancelUniqueWork(uniqueWorkName: String) {
+                cancelCount++
+            }
+        }
+        val schedulerScope = CoroutineScope(ioDispatcher)
+        val scheduler = OverseasPromoWorkScheduler(gateway)
+        try {
+            scheduler.observe(schedulerScope, coldStore.settingsFlow)
+            // Even an early background transition before disk load finishes must NOT enqueue with unloaded default true.
+            scheduler.onAppEnteredBackground(coldStore.settingsFlow.value)
+            advanceUntilIdle()
+
+            assertEquals("observe() must never enqueue periodic work from unloaded default true", 0, enqueueCount)
+            assertEquals("observe() should cancel work directly once persisted false is loaded", 1, cancelCount)
+            assertFalse(coldStore.settingsFlow.value.notificationsEnabled)
+        } finally {
+            scheduler.stopObserving()
+            schedulerScope.cancel()
+        }
     }
 
     @Test

@@ -197,6 +197,10 @@ class SellerTrustAuditFixRegressionTest {
         assertTrue("Stale expose snapshot should still flag known scammer", second.searchSucceeded)
         assertEquals(1, second.exposureSearchHits.size)
         assertEquals(TrustRiskLevel.HIGH_RISK_RED, second.riskAssessment.level)
+        assertTrue(
+            "Stale expose snapshot fallback should attach stale-snapshot hint",
+            second.riskAssessment.reasons.any { it.contains("历史曝光快照") },
+        )
     }
 
     @Test

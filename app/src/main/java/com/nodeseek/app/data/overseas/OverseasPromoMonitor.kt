@@ -667,6 +667,9 @@ class OverseasPromoWorkScheduler internal constructor(
     private val observerLock = Any()
     private var observerJob: Job? = null
 
+    @Volatile
+    private var observedLoadGate: OverseasPromoSettingsLoadGate? = null
+
     private data class ScheduleSignature(
         val shouldSchedule: Boolean,
         val intervalMinutes: Long,
@@ -680,7 +683,10 @@ class OverseasPromoWorkScheduler internal constructor(
     ) {
         synchronized(observerLock) {
             observerJob?.cancel()
+            val loadGate = OverseasPromoSettingsLoadRegistry.find(settingsFlow)
+            observedLoadGate = loadGate
             observerJob = scope.launch {
+                loadGate?.awaitLoaded?.invoke()
                 settingsFlow
                     .map { settings -> settings to toSignature(settings) }
                     .distinctUntilChanged { old, new -> old.second == new.second }
@@ -695,6 +701,7 @@ class OverseasPromoWorkScheduler internal constructor(
         synchronized(observerLock) {
             observerJob?.cancel()
             observerJob = null
+            observedLoadGate = null
         }
     }
 
@@ -716,6 +723,12 @@ class OverseasPromoWorkScheduler internal constructor(
      * if notifications were disabled.
      */
     fun onAppEnteredBackground(settings: OverseasPromoMonitorSettings) {
+        val loadGate = observedLoadGate
+        if (loadGate != null && !loadGate.isLoaded()) {
+            // Avoid cancelling or overwriting WorkManager state with unloaded default settings;
+            // observe() will immediately sync once disk loading finishes.
+            return
+        }
         if (shouldSchedule(settings)) {
             val request = buildPeriodicWorkRequest(settings)
             workManagerGateway.enqueueUniquePeriodicWork(

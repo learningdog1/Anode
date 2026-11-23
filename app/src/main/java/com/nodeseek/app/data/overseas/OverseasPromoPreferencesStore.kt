@@ -14,6 +14,43 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.lang.ref.WeakReference
+
+internal class OverseasPromoSettingsLoadGate(
+    val isLoaded: () -> Boolean,
+    val awaitLoaded: suspend () -> Unit,
+)
+
+internal object OverseasPromoSettingsLoadRegistry {
+    private val lock = Any()
+    private val entries = ArrayList<Pair<WeakReference<StateFlow<OverseasPromoMonitorSettings>>, OverseasPromoSettingsLoadGate>>()
+
+    fun register(
+        flow: StateFlow<OverseasPromoMonitorSettings>,
+        gate: OverseasPromoSettingsLoadGate,
+    ) {
+        synchronized(lock) {
+            entries.removeAll { it.first.get() == null || it.first.get() === flow }
+            entries.add(WeakReference(flow) to gate)
+        }
+    }
+
+    fun find(flow: Any): OverseasPromoSettingsLoadGate? {
+        synchronized(lock) {
+            val iterator = entries.iterator()
+            while (iterator.hasNext()) {
+                val (ref, gate) = iterator.next()
+                val target = ref.get()
+                if (target == null) {
+                    iterator.remove()
+                } else if (target === flow) {
+                    return gate
+                }
+            }
+            return null
+        }
+    }
+}
 
 @Serializable
 internal data class OverseasPromoStoreSnapshot(
@@ -64,7 +101,15 @@ class OverseasPromoPreferencesStore(
     private var state: OverseasPromoStoreSnapshot = OverseasPromoStoreSnapshot()
 
     private val _settingsFlow = MutableStateFlow(state.settings.normalized())
-    val settingsFlow: StateFlow<OverseasPromoMonitorSettings> = _settingsFlow.asStateFlow()
+    val settingsFlow: StateFlow<OverseasPromoMonitorSettings> = _settingsFlow.asStateFlow().also { flow ->
+        OverseasPromoSettingsLoadRegistry.register(
+            flow = flow,
+            gate = OverseasPromoSettingsLoadGate(
+                isLoaded = { loaded },
+                awaitLoaded = { ensureLoaded() },
+            ),
+        )
+    }
 
     val currentBaselineInitialized: Boolean
         get() = state.baselineInitialized
