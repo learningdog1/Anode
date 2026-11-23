@@ -34,12 +34,12 @@ import java.util.Locale
 object ActivityLotteryClassifier {
 
     private val URL_EXTRACT_REGEX = Regex(
-        pattern = """https?://[^\s<>"'\]\[()`\u3000-\u303F\uFF00-\uFFEF]+""",
+        pattern = """https?://[^\s<>"'\]\[()`*~\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]+""",
         option = RegexOption.IGNORE_CASE,
     )
 
     private val TRAILING_URL_PUNCTUATION = charArrayOf(
-        '.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '"', '\'',
+        '.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '"', '\'', '*', '~',
         '。', '，', '；', '：', '！', '？', '、', '）', '】', '》',
     )
 
@@ -348,7 +348,7 @@ object ActivityLotteryClassifier {
         if (raw.isNullOrBlank()) return null
         var trimmed = raw.trim()
             .replace("&amp;", "&", ignoreCase = true)
-            .trimStart('<', '(', '[', '"', '\'')
+            .trimStart('<', '(', '[', '"', '\'', '*', '~')
         while (trimmed.isNotEmpty() && trimmed.last() in TRAILING_URL_PUNCTUATION) {
             trimmed = trimmed.dropLast(1)
         }

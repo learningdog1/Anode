@@ -392,7 +392,9 @@ class ForumWatchActivityRepositoryImpl(
         _snapshot.update { prev ->
             val existing = prev.activities.firstOrNull { it.id == enrichedItem.id } ?: return@update prev
             val hasUpgrade = (existing.resolvedLotteryUrl == null && enrichedItem.resolvedLotteryUrl != null) ||
-                (existing.endsAtEpochMillis == null && enrichedItem.endsAtEpochMillis != null)
+                (existing.endsAtEpochMillis == null && enrichedItem.endsAtEpochMillis != null) ||
+                (existing.startsAtEpochMillis == null && enrichedItem.startsAtEpochMillis != null) ||
+                (existing.status != enrichedItem.status)
             if (!hasUpgrade) return@update prev
 
             val replaced = prev.activities.map { candidate ->
@@ -400,6 +402,8 @@ class ForumWatchActivityRepositoryImpl(
                     ActivityLotteryClassifier.normalizeItem(
                         candidate.copy(
                             kind = enrichedItem.kind,
+                            status = enrichedItem.status,
+                            startsAtEpochMillis = enrichedItem.startsAtEpochMillis ?: candidate.startsAtEpochMillis,
                             luckyUrl = enrichedItem.luckyUrl ?: candidate.luckyUrl,
                             endsAtEpochMillis = enrichedItem.endsAtEpochMillis ?: candidate.endsAtEpochMillis,
                         ),

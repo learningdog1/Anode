@@ -276,6 +276,34 @@ class ActivityLotteryClassifierTest {
     }
 
     @Test
+    fun `extracts clean lottery URL and draw time when adjacent to CJK characters or wrapped in Markdown emphasis`() {
+        val drawAt = 1_795_438_800_000L
+        val expectedUrl = "https://www.nodeseek.com/lucky?post=123&time=$drawAt"
+
+        // 1. Bare URL directly followed by Chinese text without whitespace
+        val cjkAdjacentText = "开奖地址：https://www.nodeseek.com/lucky?post=123&time=${drawAt}欢迎参与！"
+        val cjkExtracted = ActivityLotteryClassifier.findExplicitLotteryUrl(bodyMarkdown = cjkAdjacentText)
+        assertEquals(expectedUrl, cjkExtracted)
+        assertEquals(drawAt, ActivityLotteryClassifier.extractDrawTimeEpochMillis(cjkExtracted))
+
+        // 2. URL wrapped in Markdown bold (**...**)
+        val boldWrappedText = "请点击 **https://www.nodeseek.com/lucky?post=123&time=$drawAt** 查看开奖"
+        val boldExtracted = ActivityLotteryClassifier.findExplicitLotteryUrl(bodyMarkdown = boldWrappedText)
+        assertEquals(expectedUrl, boldExtracted)
+        assertEquals(drawAt, ActivityLotteryClassifier.extractDrawTimeEpochMillis(boldExtracted))
+
+        // 3. URL wrapped in Markdown strikethrough (~~...~~) and raw luckyUrl with emphasis markers
+        val strikeWrappedText = "~~https://www.nodeseek.com/lucky?post=123&time=$drawAt~~"
+        val strikeExtracted = ActivityLotteryClassifier.findExplicitLotteryUrl(summary = strikeWrappedText)
+        assertEquals(expectedUrl, strikeExtracted)
+        assertEquals(drawAt, ActivityLotteryClassifier.extractDrawTimeEpochMillis(strikeExtracted))
+        assertEquals(
+            expectedUrl,
+            ActivityLotteryClassifier.findExplicitLotteryUrl(luckyUrl = "**$expectedUrl**"),
+        )
+    }
+
+    @Test
     fun `legacy cached JSON without lottery-other counts or with no-link LOTTERY migrates cleanly on cold load and detail fetch upgrades snapshot`() = runTest {
         val nowMs = 1_795_402_000_000L
 
@@ -306,7 +334,7 @@ class ActivityLotteryClassifierTest {
                   "title": "抽奖器好像有bug",
                   "summary": "无开奖链接讨论帖",
                   "sourceUrl": "https://www.nodeseek.com/post-1073146-1",
-                  "status": "ongoing",
+                  "status": "ended",
                   "kind": "lottery",
                   "sourceId": "nodeseek",
                   "topicId": "1073146"
@@ -354,7 +382,9 @@ class ActivityLotteryClassifierTest {
         assertFalse(migratedDiscussion.isLottery)
 
         // When fetching detail for nodeseek:1073146 reveals an explicit lottery link in bodyMarkdown,
-        // the repository promotes it in the live snapshot and updates counts!
+        // along with fresh status ("ongoing") and future startsAtEpochMillis, the repository promotes it
+        // in the live snapshot and syncs status/startsAtEpochMillis/counts so list & detail agree!
+        val futureStartMs = nowMs + 1_800_000L
         val enrichedDetailJson = """
             {
               "ok": true,
@@ -365,6 +395,7 @@ class ActivityLotteryClassifierTest {
                 "title": "补上了开奖链接的活动",
                 "summary": "现已补充开奖链接",
                 "sourceUrl": "https://www.nodeseek.com/post-1073146-1",
+                "startsAtEpochMillis": $futureStartMs,
                 "status": "ongoing",
                 "kind": "event",
                 "sourceId": "nodeseek",
@@ -383,8 +414,18 @@ class ActivityLotteryClassifierTest {
         val detail = repo.getActivityDetail("nodeseek:1073146").getOrThrow()
         assertTrue(detail.item.isLottery)
         assertEquals(ActivityKind.LOTTERY, detail.item.kind)
+        assertEquals(futureStartMs, detail.item.startsAtEpochMillis)
         assertEquals(nowMs + 7_200_000L, detail.item.endsAtEpochMillis)
+        assertEquals(ActivityTimeStatus.UPCOMING, detail.item.resolveLotteryStatusOrNull(nowMs))
+
+        val syncedInSnapshot = repo.snapshot.value.activities.first { it.id == "nodeseek:1073146" }
+        assertEquals(ActivityTimeStatus.ONGOING, syncedInSnapshot.status)
+        assertEquals(futureStartMs, syncedInSnapshot.startsAtEpochMillis)
+        assertEquals(ActivityTimeStatus.UPCOMING, syncedInSnapshot.resolveLotteryStatusOrNull(nowMs))
         assertEquals(2, repo.snapshot.value.counts.lottery)
+        assertEquals(1, repo.snapshot.value.counts.ongoing)
+        assertEquals(1, repo.snapshot.value.counts.upcoming)
+        assertEquals(0, repo.snapshot.value.counts.ended)
         assertEquals(0, repo.snapshot.value.counts.other)
     }
 
