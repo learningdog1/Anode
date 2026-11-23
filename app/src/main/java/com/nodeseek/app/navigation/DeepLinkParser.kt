@@ -22,6 +22,8 @@ sealed interface NodePulseDeepLink {
         val uid: Long,
     ) : NodePulseDeepLink
 
+    data object CuratedFeed : NodePulseDeepLink
+
     data object CheckInBoard : NodePulseDeepLink
 
     data object Inbox : NodePulseDeepLink
@@ -98,10 +100,11 @@ object DeepLinkParser {
             return NodePulseDeepLink.UserSpace(uid = uid)
         }
 
+        val normalizedPath = if (path.length > 1) path.trimEnd('/') else path
         return when {
-            path.equals("/award", ignoreCase = true) -> NodePulseDeepLink.CategoryBoard(slug = "")
-            path.equals("/board", ignoreCase = true) -> NodePulseDeepLink.CheckInBoard
-            path.equals("/notification", ignoreCase = true) -> NodePulseDeepLink.Inbox
+            normalizedPath.equals("/award", ignoreCase = true) -> NodePulseDeepLink.CuratedFeed
+            normalizedPath.equals("/board", ignoreCase = true) -> NodePulseDeepLink.CheckInBoard
+            normalizedPath.equals("/notification", ignoreCase = true) -> NodePulseDeepLink.Inbox
             else -> null
         }
     }

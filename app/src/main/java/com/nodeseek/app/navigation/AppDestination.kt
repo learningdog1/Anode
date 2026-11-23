@@ -151,6 +151,7 @@ data class MyServersRoute(
     val importName: String = "",
     val importPrice: String = "",
     val importUrl: String = "",
+    val highlightAssetId: String = "",
 ) : AppDestination
 
 @Serializable
