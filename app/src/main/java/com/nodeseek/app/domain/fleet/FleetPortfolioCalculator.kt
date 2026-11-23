@@ -82,11 +82,16 @@ object FleetPortfolioCalculator {
         cyclePreset: BillingCyclePreset,
         customCycleDays: Int? = null,
         cycleCount: Int = 1,
+        anchorDayOfMonth: Int? = null,
     ): LocalDate {
         val safeCycles = cycleCount.coerceAtLeast(1).toLong()
         val monthsPerCycle = monthsForCyclePreset(cyclePreset)
         return if (monthsPerCycle != null) {
-            baseDate.plusMonths(monthsPerCycle.toLong() * safeCycles)
+            addMonthsPreservingAnchor(
+                baseDate = baseDate,
+                totalMonths = monthsPerCycle.toLong() * safeCycles,
+                anchorDayOfMonth = anchorDayOfMonth,
+            )
         } else {
             val stepDays = (customCycleDays ?: 365).coerceAtLeast(1).toLong()
             baseDate.plusDays(stepDays * safeCycles)
@@ -108,12 +113,20 @@ object FleetPortfolioCalculator {
         cyclePreset: BillingCyclePreset,
         customCycleDays: Int? = null,
         today: LocalDate = VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)),
+        anchorDayOfMonth: Int? = null,
     ): Pair<LocalDate, Int> {
         if (currentExpiryDate == null) {
-            return advanceDateByCycles(today, cyclePreset, customCycleDays, 1) to 1
+            return advanceDateByCycles(today, cyclePreset, customCycleDays, 1, anchorDayOfMonth) to 1
         }
+        val effectiveAnchor = anchorDayOfMonth?.takeIf { it in 1..31 } ?: currentExpiryDate.dayOfMonth
         if (currentExpiryDate.isAfter(today)) {
-            return advanceDateByCycles(currentExpiryDate, cyclePreset, customCycleDays, 1) to 1
+            return advanceDateByCycles(
+                baseDate = currentExpiryDate,
+                cyclePreset = cyclePreset,
+                customCycleDays = customCycleDays,
+                cycleCount = 1,
+                anchorDayOfMonth = effectiveAnchor,
+            ) to 1
         }
 
         val monthsPerCycle = monthsForCyclePreset(cyclePreset)
@@ -121,13 +134,16 @@ object FleetPortfolioCalculator {
             val approxMonths = ((today.year - currentExpiryDate.year).toLong() * 12L) +
                 (today.monthValue - currentExpiryDate.monthValue).toLong()
             var cycles = (approxMonths / monthsPerCycle.toLong()).coerceAtLeast(1L)
-            while (cycles > 1L && currentExpiryDate.plusMonths((cycles - 1L) * monthsPerCycle).isAfter(today)) {
+            while (
+                cycles > 1L &&
+                addMonthsPreservingAnchor(currentExpiryDate, (cycles - 1L) * monthsPerCycle, effectiveAnchor).isAfter(today)
+            ) {
                 cycles--
             }
-            while (!currentExpiryDate.plusMonths(cycles * monthsPerCycle).isAfter(today)) {
+            while (!addMonthsPreservingAnchor(currentExpiryDate, cycles * monthsPerCycle, effectiveAnchor).isAfter(today)) {
                 cycles++
             }
-            val nextDate = currentExpiryDate.plusMonths(cycles * monthsPerCycle)
+            val nextDate = addMonthsPreservingAnchor(currentExpiryDate, cycles * monthsPerCycle, effectiveAnchor)
             return nextDate to cycles.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
 
@@ -148,15 +164,21 @@ object FleetPortfolioCalculator {
         isAutoRolled: Boolean = false,
     ): AssetRenewalResult {
         val currentExpiry = parseExpiryDate(asset.expiryDateIso)
+        val effectiveAnchor = asset.billingAnchorDay?.takeIf { it in 1..31 }
+            ?: currentExpiry?.dayOfMonth
+            ?: today.dayOfMonth
         val (nextExpiry, cyclesAdvanced) = computeNextRenewalDate(
             currentExpiryDate = currentExpiry,
             cyclePreset = asset.cyclePreset,
             customCycleDays = asset.customCycleDays,
             today = today,
+            anchorDayOfMonth = effectiveAnchor,
         )
         val nextExpiryIso = DateTimeFormatter.ISO_LOCAL_DATE.format(nextExpiry)
+        val nextAnchorDay = if (monthsForCyclePreset(asset.cyclePreset) != null) effectiveAnchor else null
         val updated = asset.copy(
             expiryDateIso = nextExpiryIso,
+            billingAnchorDay = nextAnchorDay,
             updatedAtEpochMillis = nowEpochMillis,
         )
         return AssetRenewalResult(
@@ -166,6 +188,16 @@ object FleetPortfolioCalculator {
             cyclesAdvanced = cyclesAdvanced,
             isAutoRolled = isAutoRolled,
         )
+    }
+
+    private fun addMonthsPreservingAnchor(
+        baseDate: LocalDate,
+        totalMonths: Long,
+        anchorDayOfMonth: Int?,
+    ): LocalDate {
+        val shifted = baseDate.plusMonths(totalMonths)
+        val anchor = anchorDayOfMonth?.takeIf { it in 1..31 } ?: return shifted
+        return shifted.withDayOfMonth(minOf(anchor, shifted.lengthOfMonth()))
     }
 
     /**
@@ -247,6 +279,7 @@ object FleetPortfolioCalculator {
                     cyclePreset = asset.cyclePreset,
                     customCycleDays = asset.customCycleDays,
                     today = today,
+                    anchorDayOfMonth = asset.billingAnchorDay,
                 )
                 renewals += UpcomingRenewalItem(
                     asset = asset,
@@ -323,7 +356,10 @@ object FleetPortfolioCalculator {
             upper.contains("S$") || upper.contains("SGD") -> ValuationCurrency.SGD
             upper.contains("C$") || upper.contains("CA$") || upper.contains("CAD") -> ValuationCurrency.CAD
             upper.contains("A$") || upper.contains("AU$") || upper.contains("AUD") -> ValuationCurrency.AUD
-            upper.contains("NT$") || upper.contains("TWD") -> ValuationCurrency.TWD
+            upper.contains("NT$") || upper.contains("TWD") || upper.contains("新台币") -> ValuationCurrency.TWD
+            upper.contains("₩") || upper.contains("KRW") || upper.contains("韩元") -> ValuationCurrency.KRW
+            upper.contains("CHF") || upper.contains("瑞郎") -> ValuationCurrency.CHF
+            upper.contains("₽") || upper.contains("RUB") || upper.contains("卢布") -> ValuationCurrency.RUB
             upper.contains("€") || upper.contains("EUR") -> ValuationCurrency.EUR
             upper.contains("£") || upper.contains("GBP") -> ValuationCurrency.GBP
             upper.contains("JPY") || upper.contains("日元") -> ValuationCurrency.JPY
@@ -349,7 +385,7 @@ object FleetPortfolioCalculator {
         }
     }
 
-    private val PRICE_AMOUNT_REGEX = Regex("""(?:HK\$|CA\$|AU\$|NT\$|S\$|C\$|A\$|[$€£¥￥]|USD|EUR|GBP|CNY|RMB)\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|CNY|RMB|HKD|SGD|CAD|AUD|JPY|刀|元)""", RegexOption.IGNORE_CASE)
+    private val PRICE_AMOUNT_REGEX = Regex("""(?:HK\$|CA\$|AU\$|NT\$|S\$|C\$|A\$|[$€£¥￥₩₽]|USD|EUR|GBP|CNY|RMB|TWD|KRW|CHF|RUB)\s*(\d+(?:\.\d{1,2})?)|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|CNY|RMB|HKD|SGD|CAD|AUD|JPY|TWD|KRW|CHF|RUB|刀|元|韩元|瑞郎|卢布)""", RegexOption.IGNORE_CASE)
     private val GENERIC_NUMBER_REGEX = Regex("""\b(\d+(?:\.\d{1,2})?)\b""")
 
     private fun extractDecimalAmount(text: String): String? {
