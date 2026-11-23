@@ -150,7 +150,8 @@ class ExchangeRateRepository(
      * in-flight request) and gracefully falls back on failure.
      */
     suspend fun ensureFreshRates(force: Boolean = false): FxRefreshOutcome = withContext(ioDispatcher) {
-        while (true) {
+        var resolvedOutcome: FxRefreshOutcome? = null
+        while (resolvedOutcome == null) {
             val now = nowMillisProvider()
             var earlyState: FxRatesState? = null
             var existingDeferred: CompletableDeferred<FxRefreshOutcome?>? = null
@@ -184,24 +185,26 @@ class ExchangeRateRepository(
             }
 
             if (earlyState != null) {
-                return@withContext FxRefreshOutcome.Success(state = earlyState!!, fromCache = true)
+                resolvedOutcome = FxRefreshOutcome.Success(state = earlyState!!, fromCache = true)
+                continue
             }
 
             val joinTarget = existingDeferred
             if (joinTarget != null) {
                 val joinedOutcome = joinTarget.await()
                 if (joinedOutcome != null) {
-                    return@withContext joinedOutcome
+                    resolvedOutcome = joinedOutcome
                 }
-                // Previous leader was cancelled before completion; retry cleanly.
+                // If previous leader was cancelled before completion (null), loop and retry cleanly.
                 continue
             }
 
             val leaderDeferred = ownDeferred!!
             var completedOutcome: FxRefreshOutcome? = null
             try {
-                completedOutcome = fetchAndPersistOnlineRates()
-                return@withContext completedOutcome
+                val outcome = fetchAndPersistOnlineRates()
+                completedOutcome = outcome
+                resolvedOutcome = outcome
             } finally {
                 withContext(NonCancellable) {
                     mutex.withLock {
@@ -221,6 +224,7 @@ class ExchangeRateRepository(
                 }
             }
         }
+        resolvedOutcome
     }
 
     /**

@@ -143,6 +143,9 @@ class RestockRepositoryImpl(
             val existing = currentList.firstOrNull { it.id == item.id }
             val urlChanged = existing != null &&
                 !normalizedUrl.equals(existing.resolvedOrderUrl, ignoreCase = true)
+            val needsTargetReset = urlChanged &&
+                item.lastCheckedEpochMillis == existing?.lastCheckedEpochMillis
+            val effectiveStatus = if (needsTargetReset) RestockStockStatus.UNKNOWN else item.stockStatus
 
             val normalizedItem = item.copy(
                 id = item.id.ifBlank { UUID.randomUUID().toString() },
@@ -154,9 +157,14 @@ class RestockRepositoryImpl(
                 customInStockKeyword = item.customInStockKeyword.trim(),
                 customOutOfStockKeyword = item.customOutOfStockKeyword.trim(),
                 pollIntervalMinutes = RestockWatchItem.clampPollInterval(item.pollIntervalMinutes),
+                stockStatus = effectiveStatus,
+                lastCheckedEpochMillis = if (needsTargetReset) 0L else item.lastCheckedEpochMillis,
+                consecutiveErrors = if (needsTargetReset) 0 else item.consecutiveErrors,
+                lastErrorMessage = if (needsTargetReset) null else item.lastErrorMessage,
                 alertWaveArmed = when {
-                    item.stockStatus == RestockStockStatus.OUT_OF_STOCK -> true
-                    item.stockStatus == RestockStockStatus.IN_STOCK -> false
+                    needsTargetReset -> false
+                    effectiveStatus == RestockStockStatus.OUT_OF_STOCK -> true
+                    effectiveStatus == RestockStockStatus.IN_STOCK -> false
                     urlChanged -> item.alertWaveArmed
                     else -> existing?.alertWaveArmed ?: item.alertWaveArmed
                 },

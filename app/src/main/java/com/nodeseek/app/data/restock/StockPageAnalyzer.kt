@@ -311,7 +311,7 @@ class StockPageAnalyzer(
                         checkedAt = checkedAt,
                         failure = FlareSolverrOutcome.Failure(
                             reason = "解盾后页面仍停留在 Cloudflare 安全验证 (HTTP $solvedStatus)",
-                            isTransient = true,
+                            isTransient = false,
                         ),
                     )
                 }
@@ -1094,12 +1094,17 @@ class StockPageAnalyzer(
         body: String,
     ): Boolean {
         if (cfMitigatedHeader.equals("challenge", ignoreCase = true)) return true
-        if (statusCode != 403 && statusCode != 503) return false
         val lower = body.lowercase()
-        return lower.contains("just a moment...") ||
-            lower.contains("cf-turnstile") ||
-            lower.contains("cdn-cgi/challenge-platform") ||
-            lower.contains("attention required! | cloudflare")
+        val hasStrongInterstitialMarker = lower.contains("cdn-cgi/challenge-platform") ||
+            lower.contains("attention required! | cloudflare") ||
+            lower.contains("<title>just a moment...</title>")
+        if (statusCode == 200) {
+            return hasStrongInterstitialMarker
+        }
+        if (statusCode != 403 && statusCode != 503) return false
+        return hasStrongInterstitialMarker ||
+            lower.contains("just a moment...") ||
+            lower.contains("cf-turnstile")
     }
 
     private fun readBoundedBody(response: okhttp3.Response): String {
@@ -1130,8 +1135,8 @@ class StockPageAnalyzer(
             Regex("""(?:available|stock|qty|quantity)\s*[:：]\s*(\d+)\b""", RegexOption.IGNORE_CASE),
             // Explicit Chinese stock prefixes (库存/可用库存/剩余库存/可售) exclude non-stock units like 天/元/GB/%
             Regex("""(?:可用库存|剩余库存|库存|可售)\s*[:：]?\s*(\d+)(?!\s*(?:天|日|小时|时|分|分钟|秒|周|月|年|元|块|刀|美元|美金|港币|港元|欧元|英镑|日元|CNY|USD|EUR|GBP|GB|TB|MB|KB|GiB|TiB|MiB|G|M|T|%|次|张|折))\s*(?:台|件|个|份|席|名额)?""", RegexOption.IGNORE_CASE),
-            // Generic "剩余" must carry an explicit inventory unit (台/件/个/份/席/名额) and not be preceded by coupon/balance/traffic terms
-            Regex("""(?<!余额|优惠券|折扣券|代金券|活动|倒计时|流量|带宽|时间|天数|免费备份)剩余\s*[:：]?\s*(\d+)\s*(?:台|件|份|席|名额)(?!\s*(?:天|日|小时|元|GB|TB|MB|%|次|张))"""),
+            // Generic "剩余/仅剩" must carry an explicit inventory unit (台/件/份/席/名额) and not be preceded by coupon/balance/traffic terms
+            Regex("""(?<!余额|优惠券|折扣券|代金券|活动|倒计时|流量|带宽|时间|天数|免费备份)(?:剩余|仅剩)\s*[:：]?\s*(\d+)\s*(?:台|件|份|席|名额)(?!\s*(?:天|日|小时|元|GB|TB|MB|%|次|张))"""),
             Regex("""(?<![.\d%])(\d+)\s*(?:台|件|个|份|席|名额)?\s*(?:可用|可售)"""),
         )
 
