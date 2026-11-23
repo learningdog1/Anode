@@ -129,11 +129,14 @@ class MainActivity : ComponentActivity() {
         }
         if (targetIntent.action == FleetAlertNotifier.ACTION_OPEN_FLEET) {
             val tab = targetIntent.getStringExtra(FleetAlertNotifier.EXTRA_FLEET_TAB)
+            val assetId = targetIntent.getStringExtra(FleetAlertNotifier.EXTRA_ASSET_ID).orEmpty().trim()
             targetIntent.action = null
             targetIntent.removeExtra(FleetAlertNotifier.EXTRA_FLEET_TAB)
             targetIntent.removeExtra(FleetAlertNotifier.EXTRA_ASSET_ID)
-            val initialTab = if (tab == FleetAlertNotifier.EXTRA_TAB_ASSETS) 1 else 0
-            pendingShortcutDestination.trySend(MyServersRoute(initialTab = initialTab))
+            val initialTab = if (tab == FleetAlertNotifier.EXTRA_TAB_ASSETS || assetId.isNotEmpty()) 1 else 0
+            pendingShortcutDestination.trySend(
+                MyServersRoute(initialTab = initialTab, highlightAssetId = assetId),
+            )
             return
         }
         PulseNotificationDispatcher.parseOverseasPromoDestination(targetIntent)?.let { destination ->

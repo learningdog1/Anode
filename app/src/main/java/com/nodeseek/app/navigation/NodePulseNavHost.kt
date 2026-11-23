@@ -1803,8 +1803,6 @@ fun NodePulseNavHost(
                         },
                     )
                 }
-                // Integration note (P2-55 / #69): once fix/fleet merges `initialHighlightAssetId` on MyServersScreen,
-                // pass `initialHighlightAssetId = route.highlightAssetId.takeIf { it.isNotBlank() }`.
                 MyServersScreen(
                     onBack = safePopBackStack,
                     onCreateSalePost = { suggestedTitle, markdownBody ->
@@ -1818,6 +1816,7 @@ fun NodePulseNavHost(
                     } else {
                         MyServersTab.PROBES
                     },
+                    initialHighlightAssetId = route.highlightAssetId.takeIf { it.isNotBlank() },
                     pendingRestockPrefill = pendingImportPrefill,
                     onConsumeRestockPrefill = { pendingImportPrefill = null },
                 )
@@ -1839,6 +1838,11 @@ fun NodePulseNavHost(
                                 preferredPort = port,
                             )
                         }
+                        navController.navigate(LiteSshRoute) {
+                            launchSingleTop = true
+                        }
+                    },
+                    onNavigateToVault = {
                         navController.navigate(LiteSshRoute) {
                             launchSingleTop = true
                         }

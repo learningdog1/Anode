@@ -207,11 +207,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.CookieJar
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -257,16 +253,6 @@ class SettingsViewModel(
 
     private val transient = MutableStateFlow(TransientState())
     private val contentFilterPresetMutex = Mutex()
-    private val nodeImageVerifyClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(10L, TimeUnit.SECONDS)
-            .readTimeout(12L, TimeUnit.SECONDS)
-            .callTimeout(15L, TimeUnit.SECONDS)
-            .build()
-    }
 
     private val _events = Channel<String>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
@@ -430,22 +416,7 @@ class SettingsViewModel(
                 )
             }
             val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val request = Request.Builder()
-                        .url("https://api.nodeimage.com/api/v1/images")
-                        .get()
-                        .header("X-API-Key", candidate)
-                        .header("Accept", "application/json")
-                        .build()
-                    nodeImageVerifyClient.newCall(request).execute().use { response ->
-                        when (response.code) {
-                            in 200..299 -> Unit
-                            401, 403 -> throw IllegalStateException("API Key 无效或已失效 (HTTP ${response.code})")
-                            in 300..399 -> throw IllegalStateException("图床接口发生异常重定向，已中止以防密钥泄漏")
-                            else -> throw IllegalStateException("图床服务返回异常状态 (HTTP ${response.code})")
-                        }
-                    }
-                }
+                container.imageHostRepository.verifyApiKey(candidate)
             }
             result
                 .onSuccess {

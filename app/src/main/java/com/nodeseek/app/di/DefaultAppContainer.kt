@@ -199,6 +199,11 @@ class DefaultAppContainer(
             sessionRepo.onChallengeClearedOrAuthenticated = {
                 forumRepositoryImpl.clearRssFallbackCache()
             }
+            sessionRepo.onSignedOutCallback = {
+                applicationScope.launch {
+                    runCatching { blockedUsersCache.clear() }
+                }
+            }
         }
     }
 
@@ -276,7 +281,10 @@ class DefaultAppContainer(
     }
 
     private val blockedUsersCache: BlockedUsersCache by lazy {
-        DataStoreBlockedUsersCache(appContext)
+        DataStoreBlockedUsersCache(
+            context = appContext,
+            accountUidProvider = { sessionRepositoryImpl.sessionState.value?.uid ?: 0L },
+        )
     }
 
     override val userRepository: UserRepository by lazy {
@@ -602,6 +610,7 @@ class DefaultAppContainer(
                     errorDetail = errorDetail,
                 )
             },
+            baseHttpClient = apiHttpClient,
         )
     }
 
