@@ -95,6 +95,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nodeseek.app.data.valuation.CurrencyRateQuote
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
@@ -370,8 +371,12 @@ fun VpsValuationBottomSheet(
         )
     }
 
-    val fxSourceNote = remember(activeQuote, fxState.providerDate) {
-        buildFxSourceFootnote(activeQuote.source, fxState.providerDate)
+    val fxSourceNote = remember(activeQuote, fxState.providerDate, fxState.isCacheExpired) {
+        buildFxSourceFootnote(
+            source = activeQuote.source,
+            providerDate = fxState.providerDate,
+            isCacheExpired = fxState.isCacheExpired,
+        )
     }
 
     val generatedMarkdown = remember(outcome, markdownStyle, fxSourceNote) {
@@ -401,6 +406,8 @@ fun VpsValuationBottomSheet(
             // ── 1. Sheet Header ───────────────────────────────────────────────
             ValuationSheetHeader(
                 fxState = fxState,
+                selectedCurrency = currency,
+                activeQuote = activeQuote,
                 onRefreshRates = {
                     coroutineScope.launch { rateRepo.refreshOnline() }
                 },
@@ -476,6 +483,7 @@ fun VpsValuationBottomSheet(
                             source = activeQuote.source,
                             hasManualOverride = activeQuote.hasManualOverride,
                             providerDate = fxState.providerDate,
+                            isCacheExpired = fxState.isCacheExpired,
                             lastSyncError = fxState.lastSyncError,
                             onEditRate = { fxEditCurrency = currency },
                             onResetOverride = {
@@ -1197,6 +1205,8 @@ fun VpsValuationBottomSheet(
 @Composable
 private fun ValuationSheetHeader(
     fxState: FxRatesState,
+    selectedCurrency: ValuationCurrency,
+    activeQuote: CurrencyRateQuote,
     onRefreshRates: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -1235,14 +1245,27 @@ private fun ValuationSheetHeader(
             )
             val fxStatusLabel = when {
                 fxState.isRefreshing -> "正在同步 Frankfurter 实时汇率…"
+                !selectedCurrency.supportsOnlineSync && !activeQuote.hasManualOverride ->
+                    "${selectedCurrency.code} 不受 Frankfurter 在线源支持 · 使用内置参考汇率"
                 !fxState.lastSyncError.isNullOrBlank() -> fxState.lastSyncError!!
+                fxState.isCacheExpired && fxState.providerDate != null ->
+                    "汇率基准 ${fxState.providerDate} · 缓存已超 24h，请刷新"
                 fxState.providerDate != null -> "汇率基准 ${fxState.providerDate} · 24h 本地缓存"
                 else -> "当前使用内置离线参考汇率"
+            }
+            val fxStatusColor = if (
+                (!selectedCurrency.supportsOnlineSync && !activeQuote.hasManualOverride) ||
+                fxState.isCacheExpired ||
+                !fxState.lastSyncError.isNullOrBlank()
+            ) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
             }
             Text(
                 text = fxStatusLabel,
                 style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = fxStatusColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1479,7 +1502,7 @@ private fun StickyValuationTelemetryCard(
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    val pctText = String.format(Locale.US, "%.1f%%", result.remainingRatio * 100f)
+                    val pctText = "${result.remainingRatioPercent.toPlainString()}%"
                     Text(
                         text = pctText,
                         style = NodePulseThemeTokens.extraTypography.tabularBadge,
@@ -1626,6 +1649,7 @@ private fun FxRateStrip(
     source: FxRateSource,
     hasManualOverride: Boolean,
     providerDate: String?,
+    isCacheExpired: Boolean,
     lastSyncError: String?,
     onEditRate: () -> Unit,
     onResetOverride: () -> Unit,
@@ -1668,10 +1692,21 @@ private fun FxRateStrip(
                 } else {
                     ""
                 }
+                val isStaleCache = source == FxRateSource.ONLINE_CACHED && isCacheExpired
+                val isOfflineUnsupported = !currency.supportsOnlineSync && !hasManualOverride
+                val sourceDescription = when {
+                    isOfflineUnsupported -> "来源：${source.label}（不支持在线同步，建议手动校准）"
+                    isStaleCache -> "来源：本地缓存（已超 24h 过期）$dateNote"
+                    else -> "来源：${source.label}$dateNote"
+                }
                 Text(
-                    text = "来源：${source.label}$dateNote",
+                    text = sourceDescription,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isStaleCache || isOfflineUnsupported) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
 
@@ -2007,8 +2042,13 @@ private fun CurrencyPickerDialog(
                             },
                         )
                         if (item != ValuationCurrency.CNY) {
+                            val syncTag = if (!item.supportsOnlineSync && !quote.hasManualOverride) {
+                                "${quote.source.label}·不支持在线同步"
+                            } else {
+                                quote.source.label
+                            }
                             Text(
-                                text = "1 ${item.code} = ¥${VpsValuationEngine.formatFxRate(quote.rateToCny)} (${quote.source.label})",
+                                text = "1 ${item.code} = ¥${VpsValuationEngine.formatFxRate(quote.rateToCny)} ($syncTag)",
                                 style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                 color = if (isSelected) {
                                     MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f)
@@ -2230,11 +2270,14 @@ private fun evaluateValuationForm(
 private fun buildFxSourceFootnote(
     source: FxRateSource,
     providerDate: String?,
+    isCacheExpired: Boolean = false,
 ): String = when (source) {
     FxRateSource.MANUAL_OVERRIDE -> "手动校准"
-    FxRateSource.ONLINE_FRESH,
-    FxRateSource.ONLINE_CACHED,
-    -> if (!providerDate.isNullOrBlank()) "Frankfurter $providerDate" else "在线汇率"
+    FxRateSource.ONLINE_FRESH -> if (!providerDate.isNullOrBlank()) "Frankfurter $providerDate" else "在线汇率"
+    FxRateSource.ONLINE_CACHED -> {
+        val base = if (!providerDate.isNullOrBlank()) "Frankfurter $providerDate" else "本地缓存"
+        if (isCacheExpired) "$base · 缓存已过期" else base
+    }
     FxRateSource.OFFLINE_DEFAULT -> "内置参考汇率"
 }
 

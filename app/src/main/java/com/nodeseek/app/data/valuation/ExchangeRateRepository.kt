@@ -3,8 +3,10 @@ package com.nodeseek.app.data.valuation
 import android.content.Context
 import com.nodeseek.app.domain.valuation.FxRateSource
 import com.nodeseek.app.domain.valuation.ValuationCurrency
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,6 +53,7 @@ data class FxRatesState(
     val fetchedAtEpochMillis: Long = 0L,
     val providerDate: String? = null,
     val isRefreshing: Boolean = false,
+    val isCacheExpired: Boolean = false,
     val lastSyncError: String? = null,
 ) {
     fun quoteFor(currency: ValuationCurrency): CurrencyRateQuote =
@@ -112,6 +115,7 @@ class ExchangeRateRepository(
     private val mutex = Mutex()
     private var diskLoaded = false
     private var cachedPayload = ValuationFxCachePayload()
+    private var inFlightRefresh: CompletableDeferred<FxRefreshOutcome?>? = null
 
     private val _state = MutableStateFlow(
         buildFxRatesState(
@@ -132,7 +136,7 @@ class ExchangeRateRepository(
             val next = buildFxRatesState(
                 payload = cachedPayload,
                 isOnlineFresh = isCacheFreshLocked(nowMillisProvider()),
-                isRefreshing = false,
+                isRefreshing = inFlightRefresh != null,
                 lastSyncError = _state.value.lastSyncError,
             )
             _state.value = next
@@ -142,28 +146,81 @@ class ExchangeRateRepository(
 
     /**
      * Ensures exchange rates are reasonably fresh (< 24h). Uses persisted disk cache when still
-     * within TTL; otherwise fetches from Frankfurter and gracefully falls back on failure.
+     * within TTL; otherwise fetches from Frankfurter (coalescing concurrent calls into a single
+     * in-flight request) and gracefully falls back on failure.
      */
     suspend fun ensureFreshRates(force: Boolean = false): FxRefreshOutcome = withContext(ioDispatcher) {
-        val now = nowMillisProvider()
-        val earlyState = mutex.withLock {
-            ensureDiskLoadedLocked()
-            val fresh = isCacheFreshLocked(now)
-            val currentState = buildFxRatesState(
-                payload = cachedPayload,
-                isOnlineFresh = fresh,
-                isRefreshing = force || !fresh,
-                lastSyncError = if (force) null else _state.value.lastSyncError,
-            )
-            _state.value = currentState
-            if (!force && fresh) currentState else null
-        }
+        while (true) {
+            val now = nowMillisProvider()
+            var earlyState: FxRatesState? = null
+            var existingDeferred: CompletableDeferred<FxRefreshOutcome?>? = null
+            var ownDeferred: CompletableDeferred<FxRefreshOutcome?>? = null
 
-        if (earlyState != null) {
-            return@withContext FxRefreshOutcome.Success(state = earlyState, fromCache = true)
-        }
+            mutex.withLock {
+                ensureDiskLoadedLocked()
+                val fresh = isCacheFreshLocked(now)
+                if (!force && fresh) {
+                    val currentState = buildFxRatesState(
+                        payload = cachedPayload,
+                        isOnlineFresh = true,
+                        isRefreshing = inFlightRefresh != null,
+                        lastSyncError = _state.value.lastSyncError,
+                    )
+                    _state.value = currentState
+                    earlyState = currentState
+                } else if (inFlightRefresh != null) {
+                    existingDeferred = inFlightRefresh
+                } else {
+                    val created = CompletableDeferred<FxRefreshOutcome?>()
+                    inFlightRefresh = created
+                    ownDeferred = created
+                    _state.value = buildFxRatesState(
+                        payload = cachedPayload,
+                        isOnlineFresh = fresh,
+                        isRefreshing = true,
+                        lastSyncError = if (force) null else _state.value.lastSyncError,
+                    )
+                }
+            }
 
-        fetchAndPersistOnlineRates()
+            if (earlyState != null) {
+                return@withContext FxRefreshOutcome.Success(state = earlyState!!, fromCache = true)
+            }
+
+            val joinTarget = existingDeferred
+            if (joinTarget != null) {
+                val joinedOutcome = joinTarget.await()
+                if (joinedOutcome != null) {
+                    return@withContext joinedOutcome
+                }
+                // Previous leader was cancelled before completion; retry cleanly.
+                continue
+            }
+
+            val leaderDeferred = ownDeferred!!
+            var completedOutcome: FxRefreshOutcome? = null
+            try {
+                completedOutcome = fetchAndPersistOnlineRates()
+                return@withContext completedOutcome
+            } finally {
+                withContext(NonCancellable) {
+                    mutex.withLock {
+                        if (inFlightRefresh === leaderDeferred) {
+                            inFlightRefresh = null
+                        }
+                        if (completedOutcome == null && _state.value.isRefreshing && inFlightRefresh == null) {
+                            _state.value = buildFxRatesState(
+                                payload = cachedPayload,
+                                isOnlineFresh = isCacheFreshLocked(nowMillisProvider()),
+                                isRefreshing = false,
+                                lastSyncError = _state.value.lastSyncError,
+                            )
+                        }
+                    }
+                    leaderDeferred.complete(completedOutcome)
+                }
+            }
+        }
     }
 
     /**
@@ -411,11 +468,16 @@ class ExchangeRateRepository(
             )
         }
 
+        val isCacheExpired = payload.fetchedAtEpochMillis > 0L &&
+            payload.onlineRatesToCny.isNotEmpty() &&
+            !isOnlineFresh
+
         return FxRatesState(
             quotes = quotes,
             fetchedAtEpochMillis = payload.fetchedAtEpochMillis,
             providerDate = payload.providerDate,
             isRefreshing = isRefreshing,
+            isCacheExpired = isCacheExpired,
             lastSyncError = lastSyncError,
         )
     }
