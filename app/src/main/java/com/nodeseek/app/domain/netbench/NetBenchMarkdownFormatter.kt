@@ -67,26 +67,24 @@ object NetBenchMarkdownFormatter {
         rawReportForDefenseInDepth: NetBenchReport? = null,
     ): String {
         val protectedImageUrls = LinkedHashMap<String, String>()
+        val defenseScrubber: ((String) -> String)? = when {
+            rawReportForDefenseInDepth != null -> NetBenchReportSanitizer.createScrubber(
+                report = rawReportForDefenseInDepth,
+                maskTargetIp = sanitized.maskTargetIp,
+            )
+            sanitized.maskTargetIp -> { text -> NetBenchReportSanitizer.maskAnyRemainingIpLiterals(text) }
+            else -> null
+        }
         val rawMarkdown = when (options.style) {
             NetBenchMarkdownStyle.REPLY_CARD -> formatReplyCard(sanitized, options)
             NetBenchMarkdownStyle.FULL_TABLE -> formatFullTable(
                 sanitized = sanitized,
                 options = options,
                 protectedImageUrls = protectedImageUrls,
-                rawReport = rawReportForDefenseInDepth,
+                defenseScrubber = defenseScrubber,
             )
         }
-        var scrubbed = if (rawReportForDefenseInDepth != null) {
-            NetBenchReportSanitizer.scrubFinalOutput(
-                text = rawMarkdown,
-                report = rawReportForDefenseInDepth,
-                maskTargetIp = sanitized.maskTargetIp,
-            )
-        } else if (sanitized.maskTargetIp) {
-            NetBenchReportSanitizer.maskAnyRemainingIpLiterals(rawMarkdown)
-        } else {
-            rawMarkdown
-        }
+        var scrubbed = defenseScrubber?.invoke(rawMarkdown) ?: rawMarkdown
         for ((token, cleanUrl) in protectedImageUrls) {
             scrubbed = scrubbed.replace(token, cleanUrl)
         }
@@ -174,6 +172,7 @@ object NetBenchMarkdownFormatter {
                         add("峰值 `${formatMbps(dl.maxIntervalMbps)}`")
                         add("流量 `${formatBytes(dl.bytesTransferred)}`")
                         dl.stabilityPercent?.let { add("稳定度 `${formatPercent(it)}`") }
+                        dl.retransmits?.takeIf { it >= 0 }?.let { add("重传 `$it`") }
                     }.joinToString(" · ")
                     add("下载$dirStreams **${formatMbps(dl.effectiveMbps)}** ($extras)")
                 } else {
@@ -237,7 +236,7 @@ object NetBenchMarkdownFormatter {
         sanitized: SanitizedNetBenchReport,
         options: NetBenchMarkdownOptions,
         protectedImageUrls: MutableMap<String, String> = LinkedHashMap(),
-        rawReport: NetBenchReport? = null,
+        defenseScrubber: ((String) -> String)? = null,
     ): String {
         val timestamp = resolveTimestampLabel(options)
         val sb = StringBuilder()
@@ -247,15 +246,7 @@ object NetBenchMarkdownFormatter {
         sb.appendLine()
         sb.appendLine(buildEnvironmentBlockquote(sanitized, timestamp))
 
-        val cellScrubber: (String) -> String = { rawCell ->
-            if (rawReport != null) {
-                NetBenchReportSanitizer.scrubPublicText(rawCell, rawReport, sanitized.maskTargetIp)
-            } else if (sanitized.maskTargetIp) {
-                NetBenchReportSanitizer.maskAnyRemainingIpLiterals(rawCell)
-            } else {
-                rawCell
-            }
-        }
+        val cellScrubber: (String) -> String = defenseScrubber ?: { it }
 
         if (!sanitized.hasAnyResult) {
             sb.appendLine()
@@ -871,11 +862,13 @@ object NetBenchMarkdownFormatter {
 
         val summaryTuple = if (result.direction == Iperf3Direction.DOWNLOAD) {
             val srvMbps = result.serverMbps?.takeIf { it > 0.0 } ?: result.effectiveMbps
-            val srvBytes = if (result.serverMbps != null && result.serverMbps > 0.0) {
-                ((result.serverMbps * 1_000_000.0 * totalEndSec) / 8.0).toLong().coerceAtLeast(result.bytesTransferred)
-            } else {
-                result.bytesTransferred
-            }
+            val srvDurationSec = result.serverDurationSec?.takeIf { it > 0.0 } ?: totalEndSec
+            val srvBytes = result.serverBytesTransferred?.takeIf { it >= 0L }
+                ?: if (result.serverMbps != null && result.serverMbps > 0.0) {
+                    ((result.serverMbps * 1_000_000.0 * srvDurationSec) / 8.0).toLong().coerceAtLeast(result.bytesTransferred)
+                } else {
+                    result.bytesTransferred
+                }
             IperfSummaryTuple(
                 senderBytes = srvBytes,
                 senderMbps = srvMbps,
@@ -886,11 +879,13 @@ object NetBenchMarkdownFormatter {
             )
         } else {
             val srvMbps = result.serverMbps?.takeIf { it > 0.0 } ?: result.effectiveMbps
-            val srvBytes = if (result.serverMbps != null && result.serverMbps > 0.0) {
-                ((result.serverMbps * 1_000_000.0 * totalEndSec) / 8.0).toLong().coerceAtLeast(0L)
-            } else {
-                result.bytesTransferred
-            }
+            val srvDurationSec = result.serverDurationSec?.takeIf { it > 0.0 } ?: totalEndSec
+            val srvBytes = result.serverBytesTransferred?.takeIf { it >= 0L }
+                ?: if (result.serverMbps != null && result.serverMbps > 0.0) {
+                    ((result.serverMbps * 1_000_000.0 * srvDurationSec) / 8.0).toLong().coerceAtLeast(0L)
+                } else {
+                    result.bytesTransferred
+                }
             IperfSummaryTuple(
                 senderBytes = result.bytesTransferred,
                 senderMbps = result.clientMbps.takeIf { it > 0.0 } ?: result.effectiveMbps,
@@ -1173,8 +1168,14 @@ object NetBenchMarkdownFormatter {
                             else -> "分段速率起伏较大（稳定度 `${formatPercent(stab)}`），可能受限于窗口收缩或 QoS"
                         }
                     }
-                    parts += listOfNotNull("下行实测均速 **${formatMbps(dl.effectiveMbps)}**（$rampNote）", stabNote)
-                        .joinToString("，")
+                    val retrNote = dl.retransmits?.takeIf { it >= 0 }?.let { retr ->
+                        if (retr == 0L) "0 重传" else "TCP 重传 `$retr` 次"
+                    }
+                    parts += listOfNotNull(
+                        "下行实测均速 **${formatMbps(dl.effectiveMbps)}**（$rampNote）",
+                        stabNote,
+                        retrNote,
+                    ).joinToString("，")
                 }
                 if (ul?.success == true) {
                     val retrNote = ul.retransmits?.takeIf { it >= 0 }?.let { retr ->

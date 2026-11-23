@@ -205,7 +205,10 @@ class Iperf3ClientRunnerTest {
         assertTrue(result.clientMbps > 0.0)
         assertNotNull(result.serverMbps)
         assertTrue(result.serverMbps!! > 0.0)
-        assertEquals(2L, result.retransmits)
+        assertNull("Upload mode must not report server-side receiver retransmits", result.retransmits)
+        assertNotNull(result.serverBytesTransferred)
+        assertTrue(result.serverBytesTransferred!! > 0L)
+        assertNotNull(result.serverDurationSec)
         assertEquals(1, result.intervals.size)
         assertEquals(0.0, result.intervals.first().startSec, 1e-3)
         assertEquals(result.durationSec, result.intervals.first().endSec, 1e-3)
@@ -1240,5 +1243,115 @@ class Iperf3ClientRunnerTest {
         assertEquals(2, ulRes.intervals.size)
         assertTrue(ulRes.intervals.all { it.streams == 2 })
         assertEquals(ulRes.bytesTransferred, ulRes.intervals.sumOf { it.bytesTransferred })
+        assertNull(ulRes.retransmits)
+    }
+
+    @Test
+    fun `single-arg run honors config parallelStreams and preserves server retransmits and bytes on download`() = runBlocking {
+        val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val serverError = AtomicReference<Throwable?>(null)
+        val receivedParallel = AtomicInteger(0)
+        val acceptedDataCount = AtomicInteger(0)
+
+        val serverThread = thread(isDaemon = true) {
+            try {
+                server.soTimeout = 6_000
+                val ctrlSocket = server.accept()
+                ctrlSocket.soTimeout = 6_000
+                val ctrlIn = DataInputStream(ctrlSocket.getInputStream())
+                val ctrlOut = DataOutputStream(ctrlSocket.getOutputStream())
+
+                ctrlIn.readFully(ByteArray(37))
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_PARAM_EXCHANGE.toInt())
+                ctrlOut.flush()
+                val paramBytes = ByteArray(ctrlIn.readInt())
+                ctrlIn.readFully(paramBytes)
+                val params = json.parseToJsonElement(String(paramBytes, StandardCharsets.UTF_8)).jsonObject
+                receivedParallel.set(params["parallel"]!!.jsonPrimitive.int)
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_CREATE_STREAMS.toInt())
+                ctrlOut.flush()
+
+                val dataSockets = (1..3).map {
+                    val s = server.accept()
+                    DataInputStream(s.getInputStream()).readFully(ByteArray(37))
+                    acceptedDataCount.incrementAndGet()
+                    s
+                }
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_START.toInt())
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_TEST_RUNNING.toInt())
+                ctrlOut.flush()
+
+                val stopSend = AtomicBoolean(false)
+                val senders = dataSockets.map { s ->
+                    thread(isDaemon = true) {
+                        val chunk = ByteArray(32768) { 0x33 }
+                        val out = s.getOutputStream()
+                        while (!stopSend.get()) {
+                            try {
+                                out.write(chunk)
+                            } catch (_: Throwable) {
+                                break
+                            }
+                        }
+                    }
+                }
+
+                assertEquals(Iperf3ClientRunner.STATE_TEST_END, ctrlIn.readByte())
+                stopSend.set(true)
+                dataSockets.forEach { runCatching { it.close() } }
+                senders.forEach { it.join(1_000) }
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_EXCHANGE_RESULTS.toInt())
+                ctrlOut.flush()
+                ctrlIn.readFully(ByteArray(ctrlIn.readInt()))
+
+                val srvJson = """
+                    {
+                      "streams": [
+                        {"id":1,"bytes":1200000,"retransmits":3,"start_time":0.0,"end_time":1.0},
+                        {"id":3,"bytes":1300000,"retransmits":2,"start_time":0.0,"end_time":1.0},
+                        {"id":5,"bytes":1500000,"retransmits":1,"start_time":0.0,"end_time":1.0}
+                      ]
+                    }
+                """.trimIndent().toByteArray(StandardCharsets.UTF_8)
+                ctrlOut.writeInt(srvJson.size)
+                ctrlOut.write(srvJson)
+                ctrlOut.flush()
+
+                ctrlOut.writeByte(Iperf3ClientRunner.STATE_DISPLAY_RESULTS.toInt())
+                ctrlOut.flush()
+                runCatching { ctrlIn.readByte() }
+                ctrlSocket.close()
+            } catch (t: Throwable) {
+                serverError.set(t)
+            } finally {
+                runCatching { server.close() }
+            }
+        }
+
+        val runner = Iperf3ClientRunner(ioDispatcher = Dispatchers.IO)
+        val emissions = runner.run(
+            Iperf3Config(
+                target = "127.0.0.1",
+                port = server.localPort,
+                durationSec = 1,
+                direction = Iperf3Direction.DOWNLOAD,
+                parallelStreams = 3,
+            ),
+        ).toList()
+
+        serverThread.join(5_000)
+        assertNull("Mock server threw: ${serverError.get()}", serverError.get())
+
+        val result = emissions.last().finalResult!!
+        assertTrue(result.success)
+        assertEquals(3, receivedParallel.get())
+        assertEquals(3, acceptedDataCount.get())
+        assertEquals(3, result.parallelStreams)
+        assertEquals(6L, result.retransmits)
+        assertEquals(4_000_000L, result.serverBytesTransferred)
+        assertEquals(1.0, result.serverDurationSec!!, 1e-3)
     }
 }

@@ -419,6 +419,10 @@ data class SanitizedIperf3Presentation(
     val publicErrorMessage: String?,
     /** Warm-up seconds excluded from statistics (`iperf3 -O`). */
     val omitSec: Int = 0,
+    /** Server-reported total bytes from `EXCHANGE_RESULTS`, if available. */
+    val serverBytesTransferred: Long? = null,
+    /** Server-reported duration in seconds from `EXCHANGE_RESULTS`, if available. */
+    val serverDurationSec: Double? = null,
 ) {
     /** Intervals inside the measured window (warm-up `omitted` samples removed). */
     val measuredIntervals: List<Iperf3IntervalSample>
@@ -487,7 +491,16 @@ object NetBenchReportSanitizer {
         val targetPtrPatterns: List<Pair<String, String>>,
         val clientSensitiveTokens: List<String>,
         val portsToScrub: Set<Int>,
+        val portRegexes: List<Pair<Int, Regex>>,
     )
+
+    internal fun createScrubber(
+        report: NetBenchReport,
+        maskTargetIp: Boolean,
+    ): (String) -> String {
+        val ctx = buildContext(report)
+        return { text -> scrubWithContext(text, ctx, maskTargetIp) }
+    }
 
     fun sanitize(
         report: NetBenchReport,
@@ -979,6 +992,8 @@ object NetBenchReportSanitizer {
             errorCategory = errCategory,
             publicErrorMessage = errCategory?.publicLabel,
             omitSec = result.omitSec,
+            serverBytesTransferred = result.serverBytesTransferred,
+            serverDurationSec = result.serverDurationSec,
         )
     }
 
@@ -1119,12 +1134,20 @@ object NetBenchReportSanitizer {
             parsedHttpUrl?.explicitPort?.let(::add)
         }.filter { it in 1..65535 }.toSet()
 
+        val portRegexes = ports.map { port ->
+            port to Regex(
+                """(\]|(?:\d{1,3}\.){3}(?:\d{1,3}|\*)|[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-*]+)+|localhost):$port\b""",
+                RegexOption.IGNORE_CASE,
+            )
+        }
+
         return SanitizationContext(
             primaryTargetIp = rawTargetIps.firstOrNull(),
             targetIpReplacementPairs = sortedIpPairs,
             targetPtrPatterns = sortedPtrPairs,
             clientSensitiveTokens = clientTokens,
             portsToScrub = ports,
+            portRegexes = portRegexes,
         )
     }
 
@@ -1184,11 +1207,7 @@ object NetBenchReportSanitizer {
         }
 
         // 3. Scrub endpoint port suffixes without corrupting HH:mm timestamps
-        for (port in ctx.portsToScrub) {
-            val endpointPortRegex = Regex(
-                """(\]|(?:\d{1,3}\.){3}(?:\d{1,3}|\*)|[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-*]+)+|localhost):$port\b""",
-                RegexOption.IGNORE_CASE,
-            )
+        for ((port, endpointPortRegex) in ctx.portRegexes) {
             out = out
                 .replace(endpointPortRegex, "$1")
                 .replace(", port $port", "")

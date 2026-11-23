@@ -82,8 +82,14 @@ class Iperf3ClientRunner(
         isLenient = true
     }
 
-    fun run(config: Iperf3Config): Flow<Iperf3Progress> =
-        run(config = config, parallelStreams = defaultParallelStreams)
+    fun run(config: Iperf3Config): Flow<Iperf3Progress> {
+        val effectiveStreams = if (config.parallelStreams != Iperf3Config.DEFAULT_PARALLEL_STREAMS) {
+            config.normalizedParallelStreams
+        } else {
+            defaultParallelStreams
+        }
+        return run(config = config, parallelStreams = effectiveStreams)
+    }
 
     fun run(
         config: Iperf3Config,
@@ -1177,11 +1183,17 @@ class Iperf3ClientRunner(
             clientMbps = clientMbps,
             serverMbps = serverStats?.mbps,
             peakMbps = maxOf(peakMbps, clientMbps, intervalPeak),
-            retransmits = serverStats?.retransmits,
+            // In iperf3 TCP mode, only the sender reports TCP_INFO retransmits:
+            // - DOWNLOAD (-R): server is sender -> serverStats.retransmits is valid.
+            // - UPLOAD: client is sender, Java Socket cannot read TCP_INFO tcpi_retrans, and
+            //   server (receiver) always reports 0 (or -1), which would falsely display "0 retransmits".
+            retransmits = if (direction == Iperf3Direction.DOWNLOAD) serverStats?.retransmits else null,
             success = true,
             parallelStreams = parallelStreams,
             intervals = intervals,
             omitSec = omitSec,
+            serverBytesTransferred = serverStats?.bytes,
+            serverDurationSec = serverStats?.durationSec,
         )
     }
 

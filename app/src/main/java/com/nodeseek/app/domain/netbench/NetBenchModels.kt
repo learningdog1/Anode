@@ -461,6 +461,10 @@ data class Iperf3Result(
     val intervals: List<Iperf3IntervalSample> = emptyList(),
     /** Warm-up seconds actually excluded from [durationSec] / averages (`iperf3 -O`). */
     val omitSec: Int = 0,
+    /** Server-reported total bytes from `EXCHANGE_RESULTS` (sender on download, receiver on upload). */
+    val serverBytesTransferred: Long? = null,
+    /** Server-reported measurement duration in seconds from `EXCHANGE_RESULTS`. */
+    val serverDurationSec: Double? = null,
 ) {
     /**
      * Best-available throughput in Mbps, always taken from the **receiver** side (like the official
