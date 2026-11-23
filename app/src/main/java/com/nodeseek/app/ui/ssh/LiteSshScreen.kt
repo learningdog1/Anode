@@ -38,12 +38,16 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -54,6 +58,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -74,8 +79,11 @@ import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.UnfoldLess
+import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VerticalAlignBottom
 import androidx.compose.material.icons.rounded.ZoomIn
@@ -107,6 +115,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -115,15 +124,18 @@ import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.SshAuthMethod
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshPresetCategory
@@ -135,6 +147,8 @@ import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
+import com.nodeseek.app.domain.ssh.SshVaultCollapseState
+import com.nodeseek.app.domain.ssh.SshVaultServerGroup
 import com.nodeseek.app.ui.components.AnsiAndCodeFormatter
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
@@ -179,6 +193,7 @@ fun LiteSshScreen(
     onBack: () -> Unit,
     onPublishToComposer: (suggestedTitle: String, markdownContent: String) -> Unit,
     onInsertToReply: ((markdownContent: String) -> Unit)? = null,
+    onOpenProbePanels: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     previewUiState: LiteSshUiState? = null,
     viewModel: LiteSshViewModel = viewModel(factory = LiteSshViewModel.factory(LocalContext.current)),
@@ -187,6 +202,7 @@ fun LiteSshScreen(
     val uiState = previewUiState ?: observedUiState
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val pageListState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     var pendingDeleteServer by remember { mutableStateOf<SshServerProfile?>(null) }
     var pendingDeleteCustomPreset by remember { mutableStateOf<CustomSshPreset?>(null) }
@@ -195,6 +211,15 @@ fun LiteSshScreen(
         val msg = uiState.statusMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.consumeStatusMessage()
+    }
+
+    LaunchedEffect(uiState.isRunning, uiState.isInteractiveSession) {
+        if (uiState.isRunning && uiState.isInteractiveSession) {
+            val totalItems = pageListState.layoutInfo.totalItemsCount
+            if (totalItems > 0) {
+                pageListState.animateScrollToItem(totalItems - 1)
+            }
+        }
     }
 
     val copyToClipboard: (String, String) -> Unit = remember(context, scope, snackbarHostState) {
@@ -250,7 +275,11 @@ fun LiteSshScreen(
             }
         },
     ) { innerPadding ->
+        val serversById = remember(uiState.servers) { uiState.servers.associateBy { it.id } }
+        val panelsById = remember(uiState.probePanels) { uiState.probePanels.associateBy { it.id } }
+
         LazyColumn(
+            state = pageListState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -260,31 +289,45 @@ fun LiteSshScreen(
                 top = 14.dp,
                 bottom = if (exportMeta != null) 28.dp else 32.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 1. Encrypted SSH Server Vault
-            item(key = "server_vault_section") {
-                ServerVaultSection(
-                    servers = uiState.servers,
-                    filteredServers = uiState.filteredServers,
-                    inlineVisibleServers = uiState.inlineVisibleServers,
-                    selectedServer = uiState.selectedServer,
-                    searchQuery = uiState.serverSearchQuery,
-                    groupOptions = uiState.serverGroupOptions,
-                    selectedGroupKey = uiState.effectiveServerGroupKey,
-                    isExpanded = uiState.isServerVaultExpanded,
-                    isRunning = uiState.isRunning,
-                    onSearchQueryChange = viewModel::updateServerSearchQuery,
-                    onClearSearch = viewModel::clearServerSearchQuery,
-                    onSelectGroup = viewModel::selectServerGroup,
-                    onToggleExpanded = viewModel::toggleServerVaultExpanded,
-                    onOpenQuickPicker = viewModel::openServerQuickPickerSheet,
-                    onSelectServer = viewModel::selectServer,
-                    onAddServer = viewModel::openAddServerDialog,
-                    onEditServer = viewModel::openEditServerDialog,
-                    onDeleteServer = { pendingDeleteServer = it },
-                )
-            }
+            // 1. Encrypted & Probe-Integrated Collapsible SSH Server Vault
+            serverVaultItems(
+                servers = uiState.servers,
+                serversById = serversById,
+                panelsById = panelsById,
+                filteredServers = uiState.filteredServers,
+                serverGroups = uiState.vaultServerGroups,
+                selectedServer = uiState.selectedServer,
+                searchQuery = uiState.serverSearchQuery,
+                groupOptions = uiState.serverGroupOptions,
+                selectedGroupKey = uiState.effectiveServerGroupKey,
+                collapseState = uiState.collapseState,
+                configuredProbePanelCount = uiState.configuredProbePanelCount,
+                isSyncingProbes = uiState.isSyncingProbes,
+                isRunning = uiState.isRunning,
+                onSearchQueryChange = viewModel::updateServerSearchQuery,
+                onClearSearch = viewModel::clearServerSearchQuery,
+                onSelectGroup = viewModel::selectServerGroup,
+                onToggleVaultListCollapsed = viewModel::toggleVaultListCollapsed,
+                onToggleGroupCollapsed = viewModel::toggleVaultGroupCollapsed,
+                onSetAllGroupsCollapsed = viewModel::setAllVaultGroupsCollapsed,
+                onToggleServerExpanded = viewModel::toggleVaultServerExpanded,
+                onSyncProbes = {
+                    if (uiState.configuredProbePanelCount > 0 || onOpenProbePanels == null) {
+                        viewModel.syncFromProbePanels()
+                    } else {
+                        onOpenProbePanels()
+                    }
+                },
+                onOpenQuickPicker = viewModel::openServerQuickPickerSheet,
+                onSelectServer = viewModel::selectServer,
+                onSetConnectionMode = viewModel::setServerConnectionMode,
+                onOpenInteractiveTerminal = { serverId -> viewModel.openInteractiveTerminal(serverId) },
+                onAddServer = viewModel::openAddServerDialog,
+                onEditServer = viewModel::openEditServerDialog,
+                onDeleteServer = { pendingDeleteServer = it },
+            )
 
             // 2. Curated & Custom Benchmark Presets
             item(key = "presets_section") {
@@ -316,6 +359,7 @@ fun LiteSshScreen(
                     onEditCustomPreset = viewModel::openEditCustomPresetDialog,
                     onDeleteCustomPreset = { pendingDeleteCustomPreset = it },
                     onRunPreset = viewModel::runSelectedPreset,
+                    onOpenInteractiveTerminal = { viewModel.openInteractiveTerminal() },
                     onStopExecution = viewModel::cancelExecution,
                 )
             }
@@ -336,7 +380,7 @@ fun LiteSshScreen(
                 }
             }
 
-            // 4. High-Fidelity Dark ANSI Console
+            // 4. High-Fidelity Dark ANSI Console (supports live preset output + interactive shell input)
             item(key = "ansi_console") {
                 val viewedRun = uiState.viewingRun
                 val consoleHostForMask = viewedRun?.serverHost ?: uiState.activeServerHost ?: uiState.selectedServer?.host
@@ -363,6 +407,8 @@ fun LiteSshScreen(
                     hasCopyableOutput = hasCopyableOutput,
                     connectionPhase = uiState.connectionPhase,
                     isRunning = uiState.isRunning,
+                    isInteractiveSession = viewedRun == null && uiState.isInteractiveSession,
+                    activeConnectionMode = if (viewedRun == null) uiState.activeConnectionMode else null,
                     activeTitle = viewedRun?.let { "${it.serverAlias} · ${it.presetName}" }
                         ?: uiState.activePresetName?.let { preset ->
                             val alias = uiState.activeServerAlias ?: uiState.selectedServer?.displayName
@@ -372,7 +418,7 @@ fun LiteSshScreen(
                     elapsedMillis = viewedRun?.durationMillis ?: uiState.elapsedMillis,
                     exitCode = viewedRun?.exitCode ?: uiState.exitCode,
                     errorMessage = if (viewedRun == null) uiState.errorMessage else viewedRun.errorMessage,
-                    liveProgress = if (viewedRun == null) uiState.liveProgress else null,
+                    liveProgress = if (viewedRun == null && !uiState.isInteractiveSession) uiState.liveProgress else null,
                     lastOutputEpochMillis = if (viewedRun == null) uiState.lastOutputEpochMillis else null,
                     autoRespondPrompts = uiState.autoRespondPrompts,
                     autoRespondCount = if (viewedRun == null) uiState.autoRespondCount else 0,
@@ -395,6 +441,16 @@ fun LiteSshScreen(
                     onResetZoom = viewModel::resetConsoleFontScale,
                     onPtySizeChanged = livePtyResizeCallback,
                     onToggleAutoScroll = viewModel::toggleAutoScrollConsole,
+                    onSendTerminalInput = if (previewUiState == null && viewedRun == null) {
+                        viewModel::sendTerminalInput
+                    } else {
+                        null
+                    },
+                    onStopExecution = if (previewUiState == null && viewedRun == null) {
+                        viewModel::cancelExecution
+                    } else {
+                        null
+                    },
                     onCopyOutput = {
                         val currentState = previewUiState ?: viewModel.uiState.value
                         val raw = currentState.displayedConsoleOutput
@@ -637,472 +693,881 @@ private fun LiteSshTopBar(
     }
 }
 
-@Composable
-private fun ServerVaultSection(
+private fun LazyListScope.serverVaultItems(
     servers: List<SshServerProfile>,
+    serversById: Map<String, SshServerProfile>,
+    panelsById: Map<String, ProbePanelConfig>,
     filteredServers: List<SshServerProfile>,
-    inlineVisibleServers: List<SshServerProfile>,
+    serverGroups: List<SshVaultServerGroup>,
     selectedServer: SshServerProfile?,
     searchQuery: String,
     groupOptions: List<SshServerGroupOption>,
     selectedGroupKey: String,
-    isExpanded: Boolean,
+    collapseState: SshVaultCollapseState,
+    configuredProbePanelCount: Int,
+    isSyncingProbes: Boolean,
     isRunning: Boolean,
     onSearchQueryChange: (String) -> Unit,
     onClearSearch: () -> Unit,
     onSelectGroup: (String) -> Unit,
-    onToggleExpanded: () -> Unit,
+    onToggleVaultListCollapsed: () -> Unit,
+    onToggleGroupCollapsed: (String) -> Unit,
+    onSetAllGroupsCollapsed: (Boolean) -> Unit,
+    onToggleServerExpanded: (String) -> Unit,
+    onSyncProbes: () -> Unit,
     onOpenQuickPicker: () -> Unit,
     onSelectServer: (String) -> Unit,
+    onSetConnectionMode: (String, SshConnectionMode) -> Unit,
+    onOpenInteractiveTerminal: (String) -> Unit,
     onAddServer: () -> Unit,
     onEditServer: (SshServerProfile) -> Unit,
     onDeleteServer: (SshServerProfile) -> Unit,
 ) {
-    val serversById = remember(servers) { servers.associateBy { it.id } }
     val isFiltering = searchQuery.isNotBlank() || selectedGroupKey != SshServerGroupOption.KEY_ALL
+    val syncedCount = servers.count { it.isProbeSynced }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        PulseSectionHeader(
-            title = "主机保险库",
-            subtitle = when {
-                servers.isEmpty() -> "零云端同步 · AES-256-GCM 硬件密钥保护"
-                isFiltering -> "命中 ${filteredServers.size} / ${servers.size} 台 VPS · 当前目标置顶"
-                else -> "已保存 ${servers.size} 台 VPS · 当前目标置顶"
-            },
-            icon = Icons.Rounded.Dns,
-            trailing = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    if (servers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT) {
+    item(key = "vault_header_and_controls") {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            PulseSectionHeader(
+                title = "主机保险库",
+                subtitle = when {
+                    servers.isEmpty() -> "本地 Keystore 加密 · 支持从哪吒 / Komari 探针一键同步"
+                    collapseState.isVaultListCollapsed -> "共 ${servers.size} 台 VPS（列表已收起 · 点击右侧展开）"
+                    isFiltering -> "命中 ${filteredServers.size} / ${servers.size} 台 VPS · 分组与条目可折叠"
+                    syncedCount > 0 -> "共 ${servers.size} 台 VPS（含 $syncedCount 台探针）· 分组与条目可折叠"
+                    else -> "已保存 ${servers.size} 台 VPS · 分组与条目可折叠"
+                },
+                icon = Icons.Rounded.Dns,
+                trailing = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
                         TextButton(
-                            onClick = onOpenQuickPicker,
+                            onClick = onSyncProbes,
+                            enabled = !isSyncingProbes,
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         ) {
-                            Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
+                            if (isSyncingProbes) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 1.8.dp,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Sync,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
                             Spacer(Modifier.width(3.dp))
                             Text(
-                                text = "快选 (${servers.size})",
-                                style = MaterialTheme.typography.labelLarge.withTabularNumbers(),
+                                text = if (isSyncingProbes) "同步中" else "同步探针",
+                                style = MaterialTheme.typography.labelLarge,
                                 maxLines = 1,
                                 softWrap = false,
                             )
                         }
+                        if (servers.isNotEmpty()) {
+                            IconButton(
+                                onClick = onToggleVaultListCollapsed,
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (collapseState.isVaultListCollapsed) {
+                                        Icons.Rounded.UnfoldMore
+                                    } else {
+                                        Icons.Rounded.UnfoldLess
+                                    },
+                                    contentDescription = if (collapseState.isVaultListCollapsed) "展开主机列表" else "收起主机列表",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = onAddServer,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Add,
+                                contentDescription = "添加主机",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(19.dp),
+                            )
+                        }
                     }
-                    TextButton(
-                        onClick = onAddServer,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(3.dp))
-                        Text("添加主机", maxLines = 1, softWrap = false)
-                    }
-                }
-            },
-        )
-
-        if (servers.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .pulseCard()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Terminal,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(22.dp),
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "连接你的第一台 VPS",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = "一键运行 YABS / NodeQuality / NextTrace，自动清洗进度条与 IP 打码后发帖",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                Button(
-                    onClick = onAddServer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("添加 SSH 主机")
-                }
-            }
-        } else {
-            // Instant search box (alias / IP / domain / username / group tag + 1-tap clear)
-            SshCompactSearchBar(
-                value = searchQuery,
-                onValueChange = onSearchQueryChange,
-                onClear = onClearSearch,
-                placeholder = "搜索主机别名 / IP / 用户名 / 分组标签…",
-                matchCountSummary = if (isFiltering) "${filteredServers.size}/${servers.size}" else null,
+                },
             )
 
-            // Group filter chips (All + each group with count) when groups exist
-            if (groupOptions.isNotEmpty()) {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    contentPadding = PaddingValues(vertical = 2.dp),
+            if (servers.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pulseCard()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(groupOptions, key = { "vault_grp_${it.key}" }) { option ->
-                        val active = option.key.equals(selectedGroupKey, ignoreCase = true)
-                        FilterChip(
-                            selected = active,
-                            onClick = {
-                                onSelectGroup(
-                                    if (active && option.key != SshServerGroupOption.KEY_ALL) {
-                                        SshServerGroupOption.KEY_ALL
-                                    } else {
-                                        option.key
-                                    },
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "${option.label} (${option.count})",
-                                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                                    maxLines = 1,
-                                )
-                            },
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Terminal,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "连接或同步你的 VPS",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = "可手动添加 SSH 主机，或直接同步已配置的哪吒 / Komari 探针节点并通过探针终端或直连 SSH 操作",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(
+                            onClick = onAddServer,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("添加主机", maxLines = 1, softWrap = false)
+                        }
+                        FilledTonalButton(
+                            onClick = onSyncProbes,
+                            enabled = !isSyncingProbes,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Rounded.CloudSync, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = if (configuredProbePanelCount > 0) {
+                                    "同步探针 ($configuredProbePanelCount)"
+                                } else {
+                                    "配置探针"
+                                },
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
-            }
-
-            // Always surface the active target host even when hidden by an active search/group filter
-            if (selectedServer != null && filteredServers.none { it.id == selectedServer.id }) {
+            } else if (collapseState.isVaultListCollapsed) {
+                // Collapsed single-line summary bar keeping the active target and quick terminal accessible
+                val target = selectedServer ?: servers.first()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f))
-                        .border(
-                            width = 0.9.dp,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
-                            shape = RoundedCornerShape(12.dp),
+                        .pulseCard(
+                            shape = PulseArchitecturalShapes.EditorialCard,
+                            borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                            borderWidth = 1.1.dp,
                         )
-                        .padding(horizontal = 11.dp, vertical = 7.dp),
+                        .clickable(onClick = onToggleVaultListCollapsed)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    Icon(
+                        imageVector = Icons.Rounded.Dns,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        PulseAccentPill(text = "当前目标")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = target.displayName,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            PulseAccentPill(
+                                text = target.effectiveConnectionMode.label,
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            if (target.isProbeSynced) {
+                                PulseAccentPill(
+                                    text = target.probePanelShortLabel ?: "探针",
+                                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                )
+                            }
+                        }
                         Text(
-                            text = "${selectedServer.displayName} (${selectedServer.displayAddress})",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
+                            text = "${target.displayAddress} · 共 ${servers.size} 台已折叠",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    Text(
-                        text = "重置筛选",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                onClearSearch()
-                                onSelectGroup(SshServerGroupOption.KEY_ALL)
-                            }
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
-                    )
-                }
-            }
-
-            val hasMoreThanCollapsed = filteredServers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT
-            val showScrollableExpanded = hasMoreThanCollapsed && (isExpanded || searchQuery.isNotBlank())
-
-            if (filteredServers.isEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .pulseCard(shape = RoundedCornerShape(14.dp))
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = "未找到匹配的 VPS 主机",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    TextButton(
-                        onClick = {
-                            onClearSearch()
-                            onSelectGroup(SshServerGroupOption.KEY_ALL)
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    IconButton(
+                        onClick = { onOpenInteractiveTerminal(target.id) },
+                        enabled = !isRunning,
+                        modifier = Modifier.size(32.dp),
                     ) {
-                        Text("清除筛选", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            } else if (showScrollableExpanded) {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 288.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 2.dp),
-                ) {
-                    items(filteredServers, key = { it.id }) { server ->
-                        val jumpHostName = server.jumpHostId?.let { serversById[it]?.displayName }
-                        ServerVaultCompactRow(
-                            server = server,
-                            selected = server.id == selectedServer?.id,
-                            enabled = !isRunning,
-                            jumpHostName = jumpHostName,
-                            onSelect = { onSelectServer(server.id) },
-                            onEdit = { onEditServer(server) },
-                            onDelete = { onDeleteServer(server) },
+                        Icon(
+                            imageVector = Icons.Rounded.Terminal,
+                            contentDescription = "打开交互终端",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    inlineVisibleServers.forEach { server ->
-                        val jumpHostName = server.jumpHostId?.let { serversById[it]?.displayName }
-                        ServerVaultCompactRow(
-                            server = server,
-                            selected = server.id == selectedServer?.id,
-                            enabled = !isRunning,
-                            jumpHostName = jumpHostName,
-                            onSelect = { onSelectServer(server.id) },
-                            onEdit = { onEditServer(server) },
-                            onDelete = { onDeleteServer(server) },
-                        )
-                    }
-                }
-            }
-
-            if (hasMoreThanCollapsed || servers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    if (hasMoreThanCollapsed && searchQuery.isBlank()) {
-                        TextButton(
-                            onClick = onToggleExpanded,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            Icon(
-                                imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = if (isExpanded) {
-                                    "收起主机列表"
-                                } else {
-                                    "展开全部（共 ${filteredServers.size} 台）"
-                                },
-                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                            )
-                        }
-                    } else {
-                        Spacer(Modifier.width(1.dp))
-                    }
-
                     FilledTonalButton(
-                        onClick = onOpenQuickPicker,
+                        onClick = onToggleVaultListCollapsed,
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     ) {
-                        Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(4.dp))
+                        Icon(Icons.Rounded.ExpandMore, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(2.dp))
                         Text(
-                            text = "快速检索抽屉 (${servers.size})",
+                            text = "展开 (${servers.size})",
                             style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                             maxLines = 1,
                             softWrap = false,
                         )
                     }
                 }
+            } else {
+                // Expanded vault search, group filter chips, and bulk collapse/quick-picker toolbar
+                SshCompactSearchBar(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    onClear = onClearSearch,
+                    placeholder = "搜索主机别名 / IP / 探针 / 地区 / 标签…",
+                    matchCountSummary = if (isFiltering) "${filteredServers.size}/${servers.size}" else null,
+                )
+
+                if (groupOptions.isNotEmpty()) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        contentPadding = PaddingValues(vertical = 2.dp),
+                    ) {
+                        items(groupOptions, key = { "vault_grp_${it.key}" }) { option ->
+                            val active = option.key.equals(selectedGroupKey, ignoreCase = true)
+                            FilterChip(
+                                selected = active,
+                                onClick = {
+                                    onSelectGroup(
+                                        if (active && option.key != SshServerGroupOption.KEY_ALL) {
+                                            SshServerGroupOption.KEY_ALL
+                                        } else {
+                                            option.key
+                                        },
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = "${option.label} (${option.count})",
+                                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                        maxLines = 1,
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+
+                // Compact utility bar: collapse/expand all groups + quick picker for large fleets
+                val showGroupFoldControls = serverGroups.size > 1 && searchQuery.isBlank()
+                val showQuickPickerBtn = servers.size > SshVaultCatalogFilter.DEFAULT_COLLAPSED_SERVER_COUNT
+                if (showGroupFoldControls || showQuickPickerBtn) {
+                    val allGroupsCollapsed = showGroupFoldControls &&
+                        serverGroups.all { collapseState.isGroupCollapsed(it.key) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        if (showGroupFoldControls) {
+                            TextButton(
+                                onClick = { onSetAllGroupsCollapsed(!allGroupsCollapsed) },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (allGroupsCollapsed) Icons.Rounded.UnfoldMore else Icons.Rounded.UnfoldLess,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    text = if (allGroupsCollapsed) "展开全部分组" else "收起全部分组",
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        } else {
+                            Spacer(Modifier.width(1.dp))
+                        }
+
+                        if (showQuickPickerBtn) {
+                            FilledTonalButton(
+                                onClick = onOpenQuickPicker,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            ) {
+                                Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "快速检索 (${servers.size})",
+                                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Always surface the active target host even when hidden by an active search/group filter
+                if (selectedServer != null && filteredServers.none { it.id == selectedServer.id }) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f))
+                            .border(
+                                width = 0.9.dp,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                shape = RoundedCornerShape(12.dp),
+                            )
+                            .padding(horizontal = 11.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            PulseAccentPill(text = "当前目标")
+                            Text(
+                                text = "${selectedServer.displayName} (${selectedServer.displayAddress})",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Text(
+                            text = "重置筛选",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    onClearSearch()
+                                    onSelectGroup(SshServerGroupOption.KEY_ALL)
+                                }
+                                .padding(horizontal = 6.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (servers.isEmpty() || collapseState.isVaultListCollapsed) {
+        return
+    }
+
+    if (filteredServers.isEmpty()) {
+        item(key = "vault_empty_search") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pulseCard(shape = RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "未找到匹配的 VPS 主机",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = {
+                        onClearSearch()
+                        onSelectGroup(SshServerGroupOption.KEY_ALL)
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        return
+    }
+
+    val showGroupHeaders = serverGroups.size > 1 ||
+        (serverGroups.size == 1 && serverGroups.first().key != "__all_servers__")
+
+    serverGroups.forEach { group ->
+        val isGroupCollapsed = searchQuery.isBlank() && collapseState.isGroupCollapsed(group.key)
+        val containsSelected = selectedServer != null && group.servers.any { it.id == selectedServer.id }
+
+        if (showGroupHeaders) {
+            item(key = "vault_group_hdr_${group.key}") {
+                VaultGroupHeaderRow(
+                    group = group,
+                    isCollapsed = isGroupCollapsed,
+                    containsSelected = containsSelected,
+                    onToggle = { onToggleGroupCollapsed(group.key) },
+                )
+            }
+        }
+
+        if (!isGroupCollapsed) {
+            items(
+                items = group.servers,
+                key = { server -> "vault_srv_${server.id}" },
+            ) { server ->
+                val jumpHostName = server.jumpHostId?.let { serversById[it]?.displayName }
+                val linkedPanel = server.probePanelId?.let { panelsById[it] }
+                ServerVaultCollapsibleRow(
+                    server = server,
+                    selected = server.id == selectedServer?.id,
+                    expanded = collapseState.isServerExpanded(server.id),
+                    enabled = !isRunning,
+                    jumpHostName = jumpHostName,
+                    linkedPanelHasToken = !linkedPanel?.apiToken.isNullOrBlank(),
+                    onSelect = { onSelectServer(server.id) },
+                    onToggleExpand = { onToggleServerExpanded(server.id) },
+                    onSetConnectionMode = { mode -> onSetConnectionMode(server.id, mode) },
+                    onOpenTerminal = { onOpenInteractiveTerminal(server.id) },
+                    onEdit = { onEditServer(server) },
+                    onDelete = { onDeleteServer(server) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ServerVaultCompactRow(
+private fun VaultGroupHeaderRow(
+    group: SshVaultServerGroup,
+    isCollapsed: Boolean,
+    containsSelected: Boolean,
+    onToggle: () -> Unit,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .border(
+                width = 0.7.dp,
+                color = if (containsSelected && isCollapsed) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                },
+                shape = shape,
+            )
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Icon(
+            imageVector = if (isCollapsed) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess,
+            contentDescription = if (isCollapsed) "展开分组" else "收起分组",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(17.dp),
+        )
+        Icon(
+            imageVector = if (group.isProbeSourceGroup) Icons.Rounded.CloudSync else Icons.Rounded.LocalOffer,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            text = group.label,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        PulseAccentPill(
+            text = "${group.servers.size} 台",
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (containsSelected && isCollapsed) {
+            PulseAccentPill(text = "含当前目标")
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = if (isCollapsed) "已折叠" else "收起",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun ServerVaultCollapsibleRow(
     server: SshServerProfile,
     selected: Boolean,
+    expanded: Boolean,
     enabled: Boolean,
     jumpHostName: String? = null,
+    linkedPanelHasToken: Boolean = false,
     onSelect: () -> Unit,
+    onToggleExpand: () -> Unit,
+    onSetConnectionMode: (SshConnectionMode) -> Unit,
+    onOpenTerminal: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else null
+    val effectiveMode = server.effectiveConnectionMode
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .pulseCard(
                 shape = PulseArchitecturalShapes.EditorialCard,
                 borderColor = borderColor,
                 borderWidth = if (selected) 1.3.dp else 0.8.dp,
-            )
-            .pulseBouncyClickable(enabled = enabled, role = Role.Button, onClick = onSelect)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ),
     ) {
-        Box(
+        // Compact collapsed header row
+        Row(
             modifier = Modifier
-                .size(24.dp)
-                .clip(CircleShape)
-                .background(
-                    if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHighest
-                    },
-                ),
-            contentAlignment = Alignment.Center,
+                .fillMaxWidth()
+                .pulseBouncyClickable(enabled = enabled, role = Role.Button, onClick = onSelect)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            if (selected) {
-                Icon(
-                    imageVector = Icons.Rounded.Check,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(14.dp),
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.outlineVariant),
-                )
-            }
-        }
-
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (selected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHighest
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = server.displayName,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
                 if (selected) {
-                    PulseAccentPill(text = "当前目标")
-                }
-                server.resolvedGroup?.let { groupLabel ->
-                    PulseAccentPill(
-                        text = groupLabel,
-                        icon = Icons.Rounded.LocalOffer,
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-            }
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = server.displayAddress,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                PulseAccentPill(
-                    text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
-                    icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (server.hasTrustedHostKey) {
-                    PulseAccentPill(
-                        text = "TOFU 已校验",
-                        icon = Icons.Rounded.VerifiedUser,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp),
                     )
                 } else {
-                    PulseAccentPill(
-                        text = "首次校验",
-                        icon = Icons.Rounded.Lock,
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.outlineVariant),
                     )
                 }
-                if (server.usesJumpHost) {
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        text = server.displayName,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (selected) {
+                        PulseAccentPill(text = "当前目标")
+                    }
+                    if (server.isProbeSynced) {
+                        PulseAccentPill(
+                            text = server.probePanelShortLabel ?: "探针",
+                            icon = Icons.Rounded.CloudSync,
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (server.probeRegion.isNotBlank()) {
+                        Text(
+                            text = server.probeRegion,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    Text(
+                        text = server.displayAddress,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
                     PulseAccentPill(
-                        text = if (!jumpHostName.isNullOrBlank()) "跳板 · $jumpHostName" else "跳板",
-                        icon = Icons.AutoMirrored.Rounded.AltRoute,
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        text = effectiveMode.label,
+                        containerColor = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerLow
+                        },
+                        contentColor = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                IconButton(
+                    onClick = onOpenTerminal,
+                    enabled = enabled,
+                    modifier = Modifier.size(30.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Terminal,
+                        contentDescription = "打开交互终端",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                IconButton(
+                    onClick = onToggleExpand,
+                    modifier = Modifier.size(30.dp),
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = if (expanded) "收起详情" else "展开详情与操作",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            IconButton(
-                onClick = onEdit,
-                enabled = enabled,
-                modifier = Modifier.size(28.dp),
+        // Expanded detail & action drawer
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.65f))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Edit,
-                    contentDescription = "编辑主机",
-                    modifier = Modifier.size(15.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            IconButton(
-                onClick = onDelete,
-                enabled = enabled,
-                modifier = Modifier.size(28.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.DeleteOutline,
-                    contentDescription = "删除主机",
-                    modifier = Modifier.size(15.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    server.resolvedGroup?.let { groupLabel ->
+                        PulseAccentPill(
+                            text = groupLabel,
+                            icon = Icons.Rounded.LocalOffer,
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    if (server.hasDirectSshCredentials) {
+                        PulseAccentPill(
+                            text = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) "私钥" else "密码",
+                            icon = if (server.authMethod == SshAuthMethod.PRIVATE_KEY) Icons.Rounded.Key else Icons.Rounded.Password,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else if (server.isProbeSynced) {
+                        PulseAccentPill(
+                            text = "未填 SSH 凭据",
+                            icon = Icons.Rounded.Lock,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (server.hasTrustedHostKey) {
+                        PulseAccentPill(
+                            text = "TOFU 已校验",
+                            icon = Icons.Rounded.VerifiedUser,
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    } else if (server.hasDirectSshHost) {
+                        PulseAccentPill(
+                            text = "首次校验",
+                            icon = Icons.Rounded.Lock,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (server.usesJumpHost) {
+                        PulseAccentPill(
+                            text = if (!jumpHostName.isNullOrBlank()) "跳板 · $jumpHostName" else "跳板",
+                            icon = Icons.AutoMirrored.Rounded.AltRoute,
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    server.probeTags.take(4).forEach { tag ->
+                        if (!tag.equals(server.resolvedGroup, ignoreCase = true)) {
+                            PulseAccentPill(
+                                text = tag,
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                if (server.isProbeSynced) {
+                    Text(
+                        text = "同步自「${server.probePanelName ?: server.probePanelShortLabel ?: "探针面板"}」· 节点 ID ${server.probeServerId}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "连接方式：",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FilterChip(
+                            selected = effectiveMode == SshConnectionMode.PANEL_TERMINAL,
+                            enabled = enabled,
+                            onClick = { onSetConnectionMode(SshConnectionMode.PANEL_TERMINAL) },
+                            label = {
+                                Text(
+                                    text = "探针终端",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            },
+                        )
+                        FilterChip(
+                            selected = effectiveMode == SshConnectionMode.DIRECT_SSH,
+                            enabled = enabled,
+                            onClick = { onSetConnectionMode(SshConnectionMode.DIRECT_SSH) },
+                            label = {
+                                Text(
+                                    text = "直连 SSH",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            },
+                        )
+                    }
+
+                    if (effectiveMode == SshConnectionMode.PANEL_TERMINAL && !server.supportsPanelTerminalProtocol) {
+                        Text(
+                            text = "提示：哪吒 v0 暂不支持 API Token 网页终端，请切换为「直连 SSH」并补充密码/私钥",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else if (effectiveMode == SshConnectionMode.PANEL_TERMINAL && !linkedPanelHasToken) {
+                        Text(
+                            text = "提示：该探针面板尚未配置管理员 Token，打开探针终端前请先在「我的服务器」填入 JWT / API Key",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = onOpenTerminal,
+                        enabled = enabled,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Rounded.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) "打开探针终端" else "打开 SSH 终端",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onEdit,
+                        enabled = enabled,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("编辑", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
+                    }
+                    IconButton(
+                        onClick = onDelete,
+                        enabled = enabled,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DeleteOutline,
+                            contentDescription = "删除主机",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             }
         }
     }
@@ -1135,6 +1600,7 @@ private fun PresetCatalogSection(
     onEditCustomPreset: (CustomSshPreset) -> Unit,
     onDeleteCustomPreset: (CustomSshPreset) -> Unit,
     onRunPreset: () -> Unit,
+    onOpenInteractiveTerminal: () -> Unit,
     onStopExecution: () -> Unit,
 ) {
     var showCommandPreview by rememberSaveable { mutableStateOf(false) }
@@ -1489,21 +1955,36 @@ private fun PresetCatalogSection(
                     )
                 }
             } else {
-                Button(
-                    onClick = onRunPreset,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(19.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = if (selectedServer != null) {
-                            "在「${selectedServer.displayName}」一键运行"
-                        } else {
-                            "添加主机并开始测机"
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Button(
+                        onClick = onRunPreset,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (selectedServer != null) {
+                                "在「${selectedServer.displayName}」一键运行"
+                            } else {
+                                "添加主机并开始测机"
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (selectedServer != null) {
+                        FilledTonalButton(
+                            onClick = onOpenInteractiveTerminal,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            Icon(Icons.Rounded.Terminal, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("终端", maxLines = 1, softWrap = false)
+                        }
+                    }
                 }
             }
         }
@@ -1751,6 +2232,8 @@ private fun AnsiTerminalConsoleCard(
     hasCopyableOutput: Boolean,
     connectionPhase: SshConnectionPhase,
     isRunning: Boolean,
+    isInteractiveSession: Boolean,
+    activeConnectionMode: SshConnectionMode?,
     activeTitle: String,
     elapsedMillis: Long,
     exitCode: Int?,
@@ -1772,6 +2255,8 @@ private fun AnsiTerminalConsoleCard(
     onResetZoom: () -> Unit,
     onPtySizeChanged: ((SshPtySize) -> Unit)?,
     onToggleAutoScroll: (Boolean) -> Unit,
+    onSendTerminalInput: ((text: String, appendNewline: Boolean) -> Unit)?,
+    onStopExecution: (() -> Unit)?,
     onCopyOutput: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -1853,6 +2338,7 @@ private fun AnsiTerminalConsoleCard(
                 }
                 val badgeText = when {
                     exitCode != null -> "EXIT $exitCode"
+                    activeConnectionMode != null && isRunning -> "${activeConnectionMode.label} · ${connectionPhase.label}"
                     else -> connectionPhase.label
                 }
                 Box(
@@ -2227,6 +2713,161 @@ private fun AnsiTerminalConsoleCard(
             onPtySizeChanged = onPtySizeChanged,
             onLayoutSolved = { layoutSolution = it },
         )
+
+        // Interactive command & control-key input bar while an active PTY session is running
+        if (isRunning && onSendTerminalInput != null) {
+            InteractiveTerminalInputBar(
+                isInteractiveSession = isInteractiveSession,
+                onSendInput = onSendTerminalInput,
+                onDisconnect = onStopExecution,
+            )
+        }
+    }
+}
+
+@Composable
+private fun InteractiveTerminalInputBar(
+    isInteractiveSession: Boolean,
+    onSendInput: (text: String, appendNewline: Boolean) -> Unit,
+    onDisconnect: (() -> Unit)?,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val codeTypography = NodePulseThemeTokens.extraTypography
+    var commandText by rememberSaveable { mutableStateOf("") }
+
+    fun submitCommand() {
+        val text = commandText
+        commandText = ""
+        onSendInput(text, true)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ext.codeHeaderSurface)
+            .border(0.6.dp, ext.codeBorder)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        // Quick control keys row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val quickKeys = remember {
+                listOf(
+                    "Ctrl+C" to "\u0003",
+                    "Tab" to "\t",
+                    "Esc" to "\u001B",
+                    "↑" to "\u001B[A",
+                    "↓" to "\u001B[B",
+                    "Enter" to "\r",
+                    "clear" to "clear\r",
+                    "exit" to "exit\r",
+                )
+            }
+            quickKeys.forEach { (label, sequence) ->
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(ext.codeSurface)
+                        .border(0.6.dp, ext.codeBorder, RoundedCornerShape(6.dp))
+                        .clickable { onSendInput(sequence, false) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = label,
+                        style = codeTypography.microLabel,
+                        color = ext.onCodeSurface,
+                        maxLines = 1,
+                    )
+                }
+            }
+            if (isInteractiveSession && onDisconnect != null) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(ObsidianErrorContainer)
+                        .clickable(onClick = onDisconnect)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = "断开会话",
+                        style = codeTypography.microLabel,
+                        color = ObsidianOnErrorContainer,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+
+        // Command line input + send button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ext.codeSurface)
+                    .border(0.8.dp, ext.codeBorder, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "$",
+                    style = codeTypography.codeLabel,
+                    color = ObsidianPrimary,
+                )
+                Box(modifier = Modifier.weight(1f)) {
+                    if (commandText.isEmpty()) {
+                        Text(
+                            text = if (isInteractiveSession) {
+                                "输入 Shell 命令后回车发送（如 ls -la / uname -a）"
+                            } else {
+                                "向运行中的终端发送输入或应答…"
+                            },
+                            style = codeTypography.codeLabel,
+                            color = ext.onCodeMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    BasicTextField(
+                        value = commandText,
+                        onValueChange = { commandText = it },
+                        singleLine = true,
+                        textStyle = codeTypography.codeLabel.copy(color = ext.onCodeSurface),
+                        cursorBrush = SolidColor(ObsidianPrimary),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { submitCommand() }),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ObsidianPrimaryContainer)
+                    .clickable(onClick = ::submitCommand),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Send,
+                    contentDescription = "发送命令",
+                    tint = ObsidianOnPrimaryContainer,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
 

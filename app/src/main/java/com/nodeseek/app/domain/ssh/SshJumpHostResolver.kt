@@ -211,7 +211,26 @@ object SshJumpHostResolver {
         server: SshServerProfile,
         allowHostKeyMismatchOverride: Boolean = false,
         mismatchOverrideServerId: String? = null,
+        connectionModeOverride: SshConnectionMode? = null,
+        interactiveShell: Boolean = false,
     ): SshConnectionRequest {
+        val effectiveMode = connectionModeOverride ?: server.effectiveConnectionMode
+        if (effectiveMode == SshConnectionMode.PANEL_TERMINAL && server.isProbeSynced) {
+            return SshConnectionRequest(
+                host = server.host,
+                port = server.port,
+                username = server.username,
+                authMethod = server.authMethod,
+                serverId = server.id,
+                alias = server.displayName,
+                connectionMode = SshConnectionMode.PANEL_TERMINAL,
+                interactiveShell = interactiveShell,
+                probePanelId = server.probePanelId,
+                probeServerId = server.probeServerId,
+                probePanelType = server.probePanelType?.takeIf { it.isNotBlank() },
+            )
+        }
+
         val jumpProfiles = resolveJumpChain(
             target = server,
             servers = vaultRepository.serversFlow.value,
@@ -263,6 +282,11 @@ object SshJumpHostResolver {
             alias = server.displayName,
             jumpHostId = normalizeJumpHostId(server.jumpHostId),
             jumpHosts = jumpHops,
+            connectionMode = SshConnectionMode.DIRECT_SSH,
+            interactiveShell = interactiveShell,
+            probePanelId = server.probePanelId,
+            probeServerId = server.probeServerId,
+            probePanelType = server.probePanelType?.takeIf { it.isNotBlank() },
         )
     }
 }

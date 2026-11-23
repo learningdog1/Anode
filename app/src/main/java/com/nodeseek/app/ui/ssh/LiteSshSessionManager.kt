@@ -1,6 +1,9 @@
 package com.nodeseek.app.ui.ssh
 
 import androidx.compose.runtime.Stable
+import com.nodeseek.app.data.fleet.ProbePanelTerminalTransport
+import com.nodeseek.app.data.fleet.ProbeVaultSyncClient
+import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InAppMessagePopup
 import com.nodeseek.app.domain.ssh.CustomSshPreset
@@ -13,6 +16,7 @@ import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
@@ -34,6 +38,8 @@ import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshStageDetector
+import com.nodeseek.app.domain.ssh.SshStdinCallbackContext
+import com.nodeseek.app.domain.ssh.SshStdinWriter
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CancellationException
@@ -81,6 +87,9 @@ class LiteSshSessionManager(
     private val idGenerator: () -> String = { UUID.randomUUID().toString() },
     private val enableElapsedTicker: Boolean = true,
     private val silenceThresholdMillis: Long = SshStageDetector.DEFAULT_SILENCE_THRESHOLD_MILLIS,
+    fleetRepository: FleetRepository? = null,
+    private val probeSyncClientOverride: ProbeVaultSyncClient? = null,
+    private val panelTerminalExecutorOverride: LiteSshExecutor? = null,
 ) {
     private val _consoleStreamState = MutableStateFlow(SshConsoleStreamState())
     val consoleStreamState: StateFlow<SshConsoleStreamState> = _consoleStreamState.asStateFlow()
@@ -91,11 +100,26 @@ class LiteSshSessionManager(
 
     private val liveBufferAccessor = LiveBufferAccessor { _consoleStreamState.value.bufferSnapshot }
 
-    private val _uiState = MutableStateFlow(LiteSshUiState(liveBufferAccessor = liveBufferAccessor))
+    private val _uiState = MutableStateFlow(
+        LiteSshUiState(
+            liveBufferAccessor = liveBufferAccessor,
+            collapseState = vaultRepository.collapseStateFlow.value,
+        ),
+    )
     val uiState: StateFlow<LiteSshUiState> = _uiState.asStateFlow()
 
     private val _completionPopupEvents = MutableSharedFlow<InAppMessagePopup>(extraBufferCapacity = 4)
     val completionPopupEvents: SharedFlow<InAppMessagePopup> = _completionPopupEvents.asSharedFlow()
+
+    private val fleetAttachLock = Any()
+    @Volatile
+    private var attachedFleetRepository: FleetRepository? = null
+    private var fleetPanelsObserveJob: Job? = null
+    private var probeSyncJob: Job? = null
+    @Volatile
+    private var defaultProbeSyncClient: ProbeVaultSyncClient? = null
+    @Volatile
+    private var defaultPanelTerminalExecutor: LiteSshExecutor? = null
 
     private var executionJob: Job? = null
     private var iperf3ServiceJob: Job? = null
@@ -112,6 +136,10 @@ class LiteSshSessionManager(
     private var activePtyResizer: SshPtyResizer? = null
     @Volatile
     private var activePtyResizerGeneration: Long = 0L
+    @Volatile
+    private var activeStdinWriter: SshStdinWriter? = null
+    @Volatile
+    private var activeStdinWriterGeneration: Long = 0L
 
     init {
         externalScope.launch {
@@ -148,6 +176,48 @@ class LiteSshSessionManager(
                 _uiState.update { it.copy(recentRuns = runs) }
             }
         }
+        externalScope.launch {
+            vaultRepository.collapseStateFlow.collect { collapse ->
+                _uiState.update { it.copy(collapseState = collapse) }
+            }
+        }
+        if (fleetRepository != null) {
+            attachFleetIntegration(fleetRepository)
+        }
+    }
+
+    /**
+     * Binds [fleetRepository] to this session manager (idempotently) to enable probe panel sync
+     * into the SSH Host Vault and panel WebSocket terminal execution (Nezha v1 / Komari).
+     */
+    fun attachFleetIntegration(fleetRepository: FleetRepository) {
+        synchronized(fleetAttachLock) {
+            if (attachedFleetRepository === fleetRepository) return
+            attachedFleetRepository = fleetRepository
+            defaultProbeSyncClient = probeSyncClientOverride ?: ProbeVaultSyncClient()
+            defaultPanelTerminalExecutor = panelTerminalExecutorOverride ?: LiteSshExecutor(
+                transport = ProbePanelTerminalTransport(fleetRepository = fleetRepository),
+                processingDispatcher = Dispatchers.Default,
+            )
+            fleetPanelsObserveJob?.cancel()
+            fleetPanelsObserveJob = externalScope.launch {
+                loadFleetPersistedStateBestEffort(fleetRepository)
+                fleetRepository.panelsFlow.collect { panels ->
+                    _uiState.update { it.copy(probePanels = panels) }
+                }
+            }
+        }
+    }
+
+    private suspend fun loadFleetPersistedStateBestEffort(fleetRepository: FleetRepository) {
+        if (fleetRepository.isPersistedStateLoadedFlow.value) return
+        try {
+            fleetRepository.loadPersistedState()
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            // Best-effort cold load; proceed with currently loaded fleet panels.
+        }
     }
 
     fun selectServer(serverId: String) {
@@ -172,6 +242,199 @@ class LiteSshSessionManager(
 
     fun toggleServerVaultExpanded() {
         _uiState.update { it.copy(isServerVaultExpanded = !it.isServerVaultExpanded) }
+    }
+
+    fun toggleVaultListCollapsed() {
+        _uiState.update { it.copy(collapseState = it.collapseState.toggleVaultListCollapsed()) }
+        externalScope.launch {
+            vaultRepository.updateCollapseState { it.toggleVaultListCollapsed() }
+        }
+    }
+
+    fun toggleVaultGroupCollapsed(groupKey: String) {
+        _uiState.update { it.copy(collapseState = it.collapseState.toggleGroupCollapsed(groupKey)) }
+        externalScope.launch {
+            vaultRepository.updateCollapseState { it.toggleGroupCollapsed(groupKey) }
+        }
+    }
+
+    fun setAllVaultGroupsCollapsed(collapsed: Boolean) {
+        val keys = _uiState.value.vaultServerGroups.map { it.key }
+        if (keys.isEmpty()) return
+        _uiState.update {
+            it.copy(collapseState = it.collapseState.setAllGroupsCollapsed(keys, collapsed))
+        }
+        externalScope.launch {
+            vaultRepository.updateCollapseState { it.setAllGroupsCollapsed(keys, collapsed) }
+        }
+    }
+
+    fun toggleVaultServerExpanded(serverId: String) {
+        _uiState.update { it.copy(collapseState = it.collapseState.toggleServerExpanded(serverId)) }
+        externalScope.launch {
+            vaultRepository.updateCollapseState { it.toggleServerExpanded(serverId) }
+        }
+    }
+
+    fun setServerConnectionMode(serverId: String, mode: SshConnectionMode) {
+        externalScope.launch {
+            vaultRepository.updateServerConnectionMode(serverId, mode)
+            _uiState.update { state ->
+                val server = state.servers.firstOrNull { it.id == serverId }
+                val label = server?.displayName ?: "主机"
+                state.copy(statusMessage = "已将「$label」切换为${mode.label}模式")
+            }
+        }
+    }
+
+    /**
+     * Pulls machines from all enabled Nezha / Komari probe panels in [FleetRepository] and merges
+     * them into the SSH Host Vault with deduplication and strict credential preservation.
+     */
+    fun syncFromProbePanels() {
+        if (probeSyncJob?.isActive == true) return
+        val fleetRepo = attachedFleetRepository
+        if (fleetRepo == null) {
+            _uiState.update { it.copy(statusMessage = "探针模块未就绪，请先在「我的服务器」配置探针面板") }
+            return
+        }
+        probeSyncJob = externalScope.launch {
+            _uiState.update { it.copy(isSyncingProbes = true) }
+            try {
+                loadFleetPersistedStateBestEffort(fleetRepo)
+                val panels = fleetRepo.panelsFlow.value.filter { it.enabled }
+                if (panels.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            isSyncingProbes = false,
+                            statusMessage = "尚未配置探针面板，请先前往「我的服务器」添加哪吒或 Komari 面板",
+                        )
+                    }
+                    return@launch
+                }
+                val syncClient = probeSyncClientOverride ?: defaultProbeSyncClient ?: ProbeVaultSyncClient()
+                val fetched = syncClient.fetchAllPanels(
+                    panels = panels,
+                    fallbackSnapshots = fleetRepo.snapshotsFlow.value,
+                )
+                if (fetched.machines.isEmpty()) {
+                    val firstErr = fetched.failedPanelErrors.values.firstOrNull()
+                    val msg = if (firstErr != null) {
+                        "探针同步失败：$firstErr"
+                    } else {
+                        "已连接 ${fetched.succeededPanelCount} 个探针面板，未发现可同步的服务器节点"
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isSyncingProbes = false,
+                            lastProbeSyncSummary = msg,
+                            statusMessage = msg,
+                        )
+                    }
+                    return@launch
+                }
+
+                val outcome = vaultRepository.syncProbeMachines(fetched.machines)
+                val summary = buildString {
+                    append("探针同步完成（共 ${outcome.totalSyncedMachines} 台）：")
+                    val parts = buildList {
+                        if (outcome.addedCount > 0) add("新增 ${outcome.addedCount} 台")
+                        if (outcome.linkedManualCount > 0) add("关联已有 ${outcome.linkedManualCount} 台")
+                        if (outcome.updatedCount > 0) add("更新 ${outcome.updatedCount} 台")
+                        if (outcome.unchangedCount > 0 && outcome.addedCount == 0 && outcome.updatedCount == 0 && outcome.linkedManualCount == 0) {
+                            add("全部已是最新")
+                        }
+                    }
+                    append(parts.joinToString("，"))
+                    if (fetched.failedPanelErrors.isNotEmpty()) {
+                        append("（${fetched.failedPanelErrors.size} 个面板拉取异常）")
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        isSyncingProbes = false,
+                        lastProbeSyncSummary = summary,
+                        statusMessage = summary,
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val msg = "探针同步失败：${t.message?.takeIf { it.isNotBlank() } ?: "网络异常"}"
+                _uiState.update {
+                    it.copy(
+                        isSyncingProbes = false,
+                        statusMessage = msg,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Opens an interactive PTY terminal session on [serverId] (or the currently selected server)
+     * using either Panel Terminal (Nezha v1 / Komari WebSocket) or Direct SSH (`ChannelShell`).
+     */
+    fun openInteractiveTerminal(
+        serverId: String? = null,
+        modeOverride: SshConnectionMode? = null,
+    ) {
+        val state = _uiState.value
+        val server = serverId?.let { id -> state.servers.firstOrNull { it.id == id } }
+            ?: state.selectedServer
+        if (server == null) {
+            _uiState.update { it.copy(showServerEditor = true, statusMessage = "请先添加或同步一台 VPS 主机") }
+            return
+        }
+        if (state.selectedServerId != server.id) {
+            _uiState.update { it.copy(selectedServerId = server.id) }
+        }
+        val effectiveMode = modeOverride ?: server.effectiveConnectionMode
+        if (effectiveMode == SshConnectionMode.DIRECT_SSH && !server.canDirectSsh) {
+            _uiState.update {
+                it.copy(
+                    showServerEditor = true,
+                    editingServer = server,
+                    statusMessage = "请先为「${server.displayName}」补充 IP 地址和 SSH 密码/私钥，或切换为「探针终端」",
+                )
+            }
+            return
+        }
+        if (effectiveMode == SshConnectionMode.PANEL_TERMINAL && !server.isProbeSynced) {
+            _uiState.update {
+                it.copy(statusMessage = "「${server.displayName}」未关联探针面板，请使用「直连 SSH」模式")
+            }
+            return
+        }
+        val interactivePreset = SshScriptPreset(
+            id = PRESET_ID_INTERACTIVE_TERMINAL,
+            name = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) "探针交互终端" else "SSH 交互终端",
+            tabTitle = "交互终端",
+            category = SshPresetCategory.DIAGNOSTIC,
+            description = "实时交互式 PTY 终端会话",
+            estimatedDurationLabel = "实时",
+            commandTemplate = "",
+        )
+        executePresetOnServer(
+            server = server,
+            preset = interactivePreset,
+            command = "",
+            allowHostKeyMismatchOverride = false,
+            connectionModeOverride = effectiveMode,
+            interactiveShell = true,
+        )
+    }
+
+    /**
+     * Sends raw text or control sequences (`Ctrl+C`, `Tab`, `Esc`, arrows) to the active PTY stdin.
+     */
+    fun sendTerminalInput(text: String, appendNewline: Boolean = false) {
+        val writer = activeStdinWriter ?: return
+        val payload = if (appendNewline) "$text\r" else text
+        if (payload.isEmpty()) return
+        externalScope.launch(Dispatchers.IO) {
+            runCatching { writer.write(payload) }
+        }
     }
 
     fun openServerQuickPickerSheet() {
@@ -352,6 +615,17 @@ class LiteSshSessionManager(
             _uiState.update { it.copy(showServerEditor = true, statusMessage = "请先添加一台 VPS 主机") }
             return
         }
+        val effectiveMode = server.effectiveConnectionMode
+        if (effectiveMode == SshConnectionMode.DIRECT_SSH && server.isProbeSynced && !server.canDirectSsh) {
+            _uiState.update {
+                it.copy(
+                    showServerEditor = true,
+                    editingServer = server,
+                    statusMessage = "「${server.displayName}」尚未填写直连 SSH 凭据，请补充密码/私钥或切换为「探针终端」模式",
+                )
+            }
+            return
+        }
         val preset = state.selectedPreset
         val command = state.resolvedSelectedCommand
         executePresetOnServer(
@@ -359,6 +633,8 @@ class LiteSshSessionManager(
             preset = preset,
             command = command,
             allowHostKeyMismatchOverride = false,
+            connectionModeOverride = effectiveMode,
+            interactiveShell = false,
         )
     }
 
@@ -402,6 +678,8 @@ class LiteSshSessionManager(
                     command = prompt.command,
                     allowHostKeyMismatchOverride = true,
                     mismatchOverrideServerId = prompt.mismatchServerId,
+                    connectionModeOverride = SshConnectionMode.DIRECT_SSH,
+                    interactiveShell = prompt.preset.id == PRESET_ID_INTERACTIVE_TERMINAL,
                 )
             }
         }
@@ -433,6 +711,7 @@ class LiteSshSessionManager(
         val state = _uiState.value
         executionJob = null
         activePtyResizer = null
+        activeStdinWriter = null
         elapsedTickerJob?.cancel()
         elapsedTickerJob = null
         activeJob.cancel()
@@ -442,15 +721,16 @@ class LiteSshSessionManager(
         _uiState.update {
             it.copy(
                 isRunning = false,
+                isInteractiveSession = false,
                 connectionPhase = SshConnectionPhase.CANCELLED,
                 liveAnsiOutput = partialOutput,
                 hasLiveOutputFlag = partialOutput.isNotBlank(),
-                statusMessage = "已断开 SSH 会话",
+                statusMessage = "已断开终端会话",
             )
         }
         syncGlobalBarState()
 
-        if (partialOutput.isNotBlank()) {
+        if (partialOutput.isNotBlank() && !state.isInteractiveSession) {
             val server = state.selectedServer
             val cancelledRecord = SshExecutionRecord(
                 id = idGenerator(),
@@ -982,15 +1262,23 @@ class LiteSshSessionManager(
 
         val job = externalScope.launch {
             try {
+                val effectiveMode = server.effectiveConnectionMode
+                val selectedExecutor = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) {
+                    resolvePanelTerminalExecutor()
+                        ?: throw IllegalStateException("探针终端执行器未就绪，请先在「我的服务器」配置探针面板或切换为「直连 SSH」")
+                } else {
+                    executor
+                }
                 val request: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
                     vaultRepository = vaultRepository,
                     server = server,
                     allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
                     mismatchOverrideServerId = mismatchOverrideServerId,
+                    connectionModeOverride = effectiveMode,
                 )
                 var exitCode: Int? = null
                 var output = ""
-                executor.runCommand(
+                selectedExecutor.runCommand(
                     request = request,
                     command = command,
                     autoRespondConfig = SshAutoRespondConfig(enabled = _uiState.value.autoRespondPrompts),
@@ -1202,8 +1490,13 @@ class LiteSshSessionManager(
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
         iperf3ServiceJob?.cancel()
+        fleetPanelsObserveJob?.cancel()
+        probeSyncJob?.cancel()
         externalScope.cancel()
     }
+
+    private fun resolvePanelTerminalExecutor(): LiteSshExecutor? =
+        panelTerminalExecutorOverride ?: defaultPanelTerminalExecutor
 
     private fun executePresetOnServer(
         server: SshServerProfile,
@@ -1211,14 +1504,17 @@ class LiteSshSessionManager(
         command: String,
         allowHostKeyMismatchOverride: Boolean,
         mismatchOverrideServerId: String? = null,
+        connectionModeOverride: SshConnectionMode? = null,
+        interactiveShell: Boolean = false,
     ) {
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
 
+        val effectiveMode = connectionModeOverride ?: server.effectiveConnectionMode
         val startedAt = clock()
         val currentRunGeneration = ++runGenerationCounter
         latestOutputTimestampMillis = null
-        val autoRespondEnabled = _uiState.value.autoRespondPrompts
+        val autoRespondEnabled = !interactiveShell && _uiState.value.autoRespondPrompts
         val initialProgress = SshStageDetector.detect(
             presetId = preset.id,
             command = command,
@@ -1242,6 +1538,8 @@ class LiteSshSessionManager(
         _uiState.update {
             it.copy(
                 isRunning = true,
+                isInteractiveSession = interactiveShell,
+                activeConnectionMode = effectiveMode,
                 connectionPhase = SshConnectionPhase.CONNECTING,
                 activeServerAlias = server.displayName,
                 activeServerHost = server.host,
@@ -1303,11 +1601,20 @@ class LiteSshSessionManager(
         executionJob = externalScope.launch {
             var completedNormallyOrFailed = false
             try {
+                val selectedExecutor = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) {
+                    resolvePanelTerminalExecutor()
+                        ?: throw IllegalStateException("探针终端执行器未就绪，请先在「我的服务器」配置探针面板或切换为「直连 SSH」")
+                } else {
+                    executor
+                }
+
                 val baseRequest: SshConnectionRequest = SshJumpHostResolver.buildConnectionRequest(
                     vaultRepository = vaultRepository,
                     server = server,
                     allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
                     mismatchOverrideServerId = mismatchOverrideServerId,
+                    connectionModeOverride = effectiveMode,
+                    interactiveShell = interactiveShell,
                 )
                 val initialPty = desiredPtySize
                 val request = if (initialPty != null) {
@@ -1321,7 +1628,7 @@ class LiteSshSessionManager(
                     baseRequest
                 }
 
-                executor.runCommand(
+                selectedExecutor.runCommand(
                     request = request,
                     command = command,
                     autoRespondConfig = SshAutoRespondConfig(enabled = autoRespondEnabled),
@@ -1331,6 +1638,11 @@ class LiteSshSessionManager(
                             activePtyResizerGeneration = currentRunGeneration
                             activePtyResizer = resizer
                             desiredPtySize?.let(resizer::resize)
+                        }
+                    } + SshStdinCallbackContext { writer ->
+                        if (activeStdinWriterGeneration <= currentRunGeneration) {
+                            activeStdinWriterGeneration = currentRunGeneration
+                            activeStdinWriter = writer
                         }
                     },
                 ).collect { event ->
@@ -1485,25 +1797,28 @@ class LiteSshSessionManager(
                             _uiState.update {
                                 it.copy(
                                     isRunning = false,
+                                    isInteractiveSession = false,
                                     connectionPhase = SshConnectionPhase.COMPLETED,
                                     liveAnsiOutput = event.sanitizedAnsiOutput,
                                     hasLiveOutputFlag = event.sanitizedAnsiOutput.isNotBlank(),
                                     elapsedMillis = event.elapsedMillis,
                                     exitCode = event.exitCode,
                                     errorMessage = errMsg,
-                                    statusMessage = if (event.exitCode == 0) {
-                                        "测机完成：${server.displayName} · ${preset.name}"
-                                    } else {
-                                        "测机结束（退出码 ${event.exitCode}）：${server.displayName} · ${preset.name}"
+                                    statusMessage = when {
+                                        interactiveShell -> "终端会话已结束：${server.displayName}"
+                                        event.exitCode == 0 -> "测机完成：${server.displayName} · ${preset.name}"
+                                        else -> "测机结束（退出码 ${event.exitCode}）：${server.displayName} · ${preset.name}"
                                     },
                                 )
                             }
                             syncGlobalBarState()
-                            appendCompletedSessionRun(record, autoSelect = record.hasOutput)
-                            if (record.hasOutput) {
-                                vaultRepository.saveRunRecord(record)
+                            if (!interactiveShell) {
+                                appendCompletedSessionRun(record, autoSelect = record.hasOutput)
+                                if (record.hasOutput) {
+                                    vaultRepository.saveRunRecord(record)
+                                }
+                                dispatchCompletionNotices(record = record, errorDetail = errMsg)
                             }
-                            dispatchCompletionNotices(record = record, errorDetail = errMsg)
                         }
                     }
                 }
@@ -1517,6 +1832,7 @@ class LiteSshSessionManager(
                 _uiState.update {
                     it.copy(
                         isRunning = false,
+                        isInteractiveSession = false,
                         connectionPhase = SshConnectionPhase.FAILED,
                         errorMessage = "检测到主机密钥变更，已阻断连接",
                         pendingHostKeyMismatch = PendingHostKeyMismatchPrompt(
@@ -1538,6 +1854,7 @@ class LiteSshSessionManager(
                 _uiState.update {
                     it.copy(
                         isRunning = false,
+                        isInteractiveSession = false,
                         connectionPhase = SshConnectionPhase.FAILED,
                         liveAnsiOutput = partialOutput,
                         hasLiveOutputFlag = partialOutput.isNotBlank(),
@@ -1547,7 +1864,7 @@ class LiteSshSessionManager(
                     )
                 }
                 syncGlobalBarState()
-                if (!completedNormallyOrFailed) {
+                if (!completedNormallyOrFailed && !interactiveShell) {
                     val failedRecord = SshExecutionRecord(
                         id = idGenerator(),
                         serverId = server.id,
@@ -1569,6 +1886,9 @@ class LiteSshSessionManager(
             } finally {
                 if (activePtyResizerGeneration == currentRunGeneration) {
                     activePtyResizer = null
+                }
+                if (activeStdinWriterGeneration == currentRunGeneration) {
+                    activeStdinWriter = null
                 }
                 elapsedTickerJob?.cancel()
                 elapsedTickerJob = null
@@ -1695,7 +2015,18 @@ class LiteSshSessionManager(
         }
         val raw = t.message?.trim().orEmpty()
         return when {
-            raw.startsWith("跳板机连接失败") || raw.startsWith("目标经跳板连接失败") -> raw
+            raw.startsWith("跳板机连接失败") ||
+                raw.startsWith("目标经跳板连接失败") ||
+                raw.startsWith("哪吒") ||
+                raw.startsWith("Komari") ||
+                raw.startsWith("探针") ||
+                raw.startsWith("当前主机") ||
+                raw.startsWith("安全校验失败") ||
+                raw.startsWith("未找到") ||
+                raw.startsWith("等待 Komari") ||
+                raw.startsWith("连接哪吒") ||
+                raw.startsWith("连接 Komari") ||
+                raw.startsWith("创建哪吒") -> raw
             raw.contains("Auth fail", ignoreCase = true) ||
                 raw.contains("Auth cancel", ignoreCase = true) ->
                 "SSH 认证失败：请检查用户名、密码或私钥（及私钥口令）"
@@ -1715,6 +2046,7 @@ class LiteSshSessionManager(
     }
 
     companion object {
+        const val PRESET_ID_INTERACTIVE_TERMINAL: String = "__interactive_terminal__"
         private const val ELAPSED_TICK_MS: Long = 500L
         private const val FOREGROUND_NOTIF_UPDATE_INTERVAL_MS: Long = 2_000L
         private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")

@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.nodeseek.app.NodePulseApp
 import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.data.ssh.SshServerVault
+import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyInfo
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
@@ -16,6 +17,7 @@ import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.domain.ssh.Iperf3ServiceOwnership
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
 import com.nodeseek.app.domain.ssh.NodeQualityReportFormatter
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshMergeLayout
 import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshBenchmarkPostFormatter
@@ -33,7 +35,9 @@ import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
+import com.nodeseek.app.domain.ssh.SshVaultCollapseState
 import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.domain.ssh.SshVaultServerGroup
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -177,7 +181,22 @@ data class LiteSshUiState(
     val selectedPresetFilter: SshPresetFilter = SshPresetFilter.ALL,
     val isPresetCatalogExpanded: Boolean = false,
     val showPresetQuickPickerSheet: Boolean = false,
+    val collapseState: SshVaultCollapseState = SshVaultCollapseState(),
+    val isInteractiveSession: Boolean = false,
+    val activeConnectionMode: SshConnectionMode? = null,
+    val isSyncingProbes: Boolean = false,
+    val probePanels: List<ProbePanelConfig> = emptyList(),
+    val lastProbeSyncSummary: String? = null,
 ) {
+    val configuredProbePanelCount: Int
+        get() = probePanels.count { it.enabled }
+
+    val vaultServerGroups: List<SshVaultServerGroup>
+        get() = SshVaultCatalogFilter.groupServersForCollapsibleVault(
+            filteredServers = filteredServers,
+            selectedServerId = selectedServer?.id,
+        )
+
     val allPresets: List<SshScriptPreset>
         get() = builtInPresets + customPresets.map { it.toScriptPreset() }
 
@@ -464,6 +483,17 @@ class LiteSshViewModel(
     fun selectServerGroup(groupKey: String) = sessionManager.selectServerGroup(groupKey)
     fun setServerVaultExpanded(expanded: Boolean) = sessionManager.setServerVaultExpanded(expanded)
     fun toggleServerVaultExpanded() = sessionManager.toggleServerVaultExpanded()
+    fun toggleVaultListCollapsed() = sessionManager.toggleVaultListCollapsed()
+    fun toggleVaultGroupCollapsed(groupKey: String) = sessionManager.toggleVaultGroupCollapsed(groupKey)
+    fun setAllVaultGroupsCollapsed(collapsed: Boolean) = sessionManager.setAllVaultGroupsCollapsed(collapsed)
+    fun toggleVaultServerExpanded(serverId: String) = sessionManager.toggleVaultServerExpanded(serverId)
+    fun syncFromProbePanels() = sessionManager.syncFromProbePanels()
+    fun setServerConnectionMode(serverId: String, mode: SshConnectionMode) =
+        sessionManager.setServerConnectionMode(serverId, mode)
+    fun openInteractiveTerminal(serverId: String? = null, modeOverride: SshConnectionMode? = null) =
+        sessionManager.openInteractiveTerminal(serverId = serverId, modeOverride = modeOverride)
+    fun sendTerminalInput(text: String, appendNewline: Boolean = false) =
+        sessionManager.sendTerminalInput(text = text, appendNewline = appendNewline)
     fun openServerQuickPickerSheet() = sessionManager.openServerQuickPickerSheet()
     fun dismissServerQuickPickerSheet() = sessionManager.dismissServerQuickPickerSheet()
 
@@ -559,8 +589,10 @@ class LiteSshViewModel(
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory {
             val appContext = context.applicationContext ?: context
-            val sharedManager = (appContext as? NodePulseApp)?.container?.sshSessionManager
+            val container = (appContext as? NodePulseApp)?.container
+            val sharedManager = container?.sshSessionManager
             if (sharedManager != null) {
+                sharedManager.attachFleetIntegration(fleetRepository = container.fleetRepository)
                 return factory(sessionManager = sharedManager)
             }
             val vault = SshServerVault.getDefault(appContext)

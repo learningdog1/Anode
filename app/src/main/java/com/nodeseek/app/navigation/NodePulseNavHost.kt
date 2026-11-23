@@ -341,6 +341,9 @@ fun NodePulseNavHost(
     val latestIsOnLiteSshRoute by rememberUpdatedState(isOnLiteSshRoute)
 
     LaunchedEffect(container) {
+        container.sshSessionManager.attachFleetIntegration(
+            fleetRepository = container.fleetRepository,
+        )
         container.sshSessionManager.completionPopupEvents.collect { popup ->
             if (!latestIsOnLiteSshRoute) {
                 inAppPopupState.enqueue(popup)
@@ -1758,6 +1761,11 @@ fun NodePulseNavHost(
 
             // Feature 6: Lite SSH (Server Vault + Preset Benchmark Scripts + ANSI Viewer + 1-Click Review Post)
             composable<LiteSshRoute> {
+                LaunchedEffect(container) {
+                    container.sshSessionManager.attachFleetIntegration(
+                        fleetRepository = container.fleetRepository,
+                    )
+                }
                 val sshViewModel: LiteSshViewModel = viewModel(
                     factory = LiteSshViewModel.factory(
                         sessionManager = container.sshSessionManager,
@@ -1771,6 +1779,9 @@ fun NodePulseNavHost(
                             suggestedTitle,
                             markdownContent,
                         )
+                    },
+                    onOpenProbePanels = {
+                        openMyServers(0, "", "", "")
                     },
                     viewModel = sshViewModel,
                 )

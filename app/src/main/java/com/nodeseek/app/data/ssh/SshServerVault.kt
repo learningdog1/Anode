@@ -4,11 +4,16 @@ import android.content.Context
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.DecryptedSshCredentials
 import com.nodeseek.app.domain.ssh.HostKeyTrustPolicy
+import com.nodeseek.app.domain.ssh.ProbeSyncMachine
 import com.nodeseek.app.domain.ssh.SecretCipher
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
+import com.nodeseek.app.domain.ssh.SshProbeSyncMerger
+import com.nodeseek.app.domain.ssh.SshProbeSyncOutcome
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshVaultCollapseState
 import com.nodeseek.app.domain.ssh.SshVaultRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -29,9 +34,10 @@ private data class SshVaultFilePayload(
     val servers: List<SshServerProfile> = emptyList(),
     val customPresets: List<CustomSshPreset> = emptyList(),
     val recentRuns: List<SshExecutionRecord> = emptyList(),
+    val collapseState: SshVaultCollapseState = SshVaultCollapseState(),
 ) {
     companion object {
-        const val CURRENT_SCHEMA_VERSION: Int = 1
+        const val CURRENT_SCHEMA_VERSION: Int = 2
     }
 }
 
@@ -67,19 +73,35 @@ class SshServerVault(
     private val _recentRunsFlow = MutableStateFlow(initialPayload.recentRuns)
     override val recentRunsFlow: StateFlow<List<SshExecutionRecord>> = _recentRunsFlow.asStateFlow()
 
+    private val _collapseStateFlow = MutableStateFlow(initialPayload.collapseState)
+    override val collapseStateFlow: StateFlow<SshVaultCollapseState> = _collapseStateFlow.asStateFlow()
+
     override suspend fun saveServer(draft: SshServerDraft): SshServerProfile =
         withContext(ioDispatcher) {
             mutex.withLock {
-                val cleanHost = draft.host.trim()
-                require(cleanHost.isNotEmpty()) { "服务器地址不能为空" }
-                val safePort = draft.port.coerceIn(1, 65535)
-                val cleanUser = draft.username.trim().ifBlank { SshServerProfile.DEFAULT_USERNAME }
-                val cleanAlias = draft.alias.trim().ifBlank { cleanHost }
-
                 val existingList = _serversFlow.value
                 val existing = draft.id?.let { targetId ->
                     existingList.firstOrNull { it.id == targetId }
                 }
+
+                val resolvedProbePanelId = draft.probePanelId?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: if (draft.preserveProbeLink) existing?.probePanelId else null
+                val resolvedProbeServerId = draft.probeServerId?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: if (draft.preserveProbeLink) existing?.probeServerId else null
+                val isProbeLinked = resolvedProbePanelId != null && resolvedProbeServerId != null
+
+                val cleanHost = draft.host.trim()
+                val allowBlankHostForPanelTerminal =
+                    isProbeLinked && draft.connectionMode == SshConnectionMode.PANEL_TERMINAL
+                if (!allowBlankHostForPanelTerminal) {
+                    require(cleanHost.isNotEmpty()) { "服务器地址不能为空" }
+                }
+                val safePort = draft.port.coerceIn(1, 65535)
+                val cleanUser = draft.username.trim().ifBlank { SshServerProfile.DEFAULT_USERNAME }
+                val cleanAlias = draft.alias.trim().ifBlank {
+                    cleanHost.ifBlank { resolvedProbeServerId?.let { "节点 #$it" } ?: "未命名主机" }
+                }
+
                 val resolvedId = existing?.id ?: draft.id?.takeIf { it.isNotBlank() } ?: idGenerator()
                 val cleanJumpHostId = SshJumpHostResolver.normalizeJumpHostId(draft.jumpHostId)
                 SshJumpHostResolver.validateJumpHostSelection(
@@ -109,6 +131,17 @@ class SshServerVault(
                         existing.port != safePort
                     )
 
+                val resolvedGroupTag = when {
+                    draft.groupEdited -> draft.groupTag.trim()
+                    draft.groupTag.isNotBlank() -> draft.groupTag.trim()
+                    else -> existing?.groupTag.orEmpty()
+                }
+                val resolvedConnectionMode = if (isProbeLinked) {
+                    draft.connectionMode
+                } else {
+                    SshConnectionMode.DIRECT_SSH
+                }
+
                 val saved = SshServerProfile(
                     id = resolvedId,
                     alias = cleanAlias,
@@ -123,6 +156,27 @@ class SshServerVault(
                     lastConnectedEpochMillis = existing?.lastConnectedEpochMillis,
                     createdAtEpochMillis = existing?.createdAtEpochMillis ?: clock(),
                     jumpHostId = cleanJumpHostId,
+                    groupTag = resolvedGroupTag,
+                    probePanelId = resolvedProbePanelId,
+                    probePanelName = draft.probePanelName?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: if (draft.preserveProbeLink) existing?.probePanelName else null,
+                    probePanelType = draft.probePanelType?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: if (draft.preserveProbeLink) existing?.probePanelType else null,
+                    probeServerId = resolvedProbeServerId,
+                    probeRegion = draft.probeRegion.trim().ifBlank {
+                        if (draft.preserveProbeLink) existing?.probeRegion.orEmpty() else ""
+                    },
+                    probeTags = draft.probeTags.takeIf { it.isNotEmpty() }
+                        ?: if (draft.preserveProbeLink) existing?.probeTags.orEmpty() else emptyList(),
+                    probeSyncedAtEpochMillis = draft.probeSyncedAtEpochMillis
+                        ?: if (draft.preserveProbeLink) existing?.probeSyncedAtEpochMillis else null,
+                    probeReportedHost = draft.probeReportedHost.trim().ifBlank {
+                        if (draft.preserveProbeLink) existing?.probeReportedHost.orEmpty() else ""
+                    },
+                    probeReportedName = draft.probeReportedName.trim().ifBlank {
+                        if (draft.preserveProbeLink) existing?.probeReportedName.orEmpty() else ""
+                    },
+                    connectionMode = resolvedConnectionMode,
                 )
 
                 val updated = if (existing != null) {
@@ -149,6 +203,67 @@ class SshServerVault(
                         }
                     }
                     _serversFlow.value = cleaned
+                    _collapseStateFlow.value = _collapseStateFlow.value.pruneServerId(serverId)
+                    persistCurrentStateLocked()
+                }
+            }
+        }
+    }
+
+    override suspend fun syncProbeMachines(machines: List<ProbeSyncMachine>): SshProbeSyncOutcome =
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                val outcome = SshProbeSyncMerger.merge(
+                    existingServers = _serversFlow.value,
+                    incomingMachines = machines,
+                    nowEpochMillis = clock(),
+                    idGenerator = idGenerator,
+                )
+                if (outcome.mergedServers != _serversFlow.value) {
+                    _serversFlow.value = outcome.mergedServers
+                    persistCurrentStateLocked()
+                }
+                outcome
+            }
+        }
+
+    override suspend fun updateServerConnectionMode(
+        serverId: String,
+        mode: SshConnectionMode,
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                var changed = false
+                val updated = _serversFlow.value.map { profile ->
+                    if (profile.id == serverId) {
+                        val effectiveMode = if (profile.isProbeSynced) mode else SshConnectionMode.DIRECT_SSH
+                        if (profile.connectionMode != effectiveMode) {
+                            changed = true
+                            profile.copy(connectionMode = effectiveMode)
+                        } else {
+                            profile
+                        }
+                    } else {
+                        profile
+                    }
+                }
+                if (changed) {
+                    _serversFlow.value = updated
+                    persistCurrentStateLocked()
+                }
+            }
+        }
+    }
+
+    override suspend fun updateCollapseState(
+        transform: (SshVaultCollapseState) -> SshVaultCollapseState,
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                val current = _collapseStateFlow.value
+                val next = transform(current)
+                if (next != current) {
+                    _collapseStateFlow.value = next
                     persistCurrentStateLocked()
                 }
             }
@@ -322,6 +437,7 @@ class SshServerVault(
             servers = _serversFlow.value,
             customPresets = _customPresetsFlow.value,
             recentRuns = _recentRunsFlow.value,
+            collapseState = _collapseStateFlow.value,
         )
         val encoded = json.encodeToString(SshVaultFilePayload.serializer(), payload)
         vaultFile.parentFile?.mkdirs()
