@@ -13,12 +13,17 @@ import com.nodeseek.app.domain.netbench.NetBenchNetworkSelector
 import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.ProxyPresence
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -348,13 +353,74 @@ class IpIntelligenceClient(
         return lastOutcome
     }
 
+    private data class SingleUrlProbeOutcome(
+        val info: ClientNetworkInfo? = null,
+        val error: Throwable? = null,
+        val isLockdown: Boolean = false,
+    )
+
+    private suspend fun probeSingleClientUrl(
+        client: OkHttpClient,
+        sourceName: String,
+        url: String,
+        channel: NetBenchSocketChannel,
+        routeKind: EgressRouteKind,
+    ): SingleUrlProbeOutcome {
+        val fetchResult = fetchJsonTextWithError(client, url)
+        if (fetchResult.error != null) {
+            val isLockdown = channel.isDirectPhysical &&
+                NetBenchNetworkSelector.classifyDirectBindFailure(
+                    throwable = fetchResult.error,
+                    isVpnActive = true,
+                    hasDirectCandidate = true,
+                ) == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED
+            return SingleUrlProbeOutcome(error = fetchResult.error, isLockdown = isLockdown)
+        }
+        val body = fetchResult.body ?: return SingleUrlProbeOutcome()
+        val parsed = when (sourceName) {
+            "ipwho.is" -> parseIpWhoIs(body, sourceName)
+            "ipinfo.io" -> parseIpInfo(body, sourceName)
+            "ipapi.co" -> parseIpApi(body, sourceName)
+            "ipip.net" -> parseMyIpIpip(body, sourceName)
+            else -> parseIpWhoIs(body, sourceName)
+                ?: parseIpInfo(body, sourceName)
+                ?: parseIpApi(body, sourceName)
+                ?: parseMyIpIpip(body, sourceName)
+        } ?: return SingleUrlProbeOutcome()
+
+        val (carrier, displayName) = IpClassificationEngine.classifyClientCarrier(
+            asn = parsed.asn,
+            ispName = parsed.ispName,
+            orgName = parsed.orgName,
+            countryCode = parsed.countryCode,
+        )
+        val ipFamily = NetBenchTargetParser.detectIpFamily(parsed.ip)
+        return SingleUrlProbeOutcome(
+            info = ClientNetworkInfo(
+                carrier = carrier,
+                carrierDisplayName = displayName,
+                ipFamily = ipFamily,
+                countryCode = IpClassificationEngine.normalizeCountryCode(parsed.countryCode),
+                regionName = parsed.regionName,
+                asn = IpClassificationEngine.normalizeAsn(parsed.asn),
+                ispName = parsed.ispName ?: parsed.orgName,
+                maskedIp = NetBenchTargetParser.maskClientIpForDisplay(parsed.ip),
+                rawIp = parsed.ip,
+                source = parsed.source,
+                routeKind = routeKind,
+                transportLabel = channel.transportLabel,
+            ),
+        )
+    }
+
     private suspend fun lookupOnChannelDetailed(
         channel: NetBenchSocketChannel,
         urls: List<Pair<String, String>>,
         routeKind: EgressRouteKind,
     ): ChannelProbeOutcome {
+        if (urls.isEmpty()) return ChannelProbeOutcome(info = null, lastError = null)
         val needsCustomClient = channel.isDirectPhysical || channel.bypassSystemHttpProxy
-        val tempPool = if (needsCustomClient) ConnectionPool(2, 15, TimeUnit.SECONDS) else null
+        val tempPool = if (needsCustomClient) ConnectionPool(4, 15, TimeUnit.SECONDS) else null
         val client = if (needsCustomClient) {
             httpClient.newBuilder()
                 .bindToChannel(channel, tempPool)
@@ -363,63 +429,85 @@ class IpIntelligenceClient(
             httpClient
         }
 
-        var lastError: Throwable? = null
         try {
+            if (routeKind == EgressRouteKind.DIRECT && urls.size > 1) {
+                return lookupDirectHedged(client, channel, urls, routeKind)
+            }
+            var lastError: Throwable? = null
             for ((sourceName, url) in urls) {
-                val fetchResult = fetchJsonTextWithError(client, url)
-                if (fetchResult.error != null) {
-                    lastError = fetchResult.error
-                    if (channel.isDirectPhysical &&
-                        NetBenchNetworkSelector.classifyDirectBindFailure(
-                            throwable = fetchResult.error,
-                            isVpnActive = true,
-                            hasDirectCandidate = true,
-                        ) == DirectBindFailureReason.VPN_LOCKDOWN_OR_BYPASS_DENIED
-                    ) {
-                        return ChannelProbeOutcome(info = null, lastError = fetchResult.error)
+                val outcome = probeSingleClientUrl(client, sourceName, url, channel, routeKind)
+                if (outcome.info != null) {
+                    return ChannelProbeOutcome(info = outcome.info)
+                }
+                if (outcome.error != null) {
+                    lastError = outcome.error
+                    if (outcome.isLockdown) {
+                        return ChannelProbeOutcome(info = null, lastError = outcome.error)
                     }
-                    continue
-                }
-                val body = fetchResult.body ?: continue
-                val parsed = when (sourceName) {
-                    "ipwho.is" -> parseIpWhoIs(body, sourceName)
-                    "ipinfo.io" -> parseIpInfo(body, sourceName)
-                    "ipapi.co" -> parseIpApi(body, sourceName)
-                    "ipip.net" -> parseMyIpIpip(body, sourceName)
-                    else -> parseIpWhoIs(body, sourceName)
-                        ?: parseIpInfo(body, sourceName)
-                        ?: parseIpApi(body, sourceName)
-                        ?: parseMyIpIpip(body, sourceName)
-                }
-                if (parsed != null) {
-                    val (carrier, displayName) = IpClassificationEngine.classifyClientCarrier(
-                        asn = parsed.asn,
-                        ispName = parsed.ispName,
-                        orgName = parsed.orgName,
-                        countryCode = parsed.countryCode,
-                    )
-                    val ipFamily = NetBenchTargetParser.detectIpFamily(parsed.ip)
-                    return ChannelProbeOutcome(
-                        info = ClientNetworkInfo(
-                            carrier = carrier,
-                            carrierDisplayName = displayName,
-                            ipFamily = ipFamily,
-                            countryCode = IpClassificationEngine.normalizeCountryCode(parsed.countryCode),
-                            regionName = parsed.regionName,
-                            asn = IpClassificationEngine.normalizeAsn(parsed.asn),
-                            ispName = parsed.ispName ?: parsed.orgName,
-                            maskedIp = NetBenchTargetParser.maskClientIpForDisplay(parsed.ip),
-                            rawIp = parsed.ip,
-                            source = parsed.source,
-                            routeKind = routeKind,
-                            transportLabel = channel.transportLabel,
-                        ),
-                    )
                 }
             }
             return ChannelProbeOutcome(info = null, lastError = lastError)
         } finally {
             tempPool?.evictAll()
+        }
+    }
+
+    /**
+     * Hedged parallel probing for direct physical egress:
+     * Starts the primary ASN-rich source (`urls[0]`) immediately; if it fails or takes longer than
+     * [DIRECT_HEDGE_STAGGER_MS] (e.g. overseas GeoIP blackholed in mainland China), launches the
+     * remaining fallbacks (prioritizing domestic `ipip.net`) concurrently and cancels losers on
+     * first valid result.
+     */
+    private suspend fun lookupDirectHedged(
+        client: OkHttpClient,
+        channel: NetBenchSocketChannel,
+        urls: List<Pair<String, String>>,
+        routeKind: EgressRouteKind,
+    ): ChannelProbeOutcome = coroutineScope {
+        val results = Channel<SingleUrlProbeOutcome>(capacity = urls.size)
+        val primaryFailed = CompletableDeferred<Unit>()
+        val jobs = mutableListOf<Job>()
+
+        val primary = urls.first()
+        jobs += launch {
+            val outcome = probeSingleClientUrl(client, primary.first, primary.second, channel, routeKind)
+            if (outcome.info == null && !outcome.isLockdown) {
+                primaryFailed.complete(Unit)
+            }
+            results.trySend(outcome)
+        }
+
+        val fallbacks = urls.drop(1).sortedByDescending { it.first == "ipip.net" }
+        jobs += launch {
+            withTimeoutOrNull(DIRECT_HEDGE_STAGGER_MS) { primaryFailed.await() }
+            for ((sourceName, url) in fallbacks) {
+                launch {
+                    results.trySend(probeSingleClientUrl(client, sourceName, url, channel, routeKind))
+                }
+            }
+        }
+
+        var completed = 0
+        var lastError: Throwable? = null
+        try {
+            while (completed < urls.size) {
+                val outcome = results.receive()
+                completed++
+                if (outcome.info != null) {
+                    return@coroutineScope ChannelProbeOutcome(info = outcome.info)
+                }
+                if (outcome.error != null) {
+                    lastError = outcome.error
+                    if (outcome.isLockdown) {
+                        return@coroutineScope ChannelProbeOutcome(info = null, lastError = outcome.error)
+                    }
+                }
+            }
+            ChannelProbeOutcome(info = null, lastError = lastError)
+        } finally {
+            jobs.forEach { it.cancel() }
+            results.close()
         }
     }
 
@@ -770,6 +858,8 @@ class IpIntelligenceClient(
         URLEncoder.encode(raw, StandardCharsets.UTF_8.name()).replace("+", "%20")
 
     companion object {
+        private const val DIRECT_HEDGE_STAGGER_MS = 600L
+
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(6, TimeUnit.SECONDS)

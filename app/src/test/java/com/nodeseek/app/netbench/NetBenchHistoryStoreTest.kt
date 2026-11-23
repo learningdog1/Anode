@@ -160,4 +160,36 @@ class NetBenchHistoryStoreTest {
         assertEquals(31.5, newest.lastPingAvgMs!!, 0.01)
         assertEquals(0.0, newest.lastPingLossPercent!!, 0.01)
     }
+
+    @Test
+    fun `lazy init defers disk read until reload or write without losing existing entries and defaults markdownStyle to FULL_TABLE`() = runBlocking {
+        val file = File(tempFolder.root, "lazy_${NetBenchHistoryStore.HISTORY_FILE_NAME}")
+        val writer = NetBenchHistoryStore(historyFile = file, ioDispatcher = Dispatchers.IO)
+        assertEquals(
+            com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle.FULL_TABLE,
+            writer.preferences.value.markdownStyle,
+        )
+        writer.record(NetBenchHistoryEntry(host = "existing.example.com", port = 443, testedAtEpochMillis = 1000L))
+        writer.updatePreferences {
+            it.copy(markdownStyle = com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle.REPLY_CARD)
+        }
+
+        // Construct lazily: must NOT block constructor with disk read
+        val lazyStore = NetBenchHistoryStore(
+            historyFile = file,
+            ioDispatcher = Dispatchers.IO,
+            eagerLoadOnInit = false,
+        )
+        assertTrue(lazyStore.entries.value.isEmpty())
+
+        // Recording a new entry must load existing disk entries first so nothing is lost
+        lazyStore.record(NetBenchHistoryEntry(host = "added.example.com", port = 22, testedAtEpochMillis = 2000L))
+        assertEquals(2, lazyStore.entries.value.size)
+        assertEquals("added.example.com", lazyStore.entries.value[0].host)
+        assertEquals("existing.example.com", lazyStore.entries.value[1].host)
+        assertEquals(
+            com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle.REPLY_CARD,
+            lazyStore.preferences.value.markdownStyle,
+        )
+    }
 }
