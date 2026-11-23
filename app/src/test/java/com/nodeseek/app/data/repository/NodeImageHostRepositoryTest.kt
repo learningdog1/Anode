@@ -388,6 +388,27 @@ class NodeImageHostRepositoryTest {
         }
     }
 
+    @Test
+    fun `verifyApiKey checks explicit or saved key and reports 401 failures`() = runBlocking {
+        val repo = NodeImageHostRepositoryImpl(
+            apiClientProvider = { apiClient },
+            settingsRepository = settingsRepository,
+            sessionRepository = sessionRepository,
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true,"images":[]}"""))
+        assertTrue(repo.verifyApiKey(testApiKey).isSuccess)
+        val okReq = server.takeRequest()
+        assertEquals("/api/v1/images", okReq.path)
+        assertEquals(testApiKey, okReq.getHeader("X-API-Key"))
+
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"success":false,"message":"Unauthorized"}"""))
+        val unauthorized = repo.verifyApiKey("bad_key_123")
+        assertTrue(unauthorized.isFailure)
+
+        val blankRes = repo.verifyApiKey("   ")
+        assertTrue(blankRes.isFailure)
+    }
+
     private fun makeJpegBytes(): ByteArray =
         byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 0x00, 0x10)
 

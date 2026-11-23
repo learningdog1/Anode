@@ -843,4 +843,21 @@ class InboxRepositoryImplTest {
             popupJob.cancel()
         }
     }
+
+    @Test
+    fun `requireAuthenticatedSessionToken propagates CloudflareChallengeException instead of false 401`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><head><title>Just a moment...</title></head></html>"),
+        )
+
+        val result = inboxRepository.getMessageThreads()
+        assertTrue(result.isFailure)
+        assertTrue(
+            "Expected CloudflareChallengeRequired, got: ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is com.nodeseek.app.domain.model.TopicAccessException.CloudflareChallengeRequired,
+        )
+    }
 }

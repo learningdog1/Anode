@@ -6,6 +6,7 @@ import com.nodeseek.app.data.network.CoilHttpClientFactory
 import com.nodeseek.app.data.network.NodeSeekUrlNormalizer
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
+import com.nodeseek.app.data.network.WebViewSameOriginActionRunner
 import com.nodeseek.app.data.network.computeDynamicSign
 import okhttp3.Cookie
 import okhttp3.Headers
@@ -14,7 +15,10 @@ import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.security.MessageDigest
@@ -177,5 +181,65 @@ class NodeSeekSigningAndUrlTest {
             "sortBy=postTime; cf_clearance=abc123; session=xyz789",
         )
         assertEquals(listOf("cf_clearance", "session"), parsedFromHeader.map { it.name })
+    }
+
+    @Test
+    fun `CoilHttpClientFactory bounds chunked SVG reads at 2MB and injects viewBox cleanly into self-closing svg`() {
+        MockWebServer().use { svgServer ->
+            // 1. Self-closing <svg width="120" height="40"/> produces valid XML with viewBox
+            svgServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "image/svg+xml")
+                    .setBody("""<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"/>"""),
+            )
+            // 2. Chunked SVG exceeding 2MB (no Content-Length) skips normalization and leaves original body intact
+            val oversizedSvg = "<svg width=\"10\" height=\"10\">" + "a".repeat(2 * 1024 * 1024 + 512) + "</svg>"
+            svgServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "image/svg+xml")
+                    .setChunkedBody(oversizedSvg, 65536),
+            )
+
+            val coilClient = CoilHttpClientFactory.create(
+                cookieBridge = WebViewCookieBridge(forceInMemory = true),
+                userAgentProvider = UserAgentProvider("AnodeSvgTest/1.0"),
+            )
+
+            coilClient.newCall(Request.Builder().url(svgServer.url("/badge.svg")).build()).execute().use { resp ->
+                val body = resp.body!!.string()
+                assertTrue("Expected viewBox injected before />: $body", body.contains("""viewBox="0 0 120 40""""))
+                assertTrue("Expected valid self-closing tag ending: $body", body.trimEnd().endsWith("/>"))
+            }
+
+            coilClient.newCall(Request.Builder().url(svgServer.url("/huge.svg")).build()).execute().use { resp ->
+                val body = resp.body!!.string()
+                assertEquals(oversizedSvg.length, body.length)
+                assertFalse("Oversized SVG must bypass viewBox injection", body.contains("viewBox"))
+            }
+        }
+    }
+
+    @Test
+    fun `NodeSeekUrlNormalizer and WebViewSameOriginActionRunner enforce strict HTTPS NodeSeek origin and random reqId`() {
+        assertTrue(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("https://www.nodeseek.com/post-1-1"))
+        assertTrue(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("https://nodeseek.com/"))
+        assertTrue(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("https://cdn.nodeseek.com/a"))
+        assertFalse(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("http://www.nodeseek.com/post-1-1"))
+        assertFalse(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("https://evilnodeseek.com/post-1-1"))
+        assertFalse(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("file:///etc/passwd"))
+        assertFalse(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl("javascript:alert(1)"))
+        assertFalse(NodeSeekUrlNormalizer.isNodeSeekHttpsUrl(null))
+
+        assertTrue(WebViewSameOriginActionRunner.isAllowedNavigationUrl("https://www.nodeseek.com/"))
+        assertFalse(WebViewSameOriginActionRunner.isAllowedNavigationUrl("http://www.nodeseek.com/"))
+        assertFalse(WebViewSameOriginActionRunner.isAllowedNavigationUrl("https://evil.example/"))
+
+        val id1 = WebViewSameOriginActionRunner.createRequestId()
+        val id2 = WebViewSameOriginActionRunner.createRequestId()
+        assertNotEquals(id1, id2)
+        assertTrue(id1.startsWith("req_"))
+        assertTrue(id1.length >= 20)
     }
 }

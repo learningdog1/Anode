@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -243,5 +244,49 @@ class RadarRepositoryImplTest {
         assertEquals(snapshotRules, restoredRules)
         assertFalse(restoredRules.first { it.id == r2.id }.isEnabled)
         assertEquals(snapshotTopics, repo.getTrackedTopicsForBackup())
+    }
+
+    @Test
+    fun `markAlertsReadForTopic marks local alerts read and clears tracked topic unreadNewReplies`() = runBlocking {
+        val (repo, dao) = createRepository("mark_read_clears_unread")
+        repo.trackTopic(
+            topicId = 888L,
+            title = "追踪测试贴",
+            categorySlug = "tech",
+            categoryName = "技术",
+            authorName = "tester",
+            currentMaxFloor = 10,
+            totalPages = 1,
+        )
+        repo.recordMonitorTopicProgress(
+            topicId = 888L,
+            title = "追踪测试贴",
+            categorySlug = "tech",
+            categoryName = "技术",
+            authorName = "tester",
+            newMaxFloor = 13,
+            newTotalPages = 1,
+            unreadDelta = 3,
+            checkedAtEpochMillis = 1_765_000_005_000L,
+        )
+        repo.recordAlertIfAbsent(
+            com.nodeseek.app.domain.radar.LocalAlertRecord(
+                kind = com.nodeseek.app.domain.radar.LocalAlertKind.TRACKED_REPLY,
+                dedupKey = "reply:888:13",
+                topicId = 888L,
+                topicTitle = "追踪测试贴",
+                summarySnippet = "3 条新回复",
+                isRead = false,
+            ),
+        )
+
+        assertEquals(3, dao.getTrackedTopic(888L)?.unreadNewReplies)
+
+        repo.markAlertsReadForTopic(888L)
+
+        assertEquals(0, dao.getTrackedTopic(888L)?.unreadNewReplies)
+        val alerts = dao.observeAlertRecords().first()
+        assertEquals(1, alerts.size)
+        assertTrue(alerts.single().isRead)
     }
 }

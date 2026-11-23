@@ -35,6 +35,8 @@ class CheckInRepositoryImpl(
     )
 
     private val boardMutex = Mutex()
+    private val cacheLock = Any()
+    private var cacheGeneration: Long = 0L
     private var cachedPageOne: CachedPageOne? = null
     private var inFlightPageOne: CompletableDeferred<Result<CheckInStatus>>? = null
 
@@ -42,8 +44,11 @@ class CheckInRepositoryImpl(
     override val checkInStatus: StateFlow<CheckInStatus?> = _checkInStatus.asStateFlow()
 
     override fun clearCachedStatus() {
-        cachedPageOne = null
-        _checkInStatus.value = null
+        synchronized(cacheLock) {
+            cacheGeneration += 1L
+            cachedPageOne = null
+            _checkInStatus.value = null
+        }
     }
 
     private fun currentBeijingDate(nowMillis: Long = clockMillis()): LocalDate =
@@ -71,19 +76,23 @@ class CheckInRepositoryImpl(
 
         val deferred: CompletableDeferred<Result<CheckInStatus>>
         val isOwner: Boolean
+        val startGeneration: Long
         boardMutex.withLock {
-            val existingCache = cachedPageOne
-            if (existingCache != null &&
-                (existingCache.uid != uid || existingCache.beijingDate != todayBeijing)
-            ) {
-                cachedPageOne = null
-                _checkInStatus.value = null
+            val (validCache, currentGen) = synchronized(cacheLock) {
+                val existingCache = cachedPageOne
+                if (existingCache != null &&
+                    (existingCache.uid != uid || existingCache.beijingDate != todayBeijing)
+                ) {
+                    cachedPageOne = null
+                    _checkInStatus.value = null
+                }
+                if (uid <= 0L) {
+                    _checkInStatus.value = null
+                }
+                cachedPageOne to cacheGeneration
             }
-            if (uid <= 0L) {
-                _checkInStatus.value = null
-            }
+            startGeneration = currentGen
 
-            val validCache = cachedPageOne
             if (!forceRefresh &&
                 validCache != null &&
                 validCache.uid == uid &&
@@ -91,7 +100,13 @@ class CheckInRepositoryImpl(
                 (now - validCache.fetchedAtMillis) in 0L until PAGE_ONE_CACHE_TTL_MS
             ) {
                 if (uid > 0L) {
-                    _checkInStatus.value = validCache.status
+                    synchronized(cacheLock) {
+                        if (cacheGeneration == startGeneration &&
+                            (sessionRepository.sessionState.value?.uid ?: 0L) == uid
+                        ) {
+                            _checkInStatus.value = validCache.status
+                        }
+                    }
                 }
                 return Result.success(validCache.status)
             }
@@ -115,22 +130,28 @@ class CheckInRepositoryImpl(
             val result = runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
                 val board = apiClientProvider().getAttendanceBoard(1)
                 val fetchedAt = clockMillis()
-                val resolvedUid = sessionRepository.sessionState.value?.uid ?: uid
+                val liveUid = sessionRepository.sessionState.value?.uid ?: 0L
                 val resolvedDate = currentBeijingDate(fetchedAt)
                 board.toDomainStatus(
                     page = 1,
-                    currentUid = resolvedUid,
+                    currentUid = liveUid,
                     todayBeijing = resolvedDate,
                     actionMessage = null,
                 ).also { status ->
-                    boardMutex.withLock {
-                        cachedPageOne = CachedPageOne(
-                            uid = resolvedUid,
-                            beijingDate = resolvedDate,
-                            fetchedAtMillis = fetchedAt,
-                            status = status,
-                        )
-                        _checkInStatus.value = if (resolvedUid > 0L) status else null
+                    synchronized(cacheLock) {
+                        val currentLiveUid = sessionRepository.sessionState.value?.uid ?: 0L
+                        val sessionStillMatches = cacheGeneration == startGeneration &&
+                            currentLiveUid == liveUid &&
+                            (uid <= 0L || currentLiveUid == uid)
+                        if (sessionStillMatches) {
+                            cachedPageOne = CachedPageOne(
+                                uid = currentLiveUid,
+                                beijingDate = resolvedDate,
+                                fetchedAtMillis = fetchedAt,
+                                status = status,
+                            )
+                            _checkInStatus.value = if (currentLiveUid > 0L) status else null
+                        }
                     }
                 }
             }
@@ -153,11 +174,11 @@ class CheckInRepositoryImpl(
 
     override suspend fun checkIn(randomReward: Boolean): Result<CheckInStatus> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            boardMutex.withLock {
+            val startGeneration = synchronized(cacheLock) {
                 cachedPageOne = null
+                cacheGeneration
             }
             val uid = sessionRepository.sessionState.value?.uid ?: 0L
-            val todayBeijing = currentBeijingDate()
 
             val actionResp = try {
                 apiClientProvider().checkIn(random = randomReward)
@@ -168,22 +189,24 @@ class CheckInRepositoryImpl(
                     val syncedBoard = apiClientProvider().getAttendanceBoard(page = 1)
                     val fetchedAt = clockMillis()
                     val resolvedDate = currentBeijingDate(fetchedAt)
+                    val liveUid = sessionRepository.sessionState.value?.uid ?: 0L
                     val syncedStatus = syncedBoard.toDomainStatus(
                         page = 1,
-                        currentUid = uid,
+                        currentUid = liveUid,
                         todayBeijing = resolvedDate,
                         actionMessage = apiErr.serverMessage ?: apiErr.message,
                         fallbackGain = extractGainFromMessage(apiErr.serverMessage ?: apiErr.message),
-                        assumeCheckedIn = true,
+                        assumeCheckedIn = liveUid > 0L || uid <= 0L,
                     )
-                    boardMutex.withLock {
-                        cachedPageOne = CachedPageOne(
-                            uid = uid,
-                            beijingDate = resolvedDate,
-                            fetchedAtMillis = fetchedAt,
-                            status = syncedStatus,
-                        )
-                        if (uid > 0L) {
+                    synchronized(cacheLock) {
+                        val currentLiveUid = sessionRepository.sessionState.value?.uid ?: 0L
+                        if (cacheGeneration == startGeneration && currentLiveUid > 0L && (uid <= 0L || currentLiveUid == uid)) {
+                            cachedPageOne = CachedPageOne(
+                                uid = currentLiveUid,
+                                beijingDate = resolvedDate,
+                                fetchedAtMillis = fetchedAt,
+                                status = syncedStatus,
+                            )
                             _checkInStatus.value = syncedStatus
                         }
                     }
@@ -193,25 +216,28 @@ class CheckInRepositoryImpl(
             }
 
             actionResp.current?.let { updatedBalance ->
-                sessionRepository.updateCoinBalance(updatedBalance)
+                val currentLiveUid = sessionRepository.sessionState.value?.uid ?: 0L
+                if (currentLiveUid > 0L && (uid <= 0L || currentLiveUid == uid)) {
+                    sessionRepository.updateCoinBalance(updatedBalance)
+                }
             }
-            val refreshedBoard = runCatching {
+            val refreshedBoard = runSuspendCatching {
                 apiClientProvider().getAttendanceBoard(page = 1)
             }.getOrNull()
 
             val fallbackGain = actionResp.gain ?: extractGainFromMessage(actionResp.message)
             val fetchedAt = clockMillis()
             val resolvedDate = currentBeijingDate(fetchedAt)
-            val resolvedUid = sessionRepository.sessionState.value?.uid ?: uid
+            val liveUid = sessionRepository.sessionState.value?.uid ?: 0L
 
             val resultStatus = if (refreshedBoard != null) {
                 refreshedBoard.toDomainStatus(
                     page = 1,
-                    currentUid = resolvedUid,
+                    currentUid = liveUid,
                     todayBeijing = resolvedDate,
                     actionMessage = actionResp.message,
                     fallbackGain = fallbackGain,
-                    assumeCheckedIn = true,
+                    assumeCheckedIn = liveUid > 0L || uid <= 0L,
                 )
             } else {
                 CheckInStatus(
@@ -224,14 +250,17 @@ class CheckInRepositoryImpl(
                     message = actionResp.message,
                 )
             }
-            boardMutex.withLock {
-                cachedPageOne = CachedPageOne(
-                    uid = resolvedUid,
-                    beijingDate = resolvedDate,
-                    fetchedAtMillis = fetchedAt,
-                    status = resultStatus,
-                )
-                if (resolvedUid > 0L || resultStatus.hasCheckedInToday) {
+            synchronized(cacheLock) {
+                val currentLiveUid = sessionRepository.sessionState.value?.uid ?: 0L
+                val sessionStillMatches = cacheGeneration == startGeneration &&
+                    (uid <= 0L || currentLiveUid == uid)
+                if (sessionStillMatches && (currentLiveUid > 0L || (uid <= 0L && resultStatus.hasCheckedInToday))) {
+                    cachedPageOne = CachedPageOne(
+                        uid = currentLiveUid,
+                        beijingDate = resolvedDate,
+                        fetchedAtMillis = fetchedAt,
+                        status = resultStatus,
+                    )
                     _checkInStatus.value = resultStatus
                 }
             }

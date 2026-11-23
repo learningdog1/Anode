@@ -2,24 +2,28 @@ package com.nodeseek.app.data.network
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.http.SslError
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 
 data class SameOriginHttpResponse(
     val statusCode: Int,
@@ -49,6 +53,8 @@ interface SameOriginTransport {
     fun canAttemptWithExistingClearance(): Boolean
     fun markVerifiedByUser()
     fun clearSessionContext() {}
+    fun getUserAgent(): String? = null
+    fun getCsrfToken(): String? = null
     suspend fun fetchHtml(url: String): SameOriginHttpResponse
     suspend fun executeApiRequest(
         method: String,
@@ -66,16 +72,20 @@ class WebViewSameOriginActionRunner(
     private val csrfTokenStore: CsrfTokenStore,
 ) : SameOriginTransport {
 
+    internal sealed interface PageLoadOutcome {
+        data class Finished(val url: String?) : PageLoadOutcome
+        data class NetworkError(val message: String) : PageLoadOutcome
+    }
+
     private val appContext: Context = context.applicationContext ?: context
     private val mutex = Mutex()
-    private val requestIdGenerator = AtomicLong(1L)
     private val pendingFetchCallbacks = ConcurrentHashMap<String, CompletableDeferred<String>>()
 
     @Volatile
     private var verifiedInProcess: Boolean = false
 
     private var webView: WebView? = null
-    private var activePageLoadDeferred: CompletableDeferred<String?>? = null
+    private var activePageLoadDeferred: CompletableDeferred<PageLoadOutcome>? = null
 
     override fun canAttemptWithExistingClearance(): Boolean =
         verifiedInProcess || cookieBridge.hasSessionOrClearanceCookie()
@@ -84,7 +94,12 @@ class WebViewSameOriginActionRunner(
         verifiedInProcess = true
     }
 
+    override fun getUserAgent(): String? = userAgentProvider.getUserAgent(appContext)
+
+    override fun getCsrfToken(): String? = csrfTokenStore.csrfToken
+
     override fun clearSessionContext() {
+        verifiedInProcess = false
         csrfTokenStore.clear()
         val existingWebView = webView ?: return
         existingWebView.post {
@@ -153,7 +168,7 @@ class WebViewSameOriginActionRunner(
                 }
             } ?: "/"
 
-            val reqId = "req_${requestIdGenerator.getAndIncrement()}"
+            val reqId = createRequestId()
             val deferred = CompletableDeferred<String>()
             pendingFetchCallbacks[reqId] = deferred
 
@@ -181,9 +196,9 @@ class WebViewSameOriginActionRunner(
             val script = buildSameOriginFetchScript(configObj.toString())
             val rawResultJson = try {
                 wv.evaluateJavascript(script, null)
-                withTimeout(FETCH_TIMEOUT_MS) {
+                withTimeoutOrNull(FETCH_TIMEOUT_MS) {
                     deferred.await()
-                }
+                } ?: throw IOException("同源网页请求超时，请稍后重试。")
             } finally {
                 pendingFetchCallbacks.remove(reqId)
             }
@@ -204,9 +219,11 @@ class WebViewSameOriginActionRunner(
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
+                allowFileAccess = false
+                allowContentAccess = false
                 loadsImagesAutomatically = false
                 blockNetworkImage = true
-                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 val configuredUa = userAgentProvider.getUserAgent(appContext)
                 if (!userAgentProvider.isSystemWebViewDefault && configuredUa.isNotBlank()) {
                     userAgentString = configuredUa
@@ -220,14 +237,34 @@ class WebViewSameOriginActionRunner(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
-                    val host = request?.url?.host.orEmpty()
-                    // Never navigate away to external non-NodeSeek hosts in background same-origin transport
-                    return !NodeSeekUrlNormalizer.isNodeSeekHost(host)
+                    // Never navigate away to non-HTTPS or non-NodeSeek hosts in background same-origin transport
+                    return !isAllowedNavigationUrl(request?.url?.toString())
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?,
+                ) {
+                    if (request?.isForMainFrame == true) {
+                        val desc = error?.description?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: "网络连接失败"
+                        activePageLoadDeferred?.complete(PageLoadOutcome.NetworkError(desc))
+                    }
+                }
+
+                override fun onReceivedSslError(
+                    view: WebView?,
+                    handler: SslErrorHandler?,
+                    error: SslError?,
+                ) {
+                    handler?.cancel()
+                    activePageLoadDeferred?.complete(PageLoadOutcome.NetworkError("安全证书校验失败"))
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     cookieBridge.flush()
-                    activePageLoadDeferred?.complete(url)
+                    activePageLoadDeferred?.complete(PageLoadOutcome.Finished(url))
                 }
             }
         }.also { created ->
@@ -236,30 +273,44 @@ class WebViewSameOriginActionRunner(
     }
 
     private suspend fun ensureSameOriginReadyOnMain(wv: WebView, bootstrapUrl: String) {
-        val currentHost = wv.url?.toHttpUrlOrNull()?.host.orEmpty()
-        if (currentHost.equals(NodeSeekUrlNormalizer.CANONICAL_HOST, ignoreCase = true)) {
+        val currentUrl = wv.url
+        if (isAllowedNavigationUrl(currentUrl) &&
+            currentUrl?.toHttpUrlOrNull()?.host.equals(NodeSeekUrlNormalizer.CANONICAL_HOST, ignoreCase = true)
+        ) {
             if (probeOriginReadyOnMain(wv)) {
                 return
             }
         }
 
-        val loadDeferred = CompletableDeferred<String?>()
+        val loadDeferred = CompletableDeferred<PageLoadOutcome>()
         activePageLoadDeferred = loadDeferred
-        try {
+        val outcome = try {
             wv.loadUrl(bootstrapUrl)
-            withTimeout(PAGE_LOAD_TIMEOUT_MS) {
+            withTimeoutOrNull(PAGE_LOAD_TIMEOUT_MS) {
                 loadDeferred.await()
             }
-        } catch (t: Throwable) {
+        } catch (c: CancellationException) {
             wv.stopLoading()
-            throw CloudflareChallengeException(url = bootstrapUrl)
+            throw c
         } finally {
             if (activePageLoadDeferred === loadDeferred) {
                 activePageLoadDeferred = null
             }
         }
 
-        if (!probeOriginReadyOnMain(wv)) {
+        val ready = when (outcome) {
+            null -> {
+                wv.stopLoading()
+                throw IOException("同源网页加载超时，请检查网络后重试。")
+            }
+            is PageLoadOutcome.NetworkError -> {
+                wv.stopLoading()
+                throw IOException(outcome.message)
+            }
+            is PageLoadOutcome.Finished -> probeOriginReadyOnMain(wv)
+        }
+
+        if (!ready) {
             wv.stopLoading()
             throw CloudflareChallengeException(url = bootstrapUrl)
         }
@@ -271,49 +322,21 @@ class WebViewSameOriginActionRunner(
             val ready = rawLiteral?.trim() == "true"
             probeDeferred.complete(ready)
         }
-        return runCatching {
-            withTimeout(3_000L) { probeDeferred.await() }
-        }.getOrDefault(false)
+        return try {
+            withTimeoutOrNull(3_000L) { probeDeferred.await() } ?: false
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            false
+        }
     }
 
-    private fun parseBridgeResponse(rawJson: String, requestUrl: String): SameOriginHttpResponse {
-        val obj = runCatching { JSONObject(rawJson) }.getOrNull()
-            ?: throw IOException("无法解析网页同源响应")
-        if (!obj.optBoolean("ok", false)) {
-            val errMsg = obj.optString("error", "同源请求失败")
-            if (errMsg.contains("challenge", ignoreCase = true)) {
-                throw CloudflareChallengeException(url = requestUrl)
-            }
-            throw IOException(errMsg)
-        }
-
-        val status = obj.optInt("status", 0)
-        val contentType = obj.optString("contentType", "").takeIf { it.isNotBlank() }
-        val cfMitigated = obj.optString("cfMitigated", "").takeIf { it.isNotBlank() }
-        val retryAfter = obj.optString("retryAfter", "").takeIf { it.isNotBlank() }
-        val respCsrf = obj.optString("csrfToken", "").takeIf { it.isNotBlank() }
-        val respSec = obj.optString("securityToken", "").takeIf { it.isNotBlank() }
-        val body = obj.optString("body", "")
-
-        if (!respSec.isNullOrBlank()) {
-            csrfTokenStore.seedSecurityToken(respSec)
-        }
-        if (!respCsrf.isNullOrBlank()) {
-            csrfTokenStore.seedCsrfToken(respCsrf)
-        }
-
-        val headersBuilder = Headers.Builder()
-        if (contentType != null) headersBuilder.add("Content-Type", contentType)
-        if (cfMitigated != null) headersBuilder.add("cf-mitigated", cfMitigated)
-        if (retryAfter != null) headersBuilder.add("Retry-After", retryAfter)
-
-        return SameOriginHttpResponse(
-            statusCode = status,
-            headers = headersBuilder.build(),
-            contentType = contentType,
-            body = body,
+    private fun parseBridgeResponse(rawJson: String, requestUrl: String): SameOriginHttpResponse =
+        parseBridgeResponseForTest(
+            rawJson = rawJson,
+            requestUrl = requestUrl,
+            csrfTokenStore = csrfTokenStore,
         )
-    }
 
     private fun normalizeSameOriginBootstrapUrl(refererUrl: String, fallbackUrl: String): String {
         val candidate = refererUrl.trim().ifEmpty { fallbackUrl }
@@ -345,6 +368,54 @@ class WebViewSameOriginActionRunner(
         private const val JS_BRIDGE_NAME = "__NodePulseFetchBridge"
         private const val PAGE_LOAD_TIMEOUT_MS = 12_000L
         private const val FETCH_TIMEOUT_MS = 15_000L
+
+        internal fun isAllowedNavigationUrl(rawUrl: String?): Boolean =
+            NodeSeekUrlNormalizer.isNodeSeekHttpsUrl(rawUrl)
+
+        internal fun createRequestId(): String =
+            "req_${UUID.randomUUID().toString().replace("-", "")}"
+
+        internal fun parseBridgeResponseForTest(
+            rawJson: String,
+            requestUrl: String,
+            csrfTokenStore: CsrfTokenStore = CsrfTokenStore(),
+        ): SameOriginHttpResponse {
+            val obj = runCatching { JSONObject(rawJson) }.getOrNull()
+                ?: throw IOException("无法解析网页同源响应")
+            if (!obj.optBoolean("ok", false)) {
+                val errMsg = obj.optString("error", "同源请求失败")
+                if (errMsg.contains("challenge", ignoreCase = true)) {
+                    throw CloudflareChallengeException(url = requestUrl)
+                }
+                throw IOException(errMsg)
+            }
+            val status = obj.optInt("status", 0)
+            val contentType = obj.optString("contentType", "").takeIf { it.isNotBlank() }
+            val cfMitigated = obj.optString("cfMitigated", "").takeIf { it.isNotBlank() }
+            val retryAfter = obj.optString("retryAfter", "").takeIf { it.isNotBlank() }
+            val respCsrf = obj.optString("csrfToken", "").takeIf { it.isNotBlank() }
+            val respSec = obj.optString("securityToken", "").takeIf { it.isNotBlank() }
+            val body = obj.optString("body", "")
+
+            if (!respSec.isNullOrBlank()) {
+                csrfTokenStore.seedSecurityToken(respSec)
+            }
+            if (!respCsrf.isNullOrBlank()) {
+                csrfTokenStore.seedCsrfToken(respCsrf)
+            }
+
+            val headersBuilder = Headers.Builder()
+            if (contentType != null) headersBuilder.add("Content-Type", contentType)
+            if (cfMitigated != null) headersBuilder.add("cf-mitigated", cfMitigated)
+            if (retryAfter != null) headersBuilder.add("Retry-After", retryAfter)
+
+            return SameOriginHttpResponse(
+                statusCode = status,
+                headers = headersBuilder.build(),
+                contentType = contentType,
+                body = body,
+            )
+        }
 
         private val BROWSER_MANAGED_HEADER_NAMES = setOf(
             "host",

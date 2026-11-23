@@ -3,6 +3,8 @@ package com.nodeseek.app.data.repository
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.os.Build
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
@@ -11,6 +13,7 @@ import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import kotlin.math.max
@@ -423,7 +426,43 @@ object AndroidImageUploadTranscoder : ImageUploadTranscoder {
             inSampleSize = sampleSize
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts) ?: return null
+        return applyExifOrientationIfNeeded(decoded, bytes)
+    }
+
+    private fun applyExifOrientationIfNeeded(bitmap: Bitmap, rawBytes: ByteArray): Bitmap {
+        val orientation = runCatching {
+            ExifInterface(ByteArrayInputStream(rawBytes)).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL,
+            )
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            else -> return bitmap
+        }
+
+        val transformed = runCatching {
+            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        }.getOrNull() ?: return bitmap
+        if (transformed !== bitmap && !bitmap.isRecycled) {
+            bitmap.recycle()
+        }
+        return transformed
     }
 
     private fun compressBitmapToFit(
@@ -540,6 +579,15 @@ class NodeImageHostRepositoryImpl(
     private val maxAnimatedUploadBytes: Int = DEFAULT_MAX_ANIMATED_UPLOAD_BYTES,
     private val maxDimensionPx: Int = DEFAULT_MAX_DIMENSION_PX,
 ) : ImageHostRepository {
+
+    override suspend fun verifyApiKey(apiKey: String): Result<Unit> =
+        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val trimmed = apiKey.trim()
+            if (trimmed.isEmpty()) {
+                throw NodeSeekApiException("请先填写 NodeImage 图床 API Key。")
+            }
+            apiClientProvider().verifyNodeImageApiKey(trimmed)
+        }
 
     override suspend fun uploadImage(
         bytes: ByteArray,

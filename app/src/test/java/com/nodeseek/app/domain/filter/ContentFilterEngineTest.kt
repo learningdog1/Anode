@@ -283,4 +283,39 @@ class ContentFilterEngineTest {
         assertTrue(ContentFilterEngine.isPresetActive(buyPreset, configWithBuy))
         assertFalse(ContentFilterEngine.isPresetActive(affPreset, configWithBuy))
     }
+
+    @Test
+    fun `validateRegex rejects ReDoS nested quantifiers and overly long patterns while allowing all curated presets`() {
+        // All curated presets remain valid under ReDoS guards
+        for (preset in ContentFilterEngine.CURATED_PRESETS) {
+            assertNull("Preset ${preset.id} must pass validateRegex", ContentFilterEngine.validateRegex(preset.pattern))
+        }
+
+        // Classic ReDoS patterns are rejected statically
+        assertNotNull(ContentFilterEngine.validateRegex("(a+)+$"))
+        assertNotNull(ContentFilterEngine.validateRegex("([a-zA-Z]+)*b"))
+        assertNotNull(ContentFilterEngine.validateRegex("(.*a){20}"))
+        assertNotNull(ContentFilterEngine.validateRegex("(a+){2,10}"))
+        assertNotNull(ContentFilterEngine.validateRegex("a".repeat(257)))
+
+        // Unsafe regex stored in config is safely skipped without backtracking hang
+        val unsafeConfig = ContentFilterConfig(
+            isEnabled = true,
+            rules = listOf(
+                ContentBlockRule(
+                    id = "redos",
+                    pattern = "(a+)+$",
+                    matchMode = KeywordMatchMode.REGEX,
+                    isEnabled = true,
+                ),
+            ),
+        )
+        assertFalse(
+            ContentFilterEngine.shouldHideTopic(
+                sampleTopic(title = "a".repeat(40) + "!"),
+                unsafeConfig,
+                includeBlockedTopics = false,
+            ),
+        )
+    }
 }

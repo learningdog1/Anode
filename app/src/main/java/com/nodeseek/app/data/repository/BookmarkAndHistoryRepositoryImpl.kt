@@ -49,10 +49,13 @@ class BookmarkAndHistoryRepositoryImpl(
         }
         for (summary in summaries) {
             val existing = recentSummaryCache[summary.id]
-            recentSummaryCache[summary.id] = if (existing != null && summary.categorySlug.isBlank() && existing.categorySlug.isNotBlank()) {
+            recentSummaryCache[summary.id] = if (existing != null) {
                 summary.copy(
-                    categorySlug = existing.categorySlug,
+                    categorySlug = summary.categorySlug.ifBlank { existing.categorySlug },
                     categoryName = summary.categoryName.ifBlank { existing.categoryName },
+                    lastActivityIso = summary.lastActivityIso.ifBlank { existing.lastActivityIso },
+                    viewCount = if (summary.viewCount > 0) summary.viewCount else existing.viewCount,
+                    replyCount = if (summary.replyCount > 0) summary.replyCount else existing.replyCount,
                 )
             } else {
                 summary

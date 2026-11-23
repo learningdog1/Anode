@@ -2144,7 +2144,7 @@ class InboxRepositoryImpl(
             }
             nonEmittingFetchGeneration
         }
-        val persisted = runCatching { store.getWatermarks() }.getOrNull()
+        val persisted = runSuspendCatching { store.getWatermarks() }.getOrNull()
         synchronized(stateLock) {
             syncAccountLocked()
             if (!isRequestTokenValidLocked(requestToken, requireAuthenticated = true)) {
@@ -2175,7 +2175,7 @@ class InboxRepositoryImpl(
         if (alreadyChecked) return
         val store = watermarkStore
         val persisted: RadarWatermarks? = if (store != null) {
-            runCatching { store.getWatermarks() }.getOrNull()
+            runSuspendCatching { store.getWatermarks() }.getOrNull()
         } else {
             null
         }
@@ -2211,7 +2211,7 @@ class InboxRepositoryImpl(
         if (!requestToken.isAuthenticated) return
         if (!isRequestTokenValid(requestToken, requireAuthenticated = true)) return
         val viewerUid = requestToken.uid
-        runCatching {
+        runSuspendCatching {
             store.updateWatermarks { current ->
                 val stillValid = synchronized(stateLock) {
                     syncAccountLocked()
@@ -2386,7 +2386,8 @@ class InboxRepositoryImpl(
                 return existing
             }
         }
-        sessionRepository.refreshSession().getOrNull()
+        val refreshResult = sessionRepository.refreshSession()
+        refreshResult.exceptionOrNull()?.let { throw it }
         return synchronized(stateLock) {
             syncAccountLocked()
             val refreshed = currentSessionTokenLocked()

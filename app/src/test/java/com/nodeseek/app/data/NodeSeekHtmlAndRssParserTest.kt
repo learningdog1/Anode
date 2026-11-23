@@ -508,4 +508,64 @@ class NodeSeekHtmlAndRssParserTest {
         assertEquals("太强了 [表情] 确实", NodeSeekHtmlParser.cleanCommentHtmlToExcerpt(rawHtml))
         assertEquals("太强了 [表情] [表情] [表情]", NodeSeekHtmlParser.stripMarkdownToPlainPreview("太强了 :emoji02:  :emoji00:  :emoji05:"))
     }
+
+    @Test
+    fun `parseFeedPage deduplicates repeated list items with identical postId`() {
+        val configB64 = encodeConfig("""{"allCategory":[{"key":"tech","cn_text":"技术"}]}""")
+        val html = """
+            <html><body>
+              <div id="nsk-body">
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-777-1">重复帖首次出现</a></div>
+                  <a class="post-category" href="/categories/tech">技术</a>
+                </div>
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-777-1">重复帖二次出现</a></div>
+                  <a class="post-category" href="/categories/tech">技术</a>
+                </div>
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-778-1">正常第二帖</a></div>
+                  <a class="post-category" href="/categories/tech">技术</a>
+                </div>
+              </div>
+              <script id="temp-script" type="application/json">$configB64</script>
+            </body></html>
+        """.trimIndent()
+
+        val parsed = NodeSeekHtmlParser.parseFeedPage(html, "https://www.nodeseek.com/")
+        assertEquals(listOf(777L, 778L), parsed.topics.map { it.id })
+        assertEquals("重复帖首次出现", parsed.topics.first().title)
+    }
+
+    @Test
+    fun `stripMarkdownToPlainPreview preserves math and generic comparisons, blocks unsafe schemes, and parseStaticArticle handles corrupt temp-script`() {
+        assertEquals(
+            "when a < b && c > d and List<String>",
+            NodeSeekHtmlParser.stripMarkdownToPlainPreview("when a < b && c > d and List<String>"),
+        )
+        assertEquals(
+            "bold text",
+            NodeSeekHtmlParser.stripMarkdownToPlainPreview("<strong>bold</strong> text"),
+        )
+
+        // Unsafe URL schemes in HTML links/images are stripped
+        val unsafeHtml = """<a href="data:text/html,<script>alert(1)</script>">click</a> <img src="file:///etc/passwd" alt="secret" />"""
+        val md = NodeSeekHtmlParser.htmlFragmentToMarkdown(unsafeHtml)
+        assertFalse("data: scheme must be blocked: $md", md.contains("data:"))
+        assertFalse("file: scheme must be blocked: $md", md.contains("file://"))
+
+        // parseStaticArticle survives corrupt temp-script and does not duplicate <li><p>...</p></li>
+        val articleHtml = """
+            <html><body>
+              <script id="temp-script" type="application/json">!!!not-valid-base64!!!</script>
+              <article class="post-content">
+                <h1>帮助文档</h1>
+                <ul><li><p>第一条规则</p></li></ul>
+              </article>
+            </body></html>
+        """.trimIndent()
+        val articleMarkdown = NodeSeekHtmlParser.parseStaticArticle(articleHtml, "https://www.nodeseek.com/help")
+        assertTrue(articleMarkdown.contains("# 帮助文档"))
+        assertEquals(1, articleMarkdown.split("第一条规则").size - 1)
+    }
 }

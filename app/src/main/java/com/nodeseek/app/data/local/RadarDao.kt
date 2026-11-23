@@ -214,6 +214,15 @@ interface RadarDao {
     @Query("UPDATE radar_local_alerts SET isRead = 1 WHERE topicId = :topicId AND isRead = 0")
     suspend fun markAlertsReadForTopic(topicId: Long)
 
+    @Transaction
+    suspend fun markAlertsAndTrackedRepliesReadForTopic(topicId: Long) {
+        markAlertsReadForTopic(topicId)
+        val tracked = getTrackedTopic(topicId)
+        if (tracked != null && tracked.unreadNewReplies > 0) {
+            upsertTrackedTopic(tracked.copy(unreadNewReplies = 0))
+        }
+    }
+
     @Query("UPDATE radar_local_alerts SET isRead = 1 WHERE isRead = 0")
     suspend fun markAllAlertsRead()
 

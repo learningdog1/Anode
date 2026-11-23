@@ -1042,6 +1042,140 @@ class NodeSeekApiClientTest {
         }
     }
 
+    @Test
+    fun `verifyNodeImageApiKey validates key on cookie-less client and rejects 401, plaintext HTTP, and cross-origin redirects`() = runTest {
+        val validKey = "0123456789abcdef0123456789abcdef"
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true,"images":[]}"""))
+        client.verifyNodeImageApiKey(validKey)
+        val okReq = server.takeRequest()
+        assertEquals("/api/v1/images", okReq.path)
+        assertEquals(validKey, okReq.getHeader("X-API-Key"))
+        assertNull("NodeImage verify must never send forum cookies", okReq.getHeader("Cookie"))
+
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"success":false,"message":"Invalid API key"}"""))
+        try {
+            client.verifyNodeImageApiKey(validKey)
+            fail("Expected NodeSeekApiException on 401")
+        } catch (e: NodeSeekApiException) {
+            assertEquals(401, e.statusCode)
+        }
+
+        // Plaintext HTTP non-loopback NodeImage origin is rejected before network I/O
+        val insecureClient = NodeSeekApiClient(
+            httpClient = OkHttpClient(),
+            nodeImageOrigin = "http://api.nodeimage.com".toHttpUrl(),
+        )
+        try {
+            insecureClient.verifyNodeImageApiKey(validKey)
+            fail("Expected NodeSeekApiException on plaintext HTTP NodeImage origin")
+        } catch (e: NodeSeekApiException) {
+            assertTrue(e.message.orEmpty().contains("HTTPS"))
+        }
+
+        // Cross-origin redirect is blocked without following
+        MockWebServer().use { evilServer ->
+            evilServer.start()
+            evilServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true}"""))
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(302)
+                    .addHeader("Location", "http://evil.example:${evilServer.port}/steal"),
+            )
+            try {
+                client.verifyNodeImageApiKey(validKey)
+                fail("Expected NodeSeekApiException on cross-origin redirect")
+            } catch (e: NodeSeekApiException) {
+                assertTrue(e.message.orEmpty().contains("跨源"))
+            }
+            assertEquals(0, evilServer.requestCount)
+        }
+    }
+
+    @Test
+    fun `same-origin fallback forwards x-dynamic-sign on vote POST and extraHeaders on GET`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(403)
+                .addHeader("cf-mitigated", "challenge")
+                .setBody("<html><title>Just a moment...</title></html>"),
+        )
+        val capturedHeaders = mutableMapOf<String, String>()
+        val fakeSameOrigin = object : SameOriginTransport {
+            override fun canAttemptWithExistingClearance(): Boolean = true
+            override fun markVerifiedByUser() = Unit
+            override fun getUserAgent(): String = testUserAgent
+            override fun getCsrfToken(): String = "0123456789abcdef"
+            override suspend fun fetchHtml(url: String): SameOriginHttpResponse = error("Unexpected")
+            override suspend fun executeApiRequest(
+                method: String,
+                url: String,
+                refererUrl: String,
+                headers: Map<String, String>,
+                body: String?,
+            ): SameOriginHttpResponse {
+                capturedHeaders.putAll(headers)
+                return SameOriginHttpResponse(
+                    statusCode = 200,
+                    contentType = "application/json",
+                    body = """{"success":true,"vote":{"id":7,"title":"Poll","uid":1,"isPublic":1,"locked":0,"multiple":0,"items":[]}}""",
+                )
+            }
+        }
+        val fallbackClient = NodeSeekApiClient(
+            httpClient = NodeSeekApiClient.createDefaultHttpClient(
+                cookieBridge = cookieBridge,
+                userAgentProvider = userAgentProvider,
+                csrfTokenStore = csrfTokenStore,
+                additionalTargetHost = server.url("/").host,
+            ),
+            baseOrigin = server.url("/"),
+            sameOriginTransport = fakeSameOrigin,
+        )
+        val resp = fallbackClient.createVote(
+            title = "Fallback Vote",
+            multiple = false,
+            isPublic = true,
+            options = listOf("A", "B"),
+        )
+        assertEquals(7L, resp.vote?.id)
+        val sign = capturedHeaders["x-dynamic-sign"]
+        assertNotNull("x-dynamic-sign must be attached in same-origin fallback", sign)
+        assertEquals(40, sign!!.length)
+    }
+
+    @Test
+    fun `groupThreadsForViewer orders mixed ISO UTC and SQL Beijing timestamps chronologically`() {
+        val dto = com.nodeseek.app.data.network.MessageListResponseDto(
+            success = true,
+            msgArray = listOf(
+                // 2026-11-23 12:00:00 UTC+8 == 2026-11-23T04:00:00Z (EARLIER)
+                com.nodeseek.app.data.network.DirectMessageRowDto(
+                    id = 1L,
+                    senderId = 200L,
+                    senderName = "Peer",
+                    receiverId = 100L,
+                    receiverName = "Me",
+                    content = "earlier sql beijing time",
+                    createdAt = "2026-11-23 12:00:00",
+                ),
+                // 2026-11-23T05:00:00Z == 2026-11-23 13:00:00 UTC+8 (LATER, despite lexicographically smaller '05' < '12'!)
+                com.nodeseek.app.data.network.DirectMessageRowDto(
+                    id = 2L,
+                    senderId = 200L,
+                    senderName = "Peer",
+                    receiverId = 100L,
+                    receiverName = "Me",
+                    content = "later iso utc time",
+                    createdAt = "2026-11-23T05:00:00.000Z",
+                ),
+            ),
+        )
+        val threads = dto.groupThreadsForViewer(viewerUid = 100L)
+        assertEquals(1, threads.size)
+        assertEquals(2L, threads.single().latestMessageId)
+        assertEquals("later iso utc time", threads.single().preview)
+    }
+
     companion object {
         private lateinit var tlsTempDir: File
         private lateinit var tlsFixture: NodeSeekTestTlsFixture

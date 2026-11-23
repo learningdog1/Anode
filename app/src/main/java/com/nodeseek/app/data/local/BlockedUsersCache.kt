@@ -33,13 +33,18 @@ interface BlockedUsersCache {
     suspend fun mergeAll(users: List<FloorAuthor>)
     suspend fun recordBlockedByName(username: String)
     suspend fun removeByUid(uid: Long)
+    suspend fun clear() {}
 }
 
 class DataStoreBlockedUsersCache(
     private val dataStore: DataStore<Preferences>,
+    private val accountUidProvider: () -> Long = { 0L },
 ) : BlockedUsersCache {
 
-    constructor(context: Context) : this(context.applicationContext.nodePulseBlockedUsersDataStore)
+    constructor(
+        context: Context,
+        accountUidProvider: () -> Long = { 0L },
+    ) : this(context.applicationContext.nodePulseBlockedUsersDataStore, accountUidProvider)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -54,45 +59,88 @@ class DataStoreBlockedUsersCache(
         }
     }
 
-    override suspend fun getBlockedUsers(): List<FloorAuthor> =
-        decodeUsers(safePreferencesFlow.first()[KEY_BLOCKED_USERS_JSON])
+    private fun currentUid(): Long = accountUidProvider().coerceAtLeast(0L)
+
+    private fun keyForUid(uid: Long): Preferences.Key<String> =
+        stringPreferencesKey("${KEY_BLOCKED_USERS_PREFIX}$uid")
+
+    private fun readScopedUsers(prefs: Preferences, uid: Long): List<FloorAuthor> {
+        val scopedRaw = prefs[keyForUid(uid)]
+        if (scopedRaw != null) {
+            return decodeUsers(scopedRaw)
+        }
+        // Only fall back to legacy global key for guest/unscoped mode so account B never inherits account A.
+        return if (uid == 0L) {
+            decodeUsers(prefs[KEY_LEGACY_BLOCKED_USERS_JSON])
+        } else {
+            emptyList()
+        }
+    }
+
+    override suspend fun getBlockedUsers(): List<FloorAuthor> {
+        val uid = currentUid()
+        return readScopedUsers(safePreferencesFlow.first(), uid)
+    }
 
     override suspend fun replaceAll(users: List<FloorAuthor>) {
+        val uid = currentUid()
         val normalized = normalizeBlockedUserList(users)
         dataStore.edit { prefs ->
-            prefs[KEY_BLOCKED_USERS_JSON] = encodeUsers(normalized)
+            prefs[keyForUid(uid)] = encodeUsers(normalized)
+            if (uid == 0L) {
+                prefs.remove(KEY_LEGACY_BLOCKED_USERS_JSON)
+            }
         }
     }
 
     override suspend fun mergeAll(users: List<FloorAuthor>) {
         val incoming = normalizeBlockedUserList(users)
         if (incoming.isEmpty()) return
+        val uid = currentUid()
         dataStore.edit { prefs ->
-            val current = decodeUsers(prefs[KEY_BLOCKED_USERS_JSON])
+            val current = readScopedUsers(prefs, uid)
             val merged = mergeBlockedUserLists(existing = current, incoming = incoming)
-            prefs[KEY_BLOCKED_USERS_JSON] = encodeUsers(merged)
+            prefs[keyForUid(uid)] = encodeUsers(merged)
+            if (uid == 0L) {
+                prefs.remove(KEY_LEGACY_BLOCKED_USERS_JSON)
+            }
         }
     }
 
     override suspend fun recordBlockedByName(username: String) {
         val clean = username.trim().removePrefix("@").trim()
         if (clean.isEmpty()) return
+        val uid = currentUid()
         dataStore.edit { prefs ->
-            val current = decodeUsers(prefs[KEY_BLOCKED_USERS_JSON])
+            val current = readScopedUsers(prefs, uid)
             val merged = mergeBlockedUserLists(
                 existing = current,
                 incoming = listOf(FloorAuthor(uid = 0L, username = clean)),
             )
-            prefs[KEY_BLOCKED_USERS_JSON] = encodeUsers(merged)
+            prefs[keyForUid(uid)] = encodeUsers(merged)
+            if (uid == 0L) {
+                prefs.remove(KEY_LEGACY_BLOCKED_USERS_JSON)
+            }
         }
     }
 
     override suspend fun removeByUid(uid: Long) {
         if (uid <= 0L) return
+        val accountUid = currentUid()
         dataStore.edit { prefs ->
-            val current = decodeUsers(prefs[KEY_BLOCKED_USERS_JSON])
+            val current = readScopedUsers(prefs, accountUid)
             val filtered = current.filterNot { it.uid == uid }
-            prefs[KEY_BLOCKED_USERS_JSON] = encodeUsers(filtered)
+            prefs[keyForUid(accountUid)] = encodeUsers(filtered)
+        }
+    }
+
+    override suspend fun clear() {
+        val uid = currentUid()
+        dataStore.edit { prefs ->
+            prefs.remove(keyForUid(uid))
+            if (uid == 0L) {
+                prefs.remove(KEY_LEGACY_BLOCKED_USERS_JSON)
+            }
         }
     }
 
@@ -108,7 +156,8 @@ class DataStoreBlockedUsersCache(
     }
 
     companion object {
-        private val KEY_BLOCKED_USERS_JSON = stringPreferencesKey("blocked_users_json")
+        private const val KEY_BLOCKED_USERS_PREFIX = "blocked_users_json_u"
+        private val KEY_LEGACY_BLOCKED_USERS_JSON = stringPreferencesKey("blocked_users_json")
     }
 }
 
@@ -140,6 +189,10 @@ class InMemoryBlockedUsersCache(
     override suspend fun removeByUid(uid: Long) {
         if (uid <= 0L) return
         state.update { current -> current.filterNot { it.uid == uid } }
+    }
+
+    override suspend fun clear() {
+        state.value = emptyList()
     }
 }
 

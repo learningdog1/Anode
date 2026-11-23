@@ -1,14 +1,17 @@
 package com.nodeseek.app.data.repository
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.nodeseek.app.data.local.BookmarkDao
 import com.nodeseek.app.data.local.BookmarkEntity
 import com.nodeseek.app.data.local.CategoryDao
 import com.nodeseek.app.data.local.CategoryEntity
+import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
 import com.nodeseek.app.data.local.ReadHistoryDao
 import com.nodeseek.app.data.local.ReadHistoryEntity
 import com.nodeseek.app.data.local.SettingsRepositoryImpl
+import com.nodeseek.app.data.local.SettingsSecretCipher
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
@@ -26,6 +29,7 @@ import com.nodeseek.app.domain.repository.SignInStepResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -540,10 +544,12 @@ class RepositoryImplementationsTest {
             assertEquals("sk_test_seekmail_roundtrip_key", persisted.seekMailApiKey)
 
             val rawPrefs = dataStore.data.first()
-            assertEquals(
-                "sk_test_seekmail_roundtrip_key",
-                rawPrefs[stringPreferencesKey("seek_mail_api_key")],
+            val storedRaw = rawPrefs[stringPreferencesKey("seek_mail_api_key")].orEmpty()
+            assertTrue(
+                "Stored seek_mail_api_key must be encrypted at rest, got: $storedRaw",
+                storedRaw.startsWith(SettingsSecretCipher.PREFIX_SW) || storedRaw.startsWith(SettingsSecretCipher.PREFIX_AKS),
             )
+            assertFalse("Stored value must not contain plaintext secret", storedRaw.contains("sk_test_seekmail_roundtrip_key"))
 
             // Rebind a fresh SettingsRepositoryImpl to verify decoding from persisted Preferences.
             val readerRepo = SettingsRepositoryImpl(
@@ -751,6 +757,282 @@ class RepositoryImplementationsTest {
         assertNotNull(syncErr)
         assertNull(sessionRepository.sessionState.value)
     }
+
+    @Test
+    fun `SettingsRepositoryImpl migrates legacy plaintext API keys, merges pinnedCategorySlugs, and clamps MAX_FONT_SCALE to 1_30`() = runBlocking {
+        val tempDir = Files.createTempDirectory("settings_migration_merge_test").toFile()
+        val dataStoreFile = File(tempDir, "settings_mig.preferences_pb")
+        val dataStoreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dataStore = PreferenceDataStoreFactory.create(
+                scope = dataStoreScope,
+                produceFile = { dataStoreFile },
+            )
+            // Seed legacy unencrypted API keys
+            dataStore.edit { prefs ->
+                prefs[stringPreferencesKey("node_image_api_key")] = "legacy_nodeimage_key_123"
+                prefs[stringPreferencesKey("seek_mail_api_key")] = "legacy_seekmail_key_456"
+            }
+
+            val repo = SettingsRepositoryImpl(dataStore = dataStore, externalScope = repoScope)
+            val loaded = withTimeout(5_000L) {
+                repo.settings.first {
+                    it.nodeImageApiKey == "legacy_nodeimage_key_123" &&
+                        it.seekMailApiKey == "legacy_seekmail_key_456"
+                }
+            }
+            assertEquals("legacy_nodeimage_key_123", loaded.nodeImageApiKey)
+            assertEquals("legacy_seekmail_key_456", loaded.seekMailApiKey)
+
+            // Wait for background plaintext migration to rewrite encrypted envelopes on disk
+            try {
+                withTimeout(5_000L) {
+                    dataStore.data.first { prefs ->
+                        val rawImg = prefs[stringPreferencesKey("node_image_api_key")].orEmpty()
+                        val rawMail = prefs[stringPreferencesKey("seek_mail_api_key")].orEmpty()
+                        rawImg.startsWith(SettingsSecretCipher.PREFIX_SW) &&
+                            rawMail.startsWith(SettingsSecretCipher.PREFIX_SW)
+                    }
+                }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                val snapshot = dataStore.data.first()
+                throw AssertionError(
+                    "Timed out waiting for migration: rawImg=${snapshot[stringPreferencesKey("node_image_api_key")]}, rawMail=${snapshot[stringPreferencesKey("seek_mail_api_key")]}",
+                    e,
+                )
+            }
+
+            // Font scale clamps to 1.30f max
+            assertEquals(1.30f, SettingsRepositoryImpl.MAX_FONT_SCALE, 0.0001f)
+            repo.setFontScale(1.50f)
+            val clamped = withTimeout(5_000L) { repo.settings.first { it.fontScale == 1.30f } }
+            assertEquals(1.30f, clamped.fontScale, 0.0001f)
+
+            // Merge restore preserves existing pinned categories and appends backup categories
+            repo.setPinnedCategorySlugs(linkedSetOf("tech", "daily"))
+            withTimeout(5_000L) { repo.settings.first { it.pinnedCategorySlugs == setOf("tech", "daily") } }
+            repo.restoreSettingsFromBackup(
+                backup = AppSettingsBackupDto(pinnedCategorySlugs = setOf("trade", "review")),
+                merge = true,
+            )
+            val merged = withTimeout(5_000L) {
+                repo.settings.first { it.pinnedCategorySlugs.size == 4 }
+            }
+            assertEquals(setOf("tech", "daily", "trade", "review"), merged.pinnedCategorySlugs)
+        } finally {
+            repoScope.cancel()
+            dataStoreScope.cancel()
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `CheckInRepositoryImpl ignores late in-flight response that finishes after signOut`() = runBlocking {
+        val signedInConfigB64 = encodeConfig(
+            """{"user":{"member_id":88,"member_name":"Alice","coin":100},"allCategory":[{"key":"tech","cn_text":"技术"}]}""",
+        )
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200)
+                        .setBody("""<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$signedInConfigB64</script></body></html>""")
+                    "/api/attendance/board?page=1" -> {
+                        entered.countDown()
+                        release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                        MockResponse().setResponseCode(200)
+                            .setBody("""{"success":true,"record":{"gain":5,"created_at":"2026-11-23T08:00:00Z"},"order":1,"total":10,"list":[]}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        sessionRepository.refreshSession().getOrThrow()
+        assertEquals(88L, sessionRepository.sessionState.value?.uid)
+
+        val inFlight = async(Dispatchers.IO) {
+            checkInRepository.getCheckInBoard(page = 1, forceRefresh = true)
+        }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        // Sign out locally while board request is still in-flight
+        sessionRepository.signOutLocalOnly().getOrThrow()
+        checkInRepository.clearCachedStatus()
+        assertNull(sessionRepository.sessionState.value)
+        assertNull(checkInRepository.checkInStatus.value)
+
+        release.countDown()
+        val result = inFlight.await()
+        assertTrue(result.isSuccess)
+        // Crucial: late response must NOT repopulate _checkInStatus after sign-out!
+        assertNull(checkInRepository.checkInStatus.value)
+    }
+
+    @Test
+    fun `SessionRepositoryImpl refreshSession notifies config once and signOut invokes onSignedOutCallback`() = runTest {
+        var configCalls = 0
+        var signedOutCallbacks = 0
+        sessionRepository.embeddedCategoriesListener = { _, _ -> configCalls += 1 }
+        sessionRepository.onSignedOutCallback = { signedOutCallbacks += 1 }
+
+        val signedInConfigB64 = encodeConfig(
+            """{"user":{"member_id":101,"member_name":"Alice","coin":500},"allCategory":[{"key":"tech","cn_text":"技术"}]}""",
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$signedInConfigB64</script></body></html>"""),
+        )
+        sessionRepository.refreshSession().getOrThrow()
+        assertEquals("refreshSession must notify embeddedCategoriesListener exactly once", 1, configCalls)
+
+        sessionRepository.signOutLocalOnly().getOrThrow()
+        assertEquals(1, signedOutCallbacks)
+    }
+
+    @Test
+    fun `ForumRepositoryImpl preserves category customizability on refresh and preserves list timestamps on detail cache`() = runBlocking {
+        // Seed customized category with isCustomizable=true, visibleOnHome=false
+        categoryDao.upsertAll(
+            listOf(
+                CategoryEntity(
+                    accountUid = 0L,
+                    slug = "tech",
+                    name = "技术",
+                    description = "技术讨论",
+                    sortOrder = 0,
+                    isCustomizable = true,
+                    visibleOnHome = false,
+                    isAdminOnly = false,
+                    topicCoinCost = 0,
+                    supportsRss = true,
+                    syncedAtEpochMillis = 1_000L,
+                ),
+            ),
+        )
+        val configB64 = encodeConfig(
+            """{"allCategory":[{"key":"tech","cn_text":"技术"},{"key":"daily","cn_text":"日常"}]}""",
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true,"data":[{"key":"tech","cn_text":"技术"},{"key":"daily","cn_text":"日常"}]}"""),
+        )
+        forumRepository.refreshCategories(force = true).getOrThrow()
+        val persistedTech = categoryDao.getCategories(0L).first { it.slug == "tech" }
+        assertTrue("Existing isCustomizable must be preserved", persistedTech.isCustomizable)
+        assertFalse("Existing visibleOnHome must be preserved", persistedTech.visibleOnHome)
+
+        // Feed loads topic 505 with accurate lastActivityIso & replyCount = 42
+        val feedHtml = """
+            <html><body>
+              <div id="nsk-body">
+                <div class="post-list-item">
+                  <div class="post-title"><a href="/post-505-1">保留时间戳测试贴</a></div>
+                  <a class="post-category" href="/categories/tech">技术</a>
+                  <span class="info-author"><a href="/space/7">Author</a></span>
+                  <span class="info-views"><span>300</span></span>
+                  <span class="info-comments-count"><span>42</span></span>
+                  <time datetime="2026-11-23T12:34:56.000Z"></time>
+                </div>
+              </div>
+              <script id="temp-script" type="application/json">$configB64</script>
+            </body></html>
+        """.trimIndent()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(feedHtml))
+        forumRepository.getFeed(categorySlug = "tech", page = 1).getOrThrow()
+
+        // Opening page 1 of detail (only 1 reply on page 1) must NOT overwrite replyCount=42 or blank lastActivityIso
+        val threadConfigB64 = encodeConfig(
+            """
+            {
+              "allCategory":[{"key":"tech","cn_text":"技术"}],
+              "postData":{
+                "postId":505,
+                "postPage":1,
+                "postPageCount":5,
+                "title":"保留时间戳测试贴",
+                "category":"tech",
+                "categoryWord":"技术",
+                "views":310,
+                "comments":[
+                  {"commentId":1,"floorIndex":0,"poster":{"uid":7,"name":"Author"},"markdown":"正文"},
+                  {"commentId":2,"floorIndex":1,"poster":{"uid":8,"name":"Replier"},"markdown":"回复1"}
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""<html><body><div id="nsk-body"><div class="nsk-post"></div></div><script id="temp-script" type="application/json">$threadConfigB64</script></body></html>"""),
+        )
+        forumRepository.getTopicDetail(topicId = 505L, page = 1).getOrThrow()
+        // Bookmarking after viewing detail uses recentSummaryCache -> must retain exact list lastActivityIso & replyCount!
+        bookmarkAndHistoryRepository.setTopicBookmarked(topicId = 505L, bookmarked = true).getOrThrow()
+        val bookmark = bookmarkDao.getBookmark(0L, 505L)
+        assertNotNull(bookmark)
+        assertEquals("2026-11-23T12:34:56.000Z", bookmark!!.lastActivityIso)
+        assertEquals(42, bookmark.replyCount)
+        assertEquals(310, bookmark.viewCount)
+    }
+
+    @Test
+    fun `UserRepositoryImpl searchUsers strips leading at-sign`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true,"memberList":[{"member_id":42,"member_name":"alice"}]}"""),
+        )
+        val userRepo = UserRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+        )
+        val users = userRepo.searchUsers("  @alice  ").getOrThrow()
+        assertEquals(1, users.size)
+        assertEquals("alice", users.single().username)
+        val req = server.takeRequest()
+        assertEquals("/api/account/find/alice", req.path)
+    }
+
+    @Test
+    fun `DataStoreBlockedUsersCache isolates accounts by uid and supports clear`() = runBlocking {
+        val tempDir = Files.createTempDirectory("blocked_users_isolation_test").toFile()
+        val dsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dataStore = PreferenceDataStoreFactory.create(
+                scope = dsScope,
+                produceFile = { File(tempDir, "blocked_users.preferences_pb") },
+            )
+            var currentUid = 101L
+            val cache = DataStoreBlockedUsersCache(
+                dataStore = dataStore,
+                accountUidProvider = { currentUid },
+            )
+            cache.replaceAll(
+                listOf(
+                    com.nodeseek.app.domain.model.FloorAuthor(
+                        uid = 999L,
+                        username = "SpammerA",
+                    ),
+                ),
+            )
+            assertEquals(listOf(999L), cache.getBlockedUsers().map { it.uid })
+
+            // Switch to Account B: must NOT see Account A's blocked users
+            currentUid = 202L
+            assertTrue(cache.getBlockedUsers().isEmpty())
+
+            // Switch back to Account A and clear
+            currentUid = 101L
+            assertEquals(1, cache.getBlockedUsers().size)
+            cache.clear()
+            assertTrue(cache.getBlockedUsers().isEmpty())
+        } finally {
+            dsScope.cancel()
+            tempDir.deleteRecursively()
+        }
+    }
 }
 
 // =========================================================================
@@ -944,6 +1226,12 @@ internal class FakeReadHistoryDao : ReadHistoryDao {
             rows.filter { it.accountUid == accountUid && it.topicId in topicIds }
         }
 
+    override suspend fun getByTopicIds(
+        accountUid: Long,
+        topicIds: Collection<Long>,
+    ): List<ReadHistoryEntity> =
+        state.value.filter { it.accountUid == accountUid && it.topicId in topicIds }
+
     override suspend fun getByTopicId(accountUid: Long, topicId: Long): ReadHistoryEntity? =
         state.value.firstOrNull { it.accountUid == accountUid && it.topicId == topicId }
 
@@ -977,6 +1265,12 @@ internal class FakeBookmarkDao : BookmarkDao {
 
     override fun observeBookmarkedTopicIds(accountUid: Long): Flow<List<Long>> =
         observeBookmarks(accountUid).map { rows -> rows.map { it.topicId } }
+
+    override suspend fun getBookmarkedTopicIds(accountUid: Long): List<Long> =
+        state.value
+            .filter { it.accountUid == accountUid }
+            .sortedByDescending { it.savedAtEpochMillis }
+            .map { it.topicId }
 
     override suspend fun getBookmark(accountUid: Long, topicId: Long): BookmarkEntity? =
         state.value.firstOrNull { it.accountUid == accountUid && it.topicId == topicId }

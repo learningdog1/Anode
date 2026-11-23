@@ -109,18 +109,29 @@ object CoilHttpClientFactory {
         val contentLength = body.contentLength()
         if (contentLength > MAX_SVG_NORMALIZE_BYTES) return response
 
-        val head = runCatching { response.peekBody(SVG_PEEK_BYTES).string() }.getOrNull() ?: return response
+        val head = response.peekBody(SVG_PEEK_BYTES).string()
         val openMatch = SVG_OPEN_TAG_REGEX.find(head) ?: return response
         val openAttrs = openMatch.groupValues[1]
         val needsNormalization = !SVG_VIEWBOX_ATTR_REGEX.containsMatchIn(openAttrs) ||
             SVG_ATTR_CH_REGEX.containsMatchIn(head)
         if (!needsNormalization) return response
 
-        val rawSvg = runCatching { body.string() }.getOrNull() ?: return response
+        // Bounded peek enforces MAX_SVG_NORMALIZE_BYTES even for chunked or transparently
+        // gzip-decompressed responses where contentLength() == -1L, and keeps the original
+        // ResponseBody unconsumed if the payload exceeds the limit.
+        val peekedBytes = response.peekBody(MAX_SVG_NORMALIZE_BYTES + 1L).bytes()
+        if (peekedBytes.size.toLong() > MAX_SVG_NORMALIZE_BYTES) return response
+
+        val charset = mediaType?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+        val rawSvg = String(peekedBytes, charset)
         val normalizedSvg = normalizeSvgForAndroidSvg(rawSvg)
+
+        // Original body is now being replaced with a freshly buffered copy; close the source stream.
+        body.close()
+
         if (normalizedSvg == rawSvg) {
             return response.newBuilder()
-                .body(rawSvg.toResponseBody(mediaType))
+                .body(peekedBytes.toResponseBody(mediaType))
                 .build()
         }
 
@@ -202,8 +213,9 @@ object CoilHttpClientFactory {
         // Also normalize root width/height to px so CSS font-size em mismatch doesn't clip content.
         var tag = replaceFirstAttrValue(openTag, SVG_WIDTH_ATTR_REGEX, "width", "${viewBoxW}px")
         tag = replaceFirstAttrValue(tag, SVG_HEIGHT_ATTR_REGEX, "height", "${viewBoxH}px")
-        val insertIdx = tag.lastIndexOf('>')
-        if (insertIdx <= 0) return tag
+        val closeIdx = tag.lastIndexOf('>')
+        if (closeIdx <= 0) return tag
+        val insertIdx = if (tag[closeIdx - 1] == '/') closeIdx - 1 else closeIdx
         return buildString(tag.length + 32) {
             append(tag, 0, insertIdx)
             append(""" viewBox="0 0 """)
