@@ -211,7 +211,7 @@ class RestockMonitorViewModel(
             _snackbarChannel.trySend(
                 if (isEdit) "已更新监控：${saved.title}" else "已加入补货蹲守：${saved.title}",
             )
-            if (!isEdit && draft.initialStockStatus == RestockStockStatus.UNKNOWN) {
+            if (saved.stockStatus == RestockStockStatus.UNKNOWN) {
                 monitorController.triggerCheckSingle(saved.id)
             }
         }
@@ -227,8 +227,25 @@ class RestockMonitorViewModel(
 
         val item = if (existing != null) {
             val now = System.currentTimeMillis()
-            val statusChanged = draft.initialStockStatus != existing.stockStatus &&
-                draft.initialStockStatus != RestockStockStatus.UNKNOWN
+            val urlChanged = !resolvedUrl.equals(existing.resolvedOrderUrl, ignoreCase = true)
+            val keywordsChanged = draft.customInStockKeyword.trim() != existing.customInStockKeyword ||
+                draft.customOutOfStockKeyword.trim() != existing.customOutOfStockKeyword
+            val targetChanged = urlChanged || keywordsChanged
+            val hasFreshProbe = draft.initialStockStatus != RestockStockStatus.UNKNOWN &&
+                (draft.initialStockStatus != existing.stockStatus ||
+                    draft.initialEvidenceSummary != existing.lastEvidenceSummary)
+            val shouldResetState = targetChanged && !hasFreshProbe
+            val nextStatus = when {
+                shouldResetState -> RestockStockStatus.UNKNOWN
+                draft.initialStockStatus != RestockStockStatus.UNKNOWN -> draft.initialStockStatus
+                else -> existing.stockStatus
+            }
+            val nextArmed = when {
+                shouldResetState -> false
+                nextStatus == RestockStockStatus.OUT_OF_STOCK -> true
+                nextStatus == RestockStockStatus.IN_STOCK -> false
+                else -> existing.alertWaveArmed
+            }
             existing.copy(
                 title = title,
                 rawUrl = draft.rawUrl.trim(),
@@ -239,10 +256,21 @@ class RestockMonitorViewModel(
                 customOutOfStockKeyword = draft.customOutOfStockKeyword.trim(),
                 pollIntervalMinutes = RestockWatchItem.clampPollInterval(draft.pollIntervalMinutes),
                 isEnabled = draft.isEnabled,
-                stockStatus = if (statusChanged) draft.initialStockStatus else existing.stockStatus,
-                lastCheckedEpochMillis = if (statusChanged) now else existing.lastCheckedEpochMillis,
-                lastEvidenceSummary = draft.initialEvidenceSummary.ifBlank { existing.lastEvidenceSummary },
+                stockStatus = nextStatus,
+                lastCheckedEpochMillis = when {
+                    shouldResetState -> 0L
+                    hasFreshProbe -> now
+                    else -> existing.lastCheckedEpochMillis
+                },
+                consecutiveErrors = if (shouldResetState || hasFreshProbe) 0 else existing.consecutiveErrors,
+                lastErrorMessage = if (shouldResetState || hasFreshProbe) null else existing.lastErrorMessage,
+                lastEvidenceSummary = when {
+                    shouldResetState -> ""
+                    draft.initialEvidenceSummary.isNotBlank() -> draft.initialEvidenceSummary
+                    else -> existing.lastEvidenceSummary
+                },
                 sourceTopicId = draft.sourceTopicId ?: existing.sourceTopicId,
+                alertWaveArmed = nextArmed,
             )
         } else {
             val now = System.currentTimeMillis()
@@ -411,10 +439,16 @@ class RestockMonitorViewModel(
         }
     }
 
-    fun testFlareSolverrConnection() {
+    fun testFlareSolverrConnection(draftBaseUrl: String? = null) {
         if (_isTestingFlareSolverr.value) return
         viewModelScope.launch {
-            val config = repository.getSettingsSnapshot().flareSolverr
+            val config = if (draftBaseUrl != null) {
+                repository.updateSettings {
+                    it.copy(flareSolverr = it.flareSolverr.copy(baseUrl = draftBaseUrl.trim()))
+                }.flareSolverr
+            } else {
+                repository.getSettingsSnapshot().flareSolverr
+            }
             if (config.baseUrl.isBlank()) {
                 _snackbarChannel.trySend("请先填写 FlareSolverr 服务地址")
                 return@launch

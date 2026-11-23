@@ -8,10 +8,13 @@ import com.nodeseek.app.domain.restock.RestockRepository
 import com.nodeseek.app.domain.restock.RestockStockStatus
 import com.nodeseek.app.domain.restock.RestockWatchItem
 import com.nodeseek.app.domain.restock.StockAnalysisResult
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -19,7 +22,20 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.Collections
 import java.util.UUID
+import java.util.WeakHashMap
+
+internal object RestockLoadStateRegistry {
+    private val loadedFlows = Collections.synchronizedMap(WeakHashMap<StateFlow<*>, StateFlow<Boolean>>())
+
+    fun register(watchItemsFlow: StateFlow<*>, loadedFlow: StateFlow<Boolean>) {
+        loadedFlows[watchItemsFlow] = loadedFlow
+    }
+
+    fun loadedFlowFor(watchItemsFlow: Any): StateFlow<Boolean>? =
+        loadedFlows[watchItemsFlow]
+}
 
 @Serializable
 internal data class RestockStoreSnapshot(
@@ -35,6 +51,8 @@ internal data class RestockStoreSnapshot(
  *
  * Uses atomic temp-file writes guarded by a [Mutex] so foreground UI edits, fast polling,
  * and WorkManager background checks never corrupt storage or require Room migrations.
+ * Disk hydration runs asynchronously on [Dispatchers.IO] (and is awaited before any suspend
+ * read/write) so cold-start construction never blocks the main thread.
  */
 class RestockRepositoryImpl(
     private val storeFile: File,
@@ -56,29 +74,64 @@ class RestockRepositoryImpl(
     }
 
     private val mutex = Mutex()
+    private val preloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val initialSnapshot: RestockStoreSnapshot = readSnapshotFromDiskSync()
+    @Volatile
+    private var diskLoaded = false
+    private val _isLoadedFlow = MutableStateFlow(false)
 
-    private val _watchItemsFlow = MutableStateFlow(initialSnapshot.watchItems)
-    override val watchItemsFlow: StateFlow<List<RestockWatchItem>> = _watchItemsFlow.asStateFlow()
+    private val _watchItemsFlow = MutableStateFlow<List<RestockWatchItem>>(emptyList())
+    override val watchItemsFlow: StateFlow<List<RestockWatchItem>> = _watchItemsFlow.asStateFlow().also {
+        RestockLoadStateRegistry.register(it, _isLoadedFlow.asStateFlow())
+    }
 
-    private val _eventHistoryFlow = MutableStateFlow(initialSnapshot.events)
+    private val _eventHistoryFlow = MutableStateFlow<List<RestockEventRecord>>(emptyList())
     override val eventHistoryFlow: StateFlow<List<RestockEventRecord>> = _eventHistoryFlow.asStateFlow()
 
-    private val _settingsFlow = MutableStateFlow(initialSnapshot.settings.normalized())
+    private val _settingsFlow = MutableStateFlow(RestockMonitorSettings().normalized())
     override val settingsFlow: StateFlow<RestockMonitorSettings> = _settingsFlow.asStateFlow()
 
+    init {
+        preloadScope.launch {
+            mutex.withLock {
+                ensureDiskLoadedLocked()
+            }
+        }
+    }
+
+    private suspend fun ensureDiskLoadedLocked() {
+        if (diskLoaded) return
+        val snapshot = withContext(Dispatchers.IO) {
+            readSnapshotFromDiskSync()
+        }
+        _watchItemsFlow.value = snapshot.watchItems
+        _eventHistoryFlow.value = snapshot.events
+        _settingsFlow.value = snapshot.settings.normalized()
+        diskLoaded = true
+        _isLoadedFlow.value = true
+    }
+
     override suspend fun getWatchItemsSnapshot(): List<RestockWatchItem> =
-        mutex.withLock { _watchItemsFlow.value }
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            _watchItemsFlow.value
+        }
 
     override suspend fun getEventHistorySnapshot(): List<RestockEventRecord> =
-        mutex.withLock { _eventHistoryFlow.value }
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            _eventHistoryFlow.value
+        }
 
     override suspend fun getSettingsSnapshot(): RestockMonitorSettings =
-        mutex.withLock { _settingsFlow.value }
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            _settingsFlow.value
+        }
 
     override suspend fun addOrUpdateWatch(item: RestockWatchItem): RestockWatchItem =
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val normalizedUrl = MerchantLinkDetector.resolveOrderUrl(item.rawUrl)
                 .ifBlank { item.resolvedOrderUrl.trim() }
             val resolvedPanel = if (item.panelType == MerchantPanelType.GENERIC) {
@@ -88,6 +141,8 @@ class RestockRepositoryImpl(
             }
             val currentList = _watchItemsFlow.value
             val existing = currentList.firstOrNull { it.id == item.id }
+            val urlChanged = existing != null &&
+                !normalizedUrl.equals(existing.resolvedOrderUrl, ignoreCase = true)
 
             val normalizedItem = item.copy(
                 id = item.id.ifBlank { UUID.randomUUID().toString() },
@@ -99,9 +154,10 @@ class RestockRepositoryImpl(
                 customInStockKeyword = item.customInStockKeyword.trim(),
                 customOutOfStockKeyword = item.customOutOfStockKeyword.trim(),
                 pollIntervalMinutes = RestockWatchItem.clampPollInterval(item.pollIntervalMinutes),
-                alertWaveArmed = when (item.stockStatus) {
-                    RestockStockStatus.OUT_OF_STOCK -> true
-                    RestockStockStatus.IN_STOCK -> false
+                alertWaveArmed = when {
+                    item.stockStatus == RestockStockStatus.OUT_OF_STOCK -> true
+                    item.stockStatus == RestockStockStatus.IN_STOCK -> false
+                    urlChanged -> item.alertWaveArmed
                     else -> existing?.alertWaveArmed ?: item.alertWaveArmed
                 },
             )
@@ -124,6 +180,7 @@ class RestockRepositoryImpl(
 
     override suspend fun removeWatch(id: String) {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val updated = _watchItemsFlow.value.filterNot { it.id == id }
             if (updated.size == _watchItemsFlow.value.size) return
             persistLocked(
@@ -138,6 +195,7 @@ class RestockRepositoryImpl(
 
     override suspend fun setWatchEnabled(id: String, enabled: Boolean) {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val current = _watchItemsFlow.value
             val target = current.firstOrNull { it.id == id } ?: return
             if (target.isEnabled == enabled) return
@@ -156,6 +214,7 @@ class RestockRepositoryImpl(
 
     override suspend fun updateWatchPollInterval(id: String, intervalMinutes: Int) {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val clamped = RestockWatchItem.clampPollInterval(intervalMinutes)
             val current = _watchItemsFlow.value
             val target = current.firstOrNull { it.id == id } ?: return
@@ -177,6 +236,7 @@ class RestockRepositoryImpl(
         watchId: String,
         analysis: StockAnalysisResult,
     ): RestockEventRecord? = mutex.withLock {
+        ensureDiskLoadedLocked()
         val currentItems = _watchItemsFlow.value
         val existing = currentItems.firstOrNull { it.id == watchId } ?: return@withLock null
 
@@ -272,6 +332,7 @@ class RestockRepositoryImpl(
 
     override suspend fun markEventRead(eventId: String) {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val current = _eventHistoryFlow.value
             if (current.none { it.id == eventId && !it.isRead }) return
             val updated = current.map { event ->
@@ -289,6 +350,7 @@ class RestockRepositoryImpl(
 
     override suspend fun markAllEventsRead() {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val current = _eventHistoryFlow.value
             if (current.none { !it.isRead }) return
             val updated = current.map { it.copy(isRead = true) }
@@ -304,6 +366,7 @@ class RestockRepositoryImpl(
 
     override suspend fun deleteEvent(eventId: String) {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             val updated = _eventHistoryFlow.value.filterNot { it.id == eventId }
             if (updated.size == _eventHistoryFlow.value.size) return
             persistLocked(
@@ -318,6 +381,7 @@ class RestockRepositoryImpl(
 
     override suspend fun clearEventHistory() {
         mutex.withLock {
+            ensureDiskLoadedLocked()
             if (_eventHistoryFlow.value.isEmpty()) return
             persistLocked(
                 RestockStoreSnapshot(
@@ -332,6 +396,7 @@ class RestockRepositoryImpl(
     override suspend fun updateSettings(
         transform: (RestockMonitorSettings) -> RestockMonitorSettings,
     ): RestockMonitorSettings = mutex.withLock {
+        ensureDiskLoadedLocked()
         val updated = transform(_settingsFlow.value).normalized()
         if (updated == _settingsFlow.value) return@withLock updated
         persistLocked(

@@ -2,16 +2,22 @@ package com.nodeseek.app.data.restock
 
 import com.nodeseek.app.domain.restock.FlareSolverrConfig
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 /**
  * Outcome of a single FlareSolverr `request.get` solve attempt.
@@ -19,12 +25,14 @@ import java.util.concurrent.TimeUnit
 sealed interface FlareSolverrOutcome {
     /**
      * Challenge solved (or page simply fetched); [html] is the rendered page content
-     * ready for [StockPageAnalyzer.analyzeHtml].
+     * ready for [StockPageAnalyzer.analyzeHtml], and [httpStatusCode] carries the
+     * upstream target HTTP status reported by FlareSolverr (`solution.status`).
      */
     data class Solved(
         val html: String,
         val finalUrl: String,
         val userAgent: String,
+        val httpStatusCode: Int = 200,
     ) : FlareSolverrOutcome
 
     data class Failure(
@@ -101,6 +109,7 @@ class FlareSolverrClient(
                         html = solution.response,
                         finalUrl = solution.url.ifBlank { targetUrl },
                         userAgent = solution.userAgent,
+                        httpStatusCode = solution.status.takeIf { it > 0 } ?: 200,
                     )
                 }
             }
@@ -129,7 +138,7 @@ class FlareSolverrClient(
         data class Rejected(val reason: String, val isTransient: Boolean) : CommandResult
     }
 
-    private fun executeCommand(
+    private suspend fun executeCommand(
         client: OkHttpClient,
         base: String,
         payloadJson: String,
@@ -147,43 +156,82 @@ class FlareSolverrClient(
             )
         }
 
-        return try {
-            client.newCall(request).execute().use { response ->
-                val statusCode = response.code
-                val rawBody = response.body?.string().orEmpty()
-                if (statusCode != 200) {
-                    return CommandResult.Rejected(
-                        reason = "FlareSolverr 服务响应 HTTP $statusCode",
-                        isTransient = statusCode in 500..599,
+        return suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (!continuation.isActive) return
+                    continuation.resume(
+                        CommandResult.Rejected(
+                            reason = "FlareSolverr 服务不可达：${e.message?.take(80) ?: "网络连接失败"}",
+                            isTransient = true,
+                        ),
                     )
                 }
-                val decoded = runCatching { json.decodeFromString<FlareSolverrResponse>(rawBody) }
-                    .getOrElse {
-                        return CommandResult.Rejected(
-                            reason = "FlareSolverr 响应解析失败",
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = try {
+                        response.use { resp ->
+                            val statusCode = resp.code
+                            val rawBody = readBoundedResponseBody(resp)
+                            if (statusCode != 200) {
+                                CommandResult.Rejected(
+                                    reason = "FlareSolverr 服务响应 HTTP $statusCode",
+                                    isTransient = statusCode in 500..599,
+                                )
+                            } else {
+                                val decoded = runCatching {
+                                    json.decodeFromString<FlareSolverrResponse>(rawBody)
+                                }.getOrNull()
+                                if (decoded == null) {
+                                    CommandResult.Rejected(
+                                        reason = "FlareSolverr 响应解析失败",
+                                        isTransient = true,
+                                    )
+                                } else if (!decoded.status.equals("ok", ignoreCase = true)) {
+                                    val reason = decoded.message.ifBlank { "FlareSolverr 未能解开验证" }
+                                    CommandResult.Rejected(
+                                        reason = "FlareSolverr：$reason",
+                                        isTransient = false,
+                                    )
+                                } else {
+                                    CommandResult.Ok(
+                                        solution = decoded.solution,
+                                        message = decoded.message,
+                                    )
+                                }
+                            }
+                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (e: IOException) {
+                        CommandResult.Rejected(
+                            reason = "FlareSolverr 服务不可达：${e.message?.take(80) ?: "网络连接失败"}",
                             isTransient = true,
                         )
+                    } catch (t: Throwable) {
+                        CommandResult.Rejected(
+                            reason = "FlareSolverr 调用异常：${t.message?.take(80) ?: "未知错误"}",
+                            isTransient = false,
+                        )
                     }
-                if (!decoded.status.equals("ok", ignoreCase = true)) {
-                    val reason = decoded.message.ifBlank { "FlareSolverr 未能解开验证" }
-                    return CommandResult.Rejected(
-                        reason = "FlareSolverr：$reason",
-                        isTransient = false,
-                    )
+                    if (continuation.isActive) {
+                        continuation.resume(result)
+                    }
                 }
-                CommandResult.Ok(solution = decoded.solution, message = decoded.message)
-            }
-        } catch (e: IOException) {
-            CommandResult.Rejected(
-                reason = "FlareSolverr 服务不可达：${e.message?.take(80) ?: "网络连接失败"}",
-                isTransient = true,
-            )
-        } catch (t: Throwable) {
-            CommandResult.Rejected(
-                reason = "FlareSolverr 调用异常：${t.message?.take(80) ?: "未知错误"}",
-                isTransient = false,
-            )
+            })
         }
+    }
+
+    private fun readBoundedResponseBody(response: Response): String {
+        val body = response.body ?: return ""
+        val source = body.source()
+        source.request(MAX_RESPONSE_BYTES)
+        val buffer = source.buffer.clone()
+        val byteCount = minOf(buffer.size, MAX_RESPONSE_BYTES)
+        val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+        return buffer.readString(byteCount, charset)
     }
 
     @Serializable
@@ -212,6 +260,7 @@ class FlareSolverrClient(
         private const val CMD_REQUEST_GET = "request.get"
         private const val CMD_SESSIONS_LIST = "sessions.list"
         private const val READ_TIMEOUT_MARGIN_MILLIS = 15_000L
+        private const val MAX_RESPONSE_BYTES = 2_500_000L
 
         fun createDefaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)

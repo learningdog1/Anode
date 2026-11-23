@@ -73,6 +73,69 @@ open class RestockNotificationHelper(
         putExtra(EXTRA_RESTOCK_EVENT_ID, eventId)
     }
 
+    open fun cancelNotificationForWatch(watchId: String) {
+        if (watchId.isBlank()) return
+        runCatching {
+            NotificationManagerCompat.from(appContext).cancel(notificationIdForWatch(watchId))
+        }
+    }
+
+    open fun postRestockUrgentNotifications(events: List<RestockEventRecord>) {
+        if (events.isEmpty() || !hasPostNotificationsPermission()) return
+        ensureChannel()
+
+        val individualTargets = events.take(MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS)
+        for (event in individualTargets) {
+            postRestockUrgentNotification(event)
+        }
+        if (events.size > MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS) {
+            postRestockSummaryNotification(events)
+        }
+    }
+
+    open fun postRestockSummaryNotification(events: List<RestockEventRecord>) {
+        if (events.isEmpty() || !hasPostNotificationsPermission()) return
+        ensureChannel()
+
+        val count = events.size
+        val title = "发现 $count 款 VPS 补货可抢"
+        val previewLines = events.take(5).map { item ->
+            val priceSuffix = item.priceHint.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
+            "${item.watchTitle}$priceSuffix"
+        }
+        val summaryLine = previewLines.firstOrNull().orEmpty().ifBlank { "点击打开补货监控查看全部可抢商品" }
+        val bigText = buildString {
+            append(previewLines.joinToString("\n• ", prefix = "• "))
+            if (count > previewLines.size) {
+                append("\n…等共 $count 款已补货商品")
+            }
+        }
+        val openMonitorIntent = createOpenInAppIntent(watchId = "", eventId = "")
+        val pendingIntent = PendingIntent.getActivity(
+            appContext,
+            ID_RESTOCK_SUMMARY,
+            openMonitorIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_VPS_RESTOCK_URGENT)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle(title)
+            .setContentText(summaryLine)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setGroup(GROUP_VPS_RESTOCK)
+            .setGroupSummary(true)
+            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notifySafely(ID_RESTOCK_SUMMARY, notification)
+    }
+
     open fun postRestockUrgentNotification(event: RestockEventRecord) {
         if (!hasPostNotificationsPermission()) return
         ensureChannel()
@@ -138,6 +201,7 @@ open class RestockNotificationHelper(
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setGroup(GROUP_VPS_RESTOCK)
             .setAutoCancel(true)
             .setContentIntent(primaryPendingIntent)
             .addAction(0, "在应用内查看", inAppPendingIntent)
@@ -167,9 +231,12 @@ open class RestockNotificationHelper(
         const val ACTION_OPEN_RESTOCK_MONITOR = "com.nodeseek.app.action.OPEN_RESTOCK_MONITOR"
         const val EXTRA_RESTOCK_WATCH_ID = "com.nodeseek.app.extra.RESTOCK_WATCH_ID"
         const val EXTRA_RESTOCK_EVENT_ID = "com.nodeseek.app.extra.RESTOCK_EVENT_ID"
+        const val GROUP_VPS_RESTOCK = "com.nodeseek.app.group.VPS_RESTOCK"
+        const val MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS = 3
 
         private const val BASE_ID_RESTOCK = 60_000
         private const val ACTION_REQUEST_CODE_OFFSET = 5_000
+        const val ID_RESTOCK_SUMMARY = 69_100
 
         fun isRestockMonitorIntent(intent: Intent?): Boolean =
             intent?.action == ACTION_OPEN_RESTOCK_MONITOR

@@ -111,7 +111,9 @@ fun AddRestockWatchBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val coroutineScope = rememberCoroutineScope()
-    val fallbackAnalyzer = remember { StockPageAnalyzer() }
+    val fallbackAnalyzer = remember(onProbeUrl == null) {
+        if (onProbeUrl == null) StockPageAnalyzer() else null
+    }
     val ext = NodePulseThemeTokens.extendedColors
 
     var urlText by rememberSaveable(editingItem?.id, initialUrl) {
@@ -297,7 +299,7 @@ fun AddRestockWatchBottomSheet(
                                 val result = if (onProbeUrl != null) {
                                     onProbeUrl(trimmed, customInStockKeyword, customOutOfStockKeyword)
                                 } else {
-                                    fallbackAnalyzer.analyzeUrl(
+                                    (fallbackAnalyzer ?: StockPageAnalyzer()).analyzeUrl(
                                         rawUrl = trimmed,
                                         customInStockKeyword = customInStockKeyword,
                                         customOutOfStockKeyword = customOutOfStockKeyword,
@@ -525,6 +527,11 @@ fun AddRestockWatchBottomSheet(
                                 ?: "VPS 商品监控"
                         }
 
+                    val targetChangedWithoutProbe = editingItem != null && probeResult == null && (
+                        !resolved.equals(editingItem.resolvedOrderUrl, ignoreCase = true) ||
+                            customInStockKeyword.trim() != editingItem.customInStockKeyword ||
+                            customOutOfStockKeyword.trim() != editingItem.customOutOfStockKeyword
+                        )
                     onSave(
                         RestockWatchDraft(
                             rawUrl = trimmed,
@@ -536,11 +543,16 @@ fun AddRestockWatchBottomSheet(
                             pollIntervalMinutes = pollIntervalMinutes,
                             isEnabled = editingItem?.isEnabled ?: true,
                             sourceTopicId = sourceTopicId ?: editingItem?.sourceTopicId,
-                            initialStockStatus = probeResult?.stockStatus
-                                ?: editingItem?.stockStatus
-                                ?: RestockStockStatus.UNKNOWN,
-                            initialEvidenceSummary = probeResult?.matchedSignal
-                                ?: editingItem?.lastEvidenceSummary.orEmpty(),
+                            initialStockStatus = when {
+                                probeResult != null -> probeResult!!.stockStatus
+                                targetChangedWithoutProbe -> RestockStockStatus.UNKNOWN
+                                else -> editingItem?.stockStatus ?: RestockStockStatus.UNKNOWN
+                            },
+                            initialEvidenceSummary = when {
+                                probeResult != null -> probeResult!!.matchedSignal
+                                targetChangedWithoutProbe -> ""
+                                else -> editingItem?.lastEvidenceSummary.orEmpty()
+                            },
                             editingId = editingItem?.id,
                         ),
                     )
