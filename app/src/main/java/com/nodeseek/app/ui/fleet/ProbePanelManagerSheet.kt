@@ -100,13 +100,17 @@ internal fun ProbePanelManagerSheet(
     onDismiss: () -> Unit,
     saveError: String? = null,
     onClearSaveError: () -> Unit = {},
+    initialSection: PanelManagerSection = PanelManagerSection.PANELS,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.90f).dp
     val ext = NodePulseThemeTokens.extendedColors
+    val scrollState = rememberScrollState()
 
     var editingPanelId by remember { mutableStateOf<String?>(null) }
-    var showForm by remember(panels.isEmpty()) { mutableStateOf(panels.isEmpty()) }
+    var showForm by remember(panels.isEmpty(), initialSection) {
+        mutableStateOf(panels.isEmpty() && initialSection == PanelManagerSection.PANELS)
+    }
     var pendingSavedPanelId by remember { mutableStateOf<String?>(null) }
     var nameInput by remember { mutableStateOf("") }
     var urlInput by remember { mutableStateOf("") }
@@ -115,6 +119,12 @@ internal fun ProbePanelManagerSheet(
     var showToken by remember { mutableStateOf(false) }
     var notifyOnOffline by remember { mutableStateOf(true) }
     var notifyOnRecovery by remember { mutableStateOf(false) }
+
+    LaunchedEffect(initialSection) {
+        if (initialSection == PanelManagerSection.MONITOR_SETTINGS) {
+            scrollState.animateScrollTo(scrollState.maxValue)
+        }
+    }
 
     LaunchedEffect(panels, saveError, pendingSavedPanelId) {
         val targetId = pendingSavedPanelId ?: return@LaunchedEffect
@@ -219,11 +229,11 @@ internal fun ProbePanelManagerSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 // Existing panels list
-                if (panels.isNotEmpty()) {
+                if (panels.isNotEmpty() || !showForm) {
                     PulseSectionHeader(
                         title = "已接入面板 (${panels.size})",
                         icon = Icons.Rounded.Dns,
@@ -544,6 +554,11 @@ internal fun ProbePanelManagerSheet(
                             shape = PulseArchitecturalShapes.EditorialCard,
                             containerColor = ext.cardSurface,
                             elevation = PulseElevation.None,
+                            accentColor = if (initialSection == PanelManagerSection.MONITOR_SETTINGS) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                null
+                            },
                         )
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),

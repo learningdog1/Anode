@@ -3,16 +3,27 @@ package com.nodeseek.app.fleet
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.SoftwareAesGcmTokenCipher
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
+import com.nodeseek.app.domain.fleet.FleetRefreshSummary
+import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.fleet.ProbeConnectivityResult
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
+import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.ui.fleet.MyServersTab
 import com.nodeseek.app.ui.fleet.MyServersViewModel
+import com.nodeseek.app.ui.fleet.PanelManagerSection
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -30,6 +41,7 @@ import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 import java.time.LocalDate
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MyServersViewModelTest {
@@ -343,13 +355,14 @@ class MyServersViewModelTest {
                 assertEquals(1, vm.uiState.value.portfolioSummary.offlineProbeCount)
                 assertEquals(12.0, vm.uiState.value.snapshots.first { it.remoteServerId == "n-1" }.cpuPercent, 0.01)
 
-                // Start foreground auto-refresh loop and advance 5 seconds without manual refresh
+                // Start foreground auto-refresh loop using default 2 s interval without manual refresh
+                assertEquals(2_000L, MyServersViewModel.DEFAULT_FOREGROUND_POLL_INTERVAL_MS)
                 val pollJob = backgroundScope.launch(testDispatcher) {
-                    vm.runForegroundProbeAutoRefresh(intervalMillis = 5_000L)
+                    vm.runForegroundProbeAutoRefresh()
                 }
                 testScheduler.runCurrent()
-                nowMs += 5_000L
-                testScheduler.advanceTimeBy(5_100L)
+                nowMs += 2_000L
+                testScheduler.advanceTimeBy(2_100L)
                 awaitCondition { vm.uiState.value.portfolioSummary.onlineProbeCount == 2 }
 
                 assertEquals(2, vm.uiState.value.portfolioSummary.onlineProbeCount)
@@ -365,5 +378,156 @@ class MyServersViewModelTest {
             } finally {
                 mockServer.shutdown()
             }
+        }
+
+    @Test
+    fun `foreground auto-refresh never overlaps in-flight requests and stops cleanly when cancelled`() =
+        runTest(testDispatcher) {
+            val gate = CompletableDeferred<Unit>()
+            val inFlight = AtomicInteger(0)
+            val maxConcurrent = AtomicInteger(0)
+            val refreshCalls = AtomicInteger(0)
+
+            val fakeRepo = object : FleetRepository {
+                private val _loaded = MutableStateFlow(true)
+                private val _panels = MutableStateFlow(
+                    listOf(
+                        ProbePanelConfig(
+                            id = "p1",
+                            name = "Panel 1",
+                            baseUrl = "https://probe.example.com",
+                            panelType = ProbePanelType.NEZHA_V1,
+                            enabled = true,
+                        ),
+                    ),
+                )
+                private val _snapshots = MutableStateFlow(
+                    listOf(
+                        ProbeServerSnapshot(panelId = "p1", remoteServerId = "b", name = "SameName", isOnline = true),
+                        ProbeServerSnapshot(panelId = "p1", remoteServerId = "a", name = "SameName", isOnline = true),
+                    ),
+                )
+                private val _assets = MutableStateFlow<List<VpsAssetRecord>>(emptyList())
+                private val _settings = MutableStateFlow(FleetMonitorSettings())
+                private val _lastSync = MutableStateFlow(1_000_000L)
+                private val _refreshing = MutableStateFlow(false)
+                private val _errors = MutableStateFlow<Map<String, String>>(emptyMap())
+
+                override val isPersistedStateLoadedFlow: StateFlow<Boolean> = _loaded.asStateFlow()
+                override val panelsFlow: StateFlow<List<ProbePanelConfig>> = _panels.asStateFlow()
+                override val snapshotsFlow: StateFlow<List<ProbeServerSnapshot>> = _snapshots.asStateFlow()
+                override val assetsFlow: StateFlow<List<VpsAssetRecord>> = _assets.asStateFlow()
+                override val monitorSettingsFlow: StateFlow<FleetMonitorSettings> = _settings.asStateFlow()
+                override val lastSyncEpochMillisFlow: StateFlow<Long> = _lastSync.asStateFlow()
+                override val isRefreshingFlow: StateFlow<Boolean> = _refreshing.asStateFlow()
+                override val panelErrorsFlow: StateFlow<Map<String, String>> = _errors.asStateFlow()
+
+                override suspend fun loadPersistedState() = Unit
+                override suspend fun upsertPanel(config: ProbePanelConfig): ProbePanelConfig = config
+                override suspend fun deletePanel(panelId: String) = Unit
+                override suspend fun testPanelConnection(config: ProbePanelConfig) = ProbeConnectivityResult(true)
+                override suspend fun refreshPanel(panelId: String) = Result.success(_snapshots.value)
+                override suspend fun upsertAsset(asset: VpsAssetRecord): VpsAssetRecord = asset
+                override suspend fun deleteAsset(assetId: String) = Unit
+                override suspend fun linkAssetToProbe(assetId: String, probeKey: String?) = Unit
+                override suspend fun updateMonitorSettings(settings: FleetMonitorSettings) = Unit
+                override suspend fun evaluateAlerts(
+                    today: LocalDate,
+                    nowEpochMillis: Long,
+                    fxRatesState: FxRatesState?,
+                    checkedPanels: Int?,
+                    failedPanels: Int,
+                ) = FleetMonitorCheckReport()
+
+                override suspend fun refreshAllPanels(): FleetRefreshSummary = refreshAllPanels(silent = false)
+
+                override suspend fun refreshAllPanels(silent: Boolean): FleetRefreshSummary {
+                    val callIndex = refreshCalls.incrementAndGet()
+                    val current = inFlight.incrementAndGet()
+                    maxConcurrent.updateAndGet { maxOf(it, current) }
+                    try {
+                        // Block the second call (first silent foreground tick) until test releases gate.
+                        if (silent && callIndex == 2) {
+                            gate.await()
+                        }
+                        return FleetRefreshSummary(
+                            refreshedPanelCount = 1,
+                            succeededPanelCount = 1,
+                            failedPanelErrors = emptyMap(),
+                            snapshots = _snapshots.value,
+                            syncedAtEpochMillis = _lastSync.value,
+                        )
+                    } finally {
+                        inFlight.decrementAndGet()
+                    }
+                }
+            }
+
+            val fxRepo = ExchangeRateRepository(
+                cacheFile = File(tempDir, "fx_cache_overlap.json"),
+                ioDispatcher = testDispatcher,
+            )
+            var nowMs = 1_000_000L
+            val vm = MyServersViewModel(
+                fleetRepository = fakeRepo,
+                exchangeRateRepository = fxRepo,
+                todayProvider = { LocalDate.of(2026, 11, 20) },
+                nowMillisProvider = { nowMs },
+            )
+            advanceUntilIdle()
+            assertEquals(1, refreshCalls.get())
+
+            // Verify deterministic probe tie-breaking by probeKey when names match
+            assertEquals(
+                listOf("p1:a", "p1:b"),
+                vm.uiState.value.filteredSnapshots.map { it.probeKey },
+            )
+
+            // Verify distinct panel manager sections
+            vm.openMonitorSettings()
+            advanceUntilIdle()
+            assertTrue(vm.uiState.value.showPanelManagerSheet)
+            assertEquals(PanelManagerSection.MONITOR_SETTINGS, vm.uiState.value.panelManagerInitialSection)
+            vm.openPanelManager()
+            advanceUntilIdle()
+            assertEquals(PanelManagerSection.PANELS, vm.uiState.value.panelManagerInitialSection)
+            vm.closePanelManager()
+            advanceUntilIdle()
+
+            // Launch foreground auto-refresh and trigger first 2s tick which suspends on `gate`
+            val pollJob = backgroundScope.launch(testDispatcher) {
+                vm.runForegroundProbeAutoRefresh()
+            }
+            testScheduler.advanceTimeBy(2_000L)
+            testScheduler.runCurrent()
+            assertEquals(2, refreshCalls.get())
+            assertEquals(1, inFlight.get())
+
+            // Concurrent silent refresh attempts while first is in-flight must be skipped cleanly
+            vm.refreshProbesSilently()
+            vm.refreshProbesSilently()
+            testScheduler.runCurrent()
+            assertEquals(2, refreshCalls.get())
+            assertEquals(1, maxConcurrent.get())
+
+            // Release gate, let next 2s tick fire, then cancel foreground polling (leaving foreground)
+            gate.complete(Unit)
+            testScheduler.runCurrent()
+            assertEquals(0, inFlight.get())
+
+            nowMs += 2_000L
+            testScheduler.advanceTimeBy(2_000L)
+            testScheduler.runCurrent()
+            assertEquals(3, refreshCalls.get())
+
+            pollJob.cancel()
+            testScheduler.runCurrent()
+
+            // Advancing time after foreground cancellation must trigger zero additional requests
+            nowMs += 10_000L
+            testScheduler.advanceTimeBy(10_000L)
+            testScheduler.runCurrent()
+            assertEquals(3, refreshCalls.get())
+            assertEquals(1, maxConcurrent.get())
         }
 }

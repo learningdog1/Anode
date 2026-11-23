@@ -45,10 +45,13 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.math.BigDecimal
 import java.time.Clock
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class MyServersTab(val label: String) {
     PROBES("探针状态"),
@@ -59,6 +62,11 @@ enum class ProbeOnlineFilter(val label: String) {
     ALL("全部"),
     ONLINE("在线"),
     OFFLINE("离线"),
+}
+
+enum class PanelManagerSection {
+    PANELS,
+    MONITOR_SETTINGS,
 }
 
 @Immutable
@@ -145,6 +153,7 @@ data class MyServersUiState(
     val lastSyncEpochMillis: Long = 0L,
     val panelErrors: Map<String, String> = emptyMap(),
     val showPanelManagerSheet: Boolean = false,
+    val panelManagerInitialSection: PanelManagerSection = PanelManagerSection.PANELS,
     val panelTestState: PanelTestUiState = PanelTestUiState.Idle,
     val panelSaveError: String? = null,
     val assetEditorDraft: AssetEditorDraft? = null,
@@ -169,12 +178,16 @@ class MyServersViewModel(
     private val _probeFilter = MutableStateFlow(ProbeOnlineFilter.ALL)
     private val _selectedPanelIdFilter = MutableStateFlow<String?>(null)
     private val _showPanelManagerSheet = MutableStateFlow(false)
+    private val _panelManagerInitialSection = MutableStateFlow(PanelManagerSection.PANELS)
     private val _panelTestState = MutableStateFlow<PanelTestUiState>(PanelTestUiState.Idle)
     private val _panelSaveError = MutableStateFlow<String?>(null)
     private val _assetEditorDraft = MutableStateFlow<AssetEditorDraft?>(null)
     private val _assetSaveError = MutableStateFlow<String?>(null)
     private val _salePostAsset = MutableStateFlow<VpsAssetRecord?>(null)
     private val _bindingProbeAsset = MutableStateFlow<VpsAssetRecord?>(null)
+
+    private val probeRefreshMutex = Mutex()
+    private val manualRefreshRequested = AtomicBoolean(false)
 
     private val _snackbarChannel = Channel<String>(Channel.BUFFERED)
     val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
@@ -184,6 +197,7 @@ class MyServersViewModel(
         val probeFilter: ProbeOnlineFilter,
         val panelIdFilter: String?,
         val showPanelManager: Boolean,
+        val panelManagerInitialSection: PanelManagerSection,
         val panelTestState: PanelTestUiState,
     )
 
@@ -207,17 +221,27 @@ class MyServersViewModel(
     )
 
     private val navFilterFlow = combine(
-        _selectedTab,
-        _probeFilter,
-        _selectedPanelIdFilter,
-        _showPanelManagerSheet,
-        _panelTestState,
-    ) { tab, probeFilter, panelIdFilter, showPanelManager, testState ->
+        combine(
+            _selectedTab,
+            _probeFilter,
+            _selectedPanelIdFilter,
+        ) { tab, probeFilter, panelIdFilter ->
+            Triple(tab, probeFilter, panelIdFilter)
+        },
+        combine(
+            _showPanelManagerSheet,
+            _panelManagerInitialSection,
+            _panelTestState,
+        ) { showPanelManager, initialSection, testState ->
+            Triple(showPanelManager, initialSection, testState)
+        },
+    ) { (tab, probeFilter, panelIdFilter), (showPanelManager, initialSection, testState) ->
         NavigationFilterState(
             tab = tab,
             probeFilter = probeFilter,
             panelIdFilter = panelIdFilter,
             showPanelManager = showPanelManager,
+            panelManagerInitialSection = initialSection,
             panelTestState = testState,
         )
     }
@@ -289,7 +313,8 @@ class MyServersViewModel(
             }
             .sortedWith(
                 compareByDescending<ProbeServerSnapshot> { it.isOnline }
-                    .thenBy { it.name.lowercase() },
+                    .thenBy { it.name.lowercase() }
+                    .thenBy { it.probeKey },
             )
             .toList()
 
@@ -328,14 +353,18 @@ class MyServersViewModel(
 
         val highTrafficForecasts = forecastsByKey.values
             .filter { it.isAtOrAboveAlertThreshold }
-            .sortedByDescending { it.usageRatio ?: 0.0 }
+            .sortedWith(
+                compareByDescending<ServerTrafficForecast> { it.usageRatio ?: 0.0 }
+                    .thenBy { it.probeKey },
+            )
 
         val idleServers = idleByKey.values
             .filter { it.isIdle }
             .sortedWith(
                 compareBy<ServerIdleAssessment> { it.linkedAsset == null }
                     .thenBy { it.avgCpu30dPercent ?: 100.0 }
-                    .thenBy { it.serverName.lowercase() },
+                    .thenBy { it.serverName.lowercase() }
+                    .thenBy { it.probeKey },
             )
 
         val summary = FleetPortfolioCalculator.summarize(
@@ -365,6 +394,7 @@ class MyServersViewModel(
             lastSyncEpochMillis = repo.lastSyncEpochMillis,
             panelErrors = repo.panelErrors,
             showPanelManagerSheet = nav.showPanelManager,
+            panelManagerInitialSection = nav.panelManagerInitialSection,
             panelTestState = nav.panelTestState,
             panelSaveError = modals.panelSaveError,
             assetEditorDraft = modals.editorDraft,
@@ -384,7 +414,9 @@ class MyServersViewModel(
                 fleetRepository.loadPersistedState()
                 syncBackgroundSchedule()
                 if (fleetRepository.panelsFlow.value.any { it.enabled }) {
-                    fleetRepository.refreshAllPanels()
+                    probeRefreshMutex.withLock {
+                        fleetRepository.refreshAllPanels()
+                    }
                 }
             } catch (c: CancellationException) {
                 throw c
@@ -416,6 +448,14 @@ class MyServersViewModel(
     }
 
     fun openPanelManager() {
+        _panelManagerInitialSection.value = PanelManagerSection.PANELS
+        _panelTestState.value = PanelTestUiState.Idle
+        _panelSaveError.value = null
+        _showPanelManagerSheet.value = true
+    }
+
+    fun openMonitorSettings() {
+        _panelManagerInitialSection.value = PanelManagerSection.MONITOR_SETTINGS
         _panelTestState.value = PanelTestUiState.Idle
         _panelSaveError.value = null
         _showPanelManagerSheet.value = true
@@ -423,6 +463,7 @@ class MyServersViewModel(
 
     fun closePanelManager() {
         _showPanelManagerSheet.value = false
+        _panelManagerInitialSection.value = PanelManagerSection.PANELS
         _panelTestState.value = PanelTestUiState.Idle
         _panelSaveError.value = null
     }
@@ -500,10 +541,27 @@ class MyServersViewModel(
         }
     }
 
+    fun refreshCurrentTab() {
+        when (_selectedTab.value) {
+            MyServersTab.PROBES -> refreshAllProbes()
+            MyServersTab.ASSETS -> {
+                refreshFxRates()
+                if (fleetRepository.panelsFlow.value.any { it.enabled }) {
+                    viewModelScope.launch {
+                        refreshProbesSilently()
+                    }
+                }
+            }
+        }
+    }
+
     fun refreshAllProbes() {
+        if (!manualRefreshRequested.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
-                val summary = fleetRepository.refreshAllPanels(silent = false)
+                val summary = probeRefreshMutex.withLock {
+                    fleetRepository.refreshAllPanels(silent = false)
+                }
                 if (summary.refreshedPanelCount == 0) {
                     _snackbarChannel.trySend("尚未添加启用的探针面板")
                 } else if (summary.failedPanelErrors.isEmpty()) {
@@ -517,6 +575,8 @@ class MyServersViewModel(
                 throw c
             } catch (t: Throwable) {
                 _snackbarChannel.trySend("同步探针数据失败：${formatPersistenceError(t)}")
+            } finally {
+                manualRefreshRequested.set(false)
             }
         }
     }
@@ -524,19 +584,23 @@ class MyServersViewModel(
     suspend fun refreshProbesSilently() {
         if (!fleetRepository.isPersistedStateLoadedFlow.value) return
         if (!fleetRepository.panelsFlow.value.any { it.enabled }) return
+        if (manualRefreshRequested.get()) return
+        if (!probeRefreshMutex.tryLock()) return
         try {
             fleetRepository.refreshAllPanels(silent = true)
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
             // Silent background/foreground tick keeps previous snapshots and panelErrorsFlow intact.
+        } finally {
+            probeRefreshMutex.unlock()
         }
     }
 
     /**
-     * Runs a silent live telemetry refresh loop while `MyServersScreen` is visible in the foreground,
-     * so probe online/offline counts, CPU, memory, disk, and live network speeds update automatically
-     * without requiring manual pull-to-refresh.
+     * Runs a silent live telemetry refresh loop (default every 2 s) while `MyServersScreen` is
+     * visible in the foreground, guarded by [probeRefreshMutex] so slow requests never overlap or
+     * pile up, and pacing subsequent delays against request duration.
      */
     suspend fun runForegroundProbeAutoRefresh(
         intervalMillis: Long = DEFAULT_FOREGROUND_POLL_INTERVAL_MS,
@@ -546,9 +610,17 @@ class MyServersViewModel(
         if (lastSync > 0L && (nowMillisProvider() - lastSync) >= safeInterval) {
             refreshProbesSilently()
         }
+        var nextDelayMs = safeInterval
         while (currentCoroutineContext().isActive) {
-            delay(safeInterval)
+            delay(nextDelayMs)
+            val startedAt = nowMillisProvider()
             refreshProbesSilently()
+            val elapsed = (nowMillisProvider() - startedAt).coerceAtLeast(0L)
+            nextDelayMs = if (elapsed >= safeInterval) {
+                safeInterval
+            } else {
+                (safeInterval - elapsed).coerceAtLeast(MIN_POST_POLL_GAP_MS)
+            }
         }
     }
 
@@ -872,8 +944,9 @@ class MyServersViewModel(
     private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
 
     companion object {
-        const val DEFAULT_FOREGROUND_POLL_INTERVAL_MS = 5_000L
+        const val DEFAULT_FOREGROUND_POLL_INTERVAL_MS = 2_000L
         private const val MIN_FOREGROUND_POLL_INTERVAL_MS = 2_000L
+        private const val MIN_POST_POLL_GAP_MS = 500L
 
         fun factory(
             fleetRepository: FleetRepository,
