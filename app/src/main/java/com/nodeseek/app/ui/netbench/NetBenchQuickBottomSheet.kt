@@ -42,8 +42,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import android.content.Context
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -65,7 +65,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.netbench.AndroidNetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
@@ -74,6 +78,9 @@ import com.nodeseek.app.domain.netbench.Iperf3Config
 import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.NetBenchMarkdownStyle
 import com.nodeseek.app.domain.netbench.TcpPortPreset
+import com.nodeseek.app.domain.repository.ImageHostRepository
+import com.nodeseek.app.domain.repository.SettingsRepository
+import com.nodeseek.app.domain.ssh.SshVaultRepository
 import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -121,6 +128,62 @@ fun insertNetBenchMarkdownAtCursor(
 }
 
 /**
+ * Configuration-change-surviving [ViewModel] host for [NetBenchQuickBottomSheet] so rotating
+ * the screen or toggling dark mode does not abort an active benchmark or discard results.
+ */
+internal class NetBenchQuickSheetViewModel(
+    historyStore: NetBenchHistoryStore,
+    networkBridge: AndroidNetBenchNetworkBridge,
+    imageHostRepository: ImageHostRepository?,
+    settingsRepository: SettingsRepository?,
+    sshVaultRepository: SshVaultRepository?,
+    initialTarget: String,
+    initialMarkdownStyle: NetBenchMarkdownStyle,
+) : ViewModel() {
+
+    val controller = NetBenchSessionController(
+        scope = viewModelScope,
+        historyStore = historyStore,
+        networkBridge = networkBridge,
+        imageHostRepository = imageHostRepository,
+        settingsRepository = settingsRepository,
+        initialTarget = initialTarget,
+        initialMarkdownStyle = initialMarkdownStyle,
+        sshVaultRepository = sshVaultRepository,
+    )
+
+    override fun onCleared() {
+        controller.stopBenchmark(silent = true)
+        super.onCleared()
+    }
+
+    companion object {
+        fun factory(
+            context: Context,
+            imageHostRepository: ImageHostRepository?,
+            settingsRepository: SettingsRepository?,
+            sshVaultRepository: SshVaultRepository?,
+            initialTarget: String,
+            initialMarkdownStyle: NetBenchMarkdownStyle,
+        ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val appContext = context.applicationContext ?: context
+                return NetBenchQuickSheetViewModel(
+                    historyStore = NetBenchHistoryStore.forContext(appContext),
+                    networkBridge = AndroidNetBenchNetworkBridge(appContext),
+                    imageHostRepository = imageHostRepository,
+                    settingsRepository = settingsRepository,
+                    sshVaultRepository = sshVaultRepository,
+                    initialTarget = initialTarget,
+                    initialMarkdownStyle = initialMarkdownStyle,
+                ) as T
+            }
+        }
+    }
+}
+
+/**
  * Compact 1-tap Mobile Network Tester bottom sheet designed for direct embedding inside
  * `ReplyComposerBottomSheet` and `TopicComposerScreen`.
  */
@@ -134,51 +197,55 @@ fun NetBenchQuickBottomSheet(
     initialMarkdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.REPLY_CARD,
     onCopiedFeedback: ((String) -> Unit)? = null,
     onOpenFullScreen: ((String) -> Unit)? = null,
+    onNavigateToVault: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
     val appSettings by appContainer.settingsRepository.settings.collectAsStateWithLifecycle()
     val isDark = NodePulseThemeTokens.isDark
     val isInspection = LocalInspectionMode.current
-    val sheetScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxSheetHeight = (LocalConfiguration.current.screenHeightDp * 0.88f).dp
 
-    val historyStore = remember(context, isInspection) {
-        if (isInspection) {
-            NetBenchHistoryStore(
-                historyFile = File(System.getProperty("java.io.tmpdir", "/tmp"), "anode_preview_netbench_history.json"),
+    val controller: NetBenchSessionController = if (isInspection) {
+        val previewScope = rememberCoroutineScope()
+        remember(previewScope, appContainer, initialMarkdownStyle) {
+            NetBenchSessionController(
+                scope = previewScope,
+                historyStore = NetBenchHistoryStore(
+                    historyFile = File(System.getProperty("java.io.tmpdir", "/tmp"), "anode_preview_netbench_history.json"),
+                ),
+                networkBridge = SystemDefaultNetworkBridge,
+                imageHostRepository = appContainer.imageHostRepository,
+                settingsRepository = appContainer.settingsRepository,
+                initialTarget = initialTarget,
+                initialMarkdownStyle = initialMarkdownStyle,
+                sshVaultRepository = appContainer.sshVaultRepository,
             )
-        } else {
-            NetBenchHistoryStore.forContext(context)
         }
-    }
-
-    val networkBridge = remember(context, isInspection) {
-        if (isInspection) SystemDefaultNetworkBridge else AndroidNetBenchNetworkBridge(context)
-    }
-
-    val controller = remember(historyStore, networkBridge, sheetScope, appContainer) {
-        NetBenchSessionController(
-            scope = sheetScope,
-            historyStore = historyStore,
-            networkBridge = networkBridge,
-            imageHostRepository = appContainer.imageHostRepository,
-            settingsRepository = appContainer.settingsRepository,
-            initialTarget = initialTarget,
-            initialMarkdownStyle = initialMarkdownStyle,
-            sshVaultRepository = appContainer.sshVaultRepository,
+    } else {
+        val quickViewModel: NetBenchQuickSheetViewModel = viewModel(
+            key = "netbench_quick_sheet_${initialMarkdownStyle.name}",
+            factory = NetBenchQuickSheetViewModel.factory(
+                context = context,
+                imageHostRepository = appContainer.imageHostRepository,
+                settingsRepository = appContainer.settingsRepository,
+                sshVaultRepository = appContainer.sshVaultRepository,
+                initialTarget = initialTarget,
+                initialMarkdownStyle = initialMarkdownStyle,
+            ),
         )
+        quickViewModel.controller
     }
 
     LaunchedEffect(controller, isDark) {
         controller.updateRenderDarkTheme(isDark)
     }
 
-    DisposableEffect(controller) {
-        onDispose {
-            controller.stopBenchmark(silent = true)
+    LaunchedEffect(controller, initialTarget) {
+        if (initialTarget.isNotBlank()) {
+            controller.prefillTarget(initialTarget)
         }
     }
 
@@ -705,6 +772,7 @@ fun NetBenchQuickBottomSheet(
                 controller.applyVaultServer(server)
             },
             onDismiss = { showVaultHostPicker = false },
+            onNavigateToVault = onNavigateToVault,
         )
     }
 
