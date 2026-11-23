@@ -75,10 +75,12 @@ import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Tag
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -94,7 +96,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -150,6 +154,7 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -285,6 +290,7 @@ fun PulseRadarScreen(
                 onSetWifiOnly = viewModel::setWifiOnlyInBackground,
                 onSetRequireBatteryNotLow = viewModel::setRequireBatteryNotLowInBackground,
                 onSetQuietHours = viewModel::setQuietHoursEnabled,
+                onSetQuietHoursRange = viewModel::setQuietHoursRange,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
 
@@ -568,7 +574,7 @@ private fun RadarTopCircleButton(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun RadarEnvironmentBanner(
     pollingSettings: RadarPollingSettings,
@@ -589,9 +595,11 @@ private fun RadarEnvironmentBanner(
     onSetWifiOnly: (Boolean) -> Unit,
     onSetRequireBatteryNotLow: (Boolean) -> Unit,
     onSetQuietHours: (Boolean) -> Unit,
+    onSetQuietHoursRange: (Int, Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
+    var editingQuietBoundary by rememberSaveable { mutableStateOf<String?>(null) }
     val attentionNeeded = !diagnostics.hasNotificationPermission || diagnostics.isSystemDoNotDisturbActive
     val accentColor = when {
         !diagnostics.hasNotificationPermission -> MaterialTheme.colorScheme.error
@@ -773,14 +781,53 @@ private fun RadarEnvironmentBanner(
                                 modifier = Modifier.size(15.dp),
                             )
                         },
-                        label = { Text("夜间免打扰 23:00-07:00") },
+                        label = {
+                            Text(
+                                "夜间免打扰 ${formatMinuteOfDay(pollingSettings.quietStartMinuteOfDay)}-" +
+                                    formatMinuteOfDay(pollingSettings.quietEndMinuteOfDay),
+                            )
+                        },
                         enabled = pollingSettings.isEnabled,
                     )
                 }
 
+                if (pollingSettings.quietHoursEnabled) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        FilterChip(
+                            selected = true,
+                            onClick = { editingQuietBoundary = "start" },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Schedule,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            },
+                            label = { Text("静默开始 ${formatMinuteOfDay(pollingSettings.quietStartMinuteOfDay)}") },
+                            enabled = pollingSettings.isEnabled,
+                        )
+                        FilterChip(
+                            selected = true,
+                            onClick = { editingQuietBoundary = "end" },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Schedule,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            },
+                            label = { Text("静默结束 ${formatMinuteOfDay(pollingSettings.quietEndMinuteOfDay)}") },
+                            enabled = pollingSettings.isEnabled,
+                        )
+                    }
+                }
+
                 IntervalChipStrip(
                     title = "前台巡检间隔",
-                    optionsMinutes = listOf(1, 2, 5, 10),
+                    optionsMinutes = listOf(1, 2, 5, 10, 30),
                     selectedMinutes = pollingSettings.foregroundIntervalMinutes,
                     enabled = pollingSettings.isEnabled,
                     onSelect = onSetForegroundInterval,
@@ -846,6 +893,53 @@ private fun RadarEnvironmentBanner(
             }
         }
     }
+
+    val boundary = editingQuietBoundary
+    if (boundary != null) {
+        val isStart = boundary == "start"
+        val currentMinute = if (isStart) {
+            pollingSettings.quietStartMinuteOfDay
+        } else {
+            pollingSettings.quietEndMinuteOfDay
+        }.coerceIn(0, 23 * 60 + 59)
+        val timePickerState = rememberTimePickerState(
+            initialHour = currentMinute / 60,
+            initialMinute = currentMinute % 60,
+            is24Hour = true,
+        )
+        AlertDialog(
+            onDismissRequest = { editingQuietBoundary = null },
+            title = { Text(if (isStart) "设置免打扰开始时间" else "设置免打扰结束时间") },
+            text = {
+                TimePicker(state = timePickerState)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val pickedMinute = timePickerState.hour * 60 + timePickerState.minute
+                        if (isStart) {
+                            onSetQuietHoursRange(pickedMinute, pollingSettings.quietEndMinuteOfDay)
+                        } else {
+                            onSetQuietHoursRange(pollingSettings.quietStartMinuteOfDay, pickedMinute)
+                        }
+                        editingQuietBoundary = null
+                    },
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingQuietBoundary = null }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+}
+
+private fun formatMinuteOfDay(minuteOfDay: Int): String {
+    val safe = minuteOfDay.coerceIn(0, 23 * 60 + 59)
+    return String.format(Locale.US, "%02d:%02d", safe / 60, safe % 60)
 }
 
 @Composable
@@ -1460,8 +1554,7 @@ private fun KeywordRuleCard(
     onToggle: (Boolean) -> Unit,
     onDelete: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val categorySpec = CategoryPalette.resolve(rule.categorySlug, isDark)
+    val categorySpec = NodePulseThemeTokens.categorySpec(rule.categorySlug)
     val categoryLabel = if (rule.categorySlug.isBlank()) "全站版块" else categorySpec.defaultTitle
     val accent = if (rule.isEnabled) categorySpec.spineColor else null
 
@@ -1582,8 +1675,7 @@ private fun TrackedTopicCard(
     onMarkAlertsRead: () -> Unit,
     onUntrack: () -> Unit,
 ) {
-    val isDark = NodePulseThemeTokens.isDark
-    val categorySpec = CategoryPalette.resolve(topic.categorySlug, isDark)
+    val categorySpec = NodePulseThemeTokens.categorySpec(topic.categorySlug)
     val hasUnread = topic.unreadNewReplies > 0
 
     Column(
@@ -1703,7 +1795,10 @@ private fun AddKeywordRuleBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val isDark = NodePulseThemeTokens.isDark
-    val categorySpecs = remember(isDark) { CategoryPalette.allSpecs(isDark) }
+    val harmonizeTarget = if (NodePulseThemeTokens.isDynamicColorActive) MaterialTheme.colorScheme.primary else null
+    val categorySpecs = remember(isDark, harmonizeTarget) {
+        CategoryPalette.allSpecs(isDark = isDark, dynamicPrimaryToHarmonize = harmonizeTarget)
+    }
 
     var keyword by rememberSaveable { mutableStateOf("") }
     var excludeWords by rememberSaveable { mutableStateOf("") }
@@ -1950,16 +2045,17 @@ private fun openBatteryOptimizationSettings(context: Context) {
 }
 
 private fun openDoNotDisturbSettings(context: Context) {
-    val dndSettings = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS).apply {
+    val zenModeSettings = Intent("android.settings.ZEN_MODE_SETTINGS").apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    val launched = runCatching { context.startActivity(dndSettings) }.isSuccess
-    if (!launched) {
-        val soundSettings = Intent(Settings.ACTION_SOUND_SETTINGS).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        runCatching { context.startActivity(soundSettings) }
+    if (runCatching { context.startActivity(zenModeSettings) }.isSuccess) return
+
+    val soundSettings = Intent(Settings.ACTION_SOUND_SETTINGS).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
+    if (runCatching { context.startActivity(soundSettings) }.isSuccess) return
+
+    openAppNotificationSettings(context)
 }
 
 private fun openAppDetailsSettings(context: Context) {

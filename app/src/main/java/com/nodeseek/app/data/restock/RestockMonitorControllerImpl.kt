@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import com.nodeseek.app.domain.restock.RestockBackgroundPollOutcome
+import com.nodeseek.app.domain.restock.RestockEventRecord
 import com.nodeseek.app.domain.restock.RestockMonitorController
 import com.nodeseek.app.domain.restock.RestockRepository
 import com.nodeseek.app.domain.restock.RestockRuntimeStatus
@@ -31,6 +32,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Default [RestockMonitorController] coordinating:
@@ -315,6 +318,8 @@ class RestockMonitorControllerImpl(
         }
 
         val semaphore = Semaphore(MAX_CONCURRENT_CHECKS)
+        val individualNotifiedCount = AtomicInteger(0)
+        val batchTriggeredEvents = Collections.synchronizedList(ArrayList<RestockEventRecord>())
         return try {
             val outcomes = coroutineScope {
                 items.map { item ->
@@ -346,8 +351,14 @@ class RestockMonitorControllerImpl(
                                 watchId = item.id,
                                 analysis = analysis,
                             )
-                            if (event != null && urgentNotificationsEnabled) {
-                                notificationHelper.postRestockUrgentNotification(event)
+                            if (event != null) {
+                                batchTriggeredEvents.add(event)
+                                if (urgentNotificationsEnabled &&
+                                    individualNotifiedCount.incrementAndGet() <=
+                                    RestockNotificationHelper.MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS
+                                ) {
+                                    notificationHelper.postRestockUrgentNotification(event)
+                                }
                             }
                             _runtimeStatus.update { state ->
                                 state.copy(checkingItemIds = state.checkingItemIds - item.id)
@@ -360,6 +371,13 @@ class RestockMonitorControllerImpl(
                         }
                     }
                 }.awaitAll()
+            }
+
+            if (urgentNotificationsEnabled &&
+                batchTriggeredEvents.size > RestockNotificationHelper.MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS
+            ) {
+                val snapshot = synchronized(batchTriggeredEvents) { batchTriggeredEvents.toList() }
+                notificationHelper.postRestockSummaryNotification(snapshot)
             }
 
             val firstError = outcomes.firstOrNull {

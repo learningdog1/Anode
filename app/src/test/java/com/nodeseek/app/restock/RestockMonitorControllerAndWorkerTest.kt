@@ -69,11 +69,16 @@ class RestockMonitorControllerAndWorkerTest {
 
     private class RecordingRestockNotificationHelper : RestockNotificationHelper(FakeAppContext()) {
         val postedEvents = mutableListOf<RestockEventRecord>()
+        val summaryCounts = mutableListOf<Int>()
 
         override fun ensureChannel() = Unit
         override fun hasPostNotificationsPermission(): Boolean = true
         override fun postRestockUrgentNotification(event: RestockEventRecord) {
             postedEvents.add(event)
+        }
+
+        override fun postRestockSummaryNotification(events: List<RestockEventRecord>) {
+            summaryCounts.add(events.size)
         }
     }
 
@@ -445,9 +450,108 @@ class RestockMonitorControllerAndWorkerTest {
     fun `RestockNotificationHelper exposes expected channel constants and intent metadata`() {
         assertEquals("vps_restock_urgent", RestockNotificationHelper.CHANNEL_VPS_RESTOCK_URGENT)
         assertEquals("VPS 补货抢购提醒", RestockNotificationHelper.CHANNEL_NAME)
+        assertEquals("com.nodeseek.app.group.VPS_RESTOCK", RestockNotificationHelper.GROUP_VPS_RESTOCK)
+        assertEquals(3, RestockNotificationHelper.MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS)
         val id1 = RestockNotificationHelper.notificationIdForWatch("watch-a")
         val id2 = RestockNotificationHelper.notificationIdForWatch("watch-b")
         assertTrue(id1 in 60_000..64_500)
         assertTrue(id2 in 60_000..64_500)
+    }
+
+    @Test
+    fun `RestockCheckWorker returns retry when cold-start container lateinit is uninitialized`() = runTest {
+        val uninitializedContext = object : ContextWrapper(null), RestockMonitorHost {
+            private lateinit var uninitController: RestockMonitorController
+            override fun getApplicationContext(): Context = this
+            override val restockMonitorController: RestockMonitorController
+                get() = uninitController
+        }
+        val worker = TestListenableWorkerBuilder<RestockCheckWorker>(uninitializedContext).build()
+        assertEquals(ListenableWorker.Result.retry(), worker.doWork())
+    }
+
+    @Test
+    fun `batch restock caps individual urgent notifications at 3 and emits summary notification`() = runTest {
+        val inStockHtml = """
+            <html><body>
+              <div id="order-standard_cart">
+                <form id="frmConfigureProduct" action="cart.php?a=confproduct">
+                  <div class="product-info"><p class="product-title">Burst VPS</p></div>
+                  <select name="billingcycle"><option selected>$9.99 USD Annually</option></select>
+                  <button type="submit" id="btnCompleteProductConfig">Continue</button>
+                </form>
+              </div>
+            </body></html>
+        """.trimIndent()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(200).setBody(inStockHtml)
+        }
+
+        // Seed 5 watches that are armed (OUT_OF_STOCK) so all 5 restock simultaneously in one batch
+        repeat(5) { idx ->
+            val url = server.url("/cart.php?a=add&pid=${idx + 1}").toString()
+            repository.addOrUpdateWatch(
+                RestockWatchItem(
+                    id = "burst-$idx",
+                    title = "Burst VPS #$idx",
+                    rawUrl = url,
+                    resolvedOrderUrl = url,
+                    pollIntervalMinutes = 1,
+                    stockStatus = RestockStockStatus.OUT_OF_STOCK,
+                    alertWaveArmed = true,
+                ),
+            )
+        }
+
+        val controller = RestockMonitorControllerImpl(
+            repository = repository,
+            analyzer = analyzer,
+            notificationHelper = notificationSpy,
+            scope = this,
+            clockMillis = { fakeClockMillis },
+            isUnmeteredNetwork = { true },
+        )
+
+        val outcome = controller.runBackgroundPollPass()
+        assertTrue(outcome is RestockBackgroundPollOutcome.Completed)
+        val completed = outcome as RestockBackgroundPollOutcome.Completed
+        assertEquals(5, completed.restockedCount)
+        assertEquals(RestockNotificationHelper.MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS, notificationSpy.postedEvents.size)
+        assertEquals(listOf(5), notificationSpy.summaryCounts)
+    }
+
+    @Test
+    fun `RestockWorkScheduler waits for async repository load before cancelling WorkManager`() = runTest {
+        val storeFile = File(tempDir, "preseeded_restock_store.json")
+        val seedRepo = RestockRepositoryImpl(storeFile = storeFile)
+        seedRepo.addOrUpdateWatch(
+            RestockWatchItem(
+                id = "preseed-1",
+                title = "Preseeded VPS",
+                rawUrl = "https://example.com/cart.php?a=add&pid=999",
+                resolvedOrderUrl = "https://example.com/cart.php?a=add&pid=999",
+            ),
+        )
+        seedRepo.updateSettings { it.copy(isMonitorEnabled = true, backgroundIntervalMinutes = 15) }
+
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val freshRepo = RestockRepositoryImpl(storeFile = storeFile)
+        val gateway = RecordingWorkManagerGateway()
+        val scheduler = RestockWorkScheduler(gateway)
+
+        scheduler.observe(
+            scope = CoroutineScope(testDispatcher),
+            settingsFlow = freshRepo.settingsFlow,
+            watchItemsFlow = freshRepo.watchItemsFlow,
+        )
+        // Ensure disk hydration has completed before draining the scheduler coroutine
+        assertEquals(1, freshRepo.getWatchItemsSnapshot().size)
+        advanceUntilIdle()
+
+        // Must never have emitted a spurious cancelUniqueWork before disk load completed
+        assertTrue(gateway.cancelCalls.isEmpty())
+        assertEquals(1, gateway.enqueueCalls.size)
+        scheduler.stopObserving()
     }
 }

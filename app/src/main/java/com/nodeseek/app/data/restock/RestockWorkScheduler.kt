@@ -15,6 +15,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
@@ -79,20 +81,35 @@ class RestockWorkScheduler internal constructor(
         settingsFlow: Flow<RestockMonitorSettings>,
         watchItemsFlow: Flow<List<RestockWatchItem>>,
     ) {
+        val loadedFlow: Flow<Boolean> = RestockLoadStateRegistry.loadedFlowFor(watchItemsFlow)
+            ?: flowOf(true)
         synchronized(observerLock) {
             observerJob?.cancel()
             observerJob = scope.launch {
-                combine(settingsFlow, watchItemsFlow) { settings, items ->
+                combine(settingsFlow, watchItemsFlow, loadedFlow) { settings, items, isLoaded ->
                     val hasEnabled = items.any { it.isEnabled }
-                    Triple(settings, hasEnabled, toSignature(settings, hasEnabled))
+                    ObservedScheduleState(
+                        settings = settings,
+                        hasEnabled = hasEnabled,
+                        signature = toSignature(settings, hasEnabled),
+                        isLoaded = isLoaded,
+                    )
                 }
-                    .distinctUntilChanged { old, new -> old.third == new.third }
-                    .collect { (settings, hasEnabled, _) ->
-                        sync(settings = settings, hasEnabledWatches = hasEnabled)
+                    .filter { it.isLoaded }
+                    .distinctUntilChanged { old, new -> old.signature == new.signature }
+                    .collect { state ->
+                        sync(settings = state.settings, hasEnabledWatches = state.hasEnabled)
                     }
             }
         }
     }
+
+    private data class ObservedScheduleState(
+        val settings: RestockMonitorSettings,
+        val hasEnabled: Boolean,
+        val signature: ScheduleSignature,
+        val isLoaded: Boolean,
+    )
 
     fun stopObserving() {
         synchronized(observerLock) {

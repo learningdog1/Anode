@@ -20,6 +20,7 @@ enum class ValuationCurrency(
     val displayNameZh: String,
     val defaultCnyRate: BigDecimal,
     val recommendedRateScale: Int = 4,
+    val supportsOnlineSync: Boolean = true,
 ) {
     CNY("CNY", "¥", "人民币", BigDecimal("1.0000"), 4),
     USD("USD", "$", "美元", BigDecimal("7.2500"), 4),
@@ -30,10 +31,12 @@ enum class ValuationCurrency(
     SGD("SGD", "S$", "新加坡元", BigDecimal("5.4000"), 4),
     CAD("CAD", "C$", "加元", BigDecimal("5.1800"), 4),
     AUD("AUD", "A$", "澳元", BigDecimal("4.7200"), 4),
-    TWD("TWD", "NT$", "新台币", BigDecimal("0.2230"), 4),
+    TWD("TWD", "NT$", "新台币", BigDecimal("0.2230"), 4, supportsOnlineSync = false),
     KRW("KRW", "₩", "韩元", BigDecimal("0.005200"), 6),
     CHF("CHF", "CHF", "瑞士法郎", BigDecimal("8.2200"), 4),
-    RUB("RUB", "₽", "卢布", BigDecimal("0.074000"), 6),
+    RUB("RUB", "₽", "卢布", BigDecimal("0.074000"), 6, supportsOnlineSync = false),
+    TRY("TRY", "₺", "土耳其里拉", BigDecimal("0.2000"), 4),
+    BRL("BRL", "R$", "巴西雷亚尔", BigDecimal("1.2500"), 4),
     ;
 
     companion object {
@@ -208,6 +211,8 @@ data class VpsValuationResult(
     val remainingSeconds: Long,
     val remainingDays: BigDecimal,
     val remainingRatio: Float,
+    val remainingRatioPercent: BigDecimal = BigDecimal(remainingRatio.toDouble() * 100.0)
+        .setScale(1, java.math.RoundingMode.HALF_UP),
     val cycleRenewalCny: BigDecimal,
     val dailyOfficialCostCny: BigDecimal,
     val dailyOfficialCostHighPrecisionCny: BigDecimal,

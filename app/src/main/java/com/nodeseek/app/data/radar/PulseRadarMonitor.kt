@@ -30,6 +30,7 @@ import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarMonitorSyncSupport
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.radar.RadarRuleCanonicalizer
 import com.nodeseek.app.domain.radar.RadarRuntimeStatus
 import com.nodeseek.app.domain.radar.TrackedTopic
 import com.nodeseek.app.domain.repository.InboxRepository
@@ -60,19 +61,53 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object RadarKeywordMatcher {
     private val EXCLUDE_SPLIT_REGEX = Regex("""[,，;；\n\r]+""")
+    private const val MAX_REGEX_CACHE_SIZE = 128
+    private val regexCacheLock = Any()
+    private val compiledRegexCache = object : LinkedHashMap<String, Regex?>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex?>?): Boolean =
+            size > MAX_REGEX_CACHE_SIZE
+    }
+
+    private fun getOrCompileRegex(pattern: String): Regex? {
+        if (RadarRuleCanonicalizer.isPotentiallyUnsafeRegex(pattern)) return null
+        synchronized(regexCacheLock) {
+            if (compiledRegexCache.containsKey(pattern)) {
+                return compiledRegexCache[pattern]
+            }
+        }
+        val compiled = runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull()
+        synchronized(regexCacheLock) {
+            compiledRegexCache[pattern] = compiled
+        }
+        return compiled
+    }
+
+    internal fun clearRegexCacheForTesting() {
+        synchronized(regexCacheLock) {
+            compiledRegexCache.clear()
+        }
+    }
+
+    internal fun regexCacheSizeForTesting(): Int =
+        synchronized(regexCacheLock) { compiledRegexCache.size }
 
     fun findMatchingRule(
         topic: FeedTopicDto,
         rules: List<KeywordWatchRule>,
     ): KeywordWatchRule? {
         val title = topic.title
-        if (title.isBlank()) return null
+        val excerpt = topic.excerpt?.trim().orEmpty()
+        if (title.isBlank() && excerpt.isBlank()) return null
+
+        val searchableText = if (excerpt.isNotEmpty()) "$title\n$excerpt" else title
 
         for (rule in rules) {
             if (!rule.isEnabled) continue
             if (!matchesCategory(topic, rule.categorySlug)) continue
-            if (containsAnyExcludeWord(title, rule.excludeWords)) continue
-            if (matchesKeyword(title, rule.keyword, rule.matchMode)) {
+            if (containsAnyExcludeWord(searchableText, rule.excludeWords)) continue
+            if (matchesKeyword(title, rule.keyword, rule.matchMode) ||
+                (excerpt.isNotEmpty() && matchesKeyword(excerpt, rule.keyword, rule.matchMode))
+            ) {
                 return rule
             }
         }
@@ -86,12 +121,12 @@ object RadarKeywordMatcher {
             topic.categoryName.equals(cleanSlug, ignoreCase = true)
     }
 
-    internal fun containsAnyExcludeWord(title: String, excludeWordsRaw: String): Boolean {
+    internal fun containsAnyExcludeWord(text: String, excludeWordsRaw: String): Boolean {
         if (excludeWordsRaw.isBlank()) return false
         val terms = excludeWordsRaw.split(EXCLUDE_SPLIT_REGEX)
         for (rawTerm in terms) {
             val term = rawTerm.trim()
-            if (term.isNotEmpty() && title.contains(term, ignoreCase = true)) {
+            if (term.isNotEmpty() && text.contains(term, ignoreCase = true)) {
                 return true
             }
         }
@@ -99,17 +134,15 @@ object RadarKeywordMatcher {
     }
 
     internal fun matchesKeyword(
-        title: String,
+        text: String,
         keyword: String,
         mode: KeywordMatchMode,
     ): Boolean {
         val cleanKeyword = keyword.trim()
-        if (cleanKeyword.isEmpty()) return false
+        if (cleanKeyword.isEmpty() || text.isBlank()) return false
         return when (mode) {
-            KeywordMatchMode.CONTAINS -> title.contains(cleanKeyword, ignoreCase = true)
-            KeywordMatchMode.REGEX -> runCatching {
-                Regex(cleanKeyword, RegexOption.IGNORE_CASE).containsMatchIn(title)
-            }.getOrDefault(false)
+            KeywordMatchMode.CONTAINS -> text.contains(cleanKeyword, ignoreCase = true)
+            KeywordMatchMode.REGEX -> getOrCompileRegex(cleanKeyword)?.containsMatchIn(text) == true
         }
     }
 }
@@ -150,13 +183,11 @@ class PulseRadarMonitor(
 
     private val pendingManualTrigger = AtomicBoolean(false)
     private val wakeSignal = Channel<Unit>(Channel.CONFLATED)
-    private val backgroundWakeSignal = Channel<Unit>(Channel.CONFLATED)
 
     private val lifecycleLock = Any()
     private val pollMutex = Mutex()
     private var isStarted: Boolean = false
     private var monitorJob: Job? = null
-    private var backgroundInboxJob: Job? = null
     private var settingsObserverJob: Job? = null
     private var sessionObserverJob: Job? = null
 
@@ -174,12 +205,6 @@ class PulseRadarMonitor(
 
     @Volatile
     private var consecutiveInboxCfFailures: Int = 0
-
-    @Volatile
-    private var lastBackgroundUnreadCount: Int = -1
-
-    @Volatile
-    private var lastBackgroundFullInboxSyncMs: Long = 0L
 
     private fun inboxBackoffUntilMillis(): Long =
         maxOf(rateLimit429UntilEpochMillis, inboxCfBackoffUntilEpochMillis)
@@ -212,7 +237,6 @@ class PulseRadarMonitor(
                         .drop(1)
                         .collect {
                             wakeSignal.trySend(Unit)
-                            backgroundWakeSignal.trySend(Unit)
                         }
                 }
                 settingsObserverJob = observer
@@ -223,9 +247,7 @@ class PulseRadarMonitor(
                     sessionRepository.sessionState
                         .drop(1)
                         .collect {
-                            lastBackgroundUnreadCount = -1
                             wakeSignal.trySend(Unit)
-                            backgroundWakeSignal.trySend(Unit)
                         }
                 }
                 sessionObserverJob = sessionObserver
@@ -233,8 +255,6 @@ class PulseRadarMonitor(
             }
             if (_runtimeStatus.value.isRunningInForeground || pendingManualTrigger.get()) {
                 launchForegroundLoopLocked()
-            } else {
-                launchBackgroundInboxLoopLocked()
             }
         }
     }
@@ -243,15 +263,12 @@ class PulseRadarMonitor(
         synchronized(lifecycleLock) {
             isStarted = false
             pendingManualTrigger.set(false)
-            lastBackgroundUnreadCount = -1
             settingsObserverJob?.cancel()
             settingsObserverJob = null
             sessionObserverJob?.cancel()
             sessionObserverJob = null
             monitorJob?.cancel()
             monitorJob = null
-            backgroundInboxJob?.cancel()
-            backgroundInboxJob = null
             _runtimeStatus.update { it.copy(isPollingNow = false) }
         }
     }
@@ -260,23 +277,16 @@ class PulseRadarMonitor(
         synchronized(lifecycleLock) {
             val previous = _runtimeStatus.value.isRunningInForeground
             _runtimeStatus.update { it.copy(isRunningInForeground = inForeground) }
-            if (previous != inForeground) {
-                lastBackgroundUnreadCount = -1
-            }
             if (inForeground) {
-                backgroundWakeSignal.trySend(Unit)
                 if (isStarted && monitorJob?.isActive != true) {
                     launchForegroundLoopLocked()
                 } else if (previous != inForeground) {
                     wakeSignal.trySend(Unit)
                 }
             } else if (previous != inForeground) {
-                // Wake the foreground sleep loop so heavy HTML scraping yields to WorkManager,
-                // while starting the lightweight background inbox check loop while process stays alive.
+                // Wake the foreground sleep loop so it exits promptly; all background polling is
+                // owned exclusively by WorkManager (RadarWorkScheduler) honoring user interval & constraints.
                 wakeSignal.trySend(Unit)
-                if (isStarted) {
-                    launchBackgroundInboxLoopLocked()
-                }
             }
         }
     }
@@ -294,229 +304,7 @@ class PulseRadarMonitor(
     internal fun isForegroundLoopActive(): Boolean =
         synchronized(lifecycleLock) { monitorJob?.isActive == true }
 
-    internal fun isBackgroundInboxLoopActive(): Boolean =
-        synchronized(lifecycleLock) { backgroundInboxJob?.isActive == true }
-
-    private fun launchBackgroundInboxLoopLocked() {
-        if (backgroundInboxJob?.isActive == true) return
-        backgroundWakeSignal.tryReceive()
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            val selfJob = currentCoroutineContext()[Job]
-            try {
-                runBackgroundInboxLoop(selfJob = selfJob)
-            } finally {
-                if (selfJob != null) {
-                    synchronized(lifecycleLock) {
-                        if (backgroundInboxJob === selfJob) {
-                            backgroundInboxJob = null
-                        }
-                    }
-                }
-            }
-        }
-        backgroundInboxJob = job
-        job.start()
-    }
-
-    private suspend fun runBackgroundInboxLoop(selfJob: Job?) {
-        var hasAttemptedBaselineSeed = false
-        var hasPerformedEntryCheck = false
-
-        while (currentCoroutineContext().isActive) {
-            val shouldExit = synchronized(lifecycleLock) {
-                if (!isStarted || _runtimeStatus.value.isRunningInForeground) {
-                    if (selfJob != null && backgroundInboxJob === selfJob) {
-                        backgroundInboxJob = null
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            if (shouldExit) break
-
-            val settings = radarRepository.getPollingSettings()
-            if (!isStarted || _runtimeStatus.value.isRunningInForeground) continue
-            if (!settings.isEnabled || !settings.inboxPushEnabled) {
-                backgroundWakeSignal.receive()
-                continue
-            }
-
-            val currentUid = sessionRepository.sessionState.value?.uid ?: 0L
-            val hasStoredCookie = (sessionRepository as? SessionRepositoryImpl)?.hasStoredSessionCookie() == true
-            if (currentUid <= 0L && !hasStoredCookie) {
-                backgroundWakeSignal.receive()
-                continue
-            }
-
-            val watermarks = watermarkStore.getWatermarks()
-            val needsBaseline = currentUid <= 0L ||
-                watermarks.inboxAccountUid != currentUid ||
-                watermarks.lastNotifiedReplyId < 0L ||
-                watermarks.lastNotifiedMentionId < 0L ||
-                !watermarks.dmInitialized
-
-            val baseDelayMs = when {
-                needsBaseline && !hasAttemptedBaselineSeed -> INITIAL_BACKGROUND_BASELINE_DELAY_MS
-                !hasPerformedEntryCheck -> INITIAL_BACKGROUND_ENTRY_CHECK_DELAY_MS
-                else -> BACKGROUND_INBOX_POLL_INTERVAL_MS
-            }
-            val waitMs = maxOf(baseDelayMs, inboxBackoffUntilMillis() - clockMillis())
-                .coerceAtLeast(MIN_WAIT_SLICE_MS)
-
-            withTimeoutOrNull(waitMs) {
-                backgroundWakeSignal.receive()
-            }
-
-            if (!isStarted || _runtimeStatus.value.isRunningInForeground) continue
-            val latestSettings = radarRepository.getPollingSettings()
-            if (!latestSettings.isEnabled || !latestSettings.inboxPushEnabled) continue
-            if (clockMillis() < inboxBackoffUntilMillis()) continue
-            if (latestSettings.wifiOnlyInBackground && !isUnmeteredNetwork()) {
-                hasPerformedEntryCheck = true
-                continue
-            }
-
-            val latestUid = sessionRepository.sessionState.value?.uid ?: 0L
-            val latestHasCookie = (sessionRepository as? SessionRepositoryImpl)?.hasStoredSessionCookie() == true
-            if (latestUid <= 0L && !latestHasCookie) continue
-            if (latestUid <= 0L && clockMillis() < htmlBackoffUntilMillis()) continue
-
-            if (needsBaseline && !hasAttemptedBaselineSeed) {
-                hasAttemptedBaselineSeed = true
-            } else {
-                hasPerformedEntryCheck = true
-            }
-            pollMutex.withLock {
-                if (!isStarted || _runtimeStatus.value.isRunningInForeground) return@withLock
-                val activeSettings = radarRepository.getPollingSettings()
-                if (!activeSettings.isEnabled || !activeSettings.inboxPushEnabled) return@withLock
-                if (clockMillis() < inboxBackoffUntilMillis()) return@withLock
-                if (activeSettings.wifiOnlyInBackground && !isUnmeteredNetwork()) return@withLock
-                executeBackgroundInboxTickLocked(activeSettings)
-            }
-        }
-    }
-
-    private suspend fun executeBackgroundInboxTickLocked(settings: RadarPollingSettings) {
-        val tickStartMs = clockMillis()
-        val quietHoursActive = isWithinQuietHours(currentMinuteOfDay(), settings)
-        var htmlCfBackoffNeeded = false
-        var inboxCfBackoffNeeded = false
-        var ranHtmlRefresh = false
-        var ranInboxJson = false
-        var rateLimitRetrySeconds: Long? = null
-        var cycleError: String? = null
-        var transientError: String? = null
-
-        try {
-            var currentSession = sessionRepository.sessionState.value
-            if (currentSession == null &&
-                tickStartMs >= htmlCfBackoffUntilEpochMillis &&
-                (sessionRepository as? SessionRepositoryImpl)?.hasStoredSessionCookie() == true
-            ) {
-                ranHtmlRefresh = true
-                val refreshRes = sessionRepository.refreshSession()
-                refreshRes.exceptionOrNull()?.let { err ->
-                    classifyInboxFailure(err)?.let { classified ->
-                        cycleError = classified.errorMessage
-                        if (classified.hitCloudflare) htmlCfBackoffNeeded = true
-                        classified.rateLimitSeconds?.let { rateLimitRetrySeconds = it }
-                        transientError = classified.transientNetworkError
-                    }
-                } ?: run {
-                    currentSession = refreshRes.getOrNull()
-                }
-            }
-
-            val uid = currentSession?.uid ?: 0L
-            if (uid > 0L && rateLimitRetrySeconds == null && tickStartMs >= inboxCfBackoffUntilEpochMillis) {
-                ranInboxJson = true
-                val watermarks = watermarkStore.getWatermarks()
-                val needsFullPhase = watermarks.inboxAccountUid != uid ||
-                    watermarks.lastNotifiedReplyId < 0L ||
-                    watermarks.lastNotifiedMentionId < 0L ||
-                    !watermarks.dmInitialized
-
-                val outcome = withContext(SuppressInAppPopupsElement) {
-                    if (needsFullPhase) {
-                        lastBackgroundFullInboxSyncMs = clockMillis()
-                        runInboxPushPhase(
-                            viewerUid = uid,
-                            quietHoursActive = quietHoursActive,
-                            isBackgroundPass = true,
-                        )
-                    } else {
-                        val unreadRes = inboxRepository.refreshUnreadCount()
-                        val unreadErr = unreadRes.exceptionOrNull()
-                        if (unreadErr != null) {
-                            classifyInboxFailure(unreadErr) ?: PhaseOutcome(errorMessage = unreadErr.message)
-                        } else {
-                            val nowMs = clockMillis()
-                            val currentCount = unreadRes.getOrDefault(0)
-                            val prevCount = lastBackgroundUnreadCount
-                            val shouldRunFullInbox = prevCount < 0 ||
-                                currentCount > prevCount ||
-                                (currentCount > 0 && (nowMs - lastBackgroundFullInboxSyncMs) >= BACKGROUND_NONZERO_FULL_SYNC_MS)
-                            lastBackgroundUnreadCount = currentCount
-                            if (shouldRunFullInbox) {
-                                lastBackgroundFullInboxSyncMs = nowMs
-                                runInboxPushPhase(
-                                    viewerUid = uid,
-                                    quietHoursActive = quietHoursActive,
-                                    isBackgroundPass = true,
-                                )
-                            } else {
-                                runDirectMessagesOnlyPhase(
-                                    viewerUid = uid,
-                                    quietHoursActive = quietHoursActive,
-                                )
-                            }
-                        }
-                    }
-                }
-                if (cycleError == null) cycleError = outcome.errorMessage
-                if (outcome.hitCloudflare) inboxCfBackoffNeeded = true
-                outcome.rateLimitSeconds?.let { rateLimitRetrySeconds = it }
-                if (outcome.transientNetworkError != null && transientError == null) {
-                    transientError = outcome.transientNetworkError
-                }
-            }
-        } finally {
-            val finishedAt = clockMillis()
-            if (rateLimitRetrySeconds != null) {
-                val safeSeconds = rateLimitRetrySeconds!!.coerceIn(15L, 600L)
-                rateLimit429UntilEpochMillis = finishedAt + safeSeconds * 1000L
-                cycleError = "请求过于频繁，将在 ${safeSeconds}s 后恢复检查"
-            }
-            if (htmlCfBackoffNeeded) {
-                consecutiveHtmlCfFailures = (consecutiveHtmlCfFailures + 1).coerceAtMost(4)
-                val backoffSec = (60L * (1 shl (consecutiveHtmlCfFailures - 1))).coerceAtMost(600L)
-                htmlCfBackoffUntilEpochMillis = maxOf(htmlCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
-                if (cycleError == null) {
-                    cycleError = "需要网页安全验证，已暂缓网页轮询"
-                }
-            } else if (ranHtmlRefresh && transientError == null) {
-                consecutiveHtmlCfFailures = 0
-            }
-            if (inboxCfBackoffNeeded) {
-                consecutiveInboxCfFailures = (consecutiveInboxCfFailures + 1).coerceAtMost(4)
-                val backoffSec = (60L * (1 shl (consecutiveInboxCfFailures - 1))).coerceAtMost(600L)
-                inboxCfBackoffUntilEpochMillis = maxOf(inboxCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
-                if (cycleError == null) {
-                    cycleError = "需要网页安全验证，已暂停收件箱轮询"
-                }
-            } else if (ranInboxJson && transientError == null) {
-                consecutiveInboxCfFailures = 0
-            }
-            _runtimeStatus.update {
-                it.copy(
-                    lastCheckEpochMillis = finishedAt,
-                    lastErrorSummary = cycleError ?: transientError,
-                )
-            }
-        }
-    }
+    internal fun isBackgroundInboxLoopActive(): Boolean = false
 
     private fun launchForegroundLoopLocked() {
         if (monitorJob?.isActive == true) return
@@ -1527,22 +1315,6 @@ class PulseRadarMonitor(
         return PhaseOutcome(triggeredCount = totalNotifiedCount)
     }
 
-    private suspend fun runDirectMessagesOnlyPhase(
-        viewerUid: Long,
-        quietHoursActive: Boolean,
-    ): PhaseOutcome {
-        val watermarks = ensureInboxWatermarkAccount(viewerUid)
-        val canAdvanceUnreadWatermark =
-            quietHoursActive || notificationDispatcher.hasPostNotificationsPermission()
-        return processDirectMessageNotifications(
-            viewerUid = viewerUid,
-            quietHoursActive = quietHoursActive,
-            canAdvanceUnreadWatermark = canAdvanceUnreadWatermark,
-            reloadWatermarksAfterFetch = false,
-            watermarksBeforeFetch = watermarks,
-        )
-    }
-
     private suspend fun ensureInboxWatermarkAccount(viewerUid: Long): com.nodeseek.app.data.local.RadarWatermarks {
         var watermarks = watermarkStore.getWatermarks()
         if (watermarks.inboxAccountUid != 0L && watermarks.inboxAccountUid != viewerUid) {
@@ -1702,10 +1474,6 @@ class PulseRadarMonitor(
 
     companion object {
         private const val STARTUP_DELAY_MS = 1_500L
-        private const val INITIAL_BACKGROUND_BASELINE_DELAY_MS = 1_500L
-        private const val INITIAL_BACKGROUND_ENTRY_CHECK_DELAY_MS = 15_000L
-        private const val BACKGROUND_INBOX_POLL_INTERVAL_MS = 45_000L
-        private const val BACKGROUND_NONZERO_FULL_SYNC_MS = 180_000L
         private const val MIN_WAIT_SLICE_MS = 1_000L
         private const val MAX_NOTIFICATIONS_PER_CYCLE = 5
         private const val MAX_TRACKED_CHECKS_PER_CYCLE = 10
@@ -1715,9 +1483,7 @@ class PulseRadarMonitor(
             val activeNetwork = cm.activeNetwork ?: return false
             val caps = cm.getNetworkCapabilities(activeNetwork) ?: return false
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return false
-            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
         }
 
         internal fun defaultCurrentMinuteOfDay(): Int {

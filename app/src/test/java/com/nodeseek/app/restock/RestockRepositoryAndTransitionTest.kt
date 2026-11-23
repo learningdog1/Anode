@@ -209,4 +209,37 @@ class RestockRepositoryAndTransitionTest {
         assertTrue(repo.getWatchItemsSnapshot().isEmpty())
         assertTrue(repo.getEventHistorySnapshot().isEmpty())
     }
+
+    @Test
+    fun `updating watch URL resets stock status and disarms alert wave to prevent false restock`() = runTest {
+        val repo = createRepo()
+        val added = repo.addOrUpdateWatch(
+            RestockWatchItem(
+                id = "url-change-1",
+                title = "Old Plan",
+                rawUrl = "https://merchant.example/cart.php?a=add&pid=1",
+                resolvedOrderUrl = "https://merchant.example/cart.php?a=add&pid=1",
+            ),
+        )
+        // Arm wave via OUT_OF_STOCK check
+        repo.recordCheckResult(added.id, analysis(RestockStockStatus.OUT_OF_STOCK))
+        val armed = repo.getWatchItemsSnapshot().single()
+        assertEquals(RestockStockStatus.OUT_OF_STOCK, armed.stockStatus)
+        assertTrue(armed.alertWaveArmed)
+
+        // Change URL to a different already-in-stock product -> must reset status & disarm wave
+        repo.addOrUpdateWatch(
+            armed.copy(
+                rawUrl = "https://merchant.example/cart.php?a=add&pid=2",
+                resolvedOrderUrl = "https://merchant.example/cart.php?a=add&pid=2",
+            ),
+        )
+        val afterEdit = repo.getWatchItemsSnapshot().single()
+        assertEquals(RestockStockStatus.UNKNOWN, afterEdit.stockStatus)
+        assertFalse(afterEdit.alertWaveArmed)
+
+        // First IN_STOCK check on new URL must NOT trigger a false restock event
+        val falseEvent = repo.recordCheckResult(afterEdit.id, analysis(RestockStockStatus.IN_STOCK))
+        assertEquals(null, falseEvent)
+    }
 }

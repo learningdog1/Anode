@@ -12,6 +12,7 @@ import com.nodeseek.app.domain.radar.LocalAlertRecord
 import com.nodeseek.app.domain.radar.RadarMonitorController
 import com.nodeseek.app.domain.radar.RadarPollingSettings
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.radar.RadarRuleCanonicalizer
 import com.nodeseek.app.domain.radar.RadarRuntimeStatus
 import com.nodeseek.app.domain.radar.TrackedTopic
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
@@ -210,6 +211,10 @@ class PulseRadarViewModel(
             return
         }
         if (matchMode == KeywordMatchMode.REGEX) {
+            if (RadarRuleCanonicalizer.isPotentiallyUnsafeRegex(trimmedKeyword)) {
+                _addRuleError.value = "正则表达式包含嵌套量词，可能导致性能风险，请简化表达式"
+                return
+            }
             val regexCheck = runCatching { Regex(trimmedKeyword) }
             if (regexCheck.isFailure) {
                 val reason = regexCheck.exceptionOrNull()?.localizedMessage ?: "语法错误"
@@ -260,6 +265,11 @@ class PulseRadarViewModel(
     fun markTopicAlertsRead(topicId: Long) {
         viewModelScope.launch {
             radarRepository.markAlertsReadForTopic(topicId)
+            radarRepository.onTopicFloorSeen(
+                topicId = topicId,
+                maxSeenFloor = -1,
+                totalPages = 1,
+            )
         }
     }
 
@@ -320,6 +330,17 @@ class PulseRadarViewModel(
 
     fun setQuietHoursEnabled(enabled: Boolean) {
         updatePollingSettings { it.copy(quietHoursEnabled = enabled) }
+    }
+
+    fun setQuietHoursRange(startMinuteOfDay: Int, endMinuteOfDay: Int) {
+        val safeStart = startMinuteOfDay.coerceIn(0, 23 * 60 + 59)
+        val safeEnd = endMinuteOfDay.coerceIn(0, 23 * 60 + 59)
+        updatePollingSettings {
+            it.copy(
+                quietStartMinuteOfDay = safeStart,
+                quietEndMinuteOfDay = safeEnd,
+            )
+        }
     }
 
     private fun updatePollingSettings(transform: (RadarPollingSettings) -> RadarPollingSettings) {

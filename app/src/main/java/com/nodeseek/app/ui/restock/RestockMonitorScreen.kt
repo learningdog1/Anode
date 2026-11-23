@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -454,7 +455,7 @@ fun RestockMonitorScreen(
             onToggleWifiOnly = viewModel::setWifiOnlyInBackground,
             onToggleRequireBatteryNotLow = viewModel::setRequireBatteryNotLow,
             onToggleFlareSolverr = viewModel::setFlareSolverrEnabled,
-            onFlareSolverrBaseUrlChange = viewModel::setFlareSolverrBaseUrl,
+            onCommitFlareSolverrBaseUrl = viewModel::setFlareSolverrBaseUrl,
             onSelectFlareSolverrTimeout = viewModel::setFlareSolverrMaxTimeout,
             onTestFlareSolverr = viewModel::testFlareSolverrConnection,
             onRequestNotificationPermission = requestNotificationPermission,
@@ -1659,16 +1660,25 @@ private fun RestockMonitorSettingsBottomSheet(
     onToggleWifiOnly: (Boolean) -> Unit,
     onToggleRequireBatteryNotLow: (Boolean) -> Unit,
     onToggleFlareSolverr: (Boolean) -> Unit,
-    onFlareSolverrBaseUrlChange: (String) -> Unit,
+    onCommitFlareSolverrBaseUrl: (String) -> Unit,
     onSelectFlareSolverrTimeout: (Int) -> Unit,
-    onTestFlareSolverr: () -> Unit,
+    onTestFlareSolverr: (String) -> Unit,
     onRequestNotificationPermission: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val ext = NodePulseThemeTokens.extendedColors
+    var flareBaseUrlDraft by rememberSaveable(settings.flareSolverr.baseUrl) {
+        mutableStateOf(settings.flareSolverr.baseUrl)
+    }
+    val hasPendingFlareUrlChange = flareBaseUrlDraft.trim() != settings.flareSolverr.baseUrl
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            if (hasPendingFlareUrlChange) {
+                onCommitFlareSolverrBaseUrl(flareBaseUrlDraft)
+            }
+            onDismiss()
+        },
         sheetState = sheetState,
         shape = PulseArchitecturalShapes.BottomSheetTop,
         containerColor = ext.cardSurfaceElevated,
@@ -1678,6 +1688,7 @@ private fun RestockMonitorSettingsBottomSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
@@ -1782,8 +1793,8 @@ private fun RestockMonitorSettingsBottomSheet(
 
             if (settings.flareSolverr.enabled) {
                 PulseTextField(
-                    value = settings.flareSolverr.baseUrl,
-                    onValueChange = onFlareSolverrBaseUrlChange,
+                    value = flareBaseUrlDraft,
+                    onValueChange = { flareBaseUrlDraft = it },
                     singleLine = true,
                     label = "FlareSolverr 服务地址",
                     placeholder = "http://192.168.1.10:8191",
@@ -1816,20 +1827,33 @@ private fun RestockMonitorSettingsBottomSheet(
                     }
                 }
 
-                OutlinedButton(
-                    onClick = onTestFlareSolverr,
-                    enabled = !isTestingFlareSolverr,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (isTestingFlareSolverr) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("正在连接…")
-                    } else {
-                        Text("测试连接")
+                    if (hasPendingFlareUrlChange) {
+                        FilledTonalButton(
+                            onClick = { onCommitFlareSolverrBaseUrl(flareBaseUrlDraft) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("保存地址")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { onTestFlareSolverr(flareBaseUrlDraft) },
+                        enabled = !isTestingFlareSolverr,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (isTestingFlareSolverr) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("正在连接…")
+                        } else {
+                            Text("测试连接")
+                        }
                     }
                 }
             }

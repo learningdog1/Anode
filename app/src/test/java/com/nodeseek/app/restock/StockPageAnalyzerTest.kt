@@ -531,4 +531,123 @@ class StockPageAnalyzerTest {
         assertFalse(result.isTransientNetworkError)
         flareServer.shutdown()
     }
+
+    @Test
+    fun `analyzeUrl rejects non-200 or unresolved Cloudflare responses returned by FlareSolverr`() = runTest {
+        val flareServer = MockWebServer()
+        flareServer.start()
+        try {
+            val fsAnalyzer = flareSolverrAnalyzer(flareServer)
+            val watchedUrl = server.url("/cart.php?a=add&pid=404").toString()
+
+            // 1. FlareSolverr returns HTTP 503 inside solution -> CHECK_ERROR (transient), not OUT_OF_STOCK
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(403)
+                    .addHeader("cf-mitigated", "challenge")
+                    .setBody("<html><title>Just a moment...</title></html>"),
+            )
+            flareServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"status":"ok","message":"Challenge solved!","solution":{"url":"$watchedUrl","status":503,"userAgent":"Mozilla/5.0","response":"<html><body>503 Service Temporarily Unavailable</body></html>"}}""",
+                ),
+            )
+            val err503 = fsAnalyzer.analyzeUrl(
+                rawUrl = watchedUrl,
+                customInStockKeyword = "Order Now",
+            )
+            assertEquals(RestockStockStatus.CHECK_ERROR, err503.stockStatus)
+            assertTrue(err503.isTransientNetworkError)
+            assertTrue(err503.errorMessage.orEmpty().contains("503"))
+
+            // 2. FlareSolverr returns 200 but HTML is still a Cloudflare challenge page -> CHECK_ERROR
+            flareServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    flareSolverrOkBody(
+                        "<html><head><title>Just a moment...</title></head><body>/cdn-cgi/challenge-platform/</body></html>",
+                        watchedUrl,
+                    ),
+                ),
+            )
+            val stillCf = fsAnalyzer.analyzeUrl(
+                rawUrl = watchedUrl,
+                customInStockKeyword = "Order Now",
+            )
+            assertEquals(RestockStockStatus.CHECK_ERROR, stillCf.stockStatus)
+            assertFalse(stillCf.isTransientNetworkError)
+        } finally {
+            flareServer.shutdown()
+        }
+    }
+
+    @Test
+    fun `Chinese stock count heuristic ignores non-inventory countdowns, traffic, prices, and coupons`() {
+        val promoCountdown = analyzer.analyzeHtml(
+            rawUrl = "https://shop.example.com/promo",
+            html = """<html><body><main><h1>年度促销 VPS</h1><p>活动剩余 3 天 · 流量剩余 500GB · 余额剩余 0 元 · 优惠券剩余 0 张</p></main></body></html>""",
+        )
+        assertEquals(RestockStockStatus.UNKNOWN, promoCountdown.stockStatus)
+
+        val realInventoryZero = analyzer.analyzeHtml(
+            rawUrl = "https://shop.example.com/promo",
+            html = """<html><body><main><h1>年度促销 VPS</h1><p>活动剩余 3 天，当前仅剩 0 台</p></main></body></html>""",
+        )
+        assertEquals(RestockStockStatus.OUT_OF_STOCK, realInventoryZero.stockStatus)
+
+        val realInventoryPositive = analyzer.analyzeHtml(
+            rawUrl = "https://shop.example.com/promo",
+            html = """<html><body><main><h1>年度促销 VPS</h1><p>剩余 5 台 · $19.99/yr</p></main></body></html>""",
+        )
+        assertEquals(RestockStockStatus.IN_STOCK, realInventoryPositive.stockStatus)
+    }
+
+    @Test
+    fun `Cloudflare host cache expires after TTL and resumes direct fetch`() = runTest {
+        val flareServer = MockWebServer()
+        flareServer.start()
+        try {
+            var nowMillis = 1_760_000_000_000L
+            val ttlAnalyzer = StockPageAnalyzer(
+                httpClient = OkHttpClient.Builder().followRedirects(true).build(),
+                clockMillis = { nowMillis },
+                flareSolverrClient = FlareSolverrClient(),
+                settingsProvider = {
+                    RestockMonitorSettings(
+                        flareSolverr = FlareSolverrConfig(
+                            enabled = true,
+                            baseUrl = flareServer.url("/").toString().trimEnd('/'),
+                        ),
+                    )
+                },
+            )
+            val watchedUrl = server.url("/cart.php?a=add&pid=888").toString()
+
+            // First check learns CF host
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(403)
+                    .addHeader("cf-mitigated", "challenge")
+                    .setBody("<html><title>Just a moment...</title></html>"),
+            )
+            flareServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    flareSolverrOkBody(solvedInStockHtml, watchedUrl),
+                ),
+            )
+            val first = ttlAnalyzer.analyzeUrl(watchedUrl)
+            assertTrue(first.usedFlareSolverr)
+            assertEquals(1, server.requestCount)
+
+            // Advance past 6-hour TTL -> direct fetch is attempted again and succeeds without FlareSolverr
+            nowMillis += 6L * 60L * 60L * 1000L + 1_000L
+            server.enqueue(MockResponse().setResponseCode(200).setBody(solvedInStockHtml))
+            val afterExpiry = ttlAnalyzer.analyzeUrl(watchedUrl)
+            assertFalse(afterExpiry.usedFlareSolverr)
+            assertEquals(RestockStockStatus.IN_STOCK, afterExpiry.stockStatus)
+            assertEquals(2, server.requestCount)
+            assertEquals(1, flareServer.requestCount)
+        } finally {
+            flareServer.shutdown()
+        }
+    }
 }

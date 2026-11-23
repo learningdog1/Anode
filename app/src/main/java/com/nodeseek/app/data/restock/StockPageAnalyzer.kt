@@ -8,9 +8,13 @@ import com.nodeseek.app.domain.restock.RestockStockStatus
 import com.nodeseek.app.domain.restock.StockAnalysisResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -19,6 +23,8 @@ import java.net.SocketTimeoutException
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Fetches and inspects VPS merchant product pages (WHMCS, SolusVM, HostBill, VirtFusion,
@@ -38,7 +44,23 @@ class StockPageAnalyzer(
     private val settingsProvider: (suspend () -> RestockMonitorSettings)? = null,
 ) {
 
-    private val cfProtectedHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val cfProtectedHosts: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
+
+    private fun isHostCfProtected(host: String, nowMillis: Long): Boolean {
+        if (host.isEmpty()) return false
+        val recordedAt = cfProtectedHosts[host] ?: return false
+        val age = nowMillis - recordedAt
+        if (age in 0L until CF_HOST_CACHE_TTL_MILLIS) {
+            return true
+        }
+        cfProtectedHosts.remove(host, recordedAt)
+        return false
+    }
+
+    private fun markHostCfProtected(host: String, nowMillis: Long) {
+        if (host.isEmpty()) return
+        cfProtectedHosts[host] = nowMillis
+    }
 
     suspend fun analyzeUrl(
         rawUrl: String,
@@ -68,9 +90,9 @@ class StockPageAnalyzer(
         val flareSolverrConfig = currentFlareSolverrConfigOrNull()
         val targetHost = runCatching { URI(resolvedUrl).host?.lowercase()?.trim() }.getOrNull().orEmpty()
 
-        // Hosts that previously served a CF challenge go straight to FlareSolverr: the direct
-        // OkHttp fetch is doomed and typically burns ~5s waiting on the challenge page.
-        if (flareSolverrConfig != null && targetHost.isNotEmpty() && targetHost in cfProtectedHosts) {
+        // Hosts that previously served a CF challenge go straight to FlareSolverr while within TTL:
+        // the direct OkHttp fetch is doomed and typically burns ~5s waiting on the challenge page.
+        if (flareSolverrConfig != null && isHostCfProtected(targetHost, checkedAt)) {
             return@withContext analyzeViaFlareSolverr(
                 rawUrl = rawUrl,
                 resolvedOrderUrl = resolvedUrl,
@@ -111,99 +133,59 @@ class StockPageAnalyzer(
         }
 
         try {
-            httpClient.newCall(request).execute().use { response ->
-                val statusCode = response.code
-                val finalUrl = response.request.url.toString()
-                val cfMitigated = response.header("cf-mitigated").orEmpty()
-                val rawBody = readBoundedBody(response)
+            val fetched = executeFetchCancellable(request)
+            val statusCode = fetched.statusCode
+            val finalUrl = fetched.finalUrl
+            val cfMitigated = fetched.cfMitigated
+            val rawBody = fetched.body
 
-                if (isCloudflareChallenge(statusCode, cfMitigated, rawBody)) {
-                    if (targetHost.isNotEmpty()) {
-                        cfProtectedHosts.add(targetHost)
-                    }
-                    if (flareSolverrConfig != null) {
-                        return@withContext analyzeViaFlareSolverr(
-                            rawUrl = rawUrl,
-                            resolvedOrderUrl = resolvedUrl,
-                            targetUrl = finalUrl,
-                            httpStatusCode = statusCode,
-                            panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
-                            checkedAt = checkedAt,
-                            customInStockKeyword = customInStockKeyword,
-                            customOutOfStockKeyword = customOutOfStockKeyword,
-                            flareSolverrConfig = flareSolverrConfig,
-                        )
-                    }
-                    return@withContext StockAnalysisResult(
+            if (isCloudflareChallenge(statusCode, cfMitigated, rawBody)) {
+                markHostCfProtected(targetHost, checkedAt)
+                if (flareSolverrConfig != null) {
+                    return@withContext analyzeViaFlareSolverr(
                         rawUrl = rawUrl,
                         resolvedOrderUrl = resolvedUrl,
-                        finalUrl = finalUrl,
+                        targetUrl = finalUrl,
                         httpStatusCode = statusCode,
                         panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
-                        stockStatus = RestockStockStatus.CHECK_ERROR,
-                        matchedSignal = "触发 Cloudflare 安全验证",
-                        errorMessage = "站点触发 Cloudflare 验证 (HTTP $statusCode)，可在补货设置中配置 FlareSolverr 自动突破",
-                        isTransientNetworkError = false,
-                        checkedAtEpochMillis = checkedAt,
+                        checkedAt = checkedAt,
+                        customInStockKeyword = customInStockKeyword,
+                        customOutOfStockKeyword = customOutOfStockKeyword,
+                        flareSolverrConfig = flareSolverrConfig,
                     )
                 }
-
-                if (statusCode == 429) {
-                    return@withContext StockAnalysisResult(
-                        rawUrl = rawUrl,
-                        resolvedOrderUrl = resolvedUrl,
-                        finalUrl = finalUrl,
-                        httpStatusCode = statusCode,
-                        panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
-                        stockStatus = RestockStockStatus.CHECK_ERROR,
-                        matchedSignal = "请求频率受限 (HTTP 429)",
-                        errorMessage = "商家限流 (HTTP 429)，建议调大轮询间隔",
-                        isTransientNetworkError = true,
-                        checkedAtEpochMillis = checkedAt,
-                    )
-                }
-
-                if (statusCode in 500..599) {
-                    return@withContext StockAnalysisResult(
-                        rawUrl = rawUrl,
-                        resolvedOrderUrl = resolvedUrl,
-                        finalUrl = finalUrl,
-                        httpStatusCode = statusCode,
-                        panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
-                        stockStatus = RestockStockStatus.CHECK_ERROR,
-                        matchedSignal = "商家服务器异常 (HTTP $statusCode)",
-                        errorMessage = "目标服务器暂不可用 (HTTP $statusCode)",
-                        isTransientNetworkError = true,
-                        checkedAtEpochMillis = checkedAt,
-                    )
-                }
-
-                if (statusCode >= 400) {
-                    return@withContext StockAnalysisResult(
-                        rawUrl = rawUrl,
-                        resolvedOrderUrl = resolvedUrl,
-                        finalUrl = finalUrl,
-                        httpStatusCode = statusCode,
-                        panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
-                        stockStatus = RestockStockStatus.CHECK_ERROR,
-                        matchedSignal = "HTTP $statusCode 错误",
-                        errorMessage = "页面访问失败 (HTTP $statusCode)",
-                        isTransientNetworkError = false,
-                        checkedAtEpochMillis = checkedAt,
-                    )
-                }
-
-                analyzeHtml(
+                return@withContext StockAnalysisResult(
                     rawUrl = rawUrl,
                     resolvedOrderUrl = resolvedUrl,
                     finalUrl = finalUrl,
-                    html = rawBody,
                     httpStatusCode = statusCode,
-                    customInStockKeyword = customInStockKeyword,
-                    customOutOfStockKeyword = customOutOfStockKeyword,
+                    panelType = detectPanelFromUrls(resolvedUrl, finalUrl),
+                    stockStatus = RestockStockStatus.CHECK_ERROR,
+                    matchedSignal = "触发 Cloudflare 安全验证",
+                    errorMessage = "站点触发 Cloudflare 验证 (HTTP $statusCode)，可在补货设置中配置 FlareSolverr 自动突破",
+                    isTransientNetworkError = false,
                     checkedAtEpochMillis = checkedAt,
                 )
             }
+
+            validateHttpErrorStatus(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedUrl,
+                finalUrl = finalUrl,
+                statusCode = statusCode,
+                checkedAt = checkedAt,
+            )?.let { return@withContext it }
+
+            analyzeHtml(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedUrl,
+                finalUrl = finalUrl,
+                html = rawBody,
+                httpStatusCode = statusCode,
+                customInStockKeyword = customInStockKeyword,
+                customOutOfStockKeyword = customOutOfStockKeyword,
+                checkedAtEpochMillis = checkedAt,
+            )
         } catch (c: CancellationException) {
             throw c
         } catch (e: SocketTimeoutException) {
@@ -315,12 +297,41 @@ class StockPageAnalyzer(
 
         return when (val outcome = client.requestGet(flareSolverrConfig, targetUrl)) {
             is FlareSolverrOutcome.Solved -> {
+                val solvedUrl = outcome.finalUrl.ifBlank { targetUrl }
+                val solvedStatus = outcome.httpStatusCode
+                val resolvedPanel = detectPanelFromUrls(resolvedOrderUrl, solvedUrl)
+
+                if (isCloudflareChallenge(solvedStatus, "", outcome.html)) {
+                    return cfChallengeErrorResult(
+                        rawUrl = rawUrl,
+                        resolvedOrderUrl = resolvedOrderUrl,
+                        targetUrl = solvedUrl,
+                        httpStatusCode = solvedStatus,
+                        panelType = resolvedPanel,
+                        checkedAt = checkedAt,
+                        failure = FlareSolverrOutcome.Failure(
+                            reason = "解盾后页面仍停留在 Cloudflare 安全验证 (HTTP $solvedStatus)",
+                            isTransient = false,
+                        ),
+                    )
+                }
+
+                validateHttpErrorStatus(
+                    rawUrl = rawUrl,
+                    resolvedOrderUrl = resolvedOrderUrl,
+                    finalUrl = solvedUrl,
+                    statusCode = solvedStatus,
+                    checkedAt = checkedAt,
+                )?.let { errorResult ->
+                    return errorResult.copy(usedFlareSolverr = true)
+                }
+
                 val analysis = analyzeHtml(
                     rawUrl = rawUrl,
                     resolvedOrderUrl = resolvedOrderUrl,
-                    finalUrl = outcome.finalUrl.ifBlank { targetUrl },
+                    finalUrl = solvedUrl,
                     html = outcome.html,
-                    httpStatusCode = 200,
+                    httpStatusCode = solvedStatus,
                     customInStockKeyword = customInStockKeyword,
                     customOutOfStockKeyword = customOutOfStockKeyword,
                     checkedAtEpochMillis = checkedAt,
@@ -340,6 +351,100 @@ class StockPageAnalyzer(
                 failure = outcome,
             )
         }
+    }
+
+    private data class FetchedHttpPage(
+        val statusCode: Int,
+        val finalUrl: String,
+        val cfMitigated: String,
+        val body: String,
+    )
+
+    private suspend fun executeFetchCancellable(request: Request): FetchedHttpPage =
+        suspendCancellableCoroutine { continuation ->
+            val call = httpClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(e)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val fetched = response.use { resp ->
+                            FetchedHttpPage(
+                                statusCode = resp.code,
+                                finalUrl = resp.request.url.toString(),
+                                cfMitigated = resp.header("cf-mitigated").orEmpty(),
+                                body = readBoundedBody(resp),
+                            )
+                        }
+                        if (continuation.isActive) {
+                            continuation.resume(fetched)
+                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(t)
+                        }
+                    }
+                }
+            })
+        }
+
+    private fun validateHttpErrorStatus(
+        rawUrl: String,
+        resolvedOrderUrl: String,
+        finalUrl: String,
+        statusCode: Int,
+        checkedAt: Long,
+    ): StockAnalysisResult? {
+        if (statusCode == 429) {
+            return StockAnalysisResult(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedOrderUrl,
+                finalUrl = finalUrl,
+                httpStatusCode = statusCode,
+                panelType = detectPanelFromUrls(resolvedOrderUrl, finalUrl),
+                stockStatus = RestockStockStatus.CHECK_ERROR,
+                matchedSignal = "请求频率受限 (HTTP 429)",
+                errorMessage = "商家限流 (HTTP 429)，建议调大轮询间隔",
+                isTransientNetworkError = true,
+                checkedAtEpochMillis = checkedAt,
+            )
+        }
+        if (statusCode in 500..599) {
+            return StockAnalysisResult(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedOrderUrl,
+                finalUrl = finalUrl,
+                httpStatusCode = statusCode,
+                panelType = detectPanelFromUrls(resolvedOrderUrl, finalUrl),
+                stockStatus = RestockStockStatus.CHECK_ERROR,
+                matchedSignal = "商家服务器异常 (HTTP $statusCode)",
+                errorMessage = "目标服务器暂不可用 (HTTP $statusCode)",
+                isTransientNetworkError = true,
+                checkedAtEpochMillis = checkedAt,
+            )
+        }
+        if (statusCode >= 400) {
+            return StockAnalysisResult(
+                rawUrl = rawUrl,
+                resolvedOrderUrl = resolvedOrderUrl,
+                finalUrl = finalUrl,
+                httpStatusCode = statusCode,
+                panelType = detectPanelFromUrls(resolvedOrderUrl, finalUrl),
+                stockStatus = RestockStockStatus.CHECK_ERROR,
+                matchedSignal = "HTTP $statusCode 错误",
+                errorMessage = "页面访问失败 (HTTP $statusCode)",
+                isTransientNetworkError = false,
+                checkedAtEpochMillis = checkedAt,
+            )
+        }
+        return null
     }
 
     private fun cfChallengeErrorResult(
@@ -989,12 +1094,17 @@ class StockPageAnalyzer(
         body: String,
     ): Boolean {
         if (cfMitigatedHeader.equals("challenge", ignoreCase = true)) return true
-        if (statusCode != 403 && statusCode != 503) return false
         val lower = body.lowercase()
-        return lower.contains("just a moment...") ||
-            lower.contains("cf-turnstile") ||
-            lower.contains("cdn-cgi/challenge-platform") ||
-            lower.contains("attention required! | cloudflare")
+        val hasStrongInterstitialMarker = lower.contains("cdn-cgi/challenge-platform") ||
+            lower.contains("attention required! | cloudflare") ||
+            lower.contains("<title>just a moment...</title>")
+        if (statusCode == 200) {
+            return hasStrongInterstitialMarker
+        }
+        if (statusCode != 403 && statusCode != 503) return false
+        return hasStrongInterstitialMarker ||
+            lower.contains("just a moment...") ||
+            lower.contains("cf-turnstile")
     }
 
     private fun readBoundedBody(response: okhttp3.Response): String {
@@ -1009,6 +1119,7 @@ class StockPageAnalyzer(
 
     companion object {
         private const val MAX_BODY_BYTES = 1_500_000L
+        internal const val CF_HOST_CACHE_TTL_MILLIS = 6L * 60L * 60L * 1000L
 
         private val CUSTOM_KEYWORD_SPLIT_REGEX = Regex("""[,，;；\n\r]+""")
 
@@ -1022,8 +1133,11 @@ class StockPageAnalyzer(
         private val STOCK_COUNT_REGEXES = listOf(
             Regex("""\b(\d+)\s*(?:available|in\s+stock|left\s+in\s+stock|units?\s+available)\b""", RegexOption.IGNORE_CASE),
             Regex("""(?:available|stock|qty|quantity)\s*[:：]\s*(\d+)\b""", RegexOption.IGNORE_CASE),
-            Regex("""(?:库存|剩余|可售|可用库存)\s*[:：]?\s*(\d+)\s*(?:台|件|个|份)?"""),
-            Regex("""(\d+)\s*(?:台|件|个|份)?\s*(?:可用|可售)"""),
+            // Explicit Chinese stock prefixes (库存/可用库存/剩余库存/可售) exclude non-stock units like 天/元/GB/%
+            Regex("""(?:可用库存|剩余库存|库存|可售)\s*[:：]?\s*(\d+)(?!\s*(?:天|日|小时|时|分|分钟|秒|周|月|年|元|块|刀|美元|美金|港币|港元|欧元|英镑|日元|CNY|USD|EUR|GBP|GB|TB|MB|KB|GiB|TiB|MiB|G|M|T|%|次|张|折))\s*(?:台|件|个|份|席|名额)?""", RegexOption.IGNORE_CASE),
+            // Generic "剩余/仅剩" must carry an explicit inventory unit (台/件/份/席/名额) and not be preceded by coupon/balance/traffic terms
+            Regex("""(?<!余额|优惠券|折扣券|代金券|活动|倒计时|流量|带宽|时间|天数|免费备份)(?:剩余|仅剩)\s*[:：]?\s*(\d+)\s*(?:台|件|份|席|名额)(?!\s*(?:天|日|小时|元|GB|TB|MB|%|次|张))"""),
+            Regex("""(?<![.\d%])(\d+)\s*(?:台|件|个|份|席|名额)?\s*(?:可用|可售)"""),
         )
 
         private val OUT_OF_STOCK_KEYWORDS = listOf(

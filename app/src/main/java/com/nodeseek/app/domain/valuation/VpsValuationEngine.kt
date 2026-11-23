@@ -166,6 +166,14 @@ object VpsValuationEngine {
             BigDecimal.ZERO
         }
         val remainingRatio = ratioBd.toFloat().coerceIn(0f, 1f)
+        val remainingRatioPercent = if (isExpired || effectiveCycleDays <= BigDecimal.ZERO) {
+            BigDecimal.ZERO.setScale(1, RoundingMode.HALF_UP)
+        } else {
+            remainingDays
+                .multiply(HUNDRED)
+                .divide(effectiveCycleDays, 1, RoundingMode.HALF_UP)
+                .normalizeZero(1)
+        }
 
         val renewalOriginal = input.renewalAmount.setScale(2, RoundingMode.HALF_UP).normalizeZero(2)
         val cycleRenewalCnyRaw = input.renewalAmount.multiply(effectiveFxRate)
@@ -223,6 +231,7 @@ object VpsValuationEngine {
                 remainingSeconds = remainingSeconds,
                 remainingDays = remainingDays,
                 remainingRatio = remainingRatio,
+                remainingRatioPercent = remainingRatioPercent,
                 cycleRenewalCny = cycleRenewalCny,
                 dailyOfficialCostCny = dailyOfficialCny,
                 dailyOfficialCostHighPrecisionCny = dailyOfficialHighPrecisionCny,
@@ -270,7 +279,7 @@ object VpsValuationEngine {
         val valuationDateStr = formatDateTime(result.valuationDateTime, result.preciseToMinute)
         val expiryDateStr = formatDateTime(result.expiryDateTime, result.preciseToMinute)
         val daysRemainingStr = "${formatDaysNumber(result.remainingDays)} 天"
-        val pctStr = formatPercent(BigDecimal((result.remainingRatio * 100.0).toString()))
+        val pctStr = formatPercent(result.remainingRatioPercent)
         val dailyOfficialStr = formatDailyCny(
             result.dailyOfficialCostCny,
             result.dailyOfficialCostHighPrecisionCny,

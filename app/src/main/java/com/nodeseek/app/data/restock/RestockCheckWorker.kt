@@ -44,6 +44,10 @@ class RestockCheckWorker internal constructor(
             runner()
         } catch (c: CancellationException) {
             throw c
+        } catch (_: UninitializedPropertyAccessException) {
+            // SystemJobService / WorkManager can invoke doWork() during ContentProvider startup
+            // before Application.onCreate() finishes initializing AppContainer; retry cleanly later.
+            return Result.retry()
         } catch (e: IOException) {
             return Result.retry()
         } catch (_: Throwable) {
