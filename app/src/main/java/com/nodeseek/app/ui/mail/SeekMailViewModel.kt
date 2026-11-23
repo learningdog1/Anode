@@ -46,12 +46,20 @@ import java.util.Locale
 enum class SeekMailFilterMode(val label: String) {
     ALL("全部邮件"),
     UNREAD("未读邮件"),
+    ARCHIVED("已存档"),
 }
 
 enum class SeekMailReaderMode(val label: String) {
     HTML("HTML 视图"),
     TEXT("纯文本"),
 }
+
+@Immutable
+data class SeekMailSnackbarEvent(
+    val message: String,
+    val actionLabel: String? = null,
+    val onAction: (() -> Unit)? = null,
+)
 
 @Immutable
 sealed interface PendingExportTarget {
@@ -139,6 +147,11 @@ data class SeekMailUiState(
     val localTagCounts: Map<String, Int> = emptyMap(),
     val selectedLocalTagId: String? = null,
     val taggingTargetMail: SeekMailSummary? = null,
+    val archivedMailIds: Set<Long> = emptySet(),
+    val archivedMailCount: Int = 0,
+    val actionTargetMail: SeekMailSummary? = null,
+    val pendingDeleteMail: SeekMailSummary? = null,
+    val activeInboxUnreadCount: Int? = null,
     val isSearchExpanded: Boolean = false,
     val searchDraft: String = "",
     val activeSearchQuery: String = "",
@@ -180,7 +193,7 @@ data class SeekMailUiState(
         get() = selectedLocalTagId?.let { id -> localTags.firstOrNull { it.id == id } }
 
     val unreadLoadedCount: Int
-        get() = mails.count { !it.isRead }
+        get() = activeInboxUnreadCount ?: mails.count { !it.isRead && it.id !in archivedMailIds }
 
     companion object {
         val DEFAULT_DOMAINS: List<String> = listOf("seek.li", "nodeseek.org")
@@ -213,10 +226,17 @@ class SeekMailViewModel(
         val isCreatingMailbox: Boolean = false,
         val createMailboxError: String? = null,
         val filterMode: SeekMailFilterMode = SeekMailFilterMode.ALL,
+        val loadedServerFilterMode: SeekMailFilterMode = SeekMailFilterMode.ALL,
+        val loadedServerMailboxId: Long? = null,
+        val loadedServerTagId: Long? = null,
+        val loadedServerSearchQuery: String = "",
+        val hasLoadedServerPage: Boolean = false,
         val tags: List<SeekMailTag> = emptyList(),
         val selectedTagId: Long? = null,
         val selectedLocalTagId: String? = null,
         val taggingTargetMail: SeekMailSummary? = null,
+        val actionTargetMail: SeekMailSummary? = null,
+        val pendingDeleteMail: SeekMailSummary? = null,
         val isSearchExpanded: Boolean = false,
         val searchDraft: String = "",
         val activeSearchQuery: String = "",
@@ -252,8 +272,22 @@ class SeekMailViewModel(
     private val _internalState = MutableStateFlow(
         InternalState(selectedMailboxId = initialMailboxId.takeIf { it > 0L }),
     )
-    private val _snackbarChannel = Channel<String>(Channel.BUFFERED)
-    val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
+    private val _snackbarChannel = Channel<SeekMailSnackbarEvent>(Channel.BUFFERED)
+    val snackbarEvents: Flow<SeekMailSnackbarEvent> = _snackbarChannel.receiveAsFlow()
+
+    private fun emitSnackbar(
+        message: String,
+        actionLabel: String? = null,
+        onAction: (() -> Unit)? = null,
+    ) {
+        _snackbarChannel.trySend(
+            SeekMailSnackbarEvent(
+                message = message,
+                actionLabel = actionLabel,
+                onAction = onAction,
+            ),
+        )
+    }
 
     private var lastHandledApiKey: String? = null
     private var pendingInitialMailId: Long? = initialMailId.takeIf { it > 0L }
@@ -268,7 +302,8 @@ class SeekMailViewModel(
     private val localOverlayFlow = combine(
         seekMailRepository.locallyReadMailIds,
         seekMailRepository.localTagStore,
-        ::Pair,
+        seekMailRepository.localArchiveStore,
+        ::Triple,
     )
 
     private val vpsSyncContextFlow = combine(
@@ -285,8 +320,10 @@ class SeekMailViewModel(
         localOverlayFlow,
         seekMailRepository.latestRateLimit,
         vpsSyncContextFlow,
-    ) { state, settings, (readIds, localTagStore), rateLimit, (assets, sshServers, autoUpdates) ->
+    ) { state, settings, (readIds, localTagStore, archiveStore), rateLimit, (assets, sshServers, autoUpdates) ->
         val trimmedKey = settings.seekMailApiKey.trim()
+        val deletedIds = archiveStore.deletedMailIds
+        val archivedIds = archiveStore.archivedMailIds - deletedIds
         val overlaidMails = if (readIds.isEmpty()) {
             state.mails
         } else {
@@ -294,11 +331,27 @@ class SeekMailViewModel(
                 if (!mail.isRead && mail.id in readIds) mail.copy(isRead = true) else mail
             }
         }
+        val activeInboxMails = overlaidMails.filter { mail ->
+            mail.id !in deletedIds && mail.id !in archivedIds
+        }
+        val archivedMailsForMailbox = archiveStore
+            .orderedArchivedMails(mailboxId = state.selectedMailboxId)
+            .let { list ->
+                if (readIds.isEmpty()) {
+                    list
+                } else {
+                    list.map { mail ->
+                        if (!mail.isRead && mail.id in readIds) mail.copy(isRead = true) else mail
+                    }
+                }
+            }
+
         val localTagById = localTagStore.tags.associateBy { it.id }
         val localTagsByMailId = if (localTagStore.mailTagIds.isEmpty() || localTagById.isEmpty()) {
             emptyMap()
         } else {
             localTagStore.mailTagIds.mapNotNull { (mailId, ids) ->
+                if (mailId in deletedIds) return@mapNotNull null
                 val resolved = ids.mapNotNull { localTagById[it] }
                 if (resolved.isEmpty()) null else mailId to resolved
             }.toMap()
@@ -307,7 +360,8 @@ class SeekMailViewModel(
             emptyMap()
         } else {
             val counts = HashMap<String, Int>(localTagStore.tags.size)
-            localTagStore.mailTagIds.values.forEach { ids ->
+            localTagStore.mailTagIds.forEach { (mailId, ids) ->
+                if (mailId in deletedIds) return@forEach
                 ids.forEach { tagId ->
                     if (tagId in localTagById) {
                         counts[tagId] = (counts[tagId] ?: 0) + 1
@@ -317,13 +371,48 @@ class SeekMailViewModel(
             counts
         }
         val effectiveSelectedLocalTagId = state.selectedLocalTagId?.takeIf { it in localTagById }
-        val visibleMails = if (effectiveSelectedLocalTagId == null) {
-            overlaidMails
-        } else {
-            overlaidMails.filter { mail ->
-                effectiveSelectedLocalTagId in localTagStore.mailTagIds[mail.id].orEmpty()
+        val searchNeedle = state.activeSearchQuery.trim().lowercase(Locale.US)
+        val visibleMails = when {
+            state.filterMode == SeekMailFilterMode.ARCHIVED -> {
+                if (searchNeedle.isEmpty()) {
+                    archivedMailsForMailbox
+                } else {
+                    archivedMailsForMailbox.filter { mail -> matchesSearchNeedle(mail, searchNeedle) }
+                }
             }
+            effectiveSelectedLocalTagId != null -> {
+                val mergedPool = buildList {
+                    val seen = HashSet<Long>(overlaidMails.size + archivedMailsForMailbox.size)
+                    overlaidMails.forEach { mail ->
+                        if (mail.id !in deletedIds && seen.add(mail.id)) add(mail)
+                    }
+                    archivedMailsForMailbox.forEach { mail ->
+                        if (mail.id !in deletedIds && seen.add(mail.id)) {
+                            if (searchNeedle.isEmpty() || matchesSearchNeedle(mail, searchNeedle)) {
+                                add(mail)
+                            }
+                        }
+                    }
+                }
+                mergedPool.filter { mail ->
+                    effectiveSelectedLocalTagId in localTagStore.mailTagIds[mail.id].orEmpty()
+                }
+            }
+            else -> activeInboxMails
         }
+        val isArchivedMode = state.filterMode == SeekMailFilterMode.ARCHIVED
+        val hiddenLoadedCount = state.mails.count { it.id in deletedIds || it.id in archivedIds }
+        val effectiveTotalMailCount = when {
+            isArchivedMode || effectiveSelectedLocalTagId != null -> visibleMails.size
+            !state.hasMoreMails -> visibleMails.size
+            else -> (state.totalMailCount - hiddenLoadedCount).coerceAtLeast(visibleMails.size)
+        }
+        val effectiveHasMoreMails = if (isArchivedMode) false else state.hasMoreMails
+        val effectiveIsLoadingMails = if (isArchivedMode) false else state.isLoadingMails
+        val effectiveMailsErrorMessage = if (isArchivedMode) null else state.mailsErrorMessage
+        val effectiveMailsErrorKind = if (isArchivedMode) null else state.mailsErrorKind
+        val activeInboxUnreadCount = activeInboxMails.count { !it.isRead }
+
         val overlaidPreview = state.openedPreviewSummary?.let { preview ->
             if (!preview.isRead && preview.id in readIds) preview.copy(isRead = true) else preview
         }
@@ -396,17 +485,22 @@ class SeekMailViewModel(
             localTagCounts = localTagCounts,
             selectedLocalTagId = effectiveSelectedLocalTagId,
             taggingTargetMail = state.taggingTargetMail,
+            archivedMailIds = archivedIds,
+            archivedMailCount = archivedMailsForMailbox.size,
+            actionTargetMail = state.actionTargetMail,
+            pendingDeleteMail = state.pendingDeleteMail,
+            activeInboxUnreadCount = activeInboxUnreadCount,
             isSearchExpanded = state.isSearchExpanded,
             searchDraft = state.searchDraft,
             activeSearchQuery = state.activeSearchQuery,
             mails = visibleMails,
-            totalMailCount = state.totalMailCount,
-            hasMoreMails = state.hasMoreMails,
-            isLoadingMails = state.isLoadingMails,
+            totalMailCount = effectiveTotalMailCount,
+            hasMoreMails = effectiveHasMoreMails,
+            isLoadingMails = effectiveIsLoadingMails,
             isRefreshing = state.isRefreshing,
-            isLoadingMore = state.isLoadingMore,
-            mailsErrorMessage = state.mailsErrorMessage,
-            mailsErrorKind = state.mailsErrorKind,
+            isLoadingMore = if (isArchivedMode) false else state.isLoadingMore,
+            mailsErrorMessage = effectiveMailsErrorMessage,
+            mailsErrorKind = effectiveMailsErrorKind,
             showContactsSheet = state.showContactsSheet,
             contacts = state.contacts,
             isLoadingContacts = state.isLoadingContacts,
@@ -445,7 +539,7 @@ class SeekMailViewModel(
         }
         viewModelScope.launch {
             vpsMailAutoIngestService.renewalAutoUpdateEvents.collect { record ->
-                _snackbarChannel.trySend(
+                emitSnackbar(
                     "续费邮件已自动将「${record.assetNickname}」到期日更新至 ${record.newExpiryDateIso}",
                 )
             }
@@ -557,7 +651,7 @@ class SeekMailViewModel(
                 createDomain = domains.firstOrNull() ?: SeekMailUiState.DEFAULT_DOMAINS.first(),
             )
         }
-        _snackbarChannel.trySend("Seek 邮箱连接成功（共 ${sortedMailboxes.size} 个邮箱）")
+        emitSnackbar("Seek 邮箱连接成功（共 ${sortedMailboxes.size} 个邮箱）")
         loadWorkspace(forceRefresh = false, skipMailboxesFetch = true)
         consumePendingInitialMail()
     }
@@ -571,7 +665,7 @@ class SeekMailViewModel(
         viewModelScope.launch {
             settingsRepository.setSeekMailApiKey("")
             seekMailRepository.clearCache()
-            _snackbarChannel.trySend("已断开 Seek 邮箱密钥")
+            emitSnackbar("已断开 Seek 邮箱密钥")
         }
     }
 
@@ -643,7 +737,9 @@ class SeekMailViewModel(
         val current = _internalState.value
         if (current.selectedMailboxId == mailboxId && current.mailsErrorMessage == null) return
         _internalState.update { it.copy(selectedMailboxId = mailboxId) }
-        loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
+        if (current.filterMode != SeekMailFilterMode.ARCHIVED) {
+            loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
+        }
     }
 
     fun selectFilterMode(mode: SeekMailFilterMode) {
@@ -652,7 +748,6 @@ class SeekMailViewModel(
         if (current.filterMode == mode && !hadTagFilter && current.mailsErrorMessage == null) {
             return
         }
-        val needsReload = current.filterMode != mode || current.selectedTagId != null || current.mailsErrorMessage != null
         _internalState.update {
             it.copy(
                 filterMode = mode,
@@ -660,6 +755,13 @@ class SeekMailViewModel(
                 selectedLocalTagId = null,
             )
         }
+        if (mode == SeekMailFilterMode.ARCHIVED) return
+        val needsReload = !current.hasLoadedServerPage ||
+            current.loadedServerFilterMode != mode ||
+            current.loadedServerMailboxId != current.selectedMailboxId ||
+            current.loadedServerTagId != null ||
+            current.loadedServerSearchQuery != current.activeSearchQuery.trim() ||
+            current.mailsErrorMessage != null
         if (needsReload) {
             loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
         }
@@ -681,16 +783,198 @@ class SeekMailViewModel(
     fun toggleLocalTagFilter(localTagId: String) {
         val current = _internalState.value
         val nextLocalTagId = if (current.selectedLocalTagId == localTagId) null else localTagId
-        val needsReload = current.selectedTagId != null || current.filterMode == SeekMailFilterMode.UNREAD
+        val nextFilterMode = if (nextLocalTagId != null) SeekMailFilterMode.ALL else current.filterMode
+        val needsReload = nextFilterMode != SeekMailFilterMode.ARCHIVED && (
+            !current.hasLoadedServerPage ||
+                current.loadedServerFilterMode != nextFilterMode ||
+                current.loadedServerMailboxId != current.selectedMailboxId ||
+                current.loadedServerTagId != null ||
+                current.loadedServerSearchQuery != current.activeSearchQuery.trim() ||
+                current.mailsErrorMessage != null
+            )
         _internalState.update {
             it.copy(
-                filterMode = if (nextLocalTagId != null) SeekMailFilterMode.ALL else it.filterMode,
+                filterMode = nextFilterMode,
                 selectedTagId = null,
                 selectedLocalTagId = nextLocalTagId,
             )
         }
         if (needsReload) {
             loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
+        }
+    }
+
+    fun openMailActionSheet(summary: SeekMailSummary) {
+        _internalState.update { it.copy(actionTargetMail = summary) }
+    }
+
+    fun dismissMailActionSheet() {
+        _internalState.update { it.copy(actionTargetMail = null) }
+    }
+
+    fun openTagSheetFromActionSheet() {
+        _internalState.update { current ->
+            val target = current.actionTargetMail ?: return@update current
+            current.copy(
+                actionTargetMail = null,
+                taggingTargetMail = target,
+            )
+        }
+    }
+
+    fun requestDeleteMail(summary: SeekMailSummary) {
+        _internalState.update {
+            it.copy(
+                actionTargetMail = null,
+                pendingDeleteMail = summary,
+            )
+        }
+    }
+
+    fun dismissDeleteMailDialog() {
+        _internalState.update { it.copy(pendingDeleteMail = null) }
+    }
+
+    fun confirmDeleteMail() {
+        val target = _internalState.value.pendingDeleteMail ?: return
+        deleteMail(target)
+    }
+
+    fun archiveMail(
+        summary: SeekMailSummary,
+        showUndoSnackbar: Boolean = true,
+        feedbackMessage: String? = null,
+    ) {
+        val shouldCloseDetail = _internalState.value.openedMailId == summary.id
+        _internalState.update { current ->
+            current.copy(
+                actionTargetMail = if (current.actionTargetMail?.id == summary.id) null else current.actionTargetMail,
+                taggingTargetMail = if (current.taggingTargetMail?.id == summary.id) null else current.taggingTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.archiveMailLocally(summary)
+            if (showUndoSnackbar) {
+                emitSnackbar(
+                    message = "已存档邮件",
+                    actionLabel = "撤销",
+                    onAction = {
+                        unarchiveMail(
+                            summary = summary,
+                            showUndoSnackbar = false,
+                            feedbackMessage = "已撤销存档",
+                        )
+                    },
+                )
+            } else if (!feedbackMessage.isNullOrBlank()) {
+                emitSnackbar(feedbackMessage)
+            }
+        }
+    }
+
+    fun unarchiveMail(
+        summary: SeekMailSummary,
+        showUndoSnackbar: Boolean = true,
+        feedbackMessage: String? = null,
+    ) {
+        val stateSnapshot = _internalState.value
+        val shouldCloseDetail = stateSnapshot.openedMailId == summary.id &&
+            stateSnapshot.filterMode == SeekMailFilterMode.ARCHIVED
+        _internalState.update { current ->
+            current.copy(
+                actionTargetMail = if (current.actionTargetMail?.id == summary.id) null else current.actionTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.unarchiveMailLocally(summary.id)
+            mergeMailBackIntoInboxIfCompatible(summary)
+            if (showUndoSnackbar) {
+                emitSnackbar(
+                    message = "已取消存档，移回收件箱",
+                    actionLabel = "撤销",
+                    onAction = {
+                        archiveMail(
+                            summary = summary,
+                            showUndoSnackbar = false,
+                            feedbackMessage = "已重新存档",
+                        )
+                    },
+                )
+            } else if (!feedbackMessage.isNullOrBlank()) {
+                emitSnackbar(feedbackMessage)
+            }
+        }
+    }
+
+    fun deleteMail(summary: SeekMailSummary) {
+        val wasArchived = seekMailRepository.localArchiveStore.value.isArchived(summary.id)
+        val shouldCloseDetail = _internalState.value.openedMailId == summary.id
+        _internalState.update { current ->
+            current.copy(
+                actionTargetMail = if (current.actionTargetMail?.id == summary.id) null else current.actionTargetMail,
+                pendingDeleteMail = if (current.pendingDeleteMail?.id == summary.id) null else current.pendingDeleteMail,
+                taggingTargetMail = if (current.taggingTargetMail?.id == summary.id) null else current.taggingTargetMail,
+            )
+        }
+        if (shouldCloseDetail) {
+            closeMailDetail()
+        }
+        viewModelScope.launch {
+            seekMailRepository.deleteMailLocally(summary.id)
+            emitSnackbar(
+                message = "已从本地删除该邮件",
+                actionLabel = "撤销",
+                onAction = {
+                    restoreDeletedMail(summary = summary, wasArchived = wasArchived)
+                },
+            )
+        }
+    }
+
+    private fun restoreDeletedMail(
+        summary: SeekMailSummary,
+        wasArchived: Boolean,
+    ) {
+        viewModelScope.launch {
+            seekMailRepository.restoreDeletedMailLocally(
+                mailId = summary.id,
+                restoredArchiveSummary = if (wasArchived) summary else null,
+            )
+            if (!wasArchived) {
+                mergeMailBackIntoInboxIfCompatible(summary)
+            }
+            emitSnackbar("已恢复该邮件")
+        }
+    }
+
+    private fun mergeMailBackIntoInboxIfCompatible(summary: SeekMailSummary) {
+        _internalState.update { current ->
+            if (!current.hasLoadedServerPage) return@update current
+            if (current.mails.any { it.id == summary.id }) return@update current
+            val mailboxMatches = current.loadedServerMailboxId == null ||
+                current.loadedServerMailboxId == summary.mailboxId
+            val modeMatches = current.loadedServerFilterMode == SeekMailFilterMode.ALL ||
+                (current.loadedServerFilterMode == SeekMailFilterMode.UNREAD && !summary.isRead)
+            val tagMatches = current.loadedServerTagId == null ||
+                summary.tags.any { it.id == current.loadedServerTagId }
+            val queryMatches = current.loadedServerSearchQuery.isBlank() ||
+                matchesSearchNeedle(summary, current.loadedServerSearchQuery.lowercase(Locale.US))
+            if (!mailboxMatches || !modeMatches || !tagMatches || !queryMatches) {
+                return@update current
+            }
+            val merged = (current.mails + summary)
+                .distinctBy { it.id }
+                .sortedWith(
+                    compareByDescending<SeekMailSummary> { it.receivedAt.ifBlank { it.createdAt } }
+                        .thenByDescending { it.id },
+                )
+            current.copy(mails = merged)
         }
     }
 
@@ -718,10 +1002,10 @@ class SeekMailViewModel(
                     if (created.id !in currentIds) {
                         seekMailRepository.toggleLocalTagForMail(mailId = mailId, tagId = created.id)
                     }
-                    _snackbarChannel.trySend("已打上标签「${created.name}」")
+                    emitSnackbar("已打上标签「${created.name}」")
                 }
                 .onFailure { err ->
-                    _snackbarChannel.trySend(
+                    emitSnackbar(
                         err.message?.takeIf { it.isNotBlank() } ?: "创建标签失败",
                     )
                 }
@@ -731,7 +1015,7 @@ class SeekMailViewModel(
     fun clearLocalTagsForMail(mailId: Long) {
         viewModelScope.launch {
             seekMailRepository.setLocalTagsForMail(mailId = mailId, tagIds = emptyList())
-            _snackbarChannel.trySend("已清空该邮件的本地标签")
+            emitSnackbar("已清空该邮件的本地标签")
         }
     }
 
@@ -745,7 +1029,7 @@ class SeekMailViewModel(
                 _internalState.update { it.copy(selectedLocalTagId = null) }
             }
             if (!tagName.isNullOrBlank()) {
-                _snackbarChannel.trySend("已删除标签「$tagName」")
+                emitSnackbar("已删除标签「$tagName」")
             }
         }
     }
@@ -761,7 +1045,7 @@ class SeekMailViewModel(
                     activeSearchQuery = "",
                 )
             }
-            if (hadActiveSearch) {
+            if (hadActiveSearch && current.filterMode != SeekMailFilterMode.ARCHIVED) {
                 loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
             }
         } else {
@@ -779,25 +1063,29 @@ class SeekMailViewModel(
         if (query == current.activeSearchQuery && query == current.searchDraft && current.mailsErrorMessage == null) {
             return
         }
+        val staysArchived = current.filterMode == SeekMailFilterMode.ARCHIVED
         _internalState.update {
             it.copy(
                 searchDraft = query,
                 activeSearchQuery = query,
-                filterMode = if (query.isNotEmpty()) SeekMailFilterMode.ALL else it.filterMode,
+                filterMode = if (query.isNotEmpty() && !staysArchived) SeekMailFilterMode.ALL else it.filterMode,
             )
         }
-        loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
+        if (!staysArchived) {
+            loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
+        }
     }
 
     fun clearSearch() {
-        val hadActiveSearch = _internalState.value.activeSearchQuery.isNotBlank()
+        val current = _internalState.value
+        val hadActiveSearch = current.activeSearchQuery.isNotBlank()
         _internalState.update {
             it.copy(
                 searchDraft = "",
                 activeSearchQuery = "",
             )
         }
-        if (hadActiveSearch) {
+        if (hadActiveSearch && current.filterMode != SeekMailFilterMode.ARCHIVED) {
             loadMailPage(reset = true, isRefresh = false, forceRefresh = false)
         }
     }
@@ -818,7 +1106,13 @@ class SeekMailViewModel(
 
     fun loadMoreMails() {
         val current = _internalState.value
-        if (!current.hasMoreMails || current.isLoadingMails || current.isRefreshing || current.isLoadingMore) {
+        if (
+            current.filterMode == SeekMailFilterMode.ARCHIVED ||
+            !current.hasMoreMails ||
+            current.isLoadingMails ||
+            current.isRefreshing ||
+            current.isLoadingMore
+        ) {
             return
         }
         loadMailPage(reset = false, isRefresh = false, forceRefresh = false)
@@ -834,9 +1128,17 @@ class SeekMailViewModel(
 
         val snapshot = _internalState.value
         val mailboxId = snapshot.selectedMailboxId
-        val filterMode = snapshot.filterMode
-        val tagId = snapshot.selectedTagId
-        val searchQuery = snapshot.activeSearchQuery.trim().takeIf { it.isNotEmpty() }
+        val requestedServerMode = if (snapshot.filterMode == SeekMailFilterMode.UNREAD) {
+            SeekMailFilterMode.UNREAD
+        } else {
+            SeekMailFilterMode.ALL
+        }
+        val tagId = if (snapshot.filterMode == SeekMailFilterMode.ARCHIVED) null else snapshot.selectedTagId
+        val searchQuery = if (snapshot.filterMode == SeekMailFilterMode.ARCHIVED) {
+            null
+        } else {
+            snapshot.activeSearchQuery.trim().takeIf { it.isNotEmpty() }
+        }
 
         _internalState.update {
             if (reset) {
@@ -857,7 +1159,7 @@ class SeekMailViewModel(
         }
 
         mailLoadJob = viewModelScope.launch {
-            if (filterMode == SeekMailFilterMode.UNREAD) {
+            if (requestedServerMode == SeekMailFilterMode.UNREAD) {
                 val cursor = if (reset) null else snapshot.nextUnreadCursor.takeIf { it.isNotBlank() }
                 seekMailRepository.getUnreadMails(
                     mailboxId = mailboxId,
@@ -865,7 +1167,12 @@ class SeekMailViewModel(
                     cursor = cursor,
                 ).onSuccess { page ->
                     if (generation != mailLoadGeneration) return@onSuccess
-                    applyUnreadPage(page = page, reset = reset, searchQuery = searchQuery)
+                    applyUnreadPage(
+                        page = page,
+                        reset = reset,
+                        mailboxId = mailboxId,
+                        searchQuery = searchQuery,
+                    )
                 }.onFailure { err ->
                     if (generation != mailLoadGeneration) return@onFailure
                     applyMailLoadError(err)
@@ -881,7 +1188,13 @@ class SeekMailViewModel(
                     forceRefresh = forceRefresh || !reset,
                 ).onSuccess { page ->
                     if (generation != mailLoadGeneration) return@onSuccess
-                    applyAllMailsPage(page = page, reset = reset)
+                    applyAllMailsPage(
+                        page = page,
+                        reset = reset,
+                        mailboxId = mailboxId,
+                        tagId = tagId,
+                        searchQuery = searchQuery.orEmpty(),
+                    )
                 }.onFailure { err ->
                     if (generation != mailLoadGeneration) return@onFailure
                     applyMailLoadError(err)
@@ -893,6 +1206,9 @@ class SeekMailViewModel(
     private fun applyAllMailsPage(
         page: SeekMailPage,
         reset: Boolean,
+        mailboxId: Long?,
+        tagId: Long?,
+        searchQuery: String,
     ) {
         _internalState.update { current ->
             val merged = if (reset) {
@@ -902,6 +1218,11 @@ class SeekMailViewModel(
             }
             current.copy(
                 mails = merged,
+                loadedServerFilterMode = SeekMailFilterMode.ALL,
+                loadedServerMailboxId = mailboxId,
+                loadedServerTagId = tagId,
+                loadedServerSearchQuery = searchQuery,
+                hasLoadedServerPage = true,
                 totalMailCount = page.total,
                 nextOffset = page.offset + page.items.size,
                 nextUnreadCursor = "",
@@ -921,19 +1242,14 @@ class SeekMailViewModel(
     private fun applyUnreadPage(
         page: SeekMailUnreadPage,
         reset: Boolean,
+        mailboxId: Long?,
         searchQuery: String?,
     ) {
         val filteredItems = if (searchQuery.isNullOrBlank()) {
             page.items
         } else {
             val needle = searchQuery.lowercase(Locale.US)
-            page.items.filter { mail ->
-                mail.subject.lowercase(Locale.US).contains(needle) ||
-                    mail.fromAddress.lowercase(Locale.US).contains(needle) ||
-                    mail.fromName.lowercase(Locale.US).contains(needle) ||
-                    mail.toAddress.lowercase(Locale.US).contains(needle) ||
-                    mail.snippet.lowercase(Locale.US).contains(needle)
-            }
+            page.items.filter { mail -> matchesSearchNeedle(mail, needle) }
         }
         _internalState.update { current ->
             val merged = if (reset) {
@@ -943,6 +1259,11 @@ class SeekMailViewModel(
             }
             current.copy(
                 mails = merged,
+                loadedServerFilterMode = SeekMailFilterMode.UNREAD,
+                loadedServerMailboxId = mailboxId,
+                loadedServerTagId = null,
+                loadedServerSearchQuery = searchQuery.orEmpty(),
+                hasLoadedServerPage = true,
                 totalMailCount = merged.size,
                 nextOffset = 0,
                 nextUnreadCursor = page.nextCursor,
@@ -971,8 +1292,8 @@ class SeekMailViewModel(
                 mailsErrorKind = kind,
             )
         }
-        if (_internalState.value.mails.isNotEmpty()) {
-            _snackbarChannel.trySend(message)
+        if (_internalState.value.mails.isNotEmpty() && _internalState.value.filterMode != SeekMailFilterMode.ARCHIVED) {
+            emitSnackbar(message)
         }
     }
 
@@ -1104,6 +1425,7 @@ class SeekMailViewModel(
                         current.copy(
                             mailboxes = updatedMailboxes,
                             selectedMailboxId = created.id,
+                            filterMode = SeekMailFilterMode.ALL,
                             showCreateMailboxSheet = false,
                             createLocalPart = "",
                             useCustomDomain = false,
@@ -1114,7 +1436,7 @@ class SeekMailViewModel(
                             createMailboxError = null,
                         )
                     }
-                    _snackbarChannel.trySend("已创建邮箱：${created.address}")
+                    emitSnackbar("已创建邮箱：${created.address}")
                     loadMailPage(reset = true, isRefresh = false, forceRefresh = true)
                 }
                 .onFailure { err ->
@@ -1225,6 +1547,7 @@ class SeekMailViewModel(
     fun openMailById(mailId: Long) {
         if (mailId <= 0L) return
         val existingPreview = _internalState.value.mails.firstOrNull { it.id == mailId }
+            ?: seekMailRepository.localArchiveStore.value.archivedMails[mailId]
         openMailInternal(mailId = mailId, previewSummary = existingPreview, forceRefresh = false)
     }
 
@@ -1397,10 +1720,10 @@ class SeekMailViewModel(
             try {
                 vpsMailAutoIngestService.ingestMail(summary = summary, parsed = parsed)
                     .onSuccess { outcome ->
-                        _snackbarChannel.trySend(outcome.summaryMessage)
+                        emitSnackbar(outcome.summaryMessage)
                     }
                     .onFailure { err ->
-                        _snackbarChannel.trySend(
+                        emitSnackbar(
                             "入库失败：${err.message?.takeIf { it.isNotBlank() } ?: "请稍后重试"}",
                         )
                     }
@@ -1517,6 +1840,14 @@ private fun maskApiKeyHint(apiKey: String): String {
     val prefix = apiKey.take(8)
     val suffix = apiKey.takeLast(4)
     return "$prefix••••$suffix"
+}
+
+private fun matchesSearchNeedle(mail: SeekMailSummary, lowerNeedle: String): Boolean {
+    return mail.subject.lowercase(Locale.US).contains(lowerNeedle) ||
+        mail.fromAddress.lowercase(Locale.US).contains(lowerNeedle) ||
+        mail.fromName.lowercase(Locale.US).contains(lowerNeedle) ||
+        mail.toAddress.lowercase(Locale.US).contains(lowerNeedle) ||
+        mail.snippet.lowercase(Locale.US).contains(lowerNeedle)
 }
 
 private fun sanitizeExportFileName(raw: String): String {

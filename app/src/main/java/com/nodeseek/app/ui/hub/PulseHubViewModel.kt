@@ -139,7 +139,8 @@ class PulseHubViewModel(
         transientState.asStateFlow(),
         container.checkInRepository.checkInStatus,
         container.seekMailRepository.locallyReadMailIds,
-    ) { base, transient, sharedCheckInStatus, locallyReadMailIds ->
+        container.seekMailRepository.localArchiveStore,
+    ) { base, transient, sharedCheckInStatus, locallyReadMailIds, localArchiveStore ->
         val mergedBookmarks = mergeBookmarks(
             local = base.localBookmarks,
             server = transient.serverBookmarks,
@@ -147,7 +148,11 @@ class PulseHubViewModel(
         )
         val seekMailConfigured = base.settings.seekMailApiKey.isNotBlank()
         val effectiveSeekMailUnreadCount = if (seekMailConfigured) {
-            transient.seekMailUnreadIds.count { it !in locallyReadMailIds }
+            transient.seekMailUnreadIds.count { id ->
+                id !in locallyReadMailIds &&
+                    !localArchiveStore.isArchived(id) &&
+                    !localArchiveStore.isDeleted(id)
+            }
         } else {
             0
         }

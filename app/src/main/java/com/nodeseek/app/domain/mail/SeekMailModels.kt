@@ -65,6 +65,32 @@ data class SeekMailLocalTagStore(
 }
 
 @Serializable
+data class SeekMailLocalArchiveStore(
+    val archivedMails: Map<Long, SeekMailSummary> = emptyMap(),
+    val archivedAtMillis: Map<Long, Long> = emptyMap(),
+    val deletedMailIds: Set<Long> = emptySet(),
+) {
+    val archivedMailIds: Set<Long>
+        get() = archivedMails.keys
+
+    fun isArchived(mailId: Long): Boolean = mailId in archivedMails && mailId !in deletedMailIds
+
+    fun isDeleted(mailId: Long): Boolean = mailId in deletedMailIds
+
+    fun orderedArchivedMails(mailboxId: Long? = null): List<SeekMailSummary> =
+        archivedMails.values
+            .asSequence()
+            .filter { it.id !in deletedMailIds }
+            .filter { mailboxId == null || it.mailboxId == mailboxId }
+            .sortedWith(
+                compareByDescending<SeekMailSummary> { it.receivedAt.ifBlank { it.createdAt } }
+                    .thenByDescending { archivedAtMillis[it.id] ?: 0L }
+                    .thenByDescending { it.id },
+            )
+            .toList()
+}
+
+@Serializable
 data class SeekMailAuthTelemetry(
     val spf: String = "",
     val dkim: String = "",

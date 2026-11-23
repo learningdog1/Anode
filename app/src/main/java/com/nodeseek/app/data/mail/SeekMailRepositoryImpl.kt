@@ -6,6 +6,7 @@ import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
 import com.nodeseek.app.domain.mail.SeekMailErrorKind
 import com.nodeseek.app.domain.mail.SeekMailException
+import com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore
 import com.nodeseek.app.domain.mail.SeekMailLocalTag
 import com.nodeseek.app.domain.mail.SeekMailLocalTagStore
 import com.nodeseek.app.domain.mail.SeekMailPage
@@ -53,6 +54,9 @@ class SeekMailRepositoryImpl(
 
     private val _localTagStore = MutableStateFlow(SeekMailLocalTagStore())
     override val localTagStore: StateFlow<SeekMailLocalTagStore> = _localTagStore.asStateFlow()
+
+    private val _localArchiveStore = MutableStateFlow(SeekMailLocalArchiveStore())
+    override val localArchiveStore: StateFlow<SeekMailLocalArchiveStore> = _localArchiveStore.asStateFlow()
 
     override val latestRateLimit: StateFlow<SeekMailRateLimit?>
         get() = apiClient.latestRateLimit
@@ -456,10 +460,96 @@ class SeekMailRepositoryImpl(
         }
     }
 
+    override suspend fun archiveMailLocally(summary: SeekMailSummary) {
+        if (summary.id <= 0L) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localArchiveStore.value
+            val normalizedSummary = overlayReadState(summary, _locallyReadMailIds.value)
+            val updated = current.copy(
+                archivedMails = current.archivedMails + (summary.id to normalizedSummary),
+                archivedAtMillis = current.archivedAtMillis + (summary.id to System.currentTimeMillis()),
+                deletedMailIds = current.deletedMailIds - summary.id,
+            )
+            _localArchiveStore.value = updated
+            diskCache?.saveLocalArchiveStore(key, updated)
+        }
+    }
+
+    override suspend fun unarchiveMailLocally(mailId: Long) {
+        if (mailId <= 0L) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localArchiveStore.value
+            if (mailId !in current.archivedMails && mailId !in current.archivedAtMillis) return
+            val updated = current.copy(
+                archivedMails = current.archivedMails - mailId,
+                archivedAtMillis = current.archivedAtMillis - mailId,
+            )
+            _localArchiveStore.value = updated
+            diskCache?.saveLocalArchiveStore(key, updated)
+        }
+    }
+
+    override suspend fun deleteMailLocally(mailId: Long) {
+        if (mailId <= 0L) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localArchiveStore.value
+            val updated = current.copy(
+                archivedMails = current.archivedMails - mailId,
+                archivedAtMillis = current.archivedAtMillis - mailId,
+                deletedMailIds = current.deletedMailIds + mailId,
+            )
+            if (updated == current) return
+            _localArchiveStore.value = updated
+            diskCache?.saveLocalArchiveStore(key, updated)
+        }
+    }
+
+    override suspend fun restoreDeletedMailLocally(
+        mailId: Long,
+        restoredArchiveSummary: SeekMailSummary?,
+    ) {
+        if (mailId <= 0L) return
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return
+        stateMutex.withLock {
+            if (activeKey != key) return
+            val current = _localArchiveStore.value
+            val normalizedArchive = restoredArchiveSummary?.let {
+                overlayReadState(it, _locallyReadMailIds.value)
+            }
+            val updated = current.copy(
+                archivedMails = if (normalizedArchive != null) {
+                    current.archivedMails + (mailId to normalizedArchive)
+                } else {
+                    current.archivedMails
+                },
+                archivedAtMillis = if (normalizedArchive != null) {
+                    current.archivedAtMillis + (mailId to System.currentTimeMillis())
+                } else {
+                    current.archivedAtMillis
+                },
+                deletedMailIds = current.deletedMailIds - mailId,
+            )
+            if (updated == current) return
+            _localArchiveStore.value = updated
+            diskCache?.saveLocalArchiveStore(key, updated)
+        }
+    }
+
     override suspend fun clearCache() {
         stateMutex.withLock {
             _locallyReadMailIds.value = emptySet()
             _localTagStore.value = SeekMailLocalTagStore()
+            _localArchiveStore.value = SeekMailLocalArchiveStore()
             loadedReadIdsForKey = null
             diskCache?.clearAll()
         }
@@ -512,10 +602,17 @@ class SeekMailRepositoryImpl(
                 if (_localTagStore.value.tags.isNotEmpty() || _localTagStore.value.mailTagIds.isNotEmpty()) {
                     _localTagStore.value = SeekMailLocalTagStore()
                 }
+                if (
+                    _localArchiveStore.value.archivedMails.isNotEmpty() ||
+                    _localArchiveStore.value.deletedMailIds.isNotEmpty()
+                ) {
+                    _localArchiveStore.value = SeekMailLocalArchiveStore()
+                }
                 loadedReadIdsForKey = ""
             } else if (loadedReadIdsForKey != newKey) {
                 _locallyReadMailIds.value = diskCache?.getLocallyReadIds(newKey).orEmpty()
                 _localTagStore.value = diskCache?.getLocalTagStore(newKey) ?: SeekMailLocalTagStore()
+                _localArchiveStore.value = diskCache?.getLocalArchiveStore(newKey) ?: SeekMailLocalArchiveStore()
                 loadedReadIdsForKey = newKey
             }
         }
@@ -526,9 +623,15 @@ class SeekMailRepositoryImpl(
 
     private suspend fun notifyAutoIngestSummaries(items: List<SeekMailSummary>) {
         val service = vpsMailAutoIngestService ?: return
-        if (items.isEmpty()) return
+        val deletedIds = _localArchiveStore.value.deletedMailIds
+        val activeItems = if (deletedIds.isEmpty()) {
+            items
+        } else {
+            items.filterNot { it.id in deletedIds }
+        }
+        if (activeItems.isEmpty()) return
         try {
-            service.processIncomingSummaries(items)
+            service.processIncomingSummaries(activeItems)
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {

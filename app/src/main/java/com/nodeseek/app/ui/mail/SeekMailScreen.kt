@@ -62,6 +62,7 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AlternateEmail
+import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Check
@@ -71,6 +72,7 @@ import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.DoNotDisturbOn
 import androidx.compose.material.icons.rounded.Download
@@ -92,6 +94,7 @@ import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.Unarchive
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -107,7 +110,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -191,6 +196,7 @@ import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.pulsePressScale
 import com.nodeseek.app.ui.theme.withTabularNumbers
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
@@ -287,8 +293,20 @@ fun SeekMailScreen(
     }
 
     LaunchedEffect(viewModel) {
-        viewModel.snackbarMessages.collect { message ->
-            snackbarHostState.showSnackbar(message)
+        viewModel.snackbarEvents.collectLatest { event ->
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = event.message,
+                actionLabel = event.actionLabel,
+                duration = if (event.actionLabel != null) {
+                    SnackbarDuration.Long
+                } else {
+                    SnackbarDuration.Short
+                },
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                event.onAction?.invoke()
+            }
         }
     }
 
@@ -392,6 +410,7 @@ fun SeekMailScreen(
                         selectedLocalTagId = uiState.selectedLocalTagId,
                         totalMailCount = uiState.totalMailCount,
                         unreadCount = uiState.unreadLoadedCount,
+                        archivedCount = uiState.archivedMailCount,
                         onSelectFilterMode = viewModel::selectFilterMode,
                         onToggleTag = viewModel::toggleTagFilter,
                         onToggleLocalTag = viewModel::toggleLocalTagFilter,
@@ -414,7 +433,7 @@ fun SeekMailScreen(
                         onOpenCreateMailbox = viewModel::openCreateMailboxSheet,
                         onManageApiKey = openApiKeyDialog,
                         onOpenMail = viewModel::openMail,
-                        onLongClickMail = viewModel::openMailTagSheet,
+                        onLongClickMail = viewModel::openMailActionSheet,
                         onCopyCode = { code ->
                             copyWithFeedback("验证码", code, "已复制验证码：$code")
                         },
@@ -446,6 +465,14 @@ fun SeekMailScreen(
                 onToggleVpsPasswordVisibility = viewModel::toggleVpsPasswordVisibility,
                 onIngestVpsMail = viewModel::ingestOpenedVpsMail,
                 onManageMailTags = { summary -> viewModel.openMailTagSheet(summary) },
+                onToggleArchive = { summary ->
+                    if (summary.id in uiState.archivedMailIds) {
+                        viewModel.unarchiveMail(summary)
+                    } else {
+                        viewModel.archiveMail(summary)
+                    }
+                },
+                onDeleteMail = { summary -> viewModel.requestDeleteMail(summary) },
                 onCopyCode = { code ->
                     copyWithFeedback("验证码", code, "已复制验证码：$code")
                 },
@@ -503,6 +530,42 @@ fun SeekMailScreen(
                 copyWithFeedback("联系人邮箱", email, "已复制邮箱：$email")
             },
             onDismiss = viewModel::dismissContactsSheet,
+        )
+    }
+
+    uiState.actionTargetMail?.let { targetMail ->
+        val isArchived = targetMail.id in uiState.archivedMailIds
+        val localTagsForTarget = uiState.localTagsByMailId[targetMail.id].orEmpty()
+        SeekMailActionBottomSheet(
+            mail = targetMail,
+            isArchived = isArchived,
+            localTags = localTagsForTarget,
+            onToggleArchive = {
+                if (isArchived) {
+                    viewModel.unarchiveMail(targetMail)
+                } else {
+                    viewModel.archiveMail(targetMail)
+                }
+            },
+            onManageTags = viewModel::openTagSheetFromActionSheet,
+            onRequestDelete = { viewModel.requestDeleteMail(targetMail) },
+            onDismiss = viewModel::dismissMailActionSheet,
+        )
+    }
+
+    uiState.pendingDeleteMail?.let { deleteTarget ->
+        val subjectPreview = deleteTarget.subject.ifBlank {
+            deleteTarget.fromName.ifBlank { deleteTarget.fromAddress }.ifBlank { "这封邮件" }
+        }
+        PulseConfirmDialog(
+            onDismissRequest = viewModel::dismissDeleteMailDialog,
+            icon = Icons.Rounded.DeleteOutline,
+            tone = PulseDialogTone.DESTRUCTIVE,
+            title = "删除这封邮件？",
+            message = "「$subjectPreview」将从本机列表中移除（不影响 seek.li 服务器原件），删除后可在提示栏点击撤销。",
+            confirmText = "确认删除",
+            dismissText = "取消",
+            onConfirm = viewModel::confirmDeleteMail,
         )
     }
 
@@ -1616,6 +1679,7 @@ private fun SeekMailFilterAndTagRail(
     selectedLocalTagId: String?,
     totalMailCount: Int,
     unreadCount: Int,
+    archivedCount: Int,
     onSelectFilterMode: (SeekMailFilterMode) -> Unit,
     onToggleTag: (Long) -> Unit,
     onToggleLocalTag: (String) -> Unit,
@@ -1645,6 +1709,17 @@ private fun SeekMailFilterAndTagRail(
                 selected = selected,
                 icon = Icons.Rounded.MarkEmailUnread,
                 onClick = { onSelectFilterMode(SeekMailFilterMode.UNREAD) },
+            )
+        }
+
+        item(key = "filter_archived") {
+            val selected = filterMode == SeekMailFilterMode.ARCHIVED && selectedLocalTagId == null
+            val label = if (archivedCount > 0) "已存档 · $archivedCount" else "已存档"
+            CompactMailFilterPill(
+                label = label,
+                selected = selected,
+                icon = Icons.Rounded.Archive,
+                onClick = { onSelectFilterMode(SeekMailFilterMode.ARCHIVED) },
             )
         }
 
@@ -1882,12 +1957,16 @@ private fun SeekMailListPane(
             }
 
             uiState.mails.isEmpty() -> {
+                val isArchivedFilter = uiState.filterMode == SeekMailFilterMode.ARCHIVED
                 val hasFilters = uiState.selectedMailboxId != null ||
                     uiState.selectedTagId != null ||
                     uiState.selectedLocalTagId != null ||
                     uiState.activeSearchQuery.isNotBlank() ||
-                    uiState.filterMode == SeekMailFilterMode.UNREAD
+                    uiState.filterMode == SeekMailFilterMode.UNREAD ||
+                    isArchivedFilter
                 val title = when {
+                    isArchivedFilter && uiState.activeSearchQuery.isNotBlank() -> "未找到匹配的已存档邮件"
+                    isArchivedFilter -> "暂无已存档邮件"
                     uiState.activeSearchQuery.isNotBlank() -> "未找到匹配邮件"
                     uiState.filterMode == SeekMailFilterMode.UNREAD -> "太棒了，暂无未读邮件"
                     uiState.selectedLocalTag != null -> "「${uiState.selectedLocalTag?.name}」标签下暂无邮件"
@@ -1896,32 +1975,41 @@ private fun SeekMailListPane(
                     else -> "收件箱暂无邮件"
                 }
                 val subtitle = when {
+                    isArchivedFilter && uiState.activeSearchQuery.isNotBlank() ->
+                        "当前已存档邮件中暂无包含该关键词的记录，可清除搜索或切换回全部邮件。"
+                    isArchivedFilter ->
+                        "长按任意邮件选择「存档邮件」，即可将重要邮件收纳至此，随时查阅或取消存档。"
                     uiState.selectedLocalTag != null && uiState.hasMoreMails ->
                         "当前已加载页面中没有该标签的邮件，您可以加载更多历史邮件或清除筛选。"
                     uiState.selectedLocalTag != null ->
-                        "长按任意邮件可快速为其添加或移除本地标签。"
+                        "长按任意邮件可快速管理标签、存档或删除。"
+                    uiState.hasMoreMails ->
+                        "当前页邮件已处理完毕，可继续加载更多历史邮件或下拉刷新。"
                     hasFilters -> "您可以清除当前筛选条件，或下拉刷新同步最新来信。"
                     else -> "您可以向任意自有域名别名发送一封测试邮件，或创建一个新的临时别名。"
                 }
                 SeekMailEmptyStateCard(
-                    icon = if (uiState.activeSearchQuery.isNotBlank()) {
-                        Icons.Rounded.SearchOff
-                    } else if (uiState.selectedLocalTag != null) {
-                        Icons.AutoMirrored.Rounded.Label
-                    } else {
-                        Icons.Rounded.Mail
+                    icon = when {
+                        uiState.activeSearchQuery.isNotBlank() -> Icons.Rounded.SearchOff
+                        isArchivedFilter -> Icons.Rounded.Archive
+                        uiState.selectedLocalTag != null -> Icons.AutoMirrored.Rounded.Label
+                        else -> Icons.Rounded.Mail
                     },
                     title = title,
                     subtitle = subtitle,
-                    actionLabel = if (hasFilters) "查看全部邮件" else "新建邮箱别名",
+                    actionLabel = when {
+                        isArchivedFilter -> "返回收件箱"
+                        hasFilters -> "查看全部邮件"
+                        else -> "新建邮箱别名"
+                    },
                     actionIcon = if (hasFilters) Icons.Rounded.Refresh else Icons.Rounded.Add,
                     onAction = if (hasFilters) onClearFilters else onOpenCreateMailbox,
-                    secondaryActionLabel = if (uiState.selectedLocalTag != null && uiState.hasMoreMails) {
+                    secondaryActionLabel = if (uiState.hasMoreMails) {
                         "加载更多邮件"
                     } else {
                         null
                     },
-                    onSecondaryAction = if (uiState.selectedLocalTag != null && uiState.hasMoreMails) {
+                    onSecondaryAction = if (uiState.hasMoreMails) {
                         onLoadMore
                     } else {
                         null
@@ -1991,10 +2079,13 @@ private fun SeekMailListPane(
                         key = { _, mail -> mail.id },
                     ) { index, mail ->
                         val localTags = uiState.localTagsByMailId[mail.id].orEmpty()
+                        val showArchivedBadge = uiState.filterMode != SeekMailFilterMode.ARCHIVED &&
+                            mail.id in uiState.archivedMailIds
                         PulseStaggeredEntrance(index = index.coerceAtMost(6)) {
                             SeekMailSummaryCard(
                                 mail = mail,
                                 localTags = localTags,
+                                showArchivedBadge = showArchivedBadge,
                                 onClick = { onOpenMail(mail) },
                                 onLongClick = { onLongClickMail(mail) },
                                 onCopyCode = { code -> onCopyCode(code) },
@@ -2038,8 +2129,13 @@ private fun SeekMailListPane(
                                 }
 
                                 else -> {
+                                    val footerHint = if (uiState.filterMode == SeekMailFilterMode.ARCHIVED) {
+                                        "已显示全部 ${uiState.mails.size} 封已存档邮件 · 长按可取消存档、打标签或删除"
+                                    } else {
+                                        "已显示全部 ${uiState.mails.size} 封邮件 · 长按可存档、打标签或删除"
+                                    }
                                     Text(
-                                        text = "已显示全部 ${uiState.mails.size} 封邮件 · 长按邮件可打标签",
+                                        text = footerHint,
                                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -2058,6 +2154,7 @@ private fun SeekMailListPane(
 private fun SeekMailSummaryCard(
     mail: SeekMailSummary,
     localTags: List<SeekMailLocalTag>,
+    showArchivedBadge: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onCopyCode: (String) -> Unit,
@@ -2098,7 +2195,7 @@ private fun SeekMailSummaryCard(
     val vpsHint = remember(mail.id, mail.subject, mail.snippet, mail.fromName, mail.fromAddress) {
         VpsBillingMailParser.parseSummaryHint(mail)
     }
-    val hasBadgeRow = otpCode != null || vpsHint != null || mail.tags.isNotEmpty() || localTags.isNotEmpty()
+    val hasBadgeRow = showArchivedBadge || otpCode != null || vpsHint != null || mail.tags.isNotEmpty() || localTags.isNotEmpty()
 
     Row(
         modifier = Modifier
@@ -2135,7 +2232,7 @@ private fun SeekMailSummaryCard(
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     onLongClick()
                 },
-                onLongClickLabel = "管理邮件标签",
+                onLongClickLabel = "邮件操作（存档、标签、删除）",
             )
             .padding(start = 11.dp, end = 11.dp, top = 8.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(9.dp),
@@ -2234,13 +2331,16 @@ private fun SeekMailSummaryCard(
                 )
             }
 
-            // ── 4. Compact OTP / VPS / Tag Badges Row (only when present) ──
+            // ── 4. Compact OTP / VPS / Archived / Tag Badges Row (only when present) ──
             if (hasBadgeRow) {
                 FlowRow(
                     modifier = Modifier.padding(top = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    if (showArchivedBadge) {
+                        ArchivedMailMicroBadge()
+                    }
                     if (otpCode != null) {
                         OtpQuickCopyPill(
                             code = otpCode,
@@ -2328,7 +2428,49 @@ private fun OtpQuickCopyPill(
 }
 
 @Composable
-private fun MailSenderAvatar(
+private fun ArchivedMailMicroBadge(
+    modifier: Modifier = Modifier,
+) {
+    val isDark = NodePulseThemeTokens.isDark
+    val fontScale = NodePulseThemeTokens.fontScale
+    val accentColor = MaterialTheme.colorScheme.secondary
+    val shape = RoundedCornerShape(6.dp)
+
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(accentColor.copy(alpha = if (isDark) 0.18f else 0.10f))
+            .border(
+                width = 0.7.dp,
+                color = accentColor.copy(alpha = if (isDark) 0.42f else 0.25f),
+                shape = shape,
+            )
+            .padding(horizontal = 5.5.dp, vertical = 1.5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Archive,
+            contentDescription = null,
+            tint = accentColor,
+            modifier = Modifier.size(10.5.dp),
+        )
+        Text(
+            text = "已存档",
+            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
+                fontSize = (10f * fontScale).sp,
+                lineHeight = (13f * fontScale).sp,
+                fontWeight = FontWeight.SemiBold,
+            ),
+            color = accentColor,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+internal fun MailSenderAvatar(
     senderName: String,
     senderAddress: String,
     isUnread: Boolean,
@@ -2521,6 +2663,8 @@ private fun SeekMailDetailReaderPane(
     onToggleVpsPasswordVisibility: () -> Unit,
     onIngestVpsMail: () -> Unit,
     onManageMailTags: (SeekMailSummary) -> Unit,
+    onToggleArchive: (SeekMailSummary) -> Unit,
+    onDeleteMail: (SeekMailSummary) -> Unit,
     onCopyCode: (String) -> Unit,
     onCopyText: (label: String, text: String, toast: String) -> Unit,
     onDownloadAttachment: (SeekMailAttachment) -> Unit,
@@ -2528,6 +2672,7 @@ private fun SeekMailDetailReaderPane(
 ) {
     val detail = uiState.openedDetail
     val summary = detail?.summary ?: uiState.openedPreviewSummary
+    val isOpenedMailArchived = summary != null && summary.id in uiState.archivedMailIds
     val localTagsForOpened = remember(uiState.localTagsByMailId, summary?.id) {
         summary?.id?.let { uiState.localTagsByMailId[it] }.orEmpty()
     }
@@ -2585,23 +2730,44 @@ private fun SeekMailDetailReaderPane(
                             )
                         }
                     }
-                    if (summary != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (summary != null) {
+                            MailTopCircleButton(
+                                icon = if (isOpenedMailArchived) Icons.Rounded.Unarchive else Icons.Rounded.Archive,
+                                contentDescription = if (isOpenedMailArchived) "取消存档" else "存档邮件",
+                                onClick = { onToggleArchive(summary) },
+                                tint = if (isOpenedMailArchived) {
+                                    MaterialTheme.colorScheme.secondary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                            MailTopCircleButton(
+                                icon = Icons.AutoMirrored.Rounded.Label,
+                                contentDescription = "管理邮件标签",
+                                onClick = { onManageMailTags(summary) },
+                                tint = if (localTagsForOpened.isNotEmpty()) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                            MailTopCircleButton(
+                                icon = Icons.Rounded.DeleteOutline,
+                                contentDescription = "删除邮件",
+                                onClick = { onDeleteMail(summary) },
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                        }
                         MailTopCircleButton(
-                            icon = Icons.AutoMirrored.Rounded.Label,
-                            contentDescription = "管理邮件标签",
-                            onClick = { onManageMailTags(summary) },
-                            tint = if (localTagsForOpened.isNotEmpty()) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
+                            icon = Icons.Rounded.Refresh,
+                            contentDescription = "刷新邮件详情",
+                            onClick = onRetryDetail,
                         )
                     }
-                    MailTopCircleButton(
-                        icon = Icons.Rounded.Refresh,
-                        contentDescription = "刷新邮件详情",
-                        onClick = onRetryDetail,
-                    )
                 }
 
                 ReaderModeSegmentedBar(

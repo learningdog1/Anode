@@ -7,8 +7,11 @@ import kotlinx.coroutines.flow.asStateFlow
 private val EMPTY_LOCAL_TAG_STORE_FLOW: StateFlow<SeekMailLocalTagStore> =
     MutableStateFlow(SeekMailLocalTagStore()).asStateFlow()
 
+private val EMPTY_LOCAL_ARCHIVE_STORE_FLOW: StateFlow<SeekMailLocalArchiveStore> =
+    MutableStateFlow(SeekMailLocalArchiveStore()).asStateFlow()
+
 /**
- * Domain repository for Seek Mail (`seek.li`) OpenAPI operations, local read/tag tracking,
+ * Domain repository for Seek Mail (`seek.li`) OpenAPI operations, local read/tag/archive tracking,
  * and client-side response caching.
  */
 interface SeekMailRepository {
@@ -16,6 +19,8 @@ interface SeekMailRepository {
     val latestRateLimit: StateFlow<SeekMailRateLimit?>
     val localTagStore: StateFlow<SeekMailLocalTagStore>
         get() = EMPTY_LOCAL_TAG_STORE_FLOW
+    val localArchiveStore: StateFlow<SeekMailLocalArchiveStore>
+        get() = EMPTY_LOCAL_ARCHIVE_STORE_FLOW
 
     suspend fun verifyApiKey(candidateKey: String? = null): Result<SeekMailConnectionStatus>
 
@@ -75,6 +80,17 @@ interface SeekMailRepository {
     suspend fun toggleLocalTagForMail(mailId: Long, tagId: String) = Unit
 
     suspend fun setLocalTagsForMail(mailId: Long, tagIds: List<String>) = Unit
+
+    suspend fun archiveMailLocally(summary: SeekMailSummary) = Unit
+
+    suspend fun unarchiveMailLocally(mailId: Long) = Unit
+
+    suspend fun deleteMailLocally(mailId: Long) = Unit
+
+    suspend fun restoreDeletedMailLocally(
+        mailId: Long,
+        restoredArchiveSummary: SeekMailSummary? = null,
+    ) = Unit
 
     suspend fun clearCache()
 }

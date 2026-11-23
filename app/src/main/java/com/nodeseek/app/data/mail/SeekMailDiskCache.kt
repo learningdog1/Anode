@@ -2,6 +2,7 @@ package com.nodeseek.app.data.mail
 
 import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
+import com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore
 import com.nodeseek.app.domain.mail.SeekMailLocalTagStore
 import com.nodeseek.app.domain.mail.SeekMailPage
 import com.nodeseek.app.domain.mail.SeekMailTag
@@ -64,6 +65,12 @@ private data class CachedLocalTagStoreEntry(
     val store: SeekMailLocalTagStore,
 )
 
+@Serializable
+private data class CachedLocalArchiveStoreEntry(
+    val updatedAtEpochMillis: Long,
+    val store: SeekMailLocalArchiveStore,
+)
+
 /**
  * Two-tier (in-memory + atomic JSON disk) cache for Seek Mail (`seek.li`) resources.
  *
@@ -87,6 +94,7 @@ class SeekMailDiskCache(
     private val mailDetailMemory = ConcurrentHashMap<String, CachedMailDetailEntry>()
     private val locallyReadMemory = ConcurrentHashMap<String, Set<Long>>()
     private val localTagStoreMemory = ConcurrentHashMap<String, SeekMailLocalTagStore>()
+    private val localArchiveStoreMemory = ConcurrentHashMap<String, SeekMailLocalArchiveStore>()
 
     suspend fun getMailboxes(apiKey: String): CachedMailboxesEntry? {
         val ns = keyNamespace(apiKey) ?: return null
@@ -289,6 +297,34 @@ class SeekMailDiskCache(
         )
     }
 
+    suspend fun getLocalArchiveStore(apiKey: String): SeekMailLocalArchiveStore {
+        val ns = keyNamespace(apiKey) ?: return SeekMailLocalArchiveStore()
+        val key = "${ns}_local_archive"
+        localArchiveStoreMemory[key]?.let { return it }
+        val loaded = readFromDisk(key, CachedLocalArchiveStoreEntry.serializer())?.store
+            ?: SeekMailLocalArchiveStore()
+        localArchiveStoreMemory[key] = loaded
+        return loaded
+    }
+
+    suspend fun saveLocalArchiveStore(
+        apiKey: String,
+        store: SeekMailLocalArchiveStore,
+        updatedAtEpochMillis: Long = System.currentTimeMillis(),
+    ) {
+        val ns = keyNamespace(apiKey) ?: return
+        val key = "${ns}_local_archive"
+        localArchiveStoreMemory[key] = store
+        writeToDisk(
+            key = key,
+            serializer = CachedLocalArchiveStoreEntry.serializer(),
+            value = CachedLocalArchiveStoreEntry(
+                updatedAtEpochMillis = updatedAtEpochMillis,
+                store = store,
+            ),
+        )
+    }
+
     suspend fun clearForKey(apiKey: String) {
         val ns = keyNamespace(apiKey) ?: return
         val prefix = "${ns}_"
@@ -299,6 +335,7 @@ class SeekMailDiskCache(
         removeKeysWithPrefix(mailDetailMemory, prefix)
         removeKeysWithPrefix(locallyReadMemory, prefix)
         removeKeysWithPrefix(localTagStoreMemory, prefix)
+        removeKeysWithPrefix(localArchiveStoreMemory, prefix)
 
         withContext(ioDispatcher) {
             diskMutex.withLock {
@@ -319,6 +356,7 @@ class SeekMailDiskCache(
         mailDetailMemory.clear()
         locallyReadMemory.clear()
         localTagStoreMemory.clear()
+        localArchiveStoreMemory.clear()
 
         withContext(ioDispatcher) {
             diskMutex.withLock {

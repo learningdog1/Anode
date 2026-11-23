@@ -3,6 +3,7 @@ package com.nodeseek.app.data.mail
 import com.nodeseek.app.data.repository.FakeSettingsRepository
 import com.nodeseek.app.domain.mail.SeekMailErrorKind
 import com.nodeseek.app.domain.mail.SeekMailException
+import com.nodeseek.app.domain.mail.SeekMailSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -389,6 +390,77 @@ class SeekMailRepositoryTest {
         settingsRepository.setSeekMailApiKey(dummyKeyB)
         withTimeout(5_000L) {
             repo.localTagStore.first { it.tags.isEmpty() && it.mailTagIds.isEmpty() }
+        }
+    }
+
+    @Test
+    fun `local archive and delete persist across restarts, support undo restore, and stay isolated per API key`(): Unit = runBlocking {
+        val repo = createRepository()
+        settingsRepository.setSeekMailApiKey(dummyKeyA)
+
+        val mailA = SeekMailSummary(
+            id = 901L,
+            mailboxId = 10L,
+            fromAddress = "billing@dmit.io",
+            fromName = "DMIT",
+            toAddress = "box1@seek.li",
+            subject = "Invoice #901",
+            snippet = "Paid invoice",
+            receivedAt = "2026-11-23T08:00:00Z",
+        )
+        val mailB = SeekMailSummary(
+            id = 902L,
+            mailboxId = 20L,
+            fromAddress = "alerts@nodeseek.com",
+            fromName = "NodeSeek",
+            toAddress = "box2@seek.li",
+            subject = "Security Alert",
+            snippet = "New login",
+            receivedAt = "2026-11-23T09:00:00Z",
+        )
+
+        repo.archiveMailLocally(mailA)
+        repo.archiveMailLocally(mailB)
+        repo.deleteMailLocally(903L)
+
+        assertTrue(repo.localArchiveStore.value.isArchived(901L))
+        assertTrue(repo.localArchiveStore.value.isArchived(902L))
+        assertTrue(repo.localArchiveStore.value.isDeleted(903L))
+        assertEquals(listOf(902L, 901L), repo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+        assertEquals(listOf(901L), repo.localArchiveStore.value.orderedArchivedMails(mailboxId = 10L).map { it.id })
+
+        // Cold-start repo reloads persisted archive & deleted state for Key A
+        val coldScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val coldRepo = createRepository(coldScope)
+            withTimeout(5_000L) {
+                coldRepo.localArchiveStore.first { it.archivedMails.size == 2 && 903L in it.deletedMailIds }
+            }
+            assertEquals(listOf(902L, 901L), coldRepo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+
+            // Deleting an archived mail removes it from archive and adds it to deletedMailIds
+            coldRepo.deleteMailLocally(902L)
+            assertTrue(coldRepo.localArchiveStore.value.isDeleted(902L))
+            assertEquals(listOf(901L), coldRepo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+
+            // Restoring a deleted archived mail puts it back in archive
+            coldRepo.restoreDeletedMailLocally(mailId = 902L, restoredArchiveSummary = mailB)
+            assertTrue(coldRepo.localArchiveStore.value.isArchived(902L))
+            assertTrue(!coldRepo.localArchiveStore.value.isDeleted(902L))
+
+            // Unarchiving removes mail from archive without deleting it
+            coldRepo.unarchiveMailLocally(901L)
+            assertTrue(!coldRepo.localArchiveStore.value.isArchived(901L))
+            assertTrue(!coldRepo.localArchiveStore.value.isDeleted(901L))
+            assertEquals(listOf(902L), coldRepo.localArchiveStore.value.orderedArchivedMails().map { it.id })
+        } finally {
+            coldScope.cancel()
+        }
+
+        // Switching to Key B isolates local archive & delete store
+        settingsRepository.setSeekMailApiKey(dummyKeyB)
+        withTimeout(5_000L) {
+            repo.localArchiveStore.first { it.archivedMails.isEmpty() && it.deletedMailIds.isEmpty() }
         }
     }
 }
