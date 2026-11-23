@@ -65,7 +65,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -113,6 +112,7 @@ import com.nodeseek.app.ui.components.FloorNumberPill
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogTone
@@ -1752,28 +1752,31 @@ private fun EditOwnProfileDialog(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
+            PulseTextField(
                 value = bio,
                 onValueChange = { bio = it },
-                label = { Text("个人一句话简介 (Bio)") },
-                shape = RoundedCornerShape(14.dp),
+                label = "个人一句话简介 (Bio)",
+                placeholder = "用一句话介绍自己…",
+                singleLine = false,
                 maxLines = 3,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            PulseTextField(
                 value = signature,
                 onValueChange = { signature = it },
-                label = { Text("帖子底部签名 (支持 Markdown)") },
-                shape = RoundedCornerShape(14.dp),
+                label = "帖子底部签名 (支持 Markdown)",
+                placeholder = "展示在发帖/回复底部的个性签名…",
+                singleLine = false,
                 minLines = 2,
                 maxLines = 5,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            PulseTextField(
                 value = readme,
                 onValueChange = { readme = it },
-                label = { Text("主页 README (支持 Markdown)") },
-                shape = RoundedCornerShape(14.dp),
+                label = "主页 README (支持 Markdown)",
+                placeholder = "填写个人主页介绍内容…",
+                singleLine = false,
                 minLines = 4,
                 maxLines = 8,
                 modifier = Modifier.fillMaxWidth(),

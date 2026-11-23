@@ -42,7 +42,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,6 +67,7 @@ import com.nodeseek.app.domain.ssh.SshExecutionRecord
 import com.nodeseek.app.domain.ssh.SshFormattedPost
 import com.nodeseek.app.domain.ssh.SshMergeLayout
 import com.nodeseek.app.ui.components.MarkdownRenderer
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -491,10 +491,11 @@ internal fun SshResultPublishSheet(
 
             // Editable post title
             if (suggestedTitle.isNotEmpty() || customTitle.isNotEmpty()) {
-                OutlinedTextField(
+                PulseTextField(
                     value = customTitle,
                     onValueChange = { customTitle = it },
-                    label = { Text("测评帖标题") },
+                    label = "测评帖标题",
+                    placeholder = "输入测评帖子标题…",
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

@@ -89,7 +89,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -133,6 +132,7 @@ import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.components.formatRelativeTimeChinese
@@ -960,19 +960,12 @@ private fun QuickAddUrlBarCard(
             }
         }
 
-        OutlinedTextField(
+        PulseTextField(
             value = urlInput,
             onValueChange = onUrlChange,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = {
-                Text(
-                    text = "粘贴 cart.php / 商家商品页 / NodeSeek 跳转链接",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            },
+            placeholder = "粘贴 cart.php / 商家商品页 / NodeSeek 跳转链接",
             singleLine = true,
-            shape = PulseArchitecturalShapes.MediumBadge,
             trailingIcon = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (urlInput.isNotEmpty()) {
@@ -1788,15 +1781,13 @@ private fun RestockMonitorSettingsBottomSheet(
             )
 
             if (settings.flareSolverr.enabled) {
-                OutlinedTextField(
+                PulseTextField(
                     value = settings.flareSolverr.baseUrl,
                     onValueChange = onFlareSolverrBaseUrlChange,
                     singleLine = true,
-                    label = { Text("FlareSolverr 服务地址") },
-                    placeholder = { Text("http://192.168.1.10:8191") },
-                    supportingText = {
-                        Text("部署在 NAS / VPS 上的 FlareSolverr 实例，默认端口 8191")
-                    },
+                    label = "FlareSolverr 服务地址",
+                    placeholder = "http://192.168.1.10:8191",
+                    supportingText = "部署在 NAS / VPS 上的 FlareSolverr 实例，默认端口 8191",
                     modifier = Modifier.fillMaxWidth(),
                 )
 

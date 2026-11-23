@@ -52,7 +52,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -104,6 +103,7 @@ import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.TurnstileVerificationWidget
 import com.nodeseek.app.ui.components.WebViewSessionSheet
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -1362,12 +1362,12 @@ private fun NativeCredentialSignInDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = otpCode,
                     onValueChange = { otpCode = it },
-                    label = { Text("两步验证码") },
+                    label = "两步验证码",
+                    placeholder = "输入 6 位动态验证码",
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -1390,20 +1390,20 @@ private fun NativeCredentialSignInDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = { Text("用户名 / 邮箱") },
+                    label = "用户名 / 邮箱",
+                    placeholder = "输入论坛用户名或绑定邮箱",
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("密码") },
+                    label = "密码",
+                    placeholder = "输入登录密码",
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
                     visualTransformation = if (showPassword) {
                         VisualTransformation.None
                     } else {

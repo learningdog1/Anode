@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
@@ -50,9 +49,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
@@ -106,11 +102,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -123,7 +116,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -139,6 +131,7 @@ import com.nodeseek.app.ui.components.CollapsiblePinnedTicker
 import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PinnedTickerTopic
 import com.nodeseek.app.ui.components.PulseAvatar
+import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.PulseTopicCard
 import com.nodeseek.app.ui.components.PulseTopicCardSkeleton
@@ -560,33 +553,6 @@ private fun BoardsDirectorySearchHeader(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val extraType = NodePulseThemeTokens.extraTypography
-    val isDark = NodePulseThemeTokens.isDark
-    val keyboardController = LocalSoftwareKeyboardController.current
-    var isFieldFocused by remember { mutableStateOf(false) }
-    val searchHighlighted = isFieldFocused
-
-    val searchBorderWidth by animateDpAsState(
-        targetValue = if (searchHighlighted) 1.4.dp else 1.dp,
-        animationSpec = NodePulseMotion.spatialDpSpring(),
-        label = "searchBarBorderWidth",
-    )
-    val searchBorderBrush = if (searchHighlighted) {
-        PulseBrushes.brandGradient()
-    } else {
-        SolidColor(ext.cardBorder)
-    }
-    val searchContainerColor by animateColorAsState(
-        targetValue = if (searchHighlighted) ext.cardSurfaceElevated else ext.cardSurface,
-        label = "searchBarContainer",
-    )
-    val searchIconTint by animateColorAsState(
-        targetValue = if (searchHighlighted) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        },
-        label = "searchIconTint",
-    )
 
     Column(
         modifier = Modifier
@@ -697,102 +663,21 @@ private fun BoardsDirectorySearchHeader(
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(46.dp)
-                    .then(
-                        if (!isDark) {
-                            Modifier.shadow(
-                                elevation = if (searchHighlighted) PulseElevation.CardElevated else PulseElevation.Subtle,
-                                shape = PulseArchitecturalShapes.Pill,
-                                clip = false,
-                                ambientColor = ext.softShadowColor,
-                                spotColor = ext.softShadowColor,
-                            )
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .clip(PulseArchitecturalShapes.Pill)
-                    .background(searchContainerColor)
-                    .border(
-                        width = searchBorderWidth,
-                        brush = searchBorderBrush,
-                        shape = PulseArchitecturalShapes.Pill,
-                    )
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) {
-                        runCatching { focusRequester.requestFocus() }
-                        keyboardController?.show()
+            PulseSearchField(
+                value = query,
+                onValueChange = onQueryChange,
+                placeholder = "筛选版块，或输入关键词搜帖子 / 用户…",
+                minHeight = 46.dp,
+                onClear = onClearInput,
+                onSearch = onSubmitSearch,
+                focusRequester = focusRequester,
+                onFocusChanged = { focused ->
+                    if (focused && !isSearchActive) {
+                        onFocusSearch()
                     }
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Search,
-                    contentDescription = null,
-                    tint = searchIconTint,
-                    modifier = Modifier.size(19.dp),
-                )
-
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    if (query.isEmpty()) {
-                        Text(
-                            text = "筛选版块，或输入关键词搜帖子 / 用户…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    BasicTextField(
-                        value = query,
-                        onValueChange = onQueryChange,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            color = MaterialTheme.colorScheme.onSurface,
-                        ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = { onSubmitSearch() }),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { state ->
-                                isFieldFocused = state.isFocused
-                                if (state.isFocused && !isSearchActive) {
-                                    onFocusSearch()
-                                }
-                            },
-                    )
-                }
-
-                AnimatedVisibility(
-                    visible = query.isNotEmpty(),
-                    enter = scaleIn(NodePulseMotion.microBounceSpring()) + fadeIn(),
-                    exit = fadeOut(tween(120)),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(26.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                            .clickable(role = Role.Button, onClick = onClearInput),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "清空输入",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
-                }
-            }
+                },
+                modifier = Modifier.weight(1f),
+            )
 
             AnimatedVisibility(
                 visible = isSearchActive && query.isNotBlank(),

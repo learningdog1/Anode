@@ -52,7 +52,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -81,6 +80,7 @@ import com.nodeseek.app.domain.restock.RestockStockStatus
 import com.nodeseek.app.domain.restock.RestockWatchDraft
 import com.nodeseek.app.domain.restock.RestockWatchItem
 import com.nodeseek.app.domain.restock.StockAnalysisResult
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseGradientDivider
@@ -242,7 +242,7 @@ fun AddRestockWatchBottomSheet(
             }
 
             // Product URL input + 1-click Probe
-            OutlinedTextField(
+            PulseTextField(
                 value = urlText,
                 onValueChange = {
                     urlText = it
@@ -250,8 +250,8 @@ fun AddRestockWatchBottomSheet(
                     probeResult = null
                 },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("商品 / 下单页链接") },
-                placeholder = { Text("https://my.merchant.com/cart.php?a=add&pid=123") },
+                label = "商品 / 下单页链接",
+                placeholder = "https://my.merchant.com/cart.php?a=add&pid=123",
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Rounded.Link,
@@ -260,18 +260,22 @@ fun AddRestockWatchBottomSheet(
                     )
                 },
                 isError = urlError != null,
-                supportingText = {
-                    when {
-                        urlError != null -> Text(urlError!!)
-                        wasUnwrapped -> Text(
-                            text = "已自动解包直达链接：$resolvedPreviewUrl",
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                supportingContent = when {
+                    urlError != null -> {
+                        { Text(urlError!!) }
                     }
+                    wasUnwrapped -> {
+                        {
+                            Text(
+                                text = "已自动解包直达链接：$resolvedPreviewUrl",
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    else -> null
                 },
                 singleLine = true,
-                shape = PulseArchitecturalShapes.MediumBadge,
             )
 
             Row(
@@ -365,24 +369,22 @@ fun AddRestockWatchBottomSheet(
             }
 
             // Title & Price inputs
-            OutlinedTextField(
+            PulseTextField(
                 value = titleText,
                 onValueChange = { titleText = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("商品名称（留空自动提取）") },
-                placeholder = { Text("例如：RackNerd 2C2G 年付特惠款") },
+                label = "商品名称（留空自动提取）",
+                placeholder = "例如：RackNerd 2C2G 年付特惠款",
                 singleLine = true,
-                shape = PulseArchitecturalShapes.MediumBadge,
             )
 
-            OutlinedTextField(
+            PulseTextField(
                 value = priceHintText,
                 onValueChange = { priceHintText = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("参考价格（可选）") },
-                placeholder = { Text("例如：$10.98/年 或 ¥99/年") },
+                label = "参考价格（可选）",
+                placeholder = "例如：$10.98/年 或 ¥99/年",
                 singleLine = true,
-                shape = PulseArchitecturalShapes.MediumBadge,
             )
 
             // Panel type selector
@@ -480,23 +482,21 @@ fun AddRestockWatchBottomSheet(
                 exit = fadeOut() + shrinkVertically(),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = customInStockKeyword,
                         onValueChange = { customInStockKeyword = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("自定义有货关键词（逗号分隔）") },
-                        placeholder = { Text("例如：Order Now, 立即下单, 现货") },
+                        label = "自定义有货关键词（逗号分隔）",
+                        placeholder = "例如：Order Now, 立即下单, 现货",
                         singleLine = true,
-                        shape = PulseArchitecturalShapes.MediumBadge,
                     )
-                    OutlinedTextField(
+                    PulseTextField(
                         value = customOutOfStockKeyword,
                         onValueChange = { customOutOfStockKeyword = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("自定义缺货关键词（逗号分隔）") },
-                        placeholder = { Text("例如：Out of Stock, 已售罄, 补货中") },
+                        label = "自定义缺货关键词（逗号分隔）",
+                        placeholder = "例如：Out of Stock, 已售罄, 补货中",
                         singleLine = true,
-                        shape = PulseArchitecturalShapes.MediumBadge,
                     )
                 }
             }

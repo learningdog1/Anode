@@ -88,7 +88,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -137,6 +136,7 @@ import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RelativeTimeText
 import com.nodeseek.app.ui.components.formatBadgeCount
 import com.nodeseek.app.ui.theme.CategoryPalette
@@ -1729,23 +1729,18 @@ private fun AddKeywordRuleBottomSheet(
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
             )
 
-            OutlinedTextField(
+            PulseTextField(
                 value = keyword,
                 onValueChange = {
                     keyword = it
                     onClearError()
                 },
-                label = { Text("关键词 / 正则表达式") },
-                placeholder = {
-                    Text(
-                        if (matchMode == KeywordMatchMode.REGEX) {
-                            "例如：(?i)(claw|dmit).*年付"
-                        } else {
-                            "例如：CN2、补货、鸡腿、甲骨文"
-                        },
-                    )
+                label = "关键词 / 正则表达式",
+                placeholder = if (matchMode == KeywordMatchMode.REGEX) {
+                    "例如：(?i)(claw|dmit).*年付"
+                } else {
+                    "例如：CN2、补货、鸡腿、甲骨文"
                 },
-                shape = RoundedCornerShape(14.dp),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -1778,15 +1773,14 @@ private fun AddKeywordRuleBottomSheet(
                 }
             }
 
-            OutlinedTextField(
+            PulseTextField(
                 value = excludeWords,
                 onValueChange = {
                     excludeWords = it
                     onClearError()
                 },
-                label = { Text("排除词（可选，英文/中文逗号分隔）") },
-                placeholder = { Text("例如：求购,已出,回收") },
-                shape = RoundedCornerShape(14.dp),
+                label = "排除词（可选，逗号分隔）",
+                placeholder = "例如：求购,已出,回收",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )

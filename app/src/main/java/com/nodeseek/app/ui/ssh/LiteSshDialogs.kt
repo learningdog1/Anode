@@ -27,7 +27,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -53,7 +52,6 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PostAdd
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Speed
@@ -74,7 +72,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -88,10 +85,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -119,6 +114,8 @@ import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseDropdownMenu
 import com.nodeseek.app.ui.components.PulseDropdownMenuItem
+import com.nodeseek.app.ui.components.PulseSearchField
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -354,10 +351,11 @@ internal fun SshServerEditorDialog(
                 )
             }
 
-            OutlinedTextField(
+            PulseTextField(
                 value = alias,
                 onValueChange = { alias = it; validationError = null },
-                label = { Text("备注名称（如 瓦工 DC6 / 日本软银）") },
+                label = "备注名称",
+                placeholder = "如 瓦工 DC6 / 日本软银",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -368,10 +366,11 @@ internal fun SshServerEditorDialog(
                     .distinctBy { it.lowercase() }
                     .take(8)
             }
-            OutlinedTextField(
+            PulseTextField(
                 value = groupTag,
                 onValueChange = { groupTag = it.take(20); validationError = null },
-                label = { Text("分组标签（可选，如 香港 / 美西 / 主力）") },
+                label = "分组标签（可选）",
+                placeholder = "如 香港 / 美西 / 主力",
                 singleLine = true,
                 trailingIcon = if (groupTag.isNotEmpty()) {
                     {
@@ -415,32 +414,33 @@ internal fun SshServerEditorDialog(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
+                PulseTextField(
                     value = host,
                     onValueChange = { host = it; validationError = null },
-                    label = { Text("主机地址 / IP") },
-                    placeholder = { Text("203.0.113.10") },
+                    label = "主机地址 / IP",
+                    placeholder = "203.0.113.10",
                     singleLine = true,
                     modifier = Modifier.weight(1.7f),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = portText,
                     onValueChange = { input ->
                         portText = input.filter { it.isDigit() }.take(5)
                         validationError = null
                     },
-                    label = { Text("端口") },
+                    label = "端口",
+                    placeholder = "22",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(0.8f),
                 )
             }
 
-            OutlinedTextField(
+            PulseTextField(
                 value = username,
                 onValueChange = { username = it },
-                label = { Text("用户名") },
-                placeholder = { Text("root") },
+                label = "用户名",
+                placeholder = "root",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -473,17 +473,14 @@ internal fun SshServerEditorDialog(
             }
 
             if (authMethod == SshAuthMethod.PASSWORD) {
-                OutlinedTextField(
+                PulseTextField(
                     value = secret,
                     onValueChange = { secret = it; validationError = null },
-                    label = {
-                        Text(
-                            if (isEditing && hasSavedSecret && existing?.authMethod == SshAuthMethod.PASSWORD) {
-                                "SSH 密码（留空保留原密码）"
-                            } else {
-                                "SSH 密码"
-                            },
-                        )
+                    label = "SSH 密码",
+                    placeholder = if (isEditing && hasSavedSecret && existing?.authMethod == SshAuthMethod.PASSWORD) {
+                        "留空保留原密码"
+                    } else {
+                        "输入 SSH 登录密码"
                     },
                     singleLine = true,
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -498,35 +495,29 @@ internal fun SshServerEditorDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
             } else {
-                OutlinedTextField(
+                PulseTextField(
                     value = secret,
                     onValueChange = { secret = it; validationError = null },
-                    label = {
-                        Text(
-                            if (isEditing && hasSavedSecret && existing?.authMethod == SshAuthMethod.PRIVATE_KEY) {
-                                "PEM / OpenSSH 私钥（留空保留原私钥）"
-                            } else {
-                                "PEM / OpenSSH 私钥内容"
-                            },
-                        )
+                    label = if (isEditing && hasSavedSecret && existing?.authMethod == SshAuthMethod.PRIVATE_KEY) {
+                        "PEM / OpenSSH 私钥（留空保留）"
+                    } else {
+                        "PEM / OpenSSH 私钥内容"
                     },
-                    placeholder = { Text("-----BEGIN OPENSSH PRIVATE KEY-----") },
+                    placeholder = "-----BEGIN OPENSSH PRIVATE KEY-----",
+                    singleLine = false,
                     minLines = 3,
                     maxLines = 5,
                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = passphrase,
                     onValueChange = { passphrase = it },
-                    label = {
-                        Text(
-                            if (isEditing && hasSavedPassphrase) {
-                                "私钥口令 Passphrase（可选，留空保留）"
-                            } else {
-                                "私钥口令 Passphrase（可选）"
-                            },
-                        )
+                    label = "私钥口令 (Passphrase)",
+                    placeholder = if (isEditing && hasSavedPassphrase) {
+                        "可选，留空保留原口令"
+                    } else {
+                        "无口令可留空"
                     },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
@@ -761,11 +752,11 @@ internal fun CustomSshPresetEditorDialog(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OutlinedTextField(
+            PulseTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("脚本名称") },
-                placeholder = { Text("例如：融合怪极简版") },
+                label = "脚本名称",
+                placeholder = "例如：融合怪极简版",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -799,26 +790,28 @@ internal fun CustomSshPresetEditorDialog(
                     }
                 }
             }
-            OutlinedTextField(
+            PulseTextField(
                 value = tabTitle,
                 onValueChange = { tabTitle = it },
-                label = { Text("测评 Tab 标题（可选）") },
-                placeholder = { Text("留空则默认使用脚本名称") },
+                label = "测评 Tab 标题（可选）",
+                placeholder = "留空则默认使用脚本名称",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            PulseTextField(
                 value = description,
                 onValueChange = { description = it },
-                label = { Text("简短说明（可选）") },
+                label = "简短说明（可选）",
+                placeholder = "补充脚本用途或注意事项",
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            PulseTextField(
                 value = command,
                 onValueChange = { command = it },
-                label = { Text("Shell 命令（将自动注入 TERM=xterm-256color）") },
-                placeholder = { Text("curl -sL ... | bash") },
+                label = "Shell 命令（自动注入 TERM）",
+                placeholder = "curl -sL ... | bash",
+                singleLine = false,
                 minLines = 3,
                 maxLines = 6,
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -1510,18 +1503,16 @@ fun Iperf3ServerControlDialog(
             }
 
             // Custom Port input + quick presets
-            OutlinedTextField(
+            PulseTextField(
                 value = portText,
                 onValueChange = onPortTextChange,
-                label = { Text("iperf3 监听端口（1 ~ 65535）") },
-                placeholder = { Text("默认 5201") },
+                label = "iperf3 监听端口（1 ~ 65535）",
+                placeholder = "默认 5201",
                 isError = portInvalid || portText.isBlank(),
-                supportingText = {
-                    if (portInvalid || portText.isBlank()) {
-                        Text("请输入 1 ~ 65535 之间的有效端口号")
-                    } else {
-                        Text("后台启动命令：iperf3 -s -p $validPort -D")
-                    }
+                supportingText = if (portInvalid || portText.isBlank()) {
+                    "请输入 1 ~ 65535 之间的有效端口号"
+                } else {
+                    "后台启动命令：iperf3 -s -p $validPort -D"
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -1854,84 +1845,28 @@ internal fun SshCompactSearchBar(
     matchCountSummary: String? = null,
     onClear: () -> Unit = { onValueChange("") },
 ) {
-    val hasQuery = value.isNotEmpty()
-    val shape = RoundedCornerShape(12.dp)
-    val borderColor = if (hasQuery) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.50f)
-    } else {
-        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
-    }
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(width = 0.9.dp, color = borderColor, shape = shape)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Search,
-            contentDescription = null,
-            tint = if (hasQuery) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(17.dp),
-        )
-
-        Box(
-            modifier = Modifier.weight(1f),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            if (value.isEmpty()) {
+    PulseSearchField(
+        value = value,
+        onValueChange = onValueChange,
+        placeholder = placeholder,
+        elevated = false,
+        minHeight = 40.dp,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        onClear = onClear,
+        trailingContent = if (!matchCountSummary.isNullOrBlank()) {
+            {
                 Text(
-                    text = placeholder,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                    text = matchCountSummary,
+                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodySmall.copy(
-                    color = MaterialTheme.colorScheme.onSurface,
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-
-        if (!matchCountSummary.isNullOrBlank()) {
-            Text(
-                text = matchCountSummary,
-                style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 1,
-            )
-        }
-
-        if (hasQuery) {
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                    .clickable(onClick = onClear),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "清空搜索",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(13.dp),
-                )
-            }
-        }
-    }
+        } else {
+            null
+        },
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 /**

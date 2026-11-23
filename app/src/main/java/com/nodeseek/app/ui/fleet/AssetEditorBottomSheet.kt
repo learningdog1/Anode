@@ -47,7 +47,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -84,6 +83,7 @@ import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.ui.components.PulseAlertDialog
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -214,49 +214,45 @@ internal fun AssetEditorBottomSheet(
             ) {
                 // 1. Machine Profile
                 PulseSectionHeader(title = "机器与线路信息", icon = Icons.Rounded.Memory)
-                OutlinedTextField(
+                PulseTextField(
                     value = nickname,
                     onValueChange = { nickname = it },
-                    label = { Text("资产备注名称 *") },
-                    placeholder = { Text("例如：瓦工 HK85 主力鸡") },
+                    label = "资产备注名称 *",
+                    placeholder = "例如：瓦工 HK85 主力鸡",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = providerName,
                         onValueChange = { providerName = it },
-                        label = { Text("商家名称") },
-                        placeholder = { Text("Bandwagon / DMIT") },
+                        label = "商家名称",
+                        placeholder = "Bandwagon / DMIT",
                         singleLine = true,
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.weight(1f),
                     )
-                    OutlinedTextField(
+                    PulseTextField(
                         value = region,
                         onValueChange = { region = it },
-                        label = { Text("机房 / 地区") },
-                        placeholder = { Text("洛杉矶 / 东京 / 香港") },
+                        label = "机房 / 地区",
+                        placeholder = "洛杉矶 / 东京 / 香港",
                         singleLine = true,
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.weight(1f),
                     )
                 }
-                OutlinedTextField(
+                PulseTextField(
                     value = specsSummary,
                     onValueChange = { specsSummary = it },
-                    label = { Text("硬件配置摘要") },
-                    placeholder = { Text("1C / 1G / 20G NVMe / 1TB") },
+                    label = "硬件配置摘要",
+                    placeholder = "1C / 1G / 20G NVMe / 1TB",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Row(
@@ -291,7 +287,7 @@ internal fun AssetEditorBottomSheet(
                         }
                     }
                 }
-                OutlinedTextField(
+                PulseTextField(
                     value = customTagInput,
                     onValueChange = { incoming ->
                         if (incoming.contains('\n') || incoming.contains('\r')) {
@@ -300,8 +296,8 @@ internal fun AssetEditorBottomSheet(
                             customTagInput = incoming
                         }
                     },
-                    label = { Text("自定义标签（按回车添加）") },
-                    placeholder = { Text("输入自定义标签后按回车创建") },
+                    label = "自定义标签（按回车添加）",
+                    placeholder = "输入自定义标签后按回车创建",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(
@@ -316,8 +312,7 @@ internal fun AssetEditorBottomSheet(
                     } else {
                         null
                     },
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier
                         .fillMaxWidth()
                         .onPreviewKeyEvent { keyEvent ->
@@ -380,15 +375,14 @@ internal fun AssetEditorBottomSheet(
                             modifier = Modifier.size(16.dp),
                         )
                     }
-                    OutlinedTextField(
+                    PulseTextField(
                         value = renewalAmount,
                         onValueChange = { renewalAmount = sanitizeAssetDecimal(it) },
-                        label = { Text("周期续费金额 *") },
-                        placeholder = { Text("请输入金额") },
+                        label = "周期续费金额 *",
+                        placeholder = "请输入金额",
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -407,14 +401,14 @@ internal fun AssetEditorBottomSheet(
                 }
 
                 AnimatedVisibility(visible = cyclePreset == BillingCyclePreset.CUSTOM) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = customCycleDays,
                         onValueChange = { customCycleDays = it.filter(Char::isDigit).take(4) },
-                        label = { Text("自定义周期天数") },
+                        label = "自定义周期天数",
+                        placeholder = "例如：365",
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -425,19 +419,18 @@ internal fun AssetEditorBottomSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = expiryDateIso,
                         onValueChange = { expiryDateIso = it },
-                        label = { Text("到期日期 (yyyy-MM-dd) *") },
-                        placeholder = { Text("例如：2027-11-19") },
+                        label = "到期日期 (yyyy-MM-dd) *",
+                        placeholder = "例如：2027-11-19",
                         singleLine = true,
                         trailingIcon = {
                             IconButton(onClick = { showDatePicker = true }) {
                                 Icon(Icons.Rounded.CalendarMonth, contentDescription = "选择日期")
                             }
                         },
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = fleetTextFieldColors(),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -547,15 +540,14 @@ internal fun AssetEditorBottomSheet(
 
                 // 4. Optional Links & Notes
                 PulseSectionHeader(title = "配额、重置日与备注", icon = Icons.Rounded.Link)
-                OutlinedTextField(
+                PulseTextField(
                     value = monthlyTrafficQuotaGb,
                     onValueChange = { monthlyTrafficQuotaGb = sanitizeAssetDecimal(it) },
-                    label = { Text("月流量配额 (GB，选填)") },
-                    placeholder = { Text("例如：1000") },
+                    label = "月流量配额 (GB，选填)",
+                    placeholder = "例如：1000",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -571,18 +563,15 @@ internal fun AssetEditorBottomSheet(
                     else ->
                         "未单独指定 · 默认每月 1 号"
                 }
-                OutlinedTextField(
+                PulseTextField(
                     value = trafficResetDayText,
                     onValueChange = { trafficResetDayText = it.filter(Char::isDigit).take(2) },
-                    label = { Text("流量重置日：每月 X 号（1-31，选填）") },
-                    placeholder = {
-                        Text(expiryFallbackDay?.let { "留空默认每月 $it 号" } ?: "留空默认每月 1 号")
-                    },
-                    supportingText = { Text(resetDaySupportingText) },
+                    label = "流量重置日：每月 X 号（1-31）",
+                    placeholder = expiryFallbackDay?.let { "留空默认每月 $it 号" } ?: "留空默认每月 1 号",
+                    supportingText = resetDaySupportingText,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 FlowRow(
@@ -604,42 +593,42 @@ internal fun AssetEditorBottomSheet(
                         )
                     }
                 }
-                OutlinedTextField(
+                PulseTextField(
                     value = purchaseUrl,
                     onValueChange = { purchaseUrl = it },
-                    label = { Text("购买页 / 订单链接（选填）") },
+                    label = "购买页 / 订单链接（选填）",
+                    placeholder = "https://...",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = panelManageUrl,
                     onValueChange = { panelManageUrl = it },
-                    label = { Text("控制面板链接（选填）") },
+                    label = "控制面板链接（选填）",
+                    placeholder = "https://...",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = autoRenewNote,
                     onValueChange = { autoRenewNote = it },
-                    label = { Text("续费备注 / 优惠码说明（选填）") },
-                    placeholder = { Text("例如：终身循环 7 折 / PayPal 自动扣费") },
+                    label = "续费备注 / 优惠码说明（选填）",
+                    placeholder = "例如：终身循环 7 折 / PayPal 自动扣费",
                     singleLine = true,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PulseTextField(
                     value = notes,
                     onValueChange = { notes = it },
-                    label = { Text("备注（选填）") },
+                    label = "备注（选填）",
+                    placeholder = "记录账号邮箱、IP 解锁或其他备忘…",
+                    singleLine = false,
                     minLines = 2,
                     maxLines = 4,
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = fleetTextFieldColors(),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
 

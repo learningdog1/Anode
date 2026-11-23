@@ -62,8 +62,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -115,6 +113,7 @@ import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogSecondaryButton
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -437,14 +436,13 @@ fun VpsValuationBottomSheet(
                     title = "套餐与续费参数",
                     icon = Icons.Rounded.CurrencyExchange,
                 ) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = machineLabel,
                         onValueChange = { if (it.length <= 120) machineLabel = it },
-                        label = { Text("套餐 / 机型名称（选填）") },
-                        placeholder = { Text("例如：RackNerd 2C2G DC02") },
+                        label = "套餐 / 机型名称（选填）",
+                        placeholder = "例如：RackNerd 2C2G DC02",
                         singleLine = true,
-                        shape = PulseArchitecturalShapes.MediumBadge,
-                        colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                        containerColor = ext.cardSurface,
                         modifier = Modifier.fillMaxWidth(),
                     )
 
@@ -458,15 +456,14 @@ fun VpsValuationBottomSheet(
                             onClick = { currencyPickerTarget = CurrencyPickerTarget.RENEWAL },
                             modifier = Modifier.padding(top = 6.dp),
                         )
-                        OutlinedTextField(
+                        PulseTextField(
                             value = renewalAmountText,
                             onValueChange = { renewalAmountText = sanitizeDecimalInput(it) },
-                            label = { Text("续费金额 (${currency.code})") },
-                            placeholder = { Text("10.00") },
+                            label = "续费金额 (${currency.code})",
+                            placeholder = "10.00",
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -508,14 +505,14 @@ fun VpsValuationBottomSheet(
                     }
 
                     AnimatedVisibility(visible = cyclePreset == BillingCyclePreset.CUSTOM) {
-                        OutlinedTextField(
+                        PulseTextField(
                             value = customDaysText,
                             onValueChange = { customDaysText = it.filter(Char::isDigit).take(4) },
-                            label = { Text("自定义周期天数 (1 ~ 3660 天)") },
+                            label = "自定义周期天数 (1 ~ 3660 天)",
+                            placeholder = "例如：365",
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(top = 4.dp),
@@ -682,15 +679,14 @@ fun VpsValuationBottomSheet(
                         icon = Icons.Rounded.Edit,
                         accentColor = MaterialTheme.colorScheme.tertiary,
                     ) {
-                        OutlinedTextField(
+                        PulseTextField(
                             value = askingPriceText,
                             onValueChange = { askingPriceText = sanitizeDecimalInput(it) },
-                            label = { Text("出让挂牌价 (CNY ¥)") },
-                            placeholder = { Text("50.00") },
+                            label = "出让挂牌价 (CNY ¥)",
+                            placeholder = "50.00",
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            shape = PulseArchitecturalShapes.MediumBadge,
-                            colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                            containerColor = ext.cardSurface,
                             modifier = Modifier.fillMaxWidth(),
                         )
 
@@ -713,14 +709,14 @@ fun VpsValuationBottomSheet(
                                 onClick = { currencyPickerTarget = CurrencyPickerTarget.PUSH },
                                 modifier = Modifier.padding(top = 6.dp),
                             )
-                            OutlinedTextField(
+                            PulseTextField(
                                 value = pushFeeText,
                                 onValueChange = { pushFeeText = sanitizeDecimalInput(it) },
-                                label = { Text("Push 费用 (${pushCurrency.code})") },
+                                label = "Push 费用 (${pushCurrency.code})",
+                                placeholder = "0.00",
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                shape = PulseArchitecturalShapes.MediumBadge,
-                                colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                                containerColor = ext.cardSurface,
                                 modifier = Modifier.weight(1f),
                             )
                         }
@@ -781,22 +777,18 @@ fun VpsValuationBottomSheet(
                                         )
                                     }
                                 }
-                                OutlinedTextField(
+                                PulseTextField(
                                     value = middlemanValueText,
                                     onValueChange = { middlemanValueText = sanitizeDecimalInput(it) },
-                                    label = {
-                                        Text(
-                                            if (middlemanMode == MiddlemanFeeMode.PERCENT) {
-                                                "中介费率 (%)"
-                                            } else {
-                                                "固定中介费 (CNY ¥)"
-                                            }
-                                        )
+                                    label = if (middlemanMode == MiddlemanFeeMode.PERCENT) {
+                                        "中介费率 (%)"
+                                    } else {
+                                        "固定中介费 (CNY ¥)"
                                     },
+                                    placeholder = if (middlemanMode == MiddlemanFeeMode.PERCENT) "2" else "10.00",
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                    shape = PulseArchitecturalShapes.MediumBadge,
-                                    colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                                    containerColor = ext.cardSurface,
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                                 PayerSelectorRow(
@@ -1772,14 +1764,14 @@ private fun DateInputRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            OutlinedTextField(
+            PulseTextField(
                 value = dateText,
                 onValueChange = { raw ->
                     val filtered = raw.filter { it.isDigit() || it == '-' }.take(10)
                     onDateTextChange(filtered)
                 },
-                label = { Text(label) },
-                placeholder = { Text("YYYY-MM-DD") },
+                label = label,
+                placeholder = "YYYY-MM-DD",
                 isError = !dateValid,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
@@ -1796,20 +1788,19 @@ private fun DateInputRow(
                         )
                     }
                 },
-                shape = PulseArchitecturalShapes.MediumBadge,
-                colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                containerColor = ext.cardSurface,
                 modifier = Modifier.weight(1.45f),
             )
 
             if (showTimeField) {
-                OutlinedTextField(
+                PulseTextField(
                     value = timeText,
                     onValueChange = { raw ->
                         val filtered = raw.filter { it.isDigit() || it == ':' }.take(5)
                         onTimeTextChange(filtered)
                     },
-                    label = { Text("时刻") },
-                    placeholder = { Text("HH:mm") },
+                    label = "时刻",
+                    placeholder = "HH:mm",
                     isError = !timeValid,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
@@ -1826,8 +1817,7 @@ private fun DateInputRow(
                             )
                         }
                     },
-                    shape = PulseArchitecturalShapes.MediumBadge,
-                    colors = valuationTextFieldColors(ext.cardSurface, ext.cardBorder),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -2076,14 +2066,14 @@ private fun FxOverrideDialog(
         onExtraAction = if (hasManualOverride) onReset else null,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
+            PulseTextField(
                 value = rateText,
                 onValueChange = { rateText = sanitizeDecimalInput(it, maxDecimals = 6) },
-                label = { Text("1 ${currency.code} 折合人民币 (CNY)") },
+                label = "1 ${currency.code} 折合人民币 (CNY)",
+                placeholder = "输入自定义汇率",
                 isError = !isValid,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                shape = PulseArchitecturalShapes.MediumBadge,
                 modifier = Modifier.fillMaxWidth(),
             )
             val autoRef = onlineRate ?: currency.defaultCnyRate
@@ -2095,17 +2085,6 @@ private fun FxOverrideDialog(
         }
     }
 }
-
-@Composable
-private fun valuationTextFieldColors(
-    containerColor: Color,
-    borderColor: Color,
-) = OutlinedTextFieldDefaults.colors(
-    focusedContainerColor = containerColor,
-    unfocusedContainerColor = containerColor,
-    unfocusedBorderColor = borderColor,
-    focusedBorderColor = MaterialTheme.colorScheme.primary,
-)
 
 // ── Parsing & Formatting Helpers ──────────────────────────────────────────────
 
