@@ -82,8 +82,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -125,6 +123,7 @@ import com.nodeseek.app.ui.components.NodeSeekStickerCatalog
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
@@ -619,28 +618,19 @@ internal fun ReplyComposerBottomSheet(
 
             // Editor vs Live Preview Body
             if (state.activeTab == ReplyEditorTab.WRITE) {
-                OutlinedTextField(
+                PulseTextField(
                     value = textFieldValue,
                     onValueChange = { next ->
                         textFieldValue = next
                         onDraftChanged(next.text)
                     },
-                    placeholder = {
-                        Text(
-                            text = "分享你的技术见解、测评补充或讨论观点…（自动保存本地草稿）",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    },
+                    placeholder = "分享你的技术见解、测评补充或讨论观点…（自动保存本地草稿）",
                     textStyle = MaterialTheme.typography.bodyLarge,
+                    singleLine = false,
                     minLines = 6,
                     maxLines = 12,
                     shape = PulseArchitecturalShapes.EditorialCard,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = ext.cardSurface,
-                        unfocusedContainerColor = ext.cardSurface,
-                        unfocusedBorderColor = ext.cardBorder,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    ),
+                    containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -1701,18 +1691,20 @@ internal fun NodeImageApiKeySetupDialog(
         confirmEnabled = apiKey.trim().isNotEmpty(),
         dismissText = "暂不上传",
     ) {
-        OutlinedTextField(
+        PulseTextField(
             value = apiKey,
             onValueChange = { apiKey = it },
             singleLine = true,
-            shape = RoundedCornerShape(14.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = ext.cardSurface,
-                unfocusedContainerColor = ext.cardSurface,
-                unfocusedBorderColor = ext.cardBorder,
-            ),
-            label = { Text("NodeImage X-API-Key") },
-            placeholder = { Text("32–128 位十六进制密钥") },
+            label = "NodeImage X-API-Key",
+            placeholder = "32–128 位十六进制密钥",
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Rounded.Key,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+            containerColor = ext.cardSurface,
             modifier = Modifier.fillMaxWidth(),
         )
     }

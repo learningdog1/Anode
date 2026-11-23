@@ -82,8 +82,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -129,6 +127,7 @@ import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
@@ -2144,18 +2143,20 @@ private fun ComposerNodeImageKeyDialog(
         dismissText = "取消",
         onDismiss = onDismiss,
     ) {
-        OutlinedTextField(
+        PulseTextField(
             value = inputKey,
             onValueChange = { inputKey = it },
             singleLine = true,
-            shape = RoundedCornerShape(14.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = ext.cardSurface,
-                unfocusedContainerColor = ext.cardSurface,
-                unfocusedBorderColor = ext.cardBorder,
-            ),
-            label = { Text("NodeImage X-API-Key") },
-            placeholder = { Text("粘贴 32–128 位十六进制 API Key") },
+            label = "NodeImage X-API-Key",
+            placeholder = "粘贴 32–128 位十六进制 API Key",
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Rounded.Key,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+            containerColor = ext.cardSurface,
             modifier = Modifier.fillMaxWidth(),
         )
     }
