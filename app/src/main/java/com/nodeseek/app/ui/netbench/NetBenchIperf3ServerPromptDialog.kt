@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -24,7 +23,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,6 +47,7 @@ import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.ssh.Iperf3RemoteServerCommands
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogTone
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.ssh.HostKeyMismatchWarningDialog
 import com.nodeseek.app.ui.ssh.Iperf3InstallConfirmDialog
 import com.nodeseek.app.ui.ssh.Iperf3ServerAttachment
@@ -105,18 +104,16 @@ fun NetBenchIperf3ServerPromptDialog(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OutlinedTextField(
+            PulseTextField(
                 value = iperfPortText,
                 onValueChange = onPortTextChange,
-                label = { Text("iperf3 服务端端口（1 ~ 65535）") },
-                placeholder = { Text("默认 5201") },
+                label = "iperf3 服务端端口（1 ~ 65535）",
+                placeholder = "默认 5201",
                 isError = validPort == null,
-                supportingText = {
-                    if (validPort == null) {
-                        Text("请输入 1 ~ 65535 之间的有效端口")
-                    } else {
-                        Text("手机端将连接该端口执行纯 Kotlin TCP 协议测速")
-                    }
+                supportingText = if (validPort == null) {
+                    "请输入 1 ~ 65535 之间的有效端口"
+                } else {
+                    "手机端将连接该端口执行纯 Kotlin TCP 协议测速"
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

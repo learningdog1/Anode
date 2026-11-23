@@ -31,7 +31,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -39,6 +38,7 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
@@ -49,7 +49,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -84,6 +83,7 @@ import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPortPreset
 import com.nodeseek.app.ui.components.PulseAlertDialog
+import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.SortSegmentItem
 import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -123,6 +123,7 @@ fun MobileNetBenchScreen(
             initialTarget = initialTarget,
             imageHostRepository = LocalAppContainer.current.imageHostRepository,
             settingsRepository = LocalAppContainer.current.settingsRepository,
+            sshVaultRepository = LocalAppContainer.current.sshVaultRepository,
         ),
     ),
 ) {
@@ -136,6 +137,7 @@ fun MobileNetBenchScreen(
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
+    var showVaultHostPicker by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(isDark) {
         viewModel.updateRenderDarkTheme(isDark)
@@ -233,6 +235,10 @@ fun MobileNetBenchScreen(
                         onClearHistory = viewModel::clearHistory,
                         onRefreshEgress = viewModel::refreshClientEgress,
                         onEnableProxyTest = { viewModel.toggleTestViaProxy(true) },
+                        onOpenVaultPicker = {
+                            keyboardController?.hide()
+                            showVaultHostPicker = true
+                        },
                         onSubmit = {
                             keyboardController?.hide()
                             viewModel.startBenchmark()
@@ -389,6 +395,18 @@ fun MobileNetBenchScreen(
         )
     }
 
+    if (showVaultHostPicker && !uiState.isRunning) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                viewModel.applyVaultServer(server)
+            },
+            onDismiss = { showVaultHostPicker = false },
+        )
+    }
+
     NetBenchIperf3DialogsHost(
         showPrepPrompt = uiState.showIperf3ServerPrompt,
         openDirectSshControlTrigger = directSshControlTrigger,
@@ -417,6 +435,7 @@ private fun TargetAndPortConfigCard(
     onClearHistory: () -> Unit,
     onRefreshEgress: () -> Unit,
     onEnableProxyTest: () -> Unit,
+    onOpenVaultPicker: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
@@ -429,7 +448,7 @@ private fun TargetAndPortConfigCard(
     ) {
         PulseSectionHeader(
             title = "测试目标与端口",
-            subtitle = "支持 IPv4、IPv6 ([::1])、域名及 URL",
+            subtitle = "支持 IPv4、IPv6 ([::1])、域名或保险库主机",
             icon = Icons.Rounded.NetworkCheck,
             trailing = {
                 uiState.clientNetwork?.let { net ->
@@ -465,30 +484,34 @@ private fun TargetAndPortConfigCard(
             onEnableProxyTest = if (!uiState.isRunning) onEnableProxyTest else null,
         )
 
-        OutlinedTextField(
+        PulseTextField(
             value = uiState.targetInput,
             onValueChange = onTargetChange,
             modifier = Modifier.fillMaxWidth(),
             enabled = !uiState.isRunning,
             singleLine = true,
-            label = { Text("IP / IPv6 / 域名") },
-            placeholder = { Text("例如 1.1.1.1 或 [2606:4700::1111] 或 lg.example.com") },
+            label = "目标 IP / IPv6 / 域名",
+            placeholder = "例如 1.1.1.1 或 lg.example.com",
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Rounded.Router,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
             trailingIcon = {
-                if (uiState.targetInput.isNotEmpty() && !uiState.isRunning) {
-                    IconButton(onClick = { onTargetChange("") }) {
-                        Icon(
-                            imageVector = Icons.Rounded.Clear,
-                            contentDescription = "清空目标",
-                        )
-                    }
-                }
+                NetBenchTargetTrailingActions(
+                    hasText = uiState.targetInput.isNotEmpty(),
+                    enabled = !uiState.isRunning,
+                    onClear = { onTargetChange("") },
+                    onOpenVaultPicker = onOpenVaultPicker,
+                )
             },
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Go,
             ),
             keyboardActions = KeyboardActions(onGo = { onSubmit() }),
-            shape = PulseArchitecturalShapes.MediumBadge,
         )
 
         // Recent targets strip
@@ -512,15 +535,16 @@ private fun TargetAndPortConfigCard(
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            OutlinedTextField(
+            PulseTextField(
                 value = uiState.tcpPortText,
                 onValueChange = onTcpPortChange,
-                modifier = Modifier.width(108.dp),
+                modifier = Modifier.width(112.dp),
                 enabled = !uiState.isRunning,
                 singleLine = true,
-                label = { Text("自定义") },
+                label = "自定义端口",
+                placeholder = TcpPingConfig.DEFAULT_PORT.toString(),
+                minHeight = 42.dp,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                shape = PulseArchitecturalShapes.SmallChip,
             )
         }
 
@@ -675,15 +699,16 @@ private fun TestModulesConfigCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    OutlinedTextField(
+                    PulseTextField(
                         value = uiState.iperfPortText,
                         onValueChange = onIperfPortChange,
                         modifier = Modifier.width(120.dp),
                         enabled = !uiState.isRunning,
                         singleLine = true,
-                        label = { Text("iperf3 端口") },
+                        label = "iperf3 端口",
+                        placeholder = Iperf3Config.DEFAULT_PORT.toString(),
+                        minHeight = 44.dp,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        shape = PulseArchitecturalShapes.SmallChip,
                     )
 
                     Column(
@@ -1011,20 +1036,20 @@ internal fun IperfCustomDurationDialog(
         dismissText = "取消",
         onDismiss = onDismiss,
     ) {
-        OutlinedTextField(
+        PulseTextField(
             value = input,
             onValueChange = { raw -> input = raw.filter { it.isDigit() }.take(2) },
             singleLine = true,
             isError = input.isNotEmpty() && !valid,
-            label = { Text("时长（秒）") },
+            label = "时长（秒）",
+            placeholder = Iperf3Config.DEFAULT_DURATION_SEC.toString(),
             suffix = { Text("s") },
             supportingText = if (input.isNotEmpty() && !valid) {
-                { Text("请输入 ${Iperf3Config.MIN_DURATION_SEC}–${Iperf3Config.MAX_DURATION_SEC} 之间的整数") }
+                "请输入 ${Iperf3Config.MIN_DURATION_SEC}–${Iperf3Config.MAX_DURATION_SEC} 之间的整数"
             } else {
                 null
             },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            shape = PulseArchitecturalShapes.SmallChip,
             modifier = Modifier.fillMaxWidth(),
         )
     }
