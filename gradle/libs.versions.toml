@@ -1,35 +1,35 @@
 [versions]
-agp = "8.8.2"
-kotlin = "2.1.10"
-ksp = "2.1.10-1.0.31"
-coreKtx = "1.15.0"
-activityCompose = "1.10.1"
-composeBom = "2025.02.00"
-lifecycle = "2.8.7"
-navigationCompose = "2.8.9"
-coroutines = "1.10.1"
-serializationJson = "1.8.0"
-okhttp = "4.12.0"
-jsoup = "1.19.1"
-datastore = "1.1.3"
-room = "2.7.0"
-work = "2.10.0"
-coil = "3.1.0"
+agp = "9.5.2"
+kotlin = "2.4.21"
+ksp = "2.3.14"
+coreKtx = "1.19.1"
+activityCompose = "1.13.0"
+composeBom = "2026.11.01"
+lifecycle = "2.11.1"
+navigationCompose = "2.10.2"
+coroutines = "1.11.0"
+serializationJson = "1.13.0"
+okhttp = "5.5.1"
+jsoup = "1.24.1"
+datastore = "1.3.0"
+room = "2.8.5"
+work = "2.12.0"
+coil = "3.6.3"
 exifinterface = "1.4.2"
-webkit = "1.13.0"
-jsch = "2.27.5"
+webkit = "1.18.0"
+jsch = "2.28.8"
 junit = "4.13.2"
-androidxTestExtJunit = "1.2.1"
-espressoCore = "3.6.1"
-androidxTestCore = "1.6.1"
-androidxTestRunner = "1.6.1"
+androidxTestExtJunit = "1.3.0"
+espressoCore = "3.7.0"
+androidxTestCore = "1.7.0"
+androidxTestRunner = "1.7.0"
 
 [libraries]
 # AndroidX Core & Activity
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 
-# Jetpack Compose (via BOM — Material3 1.3.1+)
+# Jetpack Compose (via BOM — Material3 1.5.0)
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
@@ -92,7 +92,6 @@ androidx-test-runner = { group = "androidx.test", name = "runner", version.ref =
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
