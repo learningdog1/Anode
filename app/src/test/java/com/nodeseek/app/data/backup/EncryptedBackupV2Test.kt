@@ -78,6 +78,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
@@ -569,6 +570,9 @@ class EncryptedBackupV2Test {
         source.settingsRepository.setThemeMode(ThemeMode.OBSIDIAN_DARK)
         source.settingsRepository.setNodeImageApiKey("ni_top_secret_999")
         source.settingsRepository.setSeekMailApiKey("sm_top_secret_888")
+        kotlinx.coroutines.withTimeout(5_000L) {
+            source.settingsRepository.settings.first { it.seekMailApiKey == "sm_top_secret_888" }
+        }
         source.radarRepository.updatePollingSettings {
             RadarPollingSettings(foregroundIntervalMinutes = 5, quietHoursEnabled = true)
         }
@@ -973,6 +977,9 @@ class EncryptedBackupV2Test {
         // Prepare source backup with different data across all stores
         source.settingsRepository.setThemeMode(ThemeMode.OBSIDIAN_DARK)
         source.settingsRepository.setSeekMailApiKey("sm_new_key")
+        kotlinx.coroutines.withTimeout(5_000L) {
+            source.settingsRepository.settings.first { it.seekMailApiKey == "sm_new_key" }
+        }
         source.fleetRepository.upsertAsset(
             VpsAssetRecord(
                 id = "new-asset",
@@ -1020,6 +1027,9 @@ class EncryptedBackupV2Test {
         // Populate pre-restore state on target
         target.settingsRepository.setThemeMode(ThemeMode.PAPER_LIGHT)
         target.settingsRepository.setSeekMailApiKey("sm_original_key")
+        kotlinx.coroutines.withTimeout(5_000L) {
+            target.settingsRepository.settings.first { it.seekMailApiKey == "sm_original_key" }
+        }
         val origTag = target.seekMailRepository.createLocalTag("原有标签", "#2D637E").getOrThrow()
         target.seekMailRepository.setLocalTagsForMail(88L, listOf(origTag.id), 1L)
         target.fleetRepository.upsertAsset(
