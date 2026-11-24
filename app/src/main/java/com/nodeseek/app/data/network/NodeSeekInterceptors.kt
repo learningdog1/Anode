@@ -370,7 +370,6 @@ class NodeSeekRequestInterceptor(
 
         private val SIMPLE_CSRF_CHALLENGE_PATHS = setOf(
             "/api/account/signOut",
-            "/api/avatar/upload",
             "/api/invite/buyOne",
         )
     }
