@@ -43,7 +43,6 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Forum
-import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -138,13 +137,11 @@ private val EXPLORE_SORT_OPTIONS: List<Pair<FeedSort, String>> = listOf(
  * - Clean minimalist category text strip synchronized 1:1 with `HorizontalPager` across all boards
  * - Per-board cached slices in ViewModel + compact outlined feed cards
  */
-@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExploreScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenSearch: () -> Unit,
-    onOpenBoardsTab: () -> Unit = {},
     modifier: Modifier = Modifier,
     onOpenAuthorProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: (() -> Unit)? = null,
@@ -238,7 +235,7 @@ fun ExploreScreen(
         }
     }
 
-    // Synchronize external board selection when navigated from Boards tab or deep link
+    // Synchronize external board selection when navigated from search or deep link
     LaunchedEffect(externalCategorySlug, boardTabs) {
         val targetSlug = externalCategorySlug ?: return@LaunchedEffect
         if (targetSlug != uiState.selectedCategorySlug) {
@@ -363,27 +360,6 @@ fun ExploreScreen(
                     ExploreBrandTitle()
 
                     Spacer(modifier = Modifier.weight(1f))
-
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .pulseBouncyClickable(
-                                pressedScale = NodePulseMotion.chipPressScale,
-                                role = Role.Button,
-                                onClickLabel = "全部版块与常驻管理",
-                                showRipple = false,
-                                onClick = onOpenBoardsTab,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.GridView,
-                            contentDescription = "版块目录",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(19.dp),
-                        )
-                    }
 
                     Box(
                         modifier = Modifier

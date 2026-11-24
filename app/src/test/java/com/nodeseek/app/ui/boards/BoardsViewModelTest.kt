@@ -38,7 +38,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -90,7 +89,6 @@ class BoardsViewModelTest {
             bookmarkAndHistoryRepository = FakeBoardsBookmarkRepository(),
             settingsRepository = FakeSettingsRepository(),
             contentFilterRepository = FakeBoardsFilterRepository(),
-            autoFocusSearch = true,
         )
         val collectJob = launch(testDispatcher) { vm.uiState.collect {} }
 
@@ -121,7 +119,6 @@ class BoardsViewModelTest {
             bookmarkAndHistoryRepository = FakeBoardsBookmarkRepository(),
             settingsRepository = FakeSettingsRepository(),
             contentFilterRepository = FakeBoardsFilterRepository(),
-            autoFocusSearch = true,
         )
         val collectJob = launch(testDispatcher) { vm.uiState.collect {} }
 
@@ -136,9 +133,15 @@ class BoardsViewModelTest {
     }
 
     @Test
-    fun `setSearchModeActive false cancels in-flight search and clears loading flag`() = runTest {
-        val gate = CompletableDeferred<Result<FeedPageResult>>()
-        val forum = FakeBoardsForumRepository { _, _, _, _ -> gate.await() }
+    fun `submitting a new search cancels previous in-flight search`() = runTest {
+        val firstGate = CompletableDeferred<Result<FeedPageResult>>()
+        val forum = FakeBoardsForumRepository { query, _, _, _ ->
+            if (query == "slow-query") {
+                firstGate.await()
+            } else {
+                Result.success(FeedPageResult(topics = listOf(topic(10L)), currentPage = 1, hasNextPage = false))
+            }
+        }
         val vm = BoardsViewModel(
             forumRepository = forum,
             userRepository = FakeBoardsUserRepository(),
@@ -146,19 +149,22 @@ class BoardsViewModelTest {
             bookmarkAndHistoryRepository = FakeBoardsBookmarkRepository(),
             settingsRepository = FakeSettingsRepository(),
             contentFilterRepository = FakeBoardsFilterRepository(),
-            autoFocusSearch = true,
         )
         val collectJob = launch(testDispatcher) { vm.uiState.collect {} }
 
         vm.submitSearch("slow-query")
         assertTrue(vm.uiState.first { it.isSearching }.isSearching)
 
-        vm.setSearchModeActive(false)
-        val cleared = vm.uiState.first { !it.isSearchModeActive }
-        assertFalse(cleared.isSearching)
+        vm.submitSearch("fast-query")
+        val settled = vm.uiState.first { !it.isSearching && it.submittedQuery == "fast-query" }
+        assertEquals(listOf(10L), settled.searchTopics.map { it.id })
 
-        gate.complete(Result.success(FeedPageResult(topics = listOf(topic(99L)), currentPage = 1, hasNextPage = false)))
-        assertTrue("Cancelled search must not repopulate searchTopics", vm.uiState.value.searchTopics.isEmpty())
+        firstGate.complete(Result.success(FeedPageResult(topics = listOf(topic(99L)), currentPage = 1, hasNextPage = false)))
+        assertEquals(
+            "Cancelled slow search must not overwrite newer results",
+            listOf(10L),
+            vm.uiState.value.searchTopics.map { it.id },
+        )
 
         collectJob.cancel()
     }
