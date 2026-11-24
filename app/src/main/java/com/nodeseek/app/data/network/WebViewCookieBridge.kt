@@ -9,6 +9,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Raised when NodeSeek or Cloudflare requires manual verification in an interactive first-party WebView.
@@ -48,28 +49,39 @@ class NodeSeekApiException(
  * Bridges `android.webkit.CookieManager.getInstance()` directly into OkHttp's [CookieJar],
  * with a thread-safe in-memory fallback when running inside pure JVM unit tests.
  */
-class WebViewCookieBridge(
-    private val forceInMemory: Boolean = false,
+class WebViewCookieBridge internal constructor(
+    private val forceInMemory: Boolean,
+    private val cookieManagerProvider: () -> CookieManager?,
 ) : CookieJar {
 
-    private val inMemoryCookies = CopyOnWriteArrayList<Cookie>()
+    constructor(forceInMemory: Boolean = false) : this(
+        forceInMemory = forceInMemory,
+        cookieManagerProvider = { CookieManager.getInstance() },
+    )
 
-    private val systemCookieManager: CookieManager? by lazy {
-        if (forceInMemory) {
-            null
-        } else {
-            runCatching {
-                CookieManager.getInstance()?.also { manager ->
-                    runCatching { manager.setAcceptCookie(true) }
-                }
-            }.getOrNull()
+    private val inMemoryCookies = CopyOnWriteArrayList<Cookie>()
+    private val cachedSystemCookieManager = AtomicReference<CookieManager?>(null)
+
+    /**
+     * Resolves `CookieManager.getInstance()` lock-free so an IO thread triggering first-time
+     * Chromium WebView provider initialization can never hold an app-level `by lazy` monitor
+     * while the main thread calls [WebViewCookieBridge].
+     */
+    private fun resolveSystemCookieManager(): CookieManager? {
+        if (forceInMemory) return null
+        cachedSystemCookieManager.get()?.let { return it }
+        val resolved = runCatching { cookieManagerProvider() }.getOrNull() ?: return null
+        if (cachedSystemCookieManager.compareAndSet(null, resolved)) {
+            runCatching { resolved.setAcceptCookie(true) }
+            return resolved
         }
+        return cachedSystemCookieManager.get() ?: resolved
     }
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         val replayable = cookies.filterNot { isUnreplayableCookie(it.name) }
         if (replayable.isEmpty()) return
-        val manager = systemCookieManager
+        val manager = resolveSystemCookieManager()
         if (manager != null) {
             val urlString = url.toString()
             var wroteToSystem = false
@@ -88,7 +100,7 @@ class WebViewCookieBridge(
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val manager = systemCookieManager
+        val manager = resolveSystemCookieManager()
         if (manager != null) {
             val rawCookieHeader = runCatching { manager.getCookie(url.toString()) }.getOrNull()
             if (rawCookieHeader != null) {
@@ -182,7 +194,7 @@ class WebViewCookieBridge(
      */
     fun dropUnreplayableCookies() {
         inMemoryCookies.removeAll { isUnreplayableCookie(it.name) }
-        val manager = systemCookieManager ?: return
+        val manager = resolveSystemCookieManager() ?: return
         for (name in UNREPLAYABLE_COOKIE_NAMES) {
             runCatching {
                 manager.setCookie(NodeSeekUrlNormalizer.ORIGIN, "$name=; Path=/; Max-Age=0")
@@ -197,7 +209,7 @@ class WebViewCookieBridge(
     fun flush() {
         dropUnreplayableCookies()
         runCatching {
-            systemCookieManager?.flush()
+            resolveSystemCookieManager()?.flush()
         }
     }
 
@@ -210,7 +222,7 @@ class WebViewCookieBridge(
         inMemoryCookies.removeAll { cookie ->
             includeClearance || !isCloudflarePreservedCookie(cookie.name)
         }
-        val manager = systemCookieManager ?: return
+        val manager = resolveSystemCookieManager() ?: return
         val targetUrls = listOf(
             NodeSeekUrlNormalizer.ORIGIN.toHttpUrl(),
             "https://${NodeSeekUrlNormalizer.BARE_HOST}/".toHttpUrl(),
@@ -231,9 +243,10 @@ class WebViewCookieBridge(
 
     fun clearAllCookies() {
         inMemoryCookies.clear()
+        val manager = resolveSystemCookieManager() ?: return
         runCatching {
-            systemCookieManager?.removeAllCookies(null)
-            systemCookieManager?.flush()
+            manager.removeAllCookies(null)
+            manager.flush()
         }
     }
 

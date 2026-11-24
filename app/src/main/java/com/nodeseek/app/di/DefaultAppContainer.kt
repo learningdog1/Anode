@@ -116,13 +116,9 @@ class DefaultAppContainer(
         NodePulseDatabase.getInstance(appContext)
     }
 
-    val userAgentProvider: UserAgentProvider by lazy {
-        UserAgentProvider().also { it.initFromContext(appContext) }
-    }
+    val userAgentProvider: UserAgentProvider = UserAgentProvider()
 
-    val cookieBridge: WebViewCookieBridge by lazy {
-        WebViewCookieBridge()
-    }
+    val cookieBridge: WebViewCookieBridge = WebViewCookieBridge()
 
     val csrfTokenStore: CsrfTokenStore by lazy {
         CsrfTokenStore()
@@ -626,7 +622,7 @@ class DefaultAppContainer(
     ) {
         applicationScope.launch {
             runCatching { notificationDispatcher.ensureChannels() }
-            runCatching { userAgentProvider }
+            runCatching { userAgentProvider.initFromContext(appContext) }
             runCatching { startBackgroundRadarScheduling() }
             runCatching { startBackgroundFeatureSchedulers() }
             val inForeground = isForegroundProvider()

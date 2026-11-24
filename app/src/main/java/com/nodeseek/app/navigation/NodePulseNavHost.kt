@@ -368,13 +368,6 @@ fun NodePulseNavHost(
         }
     }
 
-    val synchronizedUserAgent = remember(container, context) {
-        (container as? DefaultAppContainer)?.userAgentProvider?.getUserAgent(context)
-    }
-    val useSystemDefaultUserAgent = remember(container, synchronizedUserAgent) {
-        (container as? DefaultAppContainer)?.userAgentProvider?.isSystemWebViewDefault != false
-    }
-
     // Cold-start background session fallback only when not immediately served by Explore's "/" fetch
     LaunchedEffect(container) {
         delay(1_500L)
@@ -1996,6 +1989,13 @@ fun NodePulseNavHost(
 
         // Centralized first-party WebView authentication & challenge recovery sheet
         activeWebViewRequest?.let { request ->
+            val userAgentProvider = (container as? DefaultAppContainer)?.userAgentProvider
+            val synchronizedUserAgent = remember(userAgentProvider, context, request) {
+                userAgentProvider?.refreshSystemUserAgentOnMain(context)
+            }
+            val useSystemDefaultUserAgent = remember(userAgentProvider, synchronizedUserAgent) {
+                userAgentProvider?.isSystemWebViewDefault != false
+            }
             WebViewSessionSheet(
                 initialUrl = request.url,
                 requireSignedInUser = request.requireSignedInUser,
