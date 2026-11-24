@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.ssh
 
+import com.nodeseek.app.domain.backup.SshVaultBackupDto
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -70,6 +71,21 @@ interface SshVaultRepository {
     suspend fun saveRunRecord(record: SshExecutionRecord)
     suspend fun deleteRunRecord(runId: String)
     suspend fun clearRunRecords()
+
+    /**
+     * Exports SSH host profiles (with decrypted plaintext secrets for encrypted backup v2 only),
+     * custom script presets, and vault collapse state.
+     */
+    suspend fun exportForBackup(): SshVaultBackupDto = SshVaultBackupDto()
+
+    /**
+     * Restores SSH host profiles (re-encrypting secrets with the target device's local cipher),
+     * custom script presets, and collapse state from an encrypted backup v2 payload.
+     */
+    suspend fun restoreFromBackup(
+        backup: SshVaultBackupDto,
+        replaceExisting: Boolean,
+    ) = Unit
 
     companion object {
         private val DEFAULT_COLLAPSE_STATE_FLOW: StateFlow<SshVaultCollapseState> =

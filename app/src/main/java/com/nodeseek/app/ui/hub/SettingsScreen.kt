@@ -162,7 +162,6 @@ import com.nodeseek.app.ui.overseas.openOverseasAppNotificationSettings
 import com.nodeseek.app.ui.trust.OFFICIAL_TRADE_PORTAL_URL
 import com.nodeseek.app.ui.trust.OfficialTradeKeyStatus
 import com.nodeseek.app.ui.trust.OfficialTradeSettingsCardContent
-import com.nodeseek.app.ui.trust.OfficialTradeUiSignalBus
 import kotlinx.coroutines.CancellationException
 import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
@@ -502,7 +501,6 @@ class SettingsViewModel(
             }
             try {
                 container.officialTradeRepository.saveApiKey(trimmed)
-                OfficialTradeUiSignalBus.notifyMutated()
                 val masked = container.officialTradeRepository.maskedApiKey()
                 val msg = if (!masked.isNullOrBlank()) {
                     "已加密保存至本机（$masked）"
@@ -628,7 +626,6 @@ class SettingsViewModel(
         viewModelScope.launch {
             try {
                 container.officialTradeRepository.clearApiKey()
-                OfficialTradeUiSignalBus.notifyMutated()
                 transient.update {
                     it.copy(
                         officialKeyRevision = it.officialKeyRevision + 1L,
@@ -1522,10 +1519,16 @@ fun SettingsScreen(
                 // ── Group 5b: 数据备份与恢复 ──
                 item(key = "settings_backup_restore") {
                     PulseStaggeredEntrance(index = 4) {
-                        BackupRestoreSettingsSection(
-                            backupManager = appContainer.backupManager,
-                            snackbarHostState = snackbarHostState,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            BackupRestoreSettingsSection(
+                                backupManager = appContainer.backupManager,
+                                snackbarHostState = snackbarHostState,
+                            )
+                            EncryptedBackupSettingsSection(
+                                backupManager = appContainer.backupManager,
+                                snackbarHostState = snackbarHostState,
+                            )
+                        }
                     }
                 }
 

@@ -52,6 +52,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -344,7 +345,7 @@ fun DirectMessageScreen(
     }
     var showSellerTrustSheet by rememberSaveable { mutableStateOf(false) }
     var hasPerformedInitialScroll by remember(peerUid) { mutableStateOf(false) }
-    var lastObservedMessageCount by remember(peerUid) { mutableStateOf(0) }
+    var lastObservedMessageCount by remember(peerUid) { mutableIntStateOf(0) }
 
     val handleMarkdownMentionClick: (String) -> Unit = remember(onOpenUserProfile) {
         { username ->

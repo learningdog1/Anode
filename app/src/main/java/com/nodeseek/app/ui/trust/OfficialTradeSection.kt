@@ -253,9 +253,9 @@ internal fun formatOfficialQuickBadgeMarker(
 internal fun OfficialTradeSectionCard(
     uiState: SellerTrustUiState,
     onRefreshOfficialTrade: () -> Unit,
+    modifier: Modifier = Modifier,
     onOpenSettings: (() -> Unit)? = null,
     officialTradeRepository: OfficialTradeRepository? = null,
-    modifier: Modifier = Modifier,
 ) {
     val status = uiState.officialTradeStatus
     if (status == OfficialTradeLoadStatus.IDLE) return
@@ -435,7 +435,6 @@ internal fun OfficialTradeSectionCard(
             repository = resolvedRepo,
             onSaved = {
                 showQuickKeyDialog = false
-                OfficialTradeUiSignalBus.notifyMutated()
                 onRefreshOfficialTrade()
             },
             onDismiss = { showQuickKeyDialog = false },
@@ -1925,8 +1924,8 @@ private fun OfficialTradeApiKeyInputField(
     showKey: Boolean,
     onToggleShowKey: () -> Unit,
     enabled: Boolean,
-    isError: Boolean = false,
     modifier: Modifier = Modifier,
+    isError: Boolean = false,
 ) {
     val context = LocalContext.current
     PulseTextField(

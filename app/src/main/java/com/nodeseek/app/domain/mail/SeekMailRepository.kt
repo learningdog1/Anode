@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.mail
 
+import com.nodeseek.app.domain.backup.SeekMailBackupDto
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,10 +28,6 @@ interface SeekMailRepository {
 
     suspend fun getMailboxes(forceRefresh: Boolean = false): Result<List<SeekMailbox>>
 
-    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
-    suspend fun getMailbox(id: Long): Result<SeekMailbox> =
-        Result.failure(UnsupportedOperationException("Unused endpoint"))
-
     suspend fun checkMailboxAvailable(address: String): Result<Boolean>
 
     suspend fun createMailbox(address: String): Result<SeekMailbox>
@@ -54,10 +51,6 @@ interface SeekMailRepository {
         mailId: Long,
         forceRefresh: Boolean = false,
     ): Result<SeekMailDetail>
-
-    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
-    suspend fun getRawMailEml(mailId: Long): Result<String> =
-        Result.failure(UnsupportedOperationException("Unused endpoint"))
 
     suspend fun getAttachments(mailId: Long): Result<List<SeekMailAttachment>>
 
@@ -162,4 +155,17 @@ interface SeekMailRepository {
     suspend fun clearCacheForCurrentKey() = clearCache()
 
     suspend fun clearCache()
+
+    /**
+     * Exports local Seek Mail tags, archives, and read state for the active API key.
+     */
+    suspend fun exportForBackup(): SeekMailBackupDto = SeekMailBackupDto()
+
+    /**
+     * Restores local Seek Mail tags, archives, and read state for the active API key.
+     */
+    suspend fun restoreFromBackup(
+        backup: SeekMailBackupDto,
+        replaceExisting: Boolean,
+    ) = Unit
 }

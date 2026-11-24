@@ -132,6 +132,25 @@ class OfficialTradeRepositoryImpl internal constructor(
 
     override fun maskedApiKey(): String? = keyStore.maskedApiKey()
 
+    override suspend fun exportApiKeyForBackup(): String {
+        keyStore.ensureLoaded()
+        return keyStore.currentApiKey().orEmpty()
+    }
+
+    override suspend fun restoreApiKeyFromBackup(
+        apiKey: String,
+        merge: Boolean,
+    ) {
+        val trimmed = apiKey.trim()
+        if (trimmed.isEmpty()) {
+            if (!merge) {
+                clearApiKey()
+            }
+            return
+        }
+        saveApiKey(trimmed)
+    }
+
     private suspend fun performNetworkLookup(
         apiKey: String,
         cleanUsername: String,

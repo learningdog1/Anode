@@ -133,6 +133,23 @@ class NetBenchHistoryStore(
         }
     }
 
+    suspend fun exportPreferencesForBackup(): NetBenchReportPreferences = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureLoadedLocked()
+            _preferences.value
+        }
+    }
+
+    suspend fun restorePreferencesFromBackup(preferences: NetBenchReportPreferences) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked()
+                _preferences.value = preferences
+                writeToDiskSafely(entries = _entries.value, preferences = preferences)
+            }
+        }
+    }
+
     private fun readPayloadFromDiskSafely(): NetBenchHistoryPayload {
         if (!historyFile.isFile) return NetBenchHistoryPayload()
         return runCatching {

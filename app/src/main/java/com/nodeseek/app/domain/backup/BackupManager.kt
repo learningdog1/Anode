@@ -41,6 +41,31 @@ interface BackupManager {
 
     suspend fun recoverPendingRestoreIfNeeded(): Result<Boolean> = Result.success(false)
 
+    // ── Encrypted Full Backup v2 (passphrase-protected PBKDF2-HMAC-SHA256 + AES-256-GCM) ──
+
+    fun isEncryptedBackupEnvelope(rawContent: String): Boolean = false
+
+    suspend fun exportEncryptedFullBackup(
+        passphrase: String,
+    ): Result<EncryptedBackupExportPayload> = Result.failure(
+        UnsupportedOperationException("Encrypted full backup v2 is not supported"),
+    )
+
+    suspend fun inspectEncryptedFullBackup(
+        rawContent: String,
+        passphrase: String,
+    ): Result<EncryptedBackupPreviewSummary> = Result.failure(
+        UnsupportedOperationException("Encrypted full backup v2 is not supported"),
+    )
+
+    suspend fun restoreEncryptedFullBackup(
+        rawContent: String,
+        passphrase: String,
+        strategy: RestoreStrategy = RestoreStrategy.MERGE,
+    ): Result<EncryptedBackupRestoreSummary> = Result.failure(
+        UnsupportedOperationException("Encrypted full backup v2 is not supported"),
+    )
+
     companion object {
         private val EMPTY_PENDING_REMOTE_SYNC_STATE: StateFlow<PendingRemoteBlocklistSync?> =
             MutableStateFlow(null)

@@ -415,8 +415,6 @@ internal class PreviewAppContainer(
         override suspend fun verifyApiKey(candidateKey: String?) =
             Result.success(SeekMailConnectionStatus(mailboxes = emptyList()))
         override suspend fun getMailboxes(forceRefresh: Boolean) = Result.success(emptyList<SeekMailbox>())
-        override suspend fun getMailbox(id: Long) =
-            Result.failure<SeekMailbox>(UnsupportedOperationException("preview"))
         override suspend fun checkMailboxAvailable(address: String) = Result.success(true)
         override suspend fun createMailbox(address: String) =
             Result.failure<SeekMailbox>(UnsupportedOperationException("preview"))
@@ -432,7 +430,6 @@ internal class PreviewAppContainer(
             Result.success(SeekMailUnreadPage(items = emptyList(), limit = limit, hasMore = false))
         override suspend fun getMailDetail(mailId: Long, forceRefresh: Boolean) =
             Result.failure<SeekMailDetail>(UnsupportedOperationException("preview"))
-        override suspend fun getRawMailEml(mailId: Long) = Result.success("")
         override suspend fun getAttachments(mailId: Long) = Result.success(emptyList<SeekMailAttachment>())
         override suspend fun downloadAttachmentBytes(mailId: Long, attachmentId: String) =
             Result.success(ByteArray(0))

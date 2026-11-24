@@ -193,9 +193,9 @@ import kotlin.math.roundToInt
 fun LiteSshScreen(
     onBack: () -> Unit,
     onPublishToComposer: (suggestedTitle: String, markdownContent: String) -> Unit,
+    modifier: Modifier = Modifier,
     onInsertToReply: ((markdownContent: String) -> Unit)? = null,
     onOpenProbePanels: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
     previewUiState: LiteSshUiState? = null,
     viewModel: LiteSshViewModel = viewModel(factory = LiteSshViewModel.factory(LocalContext.current)),
 ) {

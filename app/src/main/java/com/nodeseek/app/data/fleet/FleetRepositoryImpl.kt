@@ -2,6 +2,8 @@ package com.nodeseek.app.data.fleet
 
 import android.content.Context
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.backup.FleetBackupDto
+import com.nodeseek.app.domain.backup.toBackupDto
 import com.nodeseek.app.domain.fleet.AssetRenewalResult
 import com.nodeseek.app.domain.fleet.FleetAlertEvaluator
 import com.nodeseek.app.domain.fleet.FleetAlertTrackerState
@@ -1250,6 +1252,122 @@ class FleetRepositoryImpl(
         notifiedRenewalKeys = notifiedRenewalKeys,
         notifiedTrafficCycleKeys = notifiedTrafficCycleKeys,
     )
+
+    override suspend fun exportForBackup(): FleetBackupDto = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            val panels = cachedPayload.panels.map { it.toDomainLocked(tokenCipher).toBackupDto() }
+            val assets = cachedPayload.assets.map { it.toDomain().toBackupDto() }
+            val settings = cachedPayload.monitorSettings.toDomain().toBackupDto()
+            FleetBackupDto(
+                panels = panels,
+                assets = assets,
+                monitorSettings = settings,
+            )
+        }
+    }
+
+    override suspend fun restoreFromBackup(
+        backup: FleetBackupDto,
+        replaceExisting: Boolean,
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureDiskLoadedLocked()
+                val now = nowMillisProvider()
+                val existingPanelsById = cachedPayload.panels.associateBy { it.id }
+
+                val incomingStoredPanels = LinkedHashMap<String, StoredProbePanelConfig>()
+                for (panelDto in backup.panels) {
+                    val domain = panelDto.toDomain()
+                    val cleanId = domain.id.ifBlank { UUID.randomUUID().toString() }
+                    val cleanUrl = ProbePanelClient.normalizeBaseUrl(domain.baseUrl)
+                    if (cleanUrl.isBlank()) continue
+                    val existing = existingPanelsById[cleanId]
+                    val normalized = domain.copy(
+                        id = cleanId,
+                        name = domain.name.ifBlank { cleanUrl },
+                        baseUrl = cleanUrl,
+                        createdAtEpochMillis = domain.createdAtEpochMillis.takeIf { it > 0L }
+                            ?: existing?.createdAtEpochMillis?.takeIf { it > 0L }
+                            ?: now,
+                    )
+                    val preservedEncryptedToken = if (
+                        !replaceExisting && normalized.apiToken.isNullOrBlank()
+                    ) {
+                        existing?.encryptedApiToken
+                    } else {
+                        null
+                    }
+                    incomingStoredPanels[cleanId] = normalized.toStored(
+                        cipher = tokenCipher,
+                        preservedEncryptedToken = preservedEncryptedToken,
+                    )
+                }
+
+                val mergedPanels = if (replaceExisting) {
+                    incomingStoredPanels.values.sortedBy { it.createdAtEpochMillis }
+                } else {
+                    val combined = LinkedHashMap<String, StoredProbePanelConfig>()
+                    cachedPayload.panels.forEach { combined[it.id] = it }
+                    incomingStoredPanels.forEach { (id, panel) -> combined[id] = panel }
+                    combined.values.sortedBy { it.createdAtEpochMillis }
+                }
+
+                val incomingStoredAssets = LinkedHashMap<String, StoredVpsAssetRecord>()
+                for (assetDto in backup.assets) {
+                    val domain = assetDto.toDomain()
+                    val cleanId = domain.id.ifBlank { UUID.randomUUID().toString() }
+                    val normalized = domain.copy(
+                        id = cleanId,
+                        createdAtEpochMillis = domain.createdAtEpochMillis.takeIf { it > 0L } ?: now,
+                        updatedAtEpochMillis = domain.updatedAtEpochMillis.takeIf { it > 0L } ?: now,
+                    )
+                    incomingStoredAssets[cleanId] = normalized.toStored()
+                }
+
+                val mergedAssets = if (replaceExisting) {
+                    incomingStoredAssets.values.toList()
+                } else {
+                    val combined = LinkedHashMap<String, StoredVpsAssetRecord>()
+                    cachedPayload.assets.forEach { combined[it.id] = it }
+                    incomingStoredAssets.forEach { (id, asset) -> combined[id] = asset }
+                    combined.values.toList()
+                }
+
+                val remainingPanelIds = mergedPanels.map { it.id }.toSet()
+                val keptSnapshots = cachedPayload.snapshots.filter { it.panelId in remainingPanelIds }
+                val keptCpuHistory = cachedPayload.cpuHistoryByProbeKey.filterKeys { key ->
+                    val panelId = key.substringBefore(':', "")
+                    panelId in remainingPanelIds
+                }
+                val keptTracker = cachedPayload.alertTracker.copy(
+                    lastKnownOnlineByProbeKey = cachedPayload.alertTracker.lastKnownOnlineByProbeKey
+                        .filterKeys { it.substringBefore(':', "") in remainingPanelIds },
+                    activeOutageNotifiedKeys = cachedPayload.alertTracker.activeOutageNotifiedKeys
+                        .filter { it.substringBefore(':', "") in remainingPanelIds }
+                        .toSet(),
+                    notifiedTrafficCycleKeys = cachedPayload.alertTracker.notifiedTrafficCycleKeys
+                        .filter { it.substringBefore(':', "") in remainingPanelIds }
+                        .toSet(),
+                )
+
+                val nextPayload = cachedPayload.copy(
+                    panels = mergedPanels,
+                    snapshots = keptSnapshots,
+                    assets = mergedAssets,
+                    cpuHistoryByProbeKey = keptCpuHistory,
+                    monitorSettings = backup.monitorSettings.toDomain().toStored(),
+                    alertTracker = keptTracker,
+                )
+                writeStoreToDiskLocked(nextPayload)
+                cachedPayload = nextPayload
+                decryptedTokenCache.clear()
+                _panelErrorsFlow.value = _panelErrorsFlow.value.filterKeys { it in remainingPanelIds }
+                publishStateLocked()
+            }
+        }
+    }
 
     companion object {
         const val STORE_FILE_NAME = "fleet_store.json"

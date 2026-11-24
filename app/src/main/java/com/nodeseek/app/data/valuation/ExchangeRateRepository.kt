@@ -291,6 +291,46 @@ class ExchangeRateRepository(
         }
     }
 
+    suspend fun exportManualOverridesForBackup(): Map<String, String> = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            LinkedHashMap(cachedPayload.manualOverridesToCny)
+        }
+    }
+
+    suspend fun restoreManualOverridesFromBackup(
+        overrides: Map<String, String>,
+        merge: Boolean,
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureDiskLoadedLocked()
+                val nextOverrides = if (merge) {
+                    LinkedHashMap(cachedPayload.manualOverridesToCny)
+                } else {
+                    LinkedHashMap()
+                }
+                for ((code, rawRate) in overrides) {
+                    val currency = ValuationCurrency.fromCode(code) ?: continue
+                    if (currency == ValuationCurrency.CNY) continue
+                    val parsed = rawRate.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: continue
+                    val normalized = parsed.stripTrailingZeros().let {
+                        if (it.scale() < 0) it.setScale(0, RoundingMode.HALF_UP) else it
+                    }.toPlainString()
+                    nextOverrides[currency.code] = normalized
+                }
+                cachedPayload = cachedPayload.copy(manualOverridesToCny = nextOverrides)
+                writeCacheToDiskLocked(cachedPayload)
+                _state.value = buildFxRatesState(
+                    payload = cachedPayload,
+                    isOnlineFresh = isCacheFreshLocked(nowMillisProvider()),
+                    isRefreshing = _state.value.isRefreshing,
+                    lastSyncError = _state.value.lastSyncError,
+                )
+            }
+        }
+    }
+
     private suspend fun fetchAndPersistOnlineRates(): FxRefreshOutcome {
         return try {
             val request = Request.Builder()

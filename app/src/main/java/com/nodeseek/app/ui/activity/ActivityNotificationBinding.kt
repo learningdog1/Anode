@@ -208,11 +208,18 @@ fun rememberActivityNotificationBinding(
                     }
 
                     ActivityToggleDecision.RequestRuntimePostNotificationsPermission -> {
-                        notificationDispatcher.markPostNotificationsRequestedOnce()
-                        runCatching {
-                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        }.onFailure {
-                            latestFeedback?.invoke("无法拉起系统权限弹窗，请在系统设置中开启通知权限", true)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notificationDispatcher.markPostNotificationsRequestedOnce()
+                            runCatching {
+                                permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }.onFailure {
+                                latestFeedback?.invoke("无法拉起系统权限弹窗，请在系统设置中开启通知权限", true)
+                            }
+                        } else {
+                            scope.launch {
+                                controller.setNotificationsEnabled(true)
+                            }
+                            latestFeedback?.invoke("已开启新活动通知，发现社区新抽奖与福利时将自动提醒", false)
                         }
                     }
 

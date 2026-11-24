@@ -1,6 +1,7 @@
 package com.nodeseek.app.data.restock
 
 import android.content.Context
+import com.nodeseek.app.domain.backup.RestockBackupDto
 import com.nodeseek.app.domain.restock.MerchantPanelType
 import com.nodeseek.app.domain.restock.RestockEventRecord
 import com.nodeseek.app.domain.restock.RestockMonitorSettings
@@ -415,6 +416,70 @@ class RestockRepositoryImpl(
             ),
         )
         updated
+    }
+
+    override suspend fun exportForBackup(): RestockBackupDto = mutex.withLock {
+        ensureDiskLoadedLocked()
+        RestockBackupDto(
+            watchItems = _watchItemsFlow.value,
+            settings = _settingsFlow.value,
+        )
+    }
+
+    override suspend fun restoreFromBackup(
+        backup: RestockBackupDto,
+        replaceExisting: Boolean,
+    ) {
+        mutex.withLock {
+            ensureDiskLoadedLocked()
+            val normalizedIncoming = LinkedHashMap<String, RestockWatchItem>()
+            for (raw in backup.watchItems) {
+                val resolvedUrl = MerchantLinkDetector.resolveOrderUrl(raw.rawUrl)
+                    .ifBlank { raw.resolvedOrderUrl.trim() }
+                if (resolvedUrl.isBlank()) continue
+                val cleanId = raw.id.trim().ifBlank { UUID.randomUUID().toString() }
+                val resolvedPanel = if (raw.panelType == MerchantPanelType.GENERIC) {
+                    MerchantLinkDetector.inferPanelTypeFromUrl(resolvedUrl)
+                } else {
+                    raw.panelType
+                }
+                normalizedIncoming[cleanId] = raw.copy(
+                    id = cleanId,
+                    title = raw.title.trim().ifBlank { "VPS 商品监控" },
+                    rawUrl = raw.rawUrl.trim().ifBlank { resolvedUrl },
+                    resolvedOrderUrl = resolvedUrl,
+                    panelType = resolvedPanel,
+                    priceHint = raw.priceHint.trim(),
+                    customInStockKeyword = raw.customInStockKeyword.trim(),
+                    customOutOfStockKeyword = raw.customOutOfStockKeyword.trim(),
+                    pollIntervalMinutes = RestockWatchItem.clampPollInterval(raw.pollIntervalMinutes),
+                )
+            }
+
+            val mergedWatches = if (replaceExisting) {
+                normalizedIncoming.values.toList()
+            } else {
+                val combined = LinkedHashMap<String, RestockWatchItem>()
+                _watchItemsFlow.value.forEach { combined[it.id] = it }
+                normalizedIncoming.forEach { (id, item) -> combined[id] = item }
+                combined.values.toList()
+            }
+
+            val remainingIds = mergedWatches.map { it.id }.toSet()
+            val nextEvents = if (replaceExisting) {
+                _eventHistoryFlow.value.filter { it.watchItemId in remainingIds }
+            } else {
+                _eventHistoryFlow.value
+            }
+
+            persistLocked(
+                RestockStoreSnapshot(
+                    watchItems = mergedWatches,
+                    events = nextEvents,
+                    settings = backup.settings.normalized(),
+                ),
+            )
+        }
     }
 
     private suspend fun persistLocked(snapshot: RestockStoreSnapshot) {

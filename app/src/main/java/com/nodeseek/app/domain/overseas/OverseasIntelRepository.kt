@@ -56,6 +56,30 @@ interface OverseasIntelRepository {
      */
     suspend fun updateFilterConfig(config: OverseasOfferFilterConfig) = Unit
 
+    /**
+     * Exports the persisted overseas offer quality filter configuration for encrypted backup v2.
+     */
+    suspend fun exportFilterConfigForBackup(): OverseasOfferFilterConfig = snapshot.value.filterConfig
+
+    /**
+     * Restores the overseas offer quality filter configuration from an encrypted backup v2 payload.
+     */
+    suspend fun restoreFilterConfigFromBackup(
+        config: OverseasOfferFilterConfig,
+        merge: Boolean,
+    ) {
+        val resolved = if (merge) {
+            val current = exportFilterConfigForBackup()
+            config.copy(
+                blockedMerchants = current.blockedMerchants + config.blockedMerchants,
+                extraBlockedKeywords = current.extraBlockedKeywords + config.extraBlockedKeywords,
+            )
+        } else {
+            config
+        }
+        updateFilterConfig(resolved)
+    }
+
     companion object {
         const val DEFAULT_STALE_REFRESH_MILLIS = 10L * 60_000L
     }
