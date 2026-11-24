@@ -72,19 +72,6 @@ enum class OfficialTradeLoadStatus {
     FAILED,
 }
 
-/**
- * Lightweight in-process invalidation counter notifying inline [SellerTrustQuickBadge] instances
- * when cached official trade stats or API key state change.
- */
-internal object OfficialTradeUiSignalBus {
-    private val _epoch = MutableStateFlow(0L)
-    val epoch: StateFlow<Long> = _epoch.asStateFlow()
-
-    fun notifyMutated() {
-        _epoch.update { it + 1L }
-    }
-}
-
 private val TRUST_TIME_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("HH:mm", Locale.US)
 private val TRUST_MONTH_DAY_TIME_FORMATTER: DateTimeFormatter =
@@ -549,10 +536,6 @@ class SellerTrustStateHolder(
                         officialTradeCooldownUntilMillis = rateLimitedUntil,
                         officialTradeCooldownSeconds = remSec,
                     )
-                }
-
-                if (result is OfficialTradeLookup.Found) {
-                    OfficialTradeUiSignalBus.notifyMutated()
                 }
 
                 if (rateLimitedUntil > finishedNow) {

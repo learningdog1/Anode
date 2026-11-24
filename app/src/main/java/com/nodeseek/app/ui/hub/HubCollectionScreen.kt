@@ -315,10 +315,10 @@ class HubCollectionViewModel(
  */
 @Composable
 fun HubCollectionScreen(
-    initialTab: Int = 0,
     onBack: () -> Unit,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     modifier: Modifier = Modifier,
+    initialTab: Int = 0,
     onOpenAuthorProfile: ((uid: Long, usernameHint: String) -> Unit)? = null,
     onOpenCategory: ((slug: String) -> Unit)? = null,
     selectedTopicId: Long? = null,

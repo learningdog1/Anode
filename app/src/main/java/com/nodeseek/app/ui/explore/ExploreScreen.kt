@@ -64,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -229,7 +230,7 @@ fun ExploreScreen(
     }
 
     // Refresh feed when returning from publishing a new topic
-    var lastHandledRefreshTrigger by rememberSaveable { mutableStateOf(0L) }
+    var lastHandledRefreshTrigger by rememberSaveable { mutableLongStateOf(0L) }
     LaunchedEffect(refreshTrigger) {
         if (refreshTrigger > 0L && refreshTrigger != lastHandledRefreshTrigger) {
             lastHandledRefreshTrigger = refreshTrigger

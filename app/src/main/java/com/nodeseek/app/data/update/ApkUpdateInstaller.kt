@@ -132,17 +132,15 @@ class AndroidApkUpdateInstaller(
             val manager = NotificationManagerCompat.from(appContext)
             if (!manager.areNotificationsEnabled()) return
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val sysManager = appContext.getSystemService(NotificationManager::class.java)
-                val channel = NotificationChannel(
-                    UPDATE_NOTIFICATION_CHANNEL_ID,
-                    "应用更新提醒",
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ).apply {
-                    description = "后台下载新版本安装包完成后提醒返回应用安装"
-                }
-                sysManager?.createNotificationChannel(channel)
+            val sysManager = appContext.getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                UPDATE_NOTIFICATION_CHANNEL_ID,
+                "应用更新提醒",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "后台下载新版本安装包完成后提醒返回应用安装"
             }
+            sysManager?.createNotificationChannel(channel)
 
             val launchIntent = appContext.packageManager
                 .getLaunchIntentForPackage(appContext.packageName)

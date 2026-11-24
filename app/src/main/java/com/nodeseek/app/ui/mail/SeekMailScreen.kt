@@ -217,12 +217,10 @@ import kotlin.math.abs
 private val FULL_TIMESTAMP_FORMATTER: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US)
 
-@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SeekMailScreen(
     onBack: () -> Unit,
-    onOpenSettings: () -> Unit = {},
     initialMailboxId: Long = 0L,
     initialMailId: Long = 0L,
     showBackButton: Boolean = true,

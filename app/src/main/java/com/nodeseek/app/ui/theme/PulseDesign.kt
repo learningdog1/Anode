@@ -697,8 +697,8 @@ fun PulseShimmerBox(
  */
 @Composable
 fun PulseStaggeredEntrance(
-    index: Int = 0,
     modifier: Modifier = Modifier,
+    index: Int = 0,
     enabled: Boolean = true,
     maxStaggerSteps: Int = 6,
     content: @Composable () -> Unit,

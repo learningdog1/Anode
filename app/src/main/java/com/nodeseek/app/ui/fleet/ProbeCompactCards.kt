@@ -508,8 +508,8 @@ internal fun CompactProbeServerCard(
     referenceNowEpochMillis: Long,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
-    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -1621,8 +1621,8 @@ internal fun ProbeDenseListVirtualizedItem(
     onToggleExpand: () -> Unit,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
-    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val itemShape = if (isLast) {
@@ -1663,8 +1663,8 @@ internal fun ProbeDenseListCard(
     referenceNowEpochMillis: Long,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
-    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     var expandedProbeKey by remember { mutableStateOf<String?>(null) }
