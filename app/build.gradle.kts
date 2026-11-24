@@ -10,7 +10,7 @@ plugins {
 }
 
 val appVersionName = "2.12.0"
-val appVersionCode = 24
+val appVersionCode = 25
 
 base {
     archivesName.set("Anode-v$appVersionName")
