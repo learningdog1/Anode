@@ -354,6 +354,7 @@ internal class PreviewAppContainer(
         override suspend fun setPurePitchAmoled(enabled: Boolean) = Unit
         override suspend fun setUseDynamicColor(enabled: Boolean) = Unit
         override suspend fun setFontScale(scale: Float) = Unit
+        override suspend fun setHomeCardScale(scale: Float) = Unit
         override suspend fun setPreferRandomCheckIn(preferRandom: Boolean) = Unit
         override suspend fun setPinnedCategorySlugs(slugs: Set<String>) = Unit
         override suspend fun togglePinnedCategory(slug: String) = Unit
@@ -377,6 +378,7 @@ internal class PreviewAppContainer(
                 purePitchAmoled = s.purePitchAmoled,
                 useDynamicColor = s.useDynamicColor,
                 fontScale = s.fontScale,
+                homeCardScale = s.homeCardScale,
                 preferRandomCheckIn = s.preferRandomCheckIn,
                 pinnedCategorySlugs = s.pinnedCategorySlugs,
                 includeBlockedTopics = s.includeBlockedTopics,

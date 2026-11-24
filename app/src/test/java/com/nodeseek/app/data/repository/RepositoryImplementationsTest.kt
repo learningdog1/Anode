@@ -448,7 +448,9 @@ class RepositoryImplementationsTest {
         assertFalse(AppSettings().useDynamicColor)
         assertFalse(settingsRepository.settings.value.useDynamicColor)
         assertEquals(0.90f, AppSettings().fontScale, 0.0001f)
+        assertEquals(0.90f, AppSettings().homeCardScale, 0.0001f)
         assertEquals(0.90f, settingsRepository.settings.value.fontScale, 0.0001f)
+        assertEquals(0.90f, settingsRepository.settings.value.homeCardScale, 0.0001f)
 
         val signedInConfigB64 = encodeConfig(
             """
@@ -810,15 +812,25 @@ class RepositoryImplementationsTest {
                 )
             }
 
-            // Font scale clamps to [0.75f, 1.30f]
-            assertEquals(0.75f, SettingsRepositoryImpl.MIN_FONT_SCALE, 0.0001f)
+            // Font scale & home card scale independently clamp to [0.60f, 1.30f]
+            assertEquals(0.60f, SettingsRepositoryImpl.MIN_FONT_SCALE, 0.0001f)
             assertEquals(1.30f, SettingsRepositoryImpl.MAX_FONT_SCALE, 0.0001f)
-            repo.setFontScale(0.50f)
-            val clampedLow = withTimeout(5_000L) { repo.settings.first { it.fontScale == 0.75f } }
-            assertEquals(0.75f, clampedLow.fontScale, 0.0001f)
+            assertEquals(0.60f, SettingsRepositoryImpl.MIN_HOME_CARD_SCALE, 0.0001f)
+            assertEquals(1.30f, SettingsRepositoryImpl.MAX_HOME_CARD_SCALE, 0.0001f)
+            repo.setFontScale(0.40f)
+            val clampedLow = withTimeout(5_000L) { repo.settings.first { it.fontScale == 0.60f } }
+            assertEquals(0.60f, clampedLow.fontScale, 0.0001f)
+            assertEquals(0.90f, clampedLow.homeCardScale, 0.0001f)
+            repo.setHomeCardScale(0.45f)
+            val clampedCardLow = withTimeout(5_000L) { repo.settings.first { it.homeCardScale == 0.60f } }
+            assertEquals(0.60f, clampedCardLow.homeCardScale, 0.0001f)
             repo.setFontScale(1.50f)
-            val clamped = withTimeout(5_000L) { repo.settings.first { it.fontScale == 1.30f } }
+            repo.setHomeCardScale(1.60f)
+            val clamped = withTimeout(5_000L) {
+                repo.settings.first { it.fontScale == 1.30f && it.homeCardScale == 1.30f }
+            }
             assertEquals(1.30f, clamped.fontScale, 0.0001f)
+            assertEquals(1.30f, clamped.homeCardScale, 0.0001f)
 
             // Merge restore preserves existing pinned categories and appends backup categories
             repo.setPinnedCategorySlugs(linkedSetOf("tech", "daily"))
@@ -1068,6 +1080,9 @@ internal class FakeSettingsRepository : SettingsRepository {
     override suspend fun setFontScale(scale: Float) {
         _settings.value = _settings.value.copy(fontScale = scale)
     }
+    override suspend fun setHomeCardScale(scale: Float) {
+        _settings.value = _settings.value.copy(homeCardScale = scale)
+    }
     override suspend fun setPreferRandomCheckIn(preferRandom: Boolean) {
         _settings.value = _settings.value.copy(preferRandomCheckIn = preferRandom)
     }
@@ -1130,6 +1145,7 @@ internal class FakeSettingsRepository : SettingsRepository {
             purePitchAmoled = cur.purePitchAmoled,
             useDynamicColor = cur.useDynamicColor,
             fontScale = cur.fontScale,
+            homeCardScale = cur.homeCardScale,
             preferRandomCheckIn = cur.preferRandomCheckIn,
             pinnedCategorySlugs = cur.pinnedCategorySlugs,
             includeBlockedTopics = cur.includeBlockedTopics,
@@ -1167,6 +1183,7 @@ internal class FakeSettingsRepository : SettingsRepository {
             purePitchAmoled = backup.purePitchAmoled,
             useDynamicColor = backup.useDynamicColor,
             fontScale = backup.fontScale.coerceIn(SettingsRepositoryImpl.MIN_FONT_SCALE, SettingsRepositoryImpl.MAX_FONT_SCALE),
+            homeCardScale = backup.homeCardScale.coerceIn(SettingsRepositoryImpl.MIN_HOME_CARD_SCALE, SettingsRepositoryImpl.MAX_HOME_CARD_SCALE),
             preferRandomCheckIn = backup.preferRandomCheckIn,
             pinnedCategorySlugs = backup.pinnedCategorySlugs.map { it.trim() }.filter { it.isNotEmpty() }.toCollection(LinkedHashSet()),
             includeBlockedTopics = backup.includeBlockedTopics,

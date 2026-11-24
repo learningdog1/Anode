@@ -40,6 +40,7 @@ data class AppSettingsBackupDto(
     val purePitchAmoled: Boolean = false,
     val useDynamicColor: Boolean = false,
     val fontScale: Float = AppSettings.DEFAULT_FONT_SCALE,
+    val homeCardScale: Float = AppSettings.DEFAULT_HOME_CARD_SCALE,
     val preferRandomCheckIn: Boolean = false,
     val pinnedCategorySlugs: Set<String> = AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS,
     val includeBlockedTopics: Boolean = false,

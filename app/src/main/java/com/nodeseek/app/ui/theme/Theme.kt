@@ -30,13 +30,17 @@ enum class PulseThemeMode {
 }
 
 const val DEFAULT_GLOBAL_FONT_SCALE = 0.90f
+const val DEFAULT_HOME_CARD_FONT_SCALE = 0.90f
 const val DEFAULT_HOME_CARD_SCALE = 0.90f
-const val MIN_HOME_CARD_SCALE = 0.75f
+const val MIN_HOME_CARD_FONT_SCALE = 0.60f
+const val MAX_HOME_CARD_FONT_SCALE = 1.30f
+const val MIN_HOME_CARD_SCALE = 0.60f
 const val MAX_HOME_CARD_SCALE = 1.30f
 
 val LocalNodePulseExtendedColors = staticCompositionLocalOf { LightExtendedColors }
 val LocalNodePulseExtraTypography = staticCompositionLocalOf { buildNodePulseExtraTypography(DEFAULT_GLOBAL_FONT_SCALE) }
 val LocalFontScale = staticCompositionLocalOf { DEFAULT_GLOBAL_FONT_SCALE }
+val LocalHomeCardFontScale = staticCompositionLocalOf { DEFAULT_HOME_CARD_FONT_SCALE }
 val LocalHomeCardScale = staticCompositionLocalOf { DEFAULT_HOME_CARD_SCALE }
 val LocalNodePulseDarkTheme = staticCompositionLocalOf { false }
 val LocalNodePulseDynamicColor = staticCompositionLocalOf { false }
@@ -61,8 +65,17 @@ object NodePulseThemeTokens {
         get() = LocalFontScale.current
 
     /**
-     * User-configured scale (`0.75f..1.30f`, default `0.90f`) that applies exclusively to
-     * homepage topic cards (`ExploreScreen`) for font sizing and card compaction.
+     * User-configured font scale (`0.60f..1.30f`, default `0.90f`) that applies exclusively to
+     * homepage topic cards (`ExploreScreen`). All other pages stay fixed at `0.90f`.
+     */
+    val homeCardFontScale: Float
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalHomeCardFontScale.current
+
+    /**
+     * User-configured card size / compaction scale (`0.60f..1.30f`, default `0.90f`) that applies
+     * exclusively to homepage topic cards (`ExploreScreen`). All other pages stay fixed at `0.90f`.
      */
     val homeCardScale: Float
         @Composable
@@ -108,6 +121,7 @@ fun NodePulseTheme(
     purePitchAmoled: Boolean = false,
     dynamicColor: Boolean = false,
     fontScale: Float = DEFAULT_GLOBAL_FONT_SCALE,
+    homeCardFontScale: Float = DEFAULT_HOME_CARD_FONT_SCALE,
     homeCardScale: Float = DEFAULT_HOME_CARD_SCALE,
     content: @Composable () -> Unit,
 ) {
@@ -206,6 +220,7 @@ fun NodePulseTheme(
     }
 
     val clampedScale = fontScale.coerceIn(0.85f, 1.30f)
+    val clampedHomeCardFontScale = homeCardFontScale.coerceIn(MIN_HOME_CARD_FONT_SCALE, MAX_HOME_CARD_FONT_SCALE)
     val clampedHomeCardScale = homeCardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
     val typography = remember(clampedScale) { buildNodePulseTypography(clampedScale) }
     val extraTypography = remember(clampedScale) { buildNodePulseExtraTypography(clampedScale) }
@@ -225,6 +240,7 @@ fun NodePulseTheme(
         LocalNodePulseExtendedColors provides extendedColors,
         LocalNodePulseExtraTypography provides extraTypography,
         LocalFontScale provides clampedScale,
+        LocalHomeCardFontScale provides clampedHomeCardFontScale,
         LocalHomeCardScale provides clampedHomeCardScale,
         LocalNodePulseDarkTheme provides useDark,
         LocalNodePulseDynamicColor provides dynamicSupported,

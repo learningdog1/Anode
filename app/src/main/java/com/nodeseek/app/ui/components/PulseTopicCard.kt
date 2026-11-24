@@ -50,8 +50,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nodeseek.app.ui.theme.DEFAULT_HOME_CARD_FONT_SCALE
 import com.nodeseek.app.ui.theme.DEFAULT_HOME_CARD_SCALE
+import com.nodeseek.app.ui.theme.MAX_HOME_CARD_FONT_SCALE
 import com.nodeseek.app.ui.theme.MAX_HOME_CARD_SCALE
+import com.nodeseek.app.ui.theme.MIN_HOME_CARD_FONT_SCALE
 import com.nodeseek.app.ui.theme.MIN_HOME_CARD_SCALE
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.ProvideSharedPulseShimmer
@@ -85,14 +88,18 @@ data class PulseTopicCardModel(
 )
 
 /**
- * Harmonious geometry & typography metrics for [PulseTopicCard] at a given homepage card scale
- * (`0.75f..1.30f`). Scaling down compacts card paddings, row gaps, avatar, pills, and typography
- * in balanced proportion so significantly more posts fit on one screen without clipping or awkward
- * whitespace; scaling up opens breathing room so larger titles stay crisp and editorial.
+ * Dual-axis geometry & typography metrics for [PulseTopicCard] driven independently by:
+ * - [fontScale] (`0.60f..1.30f`, default `0.90f`): controls card text sizes & inline glyph caps
+ * - [cardScale] (`0.60f..1.30f`, default `0.90f`): controls card paddings, inter-card spacing,
+ *   row gaps, corner radius, and container compactness
+ *
+ * Cross-scale safety guards ensure extreme combinations (such as `60%` compact card + `130%` large
+ * font) never clip text, overlap lines, or misalign the top-end bookmark icon.
  */
 @Immutable
 data class PulseTopicCardMetrics(
-    val scale: Float,
+    val fontScale: Float,
+    val cardScale: Float,
     val outerHorizontalPadding: Dp,
     val outerVerticalPadding: Dp,
     val cardCornerRadius: Dp,
@@ -152,72 +159,110 @@ data class PulseTopicCardMetrics(
 }
 
 /**
- * Resolves balanced typography and compaction metrics for [PulseTopicCard] from [cardScale]
- * (`0.75f..1.30f`, default `0.90f`).
+ * Resolves independent typography ([fontScale]) and card compaction ([cardScale]) metrics for
+ * [PulseTopicCard] (`0.60f..1.30f`, default `0.90f` for both).
  */
-fun resolvePulseTopicCardMetrics(cardScale: Float = DEFAULT_HOME_CARD_SCALE): PulseTopicCardMetrics {
-    val s = cardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
-    val outerVertical = interpolateCardMetric(s, at75 = 2.0f, at90 = 3.0f, at100 = 3.5f, at130 = 4.5f).dp
-    val cardCorner = interpolateCardMetric(s, at75 = 11.0f, at90 = 13.0f, at100 = 14.0f, at130 = 16.0f).dp
-    val innerHorizontal = interpolateCardMetric(s, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.0f).dp
-    val innerVertical = interpolateCardMetric(s, at75 = 6.0f, at90 = 8.5f, at100 = 10.0f, at130 = 13.0f).dp
-    val authorRowMinHeight = interpolateCardMetric(s, at75 = 19.0f, at90 = 22.5f, at100 = 25.0f, at130 = 30.0f).dp
-    val bookmarkIconSize = interpolateCardMetric(s, at75 = 15.0f, at90 = 17.0f, at100 = 18.0f, at130 = 21.0f).dp
+fun resolvePulseTopicCardMetrics(
+    fontScale: Float = DEFAULT_HOME_CARD_FONT_SCALE,
+    cardScale: Float = DEFAULT_HOME_CARD_SCALE,
+): PulseTopicCardMetrics {
+    val f = fontScale.coerceIn(MIN_HOME_CARD_FONT_SCALE, MAX_HOME_CARD_FONT_SCALE)
+    val c = cardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
+    val inlineGlyphScale = (0.80f * f + 0.20f * c).coerceIn(MIN_HOME_CARD_FONT_SCALE, MAX_HOME_CARD_FONT_SCALE)
+    val bookmarkVisualScale = (0.35f * f + 0.65f * c).coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
+
+    // Typography axis (driven purely by fontScale)
+    val titleFontSizeSp = interpolateCardMetric(f, at60 = 10.0f, at75 = 12.2f, at90 = 14.0f, at100 = 15.5f, at130 = 20.1f)
+    val titleLineHeightSp = interpolateCardMetric(f, at60 = 13.5f, at75 = 16.4f, at90 = 19.3f, at100 = 21.5f, at130 = 27.9f)
+    val authorFontSizeSp = interpolateCardMetric(f, at60 = 9.2f, at75 = 10.8f, at90 = 12.0f, at100 = 13.0f, at130 = 16.0f)
+    val authorLineHeightSp = interpolateCardMetric(f, at60 = 12.0f, at75 = 14.0f, at90 = 15.6f, at100 = 17.0f, at130 = 21.0f)
+    val timeFontSizeSp = interpolateCardMetric(f, at60 = 8.6f, at75 = 10.0f, at90 = 11.2f, at100 = 12.0f, at130 = 14.8f)
+    val timeLineHeightSp = interpolateCardMetric(f, at60 = 11.2f, at75 = 13.0f, at90 = 14.6f, at100 = 16.0f, at130 = 19.6f)
+    val footerMetricFontSizeSp = interpolateCardMetric(f, at60 = 8.4f, at75 = 9.5f, at90 = 10.7f, at100 = 11.5f, at130 = 14.0f)
+    val footerMetricLineHeightSp = interpolateCardMetric(f, at60 = 10.8f, at75 = 12.0f, at90 = 13.5f, at100 = 14.5f, at130 = 17.8f)
+    val footerPillFontSizeSp = interpolateCardMetric(f, at60 = 8.2f, at75 = 9.2f, at90 = 10.4f, at100 = 11.0f, at130 = 13.5f)
+    val footerPillLineHeightSp = interpolateCardMetric(f, at60 = 10.5f, at75 = 11.6f, at90 = 13.1f, at100 = 14.0f, at130 = 17.2f)
+
+    // Card size / compaction axis (driven by cardScale with cross-scale floor guards)
+    val outerVertical = interpolateCardMetric(c, at60 = 1.0f, at75 = 2.0f, at90 = 3.0f, at100 = 3.5f, at130 = 4.5f).dp
+    val cardCorner = interpolateCardMetric(c, at60 = 8.5f, at75 = 11.0f, at90 = 13.0f, at100 = 14.0f, at130 = 16.0f).dp
+    val innerHorizontal = interpolateCardMetric(c, at60 = 8.5f, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.0f).dp
+    val innerVertical = interpolateCardMetric(c, at60 = 3.5f, at75 = 6.0f, at90 = 8.5f, at100 = 10.0f, at130 = 13.0f).dp
+
+    val baseAvatarDp = interpolateCardMetric(c, at60 = 15.0f, at75 = 18.0f, at90 = 21.5f, at100 = 24.0f, at130 = 28.0f)
+    val resolvedAvatarDp = maxOf(baseAvatarDp, authorFontSizeSp * 1.15f)
+    val baseAuthorRowMinHeightDp = interpolateCardMetric(c, at60 = 15.5f, at75 = 19.0f, at90 = 22.5f, at100 = 25.0f, at130 = 30.0f)
+    val authorRowMinHeight = maxOf(baseAuthorRowMinHeightDp, resolvedAvatarDp, authorLineHeightSp + 1.5f).dp
+
+    val bookmarkIconSize = interpolateCardMetric(bookmarkVisualScale, at60 = 13.5f, at75 = 15.0f, at90 = 17.0f, at100 = 18.0f, at130 = 21.0f).dp
+    val footerPillVerticalPadDp = interpolateCardMetric(c, at60 = 0.5f, at75 = 1.0f, at90 = 1.5f, at100 = 2.0f, at130 = 3.0f)
+    val baseFooterPillMinHeightDp = interpolateCardMetric(c, at60 = 14.0f, at75 = 16.5f, at90 = 19.0f, at100 = 20.5f, at130 = 25.0f)
+    val footerPillMinHeight = maxOf(
+        baseFooterPillMinHeightDp,
+        footerPillLineHeightSp + footerPillVerticalPadDp * 2f + 1.5f,
+        footerMetricLineHeightSp + footerPillVerticalPadDp * 2f + 1.0f,
+    ).dp
 
     return PulseTopicCardMetrics(
-        scale = s,
+        fontScale = f,
+        cardScale = c,
         outerHorizontalPadding = 14.dp,
         outerVerticalPadding = outerVertical,
         cardCornerRadius = cardCorner,
         innerHorizontalPadding = innerHorizontal,
         innerVerticalPadding = innerVertical,
-        selectedBarVerticalPad = interpolateCardMetric(s, at75 = 7.5f, at90 = 9.75f, at100 = 11.0f, at130 = 14.0f).dp,
-        headerToTitleSpacing = interpolateCardMetric(s, at75 = 3.0f, at90 = 4.5f, at100 = 6.0f, at130 = 8.0f).dp,
-        titleToFooterSpacing = interpolateCardMetric(s, at75 = 4.0f, at90 = 5.5f, at100 = 7.0f, at130 = 9.5f).dp,
-        avatarSize = interpolateCardMetric(s, at75 = 18.0f, at90 = 21.5f, at100 = 24.0f, at130 = 28.0f).dp,
-        avatarRankRingWidth = interpolateCardMetric(s, at75 = 1.1f, at90 = 1.3f, at100 = 1.4f, at130 = 1.6f).dp,
-        avatarNeutralRingWidth = interpolateCardMetric(s, at75 = 0.75f, at90 = 0.8f, at100 = 0.85f, at130 = 0.95f).dp,
-        avatarToAuthorSpacing = interpolateCardMetric(s, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 8.5f).dp,
+        selectedBarVerticalPad = interpolateCardMetric(c, at60 = 5.0f, at75 = 7.5f, at90 = 9.75f, at100 = 11.0f, at130 = 14.0f).dp,
+        headerToTitleSpacing = interpolateCardMetric(c, at60 = 1.5f, at75 = 3.0f, at90 = 4.5f, at100 = 6.0f, at130 = 8.0f).dp,
+        titleToFooterSpacing = interpolateCardMetric(c, at60 = 2.0f, at75 = 4.0f, at90 = 5.5f, at100 = 7.0f, at130 = 9.5f).dp,
+        avatarSize = resolvedAvatarDp.dp,
+        avatarRankRingWidth = interpolateCardMetric(c, at60 = 0.95f, at75 = 1.1f, at90 = 1.3f, at100 = 1.4f, at130 = 1.6f).dp,
+        avatarNeutralRingWidth = interpolateCardMetric(c, at60 = 0.7f, at75 = 0.75f, at90 = 0.8f, at100 = 0.85f, at130 = 0.95f).dp,
+        avatarToAuthorSpacing = interpolateCardMetric(c, at60 = 4.5f, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 8.5f).dp,
         authorRowMinHeight = authorRowMinHeight,
-        authorFontSizeSp = interpolateCardMetric(s, at75 = 10.8f, at90 = 12.0f, at100 = 13.0f, at130 = 16.0f),
-        authorLineHeightSp = interpolateCardMetric(s, at75 = 14.0f, at90 = 15.6f, at100 = 17.0f, at130 = 21.0f),
-        metaSeparatorSpacing = interpolateCardMetric(s, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
-        timeFontSizeSp = interpolateCardMetric(s, at75 = 10.0f, at90 = 11.2f, at100 = 12.0f, at130 = 14.8f),
-        timeLineHeightSp = interpolateCardMetric(s, at75 = 13.0f, at90 = 14.6f, at100 = 16.0f, at130 = 19.6f),
+        authorFontSizeSp = authorFontSizeSp,
+        authorLineHeightSp = authorLineHeightSp,
+        metaSeparatorSpacing = interpolateCardMetric(c, at60 = 3.5f, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
+        timeFontSizeSp = timeFontSizeSp,
+        timeLineHeightSp = timeLineHeightSp,
         bookmarkIconSize = bookmarkIconSize,
         // Symmetrical width/height so the bookmark icon sits at the exact vertical center of Row 1
-        // and matches the avatar's horizontal edge inset at every scale.
+        // and matches the avatar's horizontal edge inset for any (fontScale, cardScale) pair.
         bookmarkTouchWidth = innerHorizontal * 2 + bookmarkIconSize,
         bookmarkTouchHeight = innerVertical * 2 + authorRowMinHeight,
-        bookmarkEndClearance = bookmarkIconSize + 10.dp,
-        titleFontSizeSp = interpolateCardMetric(s, at75 = 12.2f, at90 = 14.0f, at100 = 15.5f, at130 = 20.1f),
-        titleLineHeightSp = interpolateCardMetric(s, at75 = 16.4f, at90 = 19.3f, at100 = 21.5f, at130 = 27.9f),
-        footerPillMinHeight = interpolateCardMetric(s, at75 = 16.5f, at90 = 19.0f, at100 = 20.5f, at130 = 25.0f).dp,
-        footerPillHorizontalPad = interpolateCardMetric(s, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 9.0f).dp,
-        footerPillVerticalPad = interpolateCardMetric(s, at75 = 1.0f, at90 = 1.5f, at100 = 2.0f, at130 = 3.0f).dp,
-        footerPillIconGap = interpolateCardMetric(s, at75 = 2.5f, at90 = 3.0f, at100 = 3.0f, at130 = 4.0f).dp,
-        footerBadgeCornerRadius = interpolateCardMetric(s, at75 = 5.0f, at90 = 5.75f, at100 = 6.0f, at130 = 7.0f).dp,
-        footerHorizontalGap = interpolateCardMetric(s, at75 = 5.0f, at90 = 6.0f, at100 = 6.5f, at130 = 8.5f).dp,
-        footerVerticalGap = interpolateCardMetric(s, at75 = 3.0f, at90 = 4.0f, at100 = 4.5f, at130 = 5.5f).dp,
-        footerIconSize = interpolateCardMetric(s, at75 = 9.5f, at90 = 11.0f, at100 = 11.5f, at130 = 14.0f).dp,
-        viewIconSize = interpolateCardMetric(s, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.5f).dp,
-        categoryDotSize = interpolateCardMetric(s, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
-        footerMetricFontSizeSp = interpolateCardMetric(s, at75 = 9.5f, at90 = 10.7f, at100 = 11.5f, at130 = 14.0f),
-        footerMetricLineHeightSp = interpolateCardMetric(s, at75 = 12.0f, at90 = 13.5f, at100 = 14.5f, at130 = 17.8f),
-        footerPillFontSizeSp = interpolateCardMetric(s, at75 = 9.2f, at90 = 10.4f, at100 = 11.0f, at130 = 13.5f),
-        footerPillLineHeightSp = interpolateCardMetric(s, at75 = 11.6f, at90 = 13.1f, at100 = 14.0f, at130 = 17.2f),
+        bookmarkEndClearance = bookmarkIconSize + 8.dp,
+        titleFontSizeSp = titleFontSizeSp,
+        titleLineHeightSp = titleLineHeightSp,
+        footerPillMinHeight = footerPillMinHeight,
+        footerPillHorizontalPad = interpolateCardMetric(c, at60 = 4.5f, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 9.0f).dp,
+        footerPillVerticalPad = footerPillVerticalPadDp.dp,
+        footerPillIconGap = interpolateCardMetric(c, at60 = 2.0f, at75 = 2.5f, at90 = 3.0f, at100 = 3.0f, at130 = 4.0f).dp,
+        footerBadgeCornerRadius = interpolateCardMetric(c, at60 = 4.5f, at75 = 5.0f, at90 = 5.75f, at100 = 6.0f, at130 = 7.0f).dp,
+        footerHorizontalGap = interpolateCardMetric(c, at60 = 4.0f, at75 = 5.0f, at90 = 6.0f, at100 = 6.5f, at130 = 8.5f).dp,
+        footerVerticalGap = interpolateCardMetric(c, at60 = 2.5f, at75 = 3.0f, at90 = 4.0f, at100 = 4.5f, at130 = 5.5f).dp,
+        footerIconSize = interpolateCardMetric(inlineGlyphScale, at60 = 8.5f, at75 = 9.5f, at90 = 11.0f, at100 = 11.5f, at130 = 14.0f).dp,
+        viewIconSize = interpolateCardMetric(inlineGlyphScale, at60 = 9.5f, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.5f).dp,
+        categoryDotSize = interpolateCardMetric(inlineGlyphScale, at60 = 3.5f, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
+        footerMetricFontSizeSp = footerMetricFontSizeSp,
+        footerMetricLineHeightSp = footerMetricLineHeightSp,
+        footerPillFontSizeSp = footerPillFontSizeSp,
+        footerPillLineHeightSp = footerPillLineHeightSp,
     )
 }
 
 private fun interpolateCardMetric(
     scale: Float,
+    at60: Float,
     at75: Float,
     at90: Float,
     at100: Float,
     at130: Float,
 ): Float = when {
+    scale <= 0.75f -> {
+        val t = ((scale - MIN_HOME_CARD_SCALE) / (0.75f - MIN_HOME_CARD_SCALE)).coerceIn(0f, 1f)
+        at60 + (at75 - at60) * t
+    }
     scale <= 0.90f -> {
-        val t = ((scale - MIN_HOME_CARD_SCALE) / (0.90f - MIN_HOME_CARD_SCALE)).coerceIn(0f, 1f)
+        val t = ((scale - 0.75f) / (0.90f - 0.75f)).coerceIn(0f, 1f)
         at75 + (at90 - at75) * t
     }
     scale <= 1.00f -> {
@@ -235,7 +280,8 @@ private fun interpolateCardMetric(
  * - Transparent outlined container (proportionally scaled corner radius, hairline border, zero shadow/fill)
  * - Single-pass measurement with zero `IntrinsicSize.Min` or scroll-time `animate*AsState`
  * - Crisp read/unread title hierarchy + bottom-right backgroundless semantic category indicator
- * - Supports dedicated [cardScale] (`0.75f..1.30f`) for homepage card typography & compaction
+ * - Supports independent [fontScale] (`0.60f..1.30f`) and [cardScale] (`0.60f..1.30f`) for homepage
+ *   cards while defaulting strictly to `0.90f` on all other screens
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -247,6 +293,7 @@ fun PulseTopicCard(
     showEngagementMetrics: Boolean = true,
     resumeBadgeTextOverride: String? = null,
     contentPadding: PaddingValues? = null,
+    fontScale: Float = DEFAULT_HOME_CARD_FONT_SCALE,
     cardScale: Float = DEFAULT_HOME_CARD_SCALE,
     selectedTopicId: Long? = null,
     isSelected: Boolean = selectedTopicId != null && selectedTopicId == topic.id,
@@ -257,7 +304,9 @@ fun PulseTopicCard(
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
     val extraType = NodePulseThemeTokens.extraTypography
-    val metrics = remember(cardScale) { resolvePulseTopicCardMetrics(cardScale) }
+    val metrics = remember(fontScale, cardScale) {
+        resolvePulseTopicCardMetrics(fontScale = fontScale, cardScale = cardScale)
+    }
     val resolvedContentPadding = contentPadding ?: metrics.outerContentPadding
     val haptics = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
@@ -718,20 +767,23 @@ private fun PulseCardCategoryTag(
 
 /**
  * Diagonal shimmer skeleton placeholder matching compact outlined `PulseTopicCard` geometry
- * at the active [cardScale].
+ * at the active [fontScale] and [cardScale].
  */
 @Composable
 fun PulseTopicCardSkeleton(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues? = null,
+    fontScale: Float = DEFAULT_HOME_CARD_FONT_SCALE,
     cardScale: Float = DEFAULT_HOME_CARD_SCALE,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val metrics = remember(cardScale) { resolvePulseTopicCardMetrics(cardScale) }
+    val metrics = remember(fontScale, cardScale) {
+        resolvePulseTopicCardMetrics(fontScale = fontScale, cardScale = cardScale)
+    }
     val resolvedContentPadding = contentPadding ?: metrics.outerContentPadding
     val cardShape = RoundedCornerShape(metrics.cardCornerRadius)
     val titleBarHeight = (metrics.titleFontSizeSp * 0.96f).dp
-    val titleLineGap = (metrics.titleLineHeightSp - metrics.titleFontSizeSp).coerceAtLeast(3.5f).dp
+    val titleLineGap = (metrics.titleLineHeightSp - metrics.titleFontSizeSp).coerceAtLeast(3.0f).dp
 
     ProvideSharedPulseShimmer {
         Box(
@@ -766,7 +818,7 @@ fun PulseTopicCardSkeleton(
                     Spacer(modifier = Modifier.width(metrics.avatarToAuthorSpacing))
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width((84f * metrics.scale).dp)
+                            .width((84f * metrics.fontScale).dp)
                             .height(metrics.authorFontSizeSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )
@@ -800,20 +852,20 @@ fun PulseTopicCardSkeleton(
                 ) {
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width((46f * metrics.scale).dp)
+                            .width((46f * metrics.fontScale).dp)
                             .height(metrics.footerPillMinHeight),
                         shape = CircleShape,
                     )
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width((38f * metrics.scale).dp)
+                            .width((38f * metrics.fontScale).dp)
                             .height(metrics.footerMetricLineHeightSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width((36f * metrics.scale).dp)
+                            .width((36f * metrics.fontScale).dp)
                             .height(metrics.footerMetricLineHeightSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )

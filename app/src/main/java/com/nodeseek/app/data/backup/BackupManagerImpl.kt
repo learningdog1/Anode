@@ -1634,13 +1634,17 @@ class BackupManagerImpl(
         }
 
         // 1. Validate & normalize Settings
-        if (!bundle.settings.fontScale.isFinite()) {
-            return Result.failure(IllegalArgumentException("备份文件包含无效的字体缩放比例"))
+        if (!bundle.settings.fontScale.isFinite() || !bundle.settings.homeCardScale.isFinite()) {
+            return Result.failure(IllegalArgumentException("备份文件包含无效的字体或卡片缩放比例"))
         }
         val normalizedSettings = bundle.settings.copy(
             fontScale = bundle.settings.fontScale.coerceIn(
                 SettingsRepositoryImpl.MIN_FONT_SCALE,
                 SettingsRepositoryImpl.MAX_FONT_SCALE,
+            ),
+            homeCardScale = bundle.settings.homeCardScale.coerceIn(
+                SettingsRepositoryImpl.MIN_HOME_CARD_SCALE,
+                SettingsRepositoryImpl.MAX_HOME_CARD_SCALE,
             ),
             pinnedCategorySlugs = bundle.settings.pinnedCategorySlugs
                 .map { it.trim() }

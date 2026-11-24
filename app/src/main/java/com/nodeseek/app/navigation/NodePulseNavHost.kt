@@ -243,8 +243,9 @@ fun NodePulseRootShell(
                     themeMode = pulseThemeMode,
                     purePitchAmoled = settings.purePitchAmoled,
                     dynamicColor = settings.useDynamicColor,
-                    fontScale = AppSettings.DEFAULT_FONT_SCALE,
-                    homeCardScale = settings.fontScale,
+                    fontScale = AppSettings.DEFAULT_GLOBAL_FONT_SCALE,
+                    homeCardFontScale = settings.fontScale,
+                    homeCardScale = settings.homeCardScale,
                 ) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),

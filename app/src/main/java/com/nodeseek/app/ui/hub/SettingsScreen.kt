@@ -77,6 +77,7 @@ import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.VerifiedUser
+import androidx.compose.material.icons.rounded.ViewAgenda
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -341,6 +342,17 @@ class SettingsViewModel(
 
     fun setFontScale(scale: Float) {
         viewModelScope.launch { container.settingsRepository.setFontScale(scale) }
+    }
+
+    fun setHomeCardScale(scale: Float) {
+        viewModelScope.launch { container.settingsRepository.setHomeCardScale(scale) }
+    }
+
+    fun resetHomeCardTypographyAndScale() {
+        viewModelScope.launch {
+            container.settingsRepository.setFontScale(AppSettings.DEFAULT_FONT_SCALE)
+            container.settingsRepository.setHomeCardScale(AppSettings.DEFAULT_HOME_CARD_SCALE)
+        }
     }
 
     fun setPreferRandomCheckIn(preferRandom: Boolean) {
@@ -1049,7 +1061,7 @@ fun SettingsScreen(
                     }
                 }
 
-                // ── Group 2: 字号与排版 ──
+                // ── Group 2: 首页字号与卡片大小 ──
                 item(key = "settings_typography") {
                     var sliderFontScale by remember(settings.fontScale) {
                         mutableFloatStateOf(
@@ -1059,135 +1071,97 @@ fun SettingsScreen(
                             ),
                         )
                     }
-                    val pct = (sliderFontScale * 100f).roundToInt()
-                    val previewMetrics = remember(sliderFontScale) {
-                        resolvePulseTopicCardMetrics(sliderFontScale)
+                    var sliderCardScale by remember(settings.homeCardScale) {
+                        mutableFloatStateOf(
+                            settings.homeCardScale.coerceIn(
+                                AppSettings.MIN_HOME_CARD_SCALE,
+                                AppSettings.MAX_HOME_CARD_SCALE,
+                            ),
+                        )
                     }
-                    val densityLabel = when {
-                        sliderFontScale <= 0.78f -> "极简紧凑"
-                        sliderFontScale <= 0.87f -> "紧凑"
-                        sliderFontScale <= 0.95f -> "默认"
-                        sliderFontScale <= 1.07f -> "标准"
-                        sliderFontScale <= 1.20f -> "大字"
-                        else -> "超大"
+                    val fontPct = (sliderFontScale * 100f).roundToInt()
+                    val cardPct = (sliderCardScale * 100f).roundToInt()
+                    val isNonDefault = abs(sliderFontScale - AppSettings.DEFAULT_FONT_SCALE) >= 0.006f ||
+                        abs(sliderCardScale - AppSettings.DEFAULT_HOME_CARD_SCALE) >= 0.006f
+                    val previewMetrics = remember(sliderFontScale, sliderCardScale) {
+                        resolvePulseTopicCardMetrics(
+                            fontScale = sliderFontScale,
+                            cardScale = sliderCardScale,
+                        )
+                    }
+                    val homeScalePresets = remember {
+                        listOf(
+                            0.60f to "60%",
+                            0.75f to "75%",
+                            0.90f to "90%",
+                            1.00f to "100%",
+                            1.20f to "120%",
+                        )
                     }
                     PulseStaggeredEntrance(index = 1) {
-                        SettingsGroupedSection(title = "字号与排版") {
+                        SettingsGroupedSection(title = "首页字号与卡片排版") {
+                            HomeCardScaleControlBlock(
+                                icon = Icons.Rounded.FormatSize,
+                                title = "首页卡片字号",
+                                subtitle = "单独调节首页帖子文字大小（其他页面固定 90%）",
+                                value = sliderFontScale,
+                                valueRange = AppSettings.MIN_FONT_SCALE..AppSettings.MAX_FONT_SCALE,
+                                presets = homeScalePresets,
+                                onValueChange = { next -> sliderFontScale = next },
+                                onValueCommit = { committed -> viewModel.setFontScale(committed) },
+                            )
+
+                            SettingsGroupDivider()
+
+                            HomeCardScaleControlBlock(
+                                icon = Icons.Rounded.ViewAgenda,
+                                title = "首页卡片大小",
+                                subtitle = "单独调节首页卡片留白、间距与紧凑度（其他页面固定 90%）",
+                                value = sliderCardScale,
+                                valueRange = AppSettings.MIN_HOME_CARD_SCALE..AppSettings.MAX_HOME_CARD_SCALE,
+                                presets = homeScalePresets,
+                                onValueChange = { next -> sliderCardScale = next },
+                                onValueCommit = { committed -> viewModel.setHomeCardScale(committed) },
+                            )
+
+                            SettingsGroupDivider()
+
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
-                                    SettingsRowIconBadge(icon = Icons.Rounded.FormatSize)
-                                    Column(
+                                    Text(
+                                        text = "仅针对首页帖子列表生效，其余页面卡片与字号恒为 90%",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(1.dp),
-                                    ) {
-                                        Text(
-                                            text = "首页卡片字号与紧缩",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                        )
-                                        Text(
-                                            text = "仅缩放首页帖子卡片的字号与紧凑度，不影响正文与其他页面",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    PulseAccentPill(
-                                        text = "$pct%",
-                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                     )
-                                }
-
-                                Slider(
-                                    value = sliderFontScale,
-                                    onValueChange = { raw ->
-                                        sliderFontScale = ((raw * 100f).roundToInt() / 100f).coerceIn(
-                                            AppSettings.MIN_FONT_SCALE,
-                                            AppSettings.MAX_FONT_SCALE,
-                                        )
-                                    },
-                                    onValueChangeFinished = {
-                                        viewModel.setFontScale(sliderFontScale)
-                                    },
-                                    valueRange = AppSettings.MIN_FONT_SCALE..AppSettings.MAX_FONT_SCALE,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    listOf(
-                                        0.75f to "75%",
-                                        0.85f to "85%",
-                                        0.90f to "90%",
-                                        1.00f to "100%",
-                                        1.15f to "115%",
-                                    ).forEach { (scale, label) ->
-                                        val isPresetActive = abs(sliderFontScale - scale) < 0.006f
-                                        val chipBg by animateColorAsState(
-                                            targetValue = if (isPresetActive) {
-                                                MaterialTheme.colorScheme.primaryContainer
-                                            } else {
-                                                MaterialTheme.colorScheme.surfaceContainerLow
-                                            },
-                                            label = "fontPresetBg",
-                                        )
-                                        val chipBorder by animateColorAsState(
-                                            targetValue = if (isPresetActive) {
-                                                MaterialTheme.colorScheme.primary
-                                            } else {
-                                                ext.cardBorder
-                                            },
-                                            label = "fontPresetBorder",
-                                        )
-                                        val presetInteraction = remember { MutableInteractionSource() }
-                                        Box(
+                                    if (isNonDefault) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "恢复 90%",
+                                            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier
-                                                .weight(1f)
-                                                .pulsePressScale(presetInteraction)
                                                 .clip(CircleShape)
-                                                .background(chipBg)
-                                                .border(
-                                                    width = if (isPresetActive) 1.1.dp else 0.8.dp,
-                                                    color = chipBorder,
-                                                    shape = CircleShape,
-                                                )
                                                 .clickable(
-                                                    interactionSource = presetInteraction,
-                                                    indication = LocalIndication.current,
                                                     role = Role.Button,
                                                     onClick = {
-                                                        sliderFontScale = scale
-                                                        viewModel.setFontScale(scale)
+                                                        sliderFontScale = AppSettings.DEFAULT_FONT_SCALE
+                                                        sliderCardScale = AppSettings.DEFAULT_HOME_CARD_SCALE
+                                                        viewModel.resetHomeCardTypographyAndScale()
                                                     },
                                                 )
-                                                .padding(vertical = 7.dp),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Text(
-                                                text = label,
-                                                style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
-                                                fontWeight = if (isPresetActive) FontWeight.Bold else FontWeight.Medium,
-                                                color = if (isPresetActive) {
-                                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                },
-                                                maxLines = 1,
-                                                softWrap = false,
-                                            )
-                                        }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        )
                                     }
                                 }
 
@@ -1212,12 +1186,12 @@ fun SettingsScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                     ) {
                                         Text(
-                                            text = "首页卡片预览",
+                                            text = "首页帖子预览",
                                             style = extraType.microLabel,
                                             color = MaterialTheme.colorScheme.primary,
                                         )
                                         Text(
-                                            text = "$densityLabel · 标题 ${previewMetrics.titleFontSizeSp.roundToInt()}sp",
+                                            text = "字号 $fontPct% (${previewMetrics.titleFontSizeSp.roundToInt()}sp) · 卡片 $cardPct%",
                                             style = extraType.microLabel.withTabularNumbers(),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
@@ -1226,14 +1200,16 @@ fun SettingsScreen(
                                         PulseTopicCard(
                                             topic = SETTINGS_PREVIEW_PRIMARY_TOPIC,
                                             onClick = {},
-                                            cardScale = sliderFontScale,
+                                            fontScale = sliderFontScale,
+                                            cardScale = sliderCardScale,
                                             contentPadding = PaddingValues(vertical = previewMetrics.outerVerticalPadding),
                                             onBookmarkToggle = {},
                                         )
                                         PulseTopicCard(
                                             topic = SETTINGS_PREVIEW_SECONDARY_TOPIC,
                                             onClick = {},
-                                            cardScale = sliderFontScale,
+                                            fontScale = sliderFontScale,
+                                            cardScale = sliderCardScale,
                                             contentPadding = PaddingValues(vertical = previewMetrics.outerVerticalPadding),
                                             onBookmarkToggle = {},
                                         )
@@ -3382,6 +3358,135 @@ private fun AwayDigestCustomDurationDialog(
                         MaterialTheme.colorScheme.onErrorContainer
                     },
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeCardScaleControlBlock(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    presets: List<Pair<Float, String>>,
+    onValueChange: (Float) -> Unit,
+    onValueCommit: (Float) -> Unit,
+) {
+    val ext = NodePulseThemeTokens.extendedColors
+    val pct = (value * 100f).roundToInt()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SettingsRowIconBadge(icon = icon)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            PulseAccentPill(
+                text = "$pct%",
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
+
+        Slider(
+            value = value,
+            onValueChange = { raw ->
+                val snapped = ((raw * 100f).roundToInt() / 100f).coerceIn(
+                    valueRange.start,
+                    valueRange.endInclusive,
+                )
+                onValueChange(snapped)
+            },
+            onValueChangeFinished = {
+                onValueCommit(value)
+            },
+            valueRange = valueRange,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            presets.forEach { (presetScale, label) ->
+                val isPresetActive = abs(value - presetScale) < 0.006f
+                val chipBg by animateColorAsState(
+                    targetValue = if (isPresetActive) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerLow
+                    },
+                    label = "homeScalePresetBg",
+                )
+                val chipBorder by animateColorAsState(
+                    targetValue = if (isPresetActive) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        ext.cardBorder
+                    },
+                    label = "homeScalePresetBorder",
+                )
+                val presetInteraction = remember { MutableInteractionSource() }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .pulsePressScale(presetInteraction)
+                        .clip(CircleShape)
+                        .background(chipBg)
+                        .border(
+                            width = if (isPresetActive) 1.1.dp else 0.8.dp,
+                            color = chipBorder,
+                            shape = CircleShape,
+                        )
+                        .clickable(
+                            interactionSource = presetInteraction,
+                            indication = LocalIndication.current,
+                            role = Role.Button,
+                            onClick = {
+                                onValueChange(presetScale)
+                                onValueCommit(presetScale)
+                            },
+                        )
+                        .padding(vertical = 7.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        fontWeight = if (isPresetActive) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isPresetActive) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
             }
         }
     }

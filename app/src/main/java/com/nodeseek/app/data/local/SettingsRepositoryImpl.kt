@@ -144,6 +144,13 @@ class SettingsRepositoryImpl(
         }
     }
 
+    override suspend fun setHomeCardScale(scale: Float) {
+        val clamped = scale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
+        dataStore.edit { prefs ->
+            prefs[Keys.HOME_CARD_SCALE] = clamped
+        }
+    }
+
     override suspend fun setPreferRandomCheckIn(preferRandom: Boolean) {
         dataStore.edit { prefs ->
             prefs[Keys.PREFER_RANDOM_CHECK_IN] = preferRandom
@@ -275,6 +282,7 @@ class SettingsRepositoryImpl(
             purePitchAmoled = current.purePitchAmoled,
             useDynamicColor = current.useDynamicColor,
             fontScale = current.fontScale,
+            homeCardScale = current.homeCardScale,
             preferRandomCheckIn = current.preferRandomCheckIn,
             pinnedCategorySlugs = current.pinnedCategorySlugs,
             includeBlockedTopics = current.includeBlockedTopics,
@@ -347,6 +355,7 @@ class SettingsRepositoryImpl(
             prefs[Keys.PURE_PITCH_AMOLED] = backup.purePitchAmoled
             prefs[Keys.USE_DYNAMIC_COLOR] = backup.useDynamicColor
             prefs[Keys.FONT_SCALE] = backup.fontScale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE)
+            prefs[Keys.HOME_CARD_SCALE] = backup.homeCardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
             prefs[Keys.PREFER_RANDOM_CHECK_IN] = backup.preferRandomCheckIn
             prefs[Keys.PINNED_CATEGORY_SLUGS] = json.encodeToString(cleanedPinned)
             prefs[Keys.INCLUDE_BLOCKED_TOPICS] = backup.includeBlockedTopics
@@ -389,6 +398,10 @@ class SettingsRepositoryImpl(
             purePitchAmoled = this[Keys.PURE_PITCH_AMOLED] ?: false,
             useDynamicColor = this[Keys.USE_DYNAMIC_COLOR] ?: false,
             fontScale = (this[Keys.FONT_SCALE] ?: AppSettings.DEFAULT_FONT_SCALE).coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE),
+            homeCardScale = (this[Keys.HOME_CARD_SCALE] ?: AppSettings.DEFAULT_HOME_CARD_SCALE).coerceIn(
+                MIN_HOME_CARD_SCALE,
+                MAX_HOME_CARD_SCALE,
+            ),
             preferRandomCheckIn = this[Keys.PREFER_RANDOM_CHECK_IN] ?: false,
             pinnedCategorySlugs = decodePinnedSlugs(this[Keys.PINNED_CATEGORY_SLUGS]),
             includeBlockedTopics = this[Keys.INCLUDE_BLOCKED_TOPICS] ?: false,
@@ -421,6 +434,7 @@ class SettingsRepositoryImpl(
         val PURE_PITCH_AMOLED = booleanPreferencesKey("pure_pitch_amoled")
         val USE_DYNAMIC_COLOR = booleanPreferencesKey("use_dynamic_color")
         val FONT_SCALE = floatPreferencesKey("font_scale")
+        val HOME_CARD_SCALE = floatPreferencesKey("home_card_scale")
         val PREFER_RANDOM_CHECK_IN = booleanPreferencesKey("prefer_random_check_in")
         val PINNED_CATEGORY_SLUGS = stringPreferencesKey("pinned_category_slugs")
         val INCLUDE_BLOCKED_TOPICS = booleanPreferencesKey("include_blocked_topics")
@@ -439,6 +453,8 @@ class SettingsRepositoryImpl(
     companion object {
         const val MIN_FONT_SCALE = AppSettings.MIN_FONT_SCALE
         const val MAX_FONT_SCALE = AppSettings.MAX_FONT_SCALE
+        const val MIN_HOME_CARD_SCALE = AppSettings.MIN_HOME_CARD_SCALE
+        const val MAX_HOME_CARD_SCALE = AppSettings.MAX_HOME_CARD_SCALE
         const val MAX_RECENT_SEARCHES = 12
     }
 }

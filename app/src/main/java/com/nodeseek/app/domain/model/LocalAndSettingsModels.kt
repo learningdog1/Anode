@@ -26,6 +26,7 @@ data class AppSettings(
     val purePitchAmoled: Boolean = false,
     val useDynamicColor: Boolean = false,
     val fontScale: Float = DEFAULT_FONT_SCALE,
+    val homeCardScale: Float = DEFAULT_HOME_CARD_SCALE,
     val preferRandomCheckIn: Boolean = false,
     val pinnedCategorySlugs: Set<String> = DEFAULT_PINNED_CATEGORY_SLUGS,
     val includeBlockedTopics: Boolean = false,
@@ -40,10 +41,14 @@ data class AppSettings(
     val awayDigestThresholdMinutes: Int = DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES,
 ) {
     companion object {
-        /** Default scale for homepage topic cards (font size & card compaction) and global UI baseline. */
+        /** Fixed 90% baseline for global UI and default scale for homepage post card font & card size. */
+        const val DEFAULT_GLOBAL_FONT_SCALE: Float = 0.90f
         const val DEFAULT_FONT_SCALE: Float = 0.90f
-        const val MIN_FONT_SCALE: Float = 0.75f
+        const val DEFAULT_HOME_CARD_SCALE: Float = 0.90f
+        const val MIN_FONT_SCALE: Float = 0.60f
         const val MAX_FONT_SCALE: Float = 1.30f
+        const val MIN_HOME_CARD_SCALE: Float = 0.60f
+        const val MAX_HOME_CARD_SCALE: Float = 1.30f
         const val DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 60
         const val MIN_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 5
         const val MAX_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 72 * 60

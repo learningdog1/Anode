@@ -14,6 +14,7 @@ interface SettingsRepository {
     suspend fun setPurePitchAmoled(enabled: Boolean)
     suspend fun setUseDynamicColor(enabled: Boolean)
     suspend fun setFontScale(scale: Float)
+    suspend fun setHomeCardScale(scale: Float) {}
     suspend fun setPreferRandomCheckIn(preferRandom: Boolean)
     suspend fun setPinnedCategorySlugs(slugs: Set<String>)
     suspend fun togglePinnedCategory(slug: String)
