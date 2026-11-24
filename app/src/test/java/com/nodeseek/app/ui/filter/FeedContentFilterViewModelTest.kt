@@ -148,26 +148,15 @@ class FeedContentFilterViewModelTest {
     }
 
     @Test
-    fun `BoardsViewModel reactively filters search results and inline board feed`() = runTest {
+    fun `BoardsViewModel reactively filters search results`() = runTest {
         val searchTopics = listOf(
             topic(100L, "[求购] Claw JP", "trade", "交易"),
             topic(101L, "Claw JP 晚高峰测评", "review", "测评"),
             topic(102L, "Claw 商家新年促销", "promotion", "推广"),
             topic(103L, "Claw 优惠附带 AFF", "promotion", "推广"),
         )
-        val promoBoardTopics = listOf(
-            topic(102L, "Claw 商家新年促销", "promotion", "推广"),
-            topic(103L, "Claw 优惠附带 AFF", "promotion", "推广"),
-        )
-        val promoBoardPinned = listOf(
-            topic(104L, "[置顶] 推广版块规则与 AFF 说明", "promotion", "推广"),
-            topic(105L, "[置顶] 推广版块发帖规范", "promotion", "推广"),
-        )
 
         val forumRepo = FakeForumRepository(
-            feedsByCategory = mapOf(
-                "promotion" to FeedPageResult(pinnedTopics = promoBoardPinned, topics = promoBoardTopics),
-            ),
             searchResults = FeedPageResult(topics = searchTopics),
         )
         val settingsRepo = FakeSettingsRepository()
@@ -212,18 +201,11 @@ class FeedContentFilterViewModelTest {
         filterRepo.setEnabled(false)
         assertEquals(listOf(100L, 101L, 102L, 103L), viewModel.uiState.value.searchTopics.map { it.id })
 
-        // Re-enable filter and open inline muted "promotion" board:
-        // allows non-keyword-blocked promotion posts (105 pinned, 102 regular), hides AFF posts (104, 103)
+        // Re-enabling filter and turning on includeBlockedTopics bypasses filter reactively
         filterRepo.setEnabled(true)
-        viewModel.openInlineBoard("promotion")
-        val boardState = viewModel.uiState.first { it.activeInlineBoardSlug == "promotion" && !it.isInlineBoardLoading }
-        assertEquals(listOf(105L), boardState.inlineBoardPinnedTopics.map { it.id })
-        assertEquals(listOf(102L), boardState.inlineBoardTopics.map { it.id })
-
-        // Turning on includeBlockedTopics reveals AFF posts reactively too
+        assertEquals(listOf(101L), viewModel.uiState.first { it.searchTopics.size == 1 }.searchTopics.map { it.id })
         settingsRepo.setIncludeBlockedTopics(true)
-        assertEquals(listOf(104L, 105L), viewModel.uiState.value.inlineBoardPinnedTopics.map { it.id })
-        assertEquals(listOf(102L, 103L), viewModel.uiState.value.inlineBoardTopics.map { it.id })
+        assertEquals(listOf(100L, 101L, 102L, 103L), viewModel.uiState.first { it.searchTopics.size == 4 }.searchTopics.map { it.id })
 
         collectJob.cancel()
     }

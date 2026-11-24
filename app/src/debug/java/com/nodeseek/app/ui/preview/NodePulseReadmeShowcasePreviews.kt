@@ -587,7 +587,6 @@ fun Preview01ExplorePaperLight() {
         ExploreScreen(
             onOpenTopic = { _, _, _ -> },
             onOpenSearch = {},
-            onOpenBoardsTab = {},
             previewUiState = SHOWCASE_EXPLORE_STATE,
         )
     }
@@ -605,7 +604,6 @@ fun Preview02ExploreObsidianDark() {
         ExploreScreen(
             onOpenTopic = { _, _, _ -> },
             onOpenSearch = {},
-            onOpenBoardsTab = {},
             previewUiState = SHOWCASE_EXPLORE_STATE,
         )
     }
@@ -623,7 +621,6 @@ fun Preview03ExplorePitchAmoled() {
         ExploreScreen(
             onOpenTopic = { _, _, _ -> },
             onOpenSearch = {},
-            onOpenBoardsTab = {},
             previewUiState = SHOWCASE_EXPLORE_STATE,
         )
     }
@@ -656,16 +653,13 @@ fun Preview05UnifiedSearch() {
     ) {
         BoardsScreen(
             onOpenTopic = { _, _, _ -> },
-            standaloneSearchMode = true,
             onBack = {},
             previewUiState = BoardsUiState(
                 categories = Category.DEFAULT_CATEGORIES,
-                pinnedCategorySlugs = SHOWCASE_SETTINGS.pinnedCategorySlugs,
                 recentSearchQueries = listOf("东京 IIJ", "DMIT TYO", "BBRv3", "seek.li"),
                 isSignedIn = true,
                 queryInput = "东京 IIJ",
                 submittedQuery = "东京 IIJ",
-                isSearchModeActive = true,
                 searchScope = SearchScope.TOPICS,
                 searchSort = FeedSort.LATEST_REPLY,
                 searchTopics = SHOWCASE_TOPICS.take(3),
@@ -1321,7 +1315,6 @@ fun Preview21DynamicGreenExploreLight() {
         ExploreScreen(
             onOpenTopic = { _, _, _ -> },
             onOpenSearch = {},
-            onOpenBoardsTab = {},
             previewUiState = SHOWCASE_EXPLORE_STATE,
         )
     }
@@ -1343,7 +1336,6 @@ fun Preview22DynamicRedExploreDark() {
         ExploreScreen(
             onOpenTopic = { _, _, _ -> },
             onOpenSearch = {},
-            onOpenBoardsTab = {},
             previewUiState = SHOWCASE_EXPLORE_STATE,
         )
     }

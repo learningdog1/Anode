@@ -62,9 +62,6 @@ sealed interface AppDestination
 data object ExploreRoute : AppDestination
 
 @Serializable
-data object BoardsRoute : AppDestination
-
-@Serializable
 data object PulseHubRoute : AppDestination
 
 @Serializable

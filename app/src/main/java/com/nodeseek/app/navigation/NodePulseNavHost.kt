@@ -1206,11 +1206,6 @@ fun NodePulseNavHost(
                                                         launchSingleTop = true
                                                     }
                                                 },
-                                                onOpenBoardsTab = {
-                                                    navController.navigate(BoardsRoute) {
-                                                        launchSingleTop = true
-                                                    }
-                                                },
                                                 onOpenAuthorProfile = navigateToUser,
                                                 onRequestWebViewAuth = {
                                                     openWebViewAuth(SIGN_IN_URL, session == null)
@@ -1345,49 +1340,6 @@ fun NodePulseNavHost(
                 }
             }
 
-            // Bento Board Directory & Pin Management
-            composable<BoardsRoute> { backStackEntry ->
-                val refreshTrigger by backStackEntry.savedStateHandle
-                    .getStateFlow(EDITED_TOPIC_REFRESH_KEY, 0L)
-                    .collectAsStateWithLifecycle()
-                AdaptiveMasterDetailContainer(
-                    adaptiveLayout = adaptiveLayout,
-                    selectedPaneTopic = selectedPaneTopic,
-                    isDetailPaneMaximized = isDetailPaneMaximized,
-                    allowBackToCloseDetail = false,
-                    refreshTrigger = refreshTrigger,
-                    onCloseDetailPane = closeDualPaneTopic,
-                    onToggleMaximizePane = toggleDualPaneMaximize,
-                    onNavigateToUser = navigateToUser,
-                    onNavigateToCategory = selectBoardAndOpenExplore,
-                    onOpenTopic = openTopic,
-                    onEditTopic = editTopic,
-                    onRequestWebViewAuth = requestTopicWebViewAuth,
-                    onStartDirectMessage = openDirectMessage,
-                    onOpenFullNetBench = openMobileNetBench,
-                    onOpenFullLiteSsh = openLiteSsh,
-                    onPublishSshToComposer = publishSshToComposer,
-                ) {
-                    BoardsScreen(
-                        onOpenTopic = openTopic,
-                        autoFocusSearch = false,
-                        standaloneSearchMode = false,
-                        onBack = safePopBackStack,
-                        onSelectBoard = selectBoardAndOpenExplore,
-                        onOpenUserProfile = navigateToUser,
-                        onRequestWebViewAuth = {
-                            openWebViewAuth(SIGN_IN_URL, session == null)
-                        },
-                        bottomContentPadding = searchBottomPadding,
-                        selectedTopicId = if (adaptiveLayout.isDualPane) {
-                            selectedPaneTopic?.topicId
-                        } else {
-                            null
-                        },
-                    )
-                }
-            }
-
             composable<PulseHubRoute> {
                 LaunchedEffect(Unit) {
                     selectedTab = PulseNavTab.PULSE_HUB
@@ -1423,7 +1375,6 @@ fun NodePulseNavHost(
                         onOpenTopic = openTopic,
                         autoFocusSearch = shouldAutoFocusSearch,
                         onAutoFocusConsumed = { shouldAutoFocusSearch = false },
-                        standaloneSearchMode = true,
                         onBack = safePopBackStack,
                         onSelectBoard = selectBoardAndOpenExplore,
                         onOpenUserProfile = navigateToUser,
@@ -2268,7 +2219,7 @@ private fun resolveDestinationKind(
                 DualPaneDestinationKind.EXPLORE_OTHER_TAB
             }
         }
-        dest.hasRoute<SearchRoute>() || dest.hasRoute<BoardsRoute>() ->
+        dest.hasRoute<SearchRoute>() ->
             DualPaneDestinationKind.BOARDS_OR_SEARCH
         dest.hasRoute<HubCollectionRoute>() ->
             DualPaneDestinationKind.HUB_COLLECTION

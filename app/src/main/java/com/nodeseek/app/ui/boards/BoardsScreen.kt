@@ -1,20 +1,13 @@
 package com.nodeseek.app.ui.boards
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,7 +26,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -41,10 +33,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -59,25 +47,13 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.DeleteSweep
-import androidx.compose.material.icons.rounded.Forum
-import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.LocalCafe
-import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.PersonSearch
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Restaurant
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material.icons.rounded.StarBorder
-import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.TravelExplore
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -85,7 +61,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -100,15 +75,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -123,13 +94,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.LocalAppContainer
-import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.domain.model.TopicSummary
-import com.nodeseek.app.ui.components.CollapsiblePinnedTicker
 import com.nodeseek.app.ui.components.CompactCountBadge
-import com.nodeseek.app.ui.components.PinnedTickerTopic
 import com.nodeseek.app.ui.components.PulseAvatar
 import com.nodeseek.app.ui.components.PulseSearchField
 import com.nodeseek.app.ui.components.PulseSnackbarHost
@@ -148,7 +116,6 @@ import com.nodeseek.app.ui.theme.PulseBrushes
 import com.nodeseek.app.ui.theme.PulseElevation
 import com.nodeseek.app.ui.theme.PulseGradientDivider
 import com.nodeseek.app.ui.theme.PulseSectionHeader
-import com.nodeseek.app.ui.theme.PulseStaggeredEntrance
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseGlassSurface
 import com.nodeseek.app.ui.theme.pulseHeroCard
@@ -158,28 +125,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-private val TECH_INTEL_SLUGS = setOf("tech", "dev", "info", "review", "inside", "sandbox")
-private val TRADE_CARPOOL_SLUGS = setOf("trade", "carpool", "promotion")
-private val TECH_HERO_PREFERENCES = setOf("tech", "review")
-private val TRADE_HERO_PREFERENCES = setOf("trade")
-private val COMMUNITY_HERO_PREFERENCES = setOf("daily")
-
 private val SEARCH_SORT_SEGMENTS: List<SortSegmentItem<FeedSort>> = listOf(
     SortSegmentItem(FeedSort.LATEST_REPLY, "最新回复"),
     SortSegmentItem(FeedSort.NEWEST_TOPIC, "最新发布"),
 )
-
-private val BOARD_FEED_SORT_SEGMENTS: List<SortSegmentItem<FeedSort>> = listOf(
-    SortSegmentItem(FeedSort.LATEST_REPLY, "最新回复"),
-    SortSegmentItem(FeedSort.NEWEST_TOPIC, "最新发布"),
-    SortSegmentItem(FeedSort.HOT, "热门精选"),
-)
-
-private enum class BoardsDisplayMode {
-    DIRECTORY,
-    SEARCH,
-    INLINE_BOARD,
-}
 
 internal fun shouldRequestSearchAutoFocus(
     autoFocusSearch: Boolean,
@@ -197,24 +146,15 @@ internal fun shouldRequestSearchAutoFocus(
 }
 
 /**
- * Anode Boards & Unified Search Screen (`版块`).
- *
- * Dual-Mode Architecture:
- * 1. **Asymmetric Visual Bento Board Directory**:
- *    - 2-column `LazyVerticalGrid` with `GridItemSpan(2)` Hero Bento tiles (`tech`, `review`,
- *      `trade`, `daily`, `all`) and `GridItemSpan(1)` tiles, displaying rounded icons, Chinese &
- *      `/slug` badges, editorial descriptions, `5 🍗` badge on `inside`, and 1-tap Pin Star (`★`).
- *    - Tapping a board either invokes `onSelectBoard` (if caller wants to switch Explore tab) OR
- *      opens a full filtered inline board feed sub-view with BackHandler support.
- * 2. **Unified Search Experience**:
- *    - Recent search history chips + clear, `找帖子` / `找用户` scope chips, board & sort filters,
- *      and a prominent **1-Tap Google 站内搜索 (`site:www.nodeseek.com`)** fallback card.
+ * Anode Unified Search Screen (`全站统一搜索`):
+ * - Recent search history chips + clear, `找帖子` / `找用户` scope chips, board & sort filters,
+ *   matching board quick-jump back to Explore, and a prominent **1-Tap Google 站内搜索
+ *   (`site:www.nodeseek.com`)** fallback card.
  */
 @Composable
 fun BoardsScreen(
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     modifier: Modifier = Modifier,
-    initialCategorySlug: String = "",
     autoFocusSearch: Boolean = false,
     focusSearchTrigger: Int = 0,
     onAutoFocusConsumed: () -> Unit = {},
@@ -222,15 +162,12 @@ fun BoardsScreen(
     onOpenUserProfile: (uid: Long, usernameHint: String) -> Unit = { _, _ -> },
     onRequestWebViewAuth: (() -> Unit)? = null,
     bottomContentPadding: Dp = 98.dp,
-    standaloneSearchMode: Boolean = false,
     onBack: (() -> Unit)? = null,
     selectedTopicId: Long? = null,
     previewUiState: BoardsUiState? = null,
     viewModel: BoardsViewModel = viewModel(
         factory = BoardsViewModel.factory(
             container = LocalAppContainer.current,
-            initialCategorySlug = initialCategorySlug,
-            autoFocusSearch = autoFocusSearch,
         )
     ),
 ) {
@@ -251,14 +188,6 @@ fun BoardsScreen(
         keyboardController?.hide()
     }
 
-    // Remember last inline slug so header transition doesn't flicker during exit animation.
-    var lastInlineSlug by rememberSaveable { mutableStateOf(initialCategorySlug) }
-    LaunchedEffect(uiState.activeInlineBoardSlug) {
-        uiState.activeInlineBoardSlug?.let { active ->
-            lastInlineSlug = active
-        }
-    }
-
     val triggerWebViewAuth: () -> Unit = remember(onRequestWebViewAuth) {
         {
             if (onRequestWebViewAuth != null) {
@@ -266,13 +195,6 @@ fun BoardsScreen(
             } else {
                 showBuiltInWebViewSheet = true
             }
-        }
-    }
-
-    // Sync external initialCategorySlug when updated dynamically
-    LaunchedEffect(initialCategorySlug) {
-        if (initialCategorySlug.isNotBlank() && initialCategorySlug != uiState.activeInlineBoardSlug) {
-            viewModel.openInlineBoard(initialCategorySlug)
         }
     }
 
@@ -292,7 +214,6 @@ fun BoardsScreen(
             if (focusSearchTrigger > 0) {
                 lastHandledFocusTrigger = focusSearchTrigger
             }
-            viewModel.setSearchModeActive(true)
             delay(80)
             runCatching { focusRequester.requestFocus() }
             keyboardController?.show()
@@ -314,33 +235,9 @@ fun BoardsScreen(
         viewModel.consumeSnackbar()
     }
 
-    // Intercept system back when viewing an inline board feed, active search mode, or standalone search
-    BackHandler(
-        enabled = uiState.activeInlineBoardSlug != null || uiState.isSearchModeActive || standaloneSearchMode,
-    ) {
-        when {
-            uiState.activeInlineBoardSlug != null -> viewModel.closeInlineBoard()
-            standaloneSearchMode -> {
-                dismissSearchKeyboard()
-                onBack?.invoke()
-            }
-            uiState.isSearchModeActive -> {
-                dismissSearchKeyboard()
-                viewModel.setSearchModeActive(false)
-            }
-        }
-    }
-
-    val displayMode = when {
-        uiState.activeInlineBoardSlug != null -> BoardsDisplayMode.INLINE_BOARD
-        standaloneSearchMode || uiState.isSearchModeActive -> BoardsDisplayMode.SEARCH
-        else -> BoardsDisplayMode.DIRECTORY
-    }
-    val visibleBoardCount = remember(uiState.categories) {
-        uiState.categories.count { !it.isAdminOnly }
-    }
-    val pinnedBoardCount = remember(uiState.categories, uiState.pinnedCategorySlugs) {
-        uiState.categories.count { !it.isAdminOnly && it.slug.isNotBlank() && it.slug in uiState.pinnedCategorySlugs }
+    BackHandler(enabled = onBack != null) {
+        dismissSearchKeyboard()
+        onBack?.invoke()
     }
 
     Scaffold(
@@ -354,58 +251,27 @@ fun BoardsScreen(
             )
         },
         topBar = {
-            AnimatedContent(
-                targetState = displayMode == BoardsDisplayMode.INLINE_BOARD,
-                transitionSpec = {
-                    (fadeIn(tween(200)) + expandVertically(tween(220))) togetherWith
-                        (fadeOut(tween(140)) + shrinkVertically(tween(180)))
-                },
-                label = "boardsTopBarTransition",
-            ) { isInlineBoard ->
-                if (isInlineBoard) {
-                    val activeSlug = uiState.activeInlineBoardSlug ?: lastInlineSlug
-                    InlineBoardTopHeader(
-                        slug = activeSlug,
-                        categories = uiState.categories,
-                        isPinned = activeSlug in uiState.pinnedCategorySlugs,
-                        sort = uiState.inlineBoardSort,
-                        onBack = viewModel::closeInlineBoard,
-                        onTogglePin = {
-                            viewModel.togglePinCategory(activeSlug)
-                        },
-                        onSelectSort = viewModel::selectInlineBoardSort,
-                    )
+            UnifiedSearchHeader(
+                query = uiState.queryInput,
+                focusRequester = focusRequester,
+                onBack = if (onBack != null) {
+                    {
+                        dismissSearchKeyboard()
+                        onBack()
+                    }
                 } else {
-                    // Keep BoardsDirectorySearchHeader mounted across DIRECTORY <-> SEARCH
-                    // so focusRequester stays attached without losing keyboard focus.
-                    BoardsDirectorySearchHeader(
-                        query = uiState.queryInput,
-                        isSearchActive = standaloneSearchMode || uiState.isSearchModeActive,
-                        pinnedCount = pinnedBoardCount,
-                        totalBoardCount = visibleBoardCount,
-                        focusRequester = focusRequester,
-                        onBack = onBack,
-                        onQueryChange = viewModel::updateQueryInput,
-                        onFocusSearch = { viewModel.setSearchModeActive(true) },
-                        onSubmitSearch = {
-                            dismissSearchKeyboard()
-                            viewModel.submitSearch()
-                            coroutineScope.launch {
-                                searchListState.scrollToItem(0)
-                            }
-                        },
-                        onCancelSearch = {
-                            dismissSearchKeyboard()
-                            if (standaloneSearchMode) {
-                                onBack?.invoke()
-                            } else {
-                                viewModel.setSearchModeActive(false)
-                            }
-                        },
-                        onClearInput = { viewModel.updateQueryInput("") },
-                    )
-                }
-            }
+                    null
+                },
+                onQueryChange = viewModel::updateQueryInput,
+                onSubmitSearch = {
+                    dismissSearchKeyboard()
+                    viewModel.submitSearch()
+                    coroutineScope.launch {
+                        searchListState.scrollToItem(0)
+                    }
+                },
+                onClearInput = { viewModel.updateQueryInput("") },
+            )
         },
     ) { innerPadding ->
         Box(
@@ -413,117 +279,62 @@ fun BoardsScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            AnimatedContent(
-                targetState = displayMode,
-                transitionSpec = {
-                    (fadeIn(tween(220)) + scaleIn(initialScale = 0.985f, animationSpec = tween(220)) +
-                        slideInVertically(animationSpec = tween(220)) { it / 32 }) togetherWith
-                        fadeOut(tween(120))
+            UnifiedSearchContent(
+                uiState = uiState,
+                listState = searchListState,
+                bottomContentPadding = bottomContentPadding,
+                selectedTopicId = selectedTopicId,
+                onSelectRecentQuery = { q ->
+                    dismissSearchKeyboard()
+                    viewModel.submitSearch(q)
+                    coroutineScope.launch {
+                        searchListState.scrollToItem(0)
+                    }
                 },
-                label = "boardsBodyModeTransition",
-            ) { mode ->
-                when (mode) {
-                    // 1. Filtered Inline Board Feed Sub-View
-                    BoardsDisplayMode.INLINE_BOARD -> {
-                        InlineBoardFeedContent(
-                            uiState = uiState,
-                            bottomContentPadding = bottomContentPadding,
-                            selectedTopicId = selectedTopicId,
-                            onOpenTopic = { topicId, initialFloor, titleHint ->
-                                dismissSearchKeyboard()
-                                onOpenTopic(topicId, initialFloor, titleHint)
-                            },
-                            onOpenUserProfile = { uid, usernameHint ->
-                                dismissSearchKeyboard()
-                                onOpenUserProfile(uid, usernameHint)
-                            },
-                            onBookmarkToggle = viewModel::toggleBookmark,
-                            onRefresh = viewModel::refreshInlineBoard,
-                            onLoadMore = viewModel::loadNextInlineBoardPage,
-                            onVerifyWebView = triggerWebViewAuth,
-                            onSwitchToFullWebFeed = viewModel::disablePreferRssAndRefreshInlineBoard,
-                        )
+                onRemoveRecentQuery = viewModel::removeRecentQuery,
+                onClearRecentQueries = viewModel::clearRecentQueries,
+                onSelectScope = { scope ->
+                    dismissSearchKeyboard()
+                    viewModel.selectSearchScope(scope)
+                },
+                onSelectCategoryFilter = { slug ->
+                    dismissSearchKeyboard()
+                    viewModel.selectSearchCategoryFilter(slug)
+                },
+                onSelectSort = { sort ->
+                    dismissSearchKeyboard()
+                    viewModel.selectSearchSort(sort)
+                },
+                onSubmitCurrentQuery = {
+                    dismissSearchKeyboard()
+                    viewModel.submitSearch(
+                        uiState.queryInput.trim().ifEmpty { uiState.submittedQuery },
+                    )
+                },
+                onOpenGoogleSearch = {
+                    dismissSearchKeyboard()
+                    runCatching { uriHandler.openUri(uiState.googleSiteSearchUrl) }
+                },
+                onJumpToBoard = if (onSelectBoard != null) {
+                    { slug ->
+                        dismissSearchKeyboard()
+                        onSelectBoard(slug)
                     }
-
-                    // 2. Unified Search Mode (Active focus or submitted query)
-                    BoardsDisplayMode.SEARCH -> {
-                        UnifiedSearchContent(
-                            uiState = uiState,
-                            listState = searchListState,
-                            bottomContentPadding = bottomContentPadding,
-                            selectedTopicId = selectedTopicId,
-                            onSelectRecentQuery = { q ->
-                                dismissSearchKeyboard()
-                                viewModel.submitSearch(q)
-                                coroutineScope.launch {
-                                    searchListState.scrollToItem(0)
-                                }
-                            },
-                            onRemoveRecentQuery = viewModel::removeRecentQuery,
-                            onClearRecentQueries = viewModel::clearRecentQueries,
-                            onSelectScope = { scope ->
-                                dismissSearchKeyboard()
-                                viewModel.selectSearchScope(scope)
-                            },
-                            onSelectCategoryFilter = { slug ->
-                                dismissSearchKeyboard()
-                                viewModel.selectSearchCategoryFilter(slug)
-                            },
-                            onSelectSort = { sort ->
-                                dismissSearchKeyboard()
-                                viewModel.selectSearchSort(sort)
-                            },
-                            onSubmitCurrentQuery = {
-                                dismissSearchKeyboard()
-                                viewModel.submitSearch(
-                                    uiState.queryInput.trim().ifEmpty { uiState.submittedQuery },
-                                )
-                            },
-                            onOpenGoogleSearch = {
-                                dismissSearchKeyboard()
-                                runCatching { uriHandler.openUri(uiState.googleSiteSearchUrl) }
-                            },
-                            onJumpToBoard = { slug ->
-                                dismissSearchKeyboard()
-                                viewModel.setSearchModeActive(false)
-                                if (onSelectBoard != null) {
-                                    onSelectBoard(slug)
-                                } else {
-                                    viewModel.openInlineBoard(slug)
-                                }
-                            },
-                            onOpenTopic = { topicId, initialFloor, titleHint ->
-                                dismissSearchKeyboard()
-                                onOpenTopic(topicId, initialFloor, titleHint)
-                            },
-                            onOpenUserProfile = { uid, usernameHint ->
-                                dismissSearchKeyboard()
-                                onOpenUserProfile(uid, usernameHint)
-                            },
-                            onBookmarkToggle = viewModel::toggleBookmark,
-                            onLoadNextPage = viewModel::loadNextSearchPage,
-                            onVerifyWebView = triggerWebViewAuth,
-                        )
-                    }
-
-                    // 3. Asymmetric 2-Column Visual Bento Board Directory
-                    BoardsDisplayMode.DIRECTORY -> {
-                        BentoBoardDirectoryGrid(
-                            categories = uiState.filteredBentoCategories,
-                            pinnedSlugs = uiState.pinnedCategorySlugs,
-                            bottomContentPadding = bottomContentPadding,
-                            onBoardClick = { slug ->
-                                if (onSelectBoard != null) {
-                                    onSelectBoard(slug)
-                                } else {
-                                    viewModel.openInlineBoard(slug)
-                                }
-                            },
-                            onTogglePin = viewModel::togglePinCategory,
-                        )
-                    }
-                }
-            }
+                } else {
+                    null
+                },
+                onOpenTopic = { topicId, initialFloor, titleHint ->
+                    dismissSearchKeyboard()
+                    onOpenTopic(topicId, initialFloor, titleHint)
+                },
+                onOpenUserProfile = { uid, usernameHint ->
+                    dismissSearchKeyboard()
+                    onOpenUserProfile(uid, usernameHint)
+                },
+                onBookmarkToggle = viewModel::toggleBookmark,
+                onLoadNextPage = viewModel::loadNextSearchPage,
+                onVerifyWebView = triggerWebViewAuth,
+            )
         }
     }
 
@@ -539,739 +350,99 @@ fun BoardsScreen(
     }
 }
 
-// ── Top Headers ───────────────────────────────────────────────────────────────────────────
+// ── Top Header ────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun BoardsDirectorySearchHeader(
+private fun UnifiedSearchHeader(
     query: String,
-    isSearchActive: Boolean,
-    pinnedCount: Int,
-    totalBoardCount: Int,
     focusRequester: FocusRequester,
+    onBack: (() -> Unit)?,
     onQueryChange: (String) -> Unit,
-    onFocusSearch: () -> Unit,
     onSubmitSearch: () -> Unit,
-    onCancelSearch: () -> Unit,
     onClearInput: () -> Unit,
-    onBack: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val extraType = NodePulseThemeTokens.extraTypography
 
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .pulseGlassSurface(
                 showTopBorder = false,
                 showBottomBorder = true,
-                tonalAccent = if (isSearchActive) MaterialTheme.colorScheme.primary else null,
+                tonalAccent = MaterialTheme.colorScheme.primary,
             )
             .statusBarsPadding()
             .padding(horizontal = 16.dp, vertical = 11.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AnimatedVisibility(
-            visible = !isSearchActive,
-            enter = expandVertically(tween(220)) + fadeIn(tween(180)),
-            exit = shrinkVertically(tween(180)) + fadeOut(tween(120)),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                if (onBack != null) {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(ext.cardSurface)
-                            .border(width = 0.8.dp, color = ext.cardBorder, shape = CircleShape)
-                            .clickable(role = Role.Button, onClick = onBack),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = "返回",
-                            tint = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .width(4.dp)
-                        .height(34.dp)
-                        .clip(CircleShape)
-                        .background(PulseBrushes.brandGradient(horizontal = false)),
-                )
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                ) {
-                    Text(
-                        text = "版块",
-                        style = extraType.heroHeadline,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "点击星标可常驻首页快捷频道栏",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-
-                // Compact live directory telemetry pill
-                Row(
-                    modifier = Modifier
-                        .clip(PulseArchitecturalShapes.Pill)
-                        .background(ext.cardSurface)
-                        .border(width = 0.8.dp, color = ext.cardBorder, shape = PulseArchitecturalShapes.Pill)
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Star,
-                        contentDescription = null,
-                        tint = ext.drumstickGoldStart,
-                        modifier = Modifier.size(13.dp),
-                    )
-                    Text(
-                        text = "$pinnedCount",
-                        style = extraType.tabularBadge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                    Text(
-                        text = "/ $totalBoardCount",
-                        style = extraType.microLabel,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AnimatedVisibility(
-                visible = isSearchActive,
-                enter = expandHorizontally(tween(180)) + fadeIn(tween(160)),
-                exit = shrinkHorizontally(tween(160)) + fadeOut(tween(120)),
-            ) {
-                IconButton(
-                    onClick = onCancelSearch,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(ext.cardSurface)
-                        .border(width = 0.8.dp, color = ext.cardBorder, shape = CircleShape),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "返回版块目录",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(19.dp),
-                    )
-                }
-            }
-
-            PulseSearchField(
-                value = query,
-                onValueChange = onQueryChange,
-                placeholder = "筛选版块，或输入关键词搜帖子 / 用户…",
-                minHeight = 46.dp,
-                onClear = onClearInput,
-                onSearch = onSubmitSearch,
-                focusRequester = focusRequester,
-                onFocusChanged = { focused ->
-                    if (focused && !isSearchActive) {
-                        onFocusSearch()
-                    }
-                },
-                modifier = Modifier.weight(1f),
-            )
-
-            AnimatedVisibility(
-                visible = isSearchActive && query.isNotBlank(),
-                enter = expandHorizontally(tween(180)) + fadeIn(tween(160)),
-                exit = shrinkHorizontally(tween(160)) + fadeOut(tween(120)),
-            ) {
-                val submitInteraction = remember { MutableInteractionSource() }
-                Box(
-                    modifier = Modifier
-                        .height(42.dp)
-                        .pulsePressScale(
-                            interactionSource = submitInteraction,
-                            pressedScale = NodePulseMotion.chipPressScale,
-                        )
-                        .clip(CircleShape)
-                        .background(PulseBrushes.brandGradient())
-                        .clickable(
-                            interactionSource = submitInteraction,
-                            indication = LocalIndication.current,
-                            role = Role.Button,
-                            onClick = onSubmitSearch,
-                        )
-                        .padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "搜索",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        maxLines = 1,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun InlineBoardTopHeader(
-    slug: String,
-    categories: List<Category>,
-    isPinned: Boolean,
-    sort: FeedSort,
-    onBack: () -> Unit,
-    onTogglePin: () -> Unit,
-    onSelectSort: (FeedSort) -> Unit,
-) {
-    val spec = NodePulseThemeTokens.categorySpec(slug)
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    val category = categories.firstOrNull { it.slug == slug }
-    val title = category?.name ?: spec.defaultTitle
-    val coinCost = maxOf(category?.topicCoinCost ?: 0, spec.postCoinCost)
-
-    var pinBounce by remember { mutableStateOf(false) }
-    LaunchedEffect(pinBounce) {
-        if (pinBounce) {
-            delay(180)
-            pinBounce = false
-        }
-    }
-    val starScale by animateFloatAsState(
-        targetValue = if (pinBounce) 1.28f else 1f,
-        animationSpec = NodePulseMotion.microBounceSpring(),
-        label = "inlineHeaderStarScale",
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .pulseGlassSurface(
-                showTopBorder = false,
-                showBottomBorder = true,
-                tonalAccent = spec.spineColor,
-            )
-            .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
+        if (onBack != null) {
             IconButton(
                 onClick = onBack,
                 modifier = Modifier
-                    .size(38.dp)
+                    .size(40.dp)
                     .clip(CircleShape)
-                    .background(ext.cardSurface.copy(alpha = 0.78f))
+                    .background(ext.cardSurface)
                     .border(width = 0.8.dp, color = ext.cardBorder, shape = CircleShape),
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                    contentDescription = "返回版块目录",
+                    contentDescription = "返回",
                     tint = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.size(19.dp),
                 )
             }
+        }
 
+        PulseSearchField(
+            value = query,
+            onValueChange = onQueryChange,
+            placeholder = "输入关键词搜帖子 / 用户…",
+            minHeight = 46.dp,
+            onClear = onClearInput,
+            onSearch = onSubmitSearch,
+            focusRequester = focusRequester,
+            modifier = Modifier.weight(1f),
+        )
+
+        AnimatedVisibility(
+            visible = query.isNotBlank(),
+            enter = expandHorizontally(tween(180)) + fadeIn(tween(160)),
+            exit = shrinkHorizontally(tween(160)) + fadeOut(tween(120)),
+        ) {
+            val submitInteraction = remember { MutableInteractionSource() }
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(spec.softTonalBrush)
-                    .border(
-                        width = 0.9.dp,
-                        color = spec.spineColor.copy(alpha = if (isDark) 0.45f else 0.25f),
-                        shape = RoundedCornerShape(12.dp),
-                    ),
+                    .height(42.dp)
+                    .pulsePressScale(
+                        interactionSource = submitInteraction,
+                        pressedScale = NodePulseMotion.chipPressScale,
+                    )
+                    .clip(CircleShape)
+                    .background(PulseBrushes.brandGradient())
+                    .clickable(
+                        interactionSource = submitInteraction,
+                        indication = LocalIndication.current,
+                        role = Role.Button,
+                        onClick = onSubmitSearch,
+                    )
+                    .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = spec.icon,
-                    contentDescription = null,
-                    tint = spec.contentColor,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (slug.isNotBlank()) {
-                        BoardSlugBadge(slug = slug, spec = spec)
-                    }
-                    if (coinCost > 0) {
-                        BoardCoinCostPill(coins = coinCost)
-                    }
-                }
                 Text(
-                    text = category?.description?.ifBlank { spec.editorialDescription }
-                        ?: spec.editorialDescription,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "搜索",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimary,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
-            }
-
-            if (slug.isNotBlank()) {
-                val starContainer by animateColorAsState(
-                    targetValue = if (isPinned) ext.drumstickContainer else ext.cardSurface,
-                    label = "inlinePinBg",
-                )
-                val starTint by animateColorAsState(
-                    targetValue = if (isPinned) ext.drumstickGoldStart else MaterialTheme.colorScheme.onSurfaceVariant,
-                    label = "inlinePinTint",
-                )
-                IconButton(
-                    onClick = {
-                        pinBounce = true
-                        onTogglePin()
-                    },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(starContainer)
-                        .border(
-                            width = 0.8.dp,
-                            color = if (isPinned) {
-                                ext.drumstickGoldStart.copy(alpha = 0.45f)
-                            } else {
-                                ext.cardBorder
-                            },
-                            shape = CircleShape,
-                        ),
-                ) {
-                    Icon(
-                        imageVector = if (isPinned) Icons.Rounded.Star else Icons.Rounded.StarBorder,
-                        contentDescription = if (isPinned) "取消常驻" else "常驻到首页",
-                        tint = starTint,
-                        modifier = Modifier
-                            .size(18.dp)
-                            .graphicsLayer {
-                                scaleX = starScale
-                                scaleY = starScale
-                            },
-                    )
-                }
-            }
-        }
-
-        SortSegmentedSwitcher(
-            options = BOARD_FEED_SORT_SEGMENTS,
-            selectedValue = sort,
-            onSelect = onSelectSort,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp),
-        )
-    }
-}
-
-// ── Mode 1: Asymmetric Visual Bento Board Directory ──────────────────────────────────────
-
-private enum class BentoDirectoryFilter(val label: String) {
-    ALL("全部版块"),
-    PINNED("常用版块"),
-}
-
-private data class BentoGridItem(
-    val category: Category,
-    val isHero: Boolean,
-)
-
-/**
- * Packs a board section into balanced 2-column Bento rows so `GridItemSpan(2)` Hero tiles
- * always start on column 0 and leave zero awkward half-row orphan gaps.
- */
-private fun packBentoSection(
-    boards: List<Category>,
-    preferredHeroSlugs: Set<String> = emptySet(),
-    forceFirstHeroIfOdd: Boolean = false,
-): List<BentoGridItem> {
-    if (boards.isEmpty()) return emptyList()
-    if (boards.size == 1) {
-        return listOf(BentoGridItem(boards.first(), isHero = true))
-    }
-
-    val wantHeroCount = when {
-        boards.size >= 4 && boards.size % 2 == 0 -> 2
-        boards.size % 2 == 1 -> 1
-        else -> 0
-    }
-
-    val selectedHeroes = mutableListOf<Category>()
-    for (board in boards) {
-        if (selectedHeroes.size >= wantHeroCount) break
-        if (board.slug in preferredHeroSlugs) {
-            selectedHeroes.add(board)
-        }
-    }
-    if (forceFirstHeroIfOdd && boards.size % 2 == 1 && selectedHeroes.isEmpty()) {
-        selectedHeroes.add(boards.first())
-    }
-
-    while (selectedHeroes.isNotEmpty() && (boards.size - selectedHeroes.size) % 2 != 0) {
-        selectedHeroes.removeAt(selectedHeroes.lastIndex)
-    }
-
-    val heroSlugs = selectedHeroes.map { it.slug }.toHashSet()
-    val heroesQueue = boards.filter { it.slug in heroSlugs }
-    val singlesQueue = boards.filterNot { it.slug in heroSlugs }
-
-    val packed = ArrayList<BentoGridItem>(boards.size)
-    var singleIndex = 0
-    heroesQueue.forEachIndexed { heroIdx, hero ->
-        packed.add(BentoGridItem(hero, isHero = true))
-        if (heroIdx < heroesQueue.lastIndex && singleIndex + 1 < singlesQueue.size) {
-            packed.add(BentoGridItem(singlesQueue[singleIndex], isHero = false))
-            packed.add(BentoGridItem(singlesQueue[singleIndex + 1], isHero = false))
-            singleIndex += 2
-        }
-    }
-    while (singleIndex < singlesQueue.size) {
-        packed.add(BentoGridItem(singlesQueue[singleIndex], isHero = false))
-        singleIndex++
-    }
-    return packed
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun BentoBoardDirectoryGrid(
-    categories: List<Category>,
-    pinnedSlugs: Set<String>,
-    bottomContentPadding: Dp,
-    onBoardClick: (String) -> Unit,
-    onTogglePin: (String) -> Unit,
-) {
-    var activeFilter by rememberSaveable { mutableStateOf(BentoDirectoryFilter.ALL) }
-    var initialEntranceCompleted by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        if (!initialEntranceCompleted) {
-            delay(460L)
-            initialEntranceCompleted = true
-        }
-    }
-
-    val pinnedBoards = remember(categories, pinnedSlugs) {
-        categories.filter { it.slug.isNotBlank() && it.slug in pinnedSlugs }
-    }
-    val packedPinnedOnly = remember(pinnedBoards) {
-        packBentoSection(
-            boards = pinnedBoards,
-            preferredHeroSlugs = TECH_HERO_PREFERENCES + TRADE_HERO_PREFERENCES + COMMUNITY_HERO_PREFERENCES,
-            forceFirstHeroIfOdd = true,
-        )
-    }
-    val packedPinnedInline = remember(pinnedBoards) {
-        packBentoSection(
-            boards = pinnedBoards,
-            preferredHeroSlugs = TECH_HERO_PREFERENCES + TRADE_HERO_PREFERENCES + COMMUNITY_HERO_PREFERENCES,
-            forceFirstHeroIfOdd = true,
-        )
-    }
-    val packedTechIntel = remember(categories) {
-        packBentoSection(
-            boards = categories.filter { it.slug in TECH_INTEL_SLUGS },
-            preferredHeroSlugs = TECH_HERO_PREFERENCES,
-        )
-    }
-    val packedTradeCarpool = remember(categories) {
-        packBentoSection(
-            boards = categories.filter { it.slug in TRADE_CARPOOL_SLUGS },
-            preferredHeroSlugs = TRADE_HERO_PREFERENCES,
-        )
-    }
-    val packedCommunity = remember(categories) {
-        packBentoSection(
-            boards = categories.filter {
-                it.slug.isNotBlank() && it.slug !in TECH_INTEL_SLUGS && it.slug !in TRADE_CARPOOL_SLUGS
-            },
-            preferredHeroSlugs = COMMUNITY_HERO_PREFERENCES,
-        )
-    }
-    val allAggregateBoard = remember(categories) {
-        categories.firstOrNull { it.slug.isBlank() }
-    }
-
-    val ext = NodePulseThemeTokens.extendedColors
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
-            top = 10.dp,
-            bottom = bottomContentPadding + 16.dp,
-        ),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item(key = "bento_quick_filters", span = { GridItemSpan(2) }) {
-            FlowRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                BentoDirectoryFilter.entries.forEach { filter ->
-                    val selected = activeFilter == filter
-                    val count = if (filter == BentoDirectoryFilter.ALL) {
-                        categories.size
-                    } else {
-                        pinnedBoards.size
-                    }
-                    val icon = if (filter == BentoDirectoryFilter.ALL) {
-                        Icons.Rounded.GridView
-                    } else {
-                        Icons.Rounded.Star
-                    }
-                    BentoFilterPill(
-                        label = "${filter.label} · $count",
-                        selected = selected,
-                        icon = icon,
-                        iconTintOverride = if (filter == BentoDirectoryFilter.PINNED) {
-                            ext.drumstickGoldStart
-                        } else {
-                            null
-                        },
-                        onClick = { activeFilter = filter },
-                    )
-                }
-            }
-        }
-
-        if (activeFilter == BentoDirectoryFilter.PINNED) {
-            if (packedPinnedOnly.isEmpty()) {
-                item(key = "pinned_boards_empty", span = { GridItemSpan(2) }) {
-                    ExpressiveStateCard(
-                        icon = Icons.Rounded.StarBorder,
-                        title = "暂无常用版块",
-                        description = "点击任意版块卡片右上角的星标，即可将其固定到首页顶部快捷频道栏",
-                        accentColor = ext.drumstickGoldStart,
-                        modifier = Modifier.padding(top = 6.dp),
-                        actions = {
-                            Button(
-                                onClick = { activeFilter = BentoDirectoryFilter.ALL },
-                                shape = CircleShape,
-                            ) {
-                                Text(text = "浏览全部版块")
-                            }
-                        },
-                    )
-                }
-            } else {
-                item(key = "header_pinned_only", span = { GridItemSpan(2) }) {
-                    DirectorySectionHeader(
-                        title = "常用版块",
-                        subtitle = "已固定至首页快捷频道栏",
-                        icon = Icons.Rounded.Star,
-                        accentColor = ext.drumstickGoldStart,
-                        countLabel = "${packedPinnedOnly.size} 个",
-                    )
-                }
-                itemsIndexed(
-                    items = packedPinnedOnly,
-                    key = { _, item -> "bento_pinned_only_${item.category.slug}" },
-                    span = { _, item -> GridItemSpan(if (item.isHero) 2 else 1) },
-                ) { idx, item ->
-                    PulseStaggeredEntrance(
-                        index = idx,
-                        enabled = !initialEntranceCompleted && idx <= 6,
-                        modifier = Modifier.animateItem(),
-                    ) {
-                        BentoBoardTile(
-                            category = item.category,
-                            isHero = item.isHero,
-                            isPinned = true,
-                            onClick = { onBoardClick(item.category.slug) },
-                            onTogglePin = { onTogglePin(item.category.slug) },
-                        )
-                    }
-                }
-            }
-        } else {
-            if (packedPinnedInline.isNotEmpty()) {
-                item(key = "header_pinned", span = { GridItemSpan(2) }) {
-                    DirectorySectionHeader(
-                        title = "常用版块",
-                        subtitle = "点击星标管理首页快捷频道",
-                        icon = Icons.Rounded.Star,
-                        accentColor = ext.drumstickGoldStart,
-                        countLabel = "${packedPinnedInline.size} 个",
-                    )
-                }
-                itemsIndexed(
-                    items = packedPinnedInline,
-                    key = { _, item -> "bento_pinned_${item.category.slug}" },
-                    span = { _, item -> GridItemSpan(if (item.isHero) 2 else 1) },
-                ) { idx, item ->
-                    PulseStaggeredEntrance(
-                        index = idx,
-                        enabled = !initialEntranceCompleted && idx <= 6,
-                        modifier = Modifier.animateItem(),
-                    ) {
-                        BentoBoardTile(
-                            category = item.category,
-                            isHero = item.isHero,
-                            isPinned = true,
-                            onClick = { onBoardClick(item.category.slug) },
-                            onTogglePin = { onTogglePin(item.category.slug) },
-                        )
-                    }
-                }
-            }
-
-            if (packedTechIntel.isNotEmpty()) {
-                item(key = "header_tech_intel", span = { GridItemSpan(2) }) {
-                    DirectorySectionHeader(
-                        title = "技术与情报",
-                        subtitle = "极客运维 · 优惠线报 · 硬件测评",
-                        icon = Icons.Rounded.Memory,
-                        accentColor = MaterialTheme.colorScheme.primary,
-                        countLabel = "${packedTechIntel.size} 个",
-                    )
-                }
-                itemsIndexed(
-                    items = packedTechIntel,
-                    key = { _, item -> "bento_tech_${item.category.slug}" },
-                    span = { _, item -> GridItemSpan(if (item.isHero) 2 else 1) },
-                ) { idx, item ->
-                    val staggerIndex = (packedPinnedInline.size + idx).coerceAtMost(6)
-                    PulseStaggeredEntrance(
-                        index = staggerIndex,
-                        enabled = !initialEntranceCompleted && (packedPinnedInline.size + idx) <= 6,
-                        modifier = Modifier.animateItem(),
-                    ) {
-                        BentoBoardTile(
-                            category = item.category,
-                            isHero = item.isHero,
-                            isPinned = item.category.slug in pinnedSlugs,
-                            onClick = { onBoardClick(item.category.slug) },
-                            onTogglePin = { onTogglePin(item.category.slug) },
-                        )
-                    }
-                }
-            }
-
-            if (packedTradeCarpool.isNotEmpty()) {
-                item(key = "header_trade_carpool", span = { GridItemSpan(2) }) {
-                    DirectorySectionHeader(
-                        title = "交易与车队",
-                        subtitle = "闲置流转 · 专线合租 · 商家推介",
-                        icon = Icons.Rounded.SwapHoriz,
-                        accentColor = MaterialTheme.colorScheme.secondary,
-                        countLabel = "${packedTradeCarpool.size} 个",
-                    )
-                }
-                itemsIndexed(
-                    items = packedTradeCarpool,
-                    key = { _, item -> "bento_trade_${item.category.slug}" },
-                    span = { _, item -> GridItemSpan(if (item.isHero) 2 else 1) },
-                ) { _, item ->
-                    BentoBoardTile(
-                        category = item.category,
-                        isHero = item.isHero,
-                        isPinned = item.category.slug in pinnedSlugs,
-                        onClick = { onBoardClick(item.category.slug) },
-                        onTogglePin = { onTogglePin(item.category.slug) },
-                        modifier = Modifier.animateItem(),
-                    )
-                }
-            }
-
-            if (packedCommunity.isNotEmpty() || allAggregateBoard != null) {
-                item(key = "header_life_community", span = { GridItemSpan(2) }) {
-                    val totalCommunity = packedCommunity.size + if (allAggregateBoard != null) 1 else 0
-                    DirectorySectionHeader(
-                        title = "日常与社区",
-                        subtitle = "水贴闲聊 · 摄影曝光 · 全站汇总",
-                        icon = Icons.Rounded.LocalCafe,
-                        accentColor = MaterialTheme.colorScheme.tertiary,
-                        countLabel = "$totalCommunity 个",
-                    )
-                }
-                itemsIndexed(
-                    items = packedCommunity,
-                    key = { _, item -> "bento_community_${item.category.slug}" },
-                    span = { _, item -> GridItemSpan(if (item.isHero) 2 else 1) },
-                ) { _, item ->
-                    BentoBoardTile(
-                        category = item.category,
-                        isHero = item.isHero,
-                        isPinned = item.category.slug in pinnedSlugs,
-                        onClick = { onBoardClick(item.category.slug) },
-                        onTogglePin = { onTogglePin(item.category.slug) },
-                        modifier = Modifier.animateItem(),
-                    )
-                }
-                if (allAggregateBoard != null) {
-                    item(
-                        key = "bento_all_aggregate",
-                        span = { GridItemSpan(2) },
-                    ) {
-                        BentoBoardTile(
-                            category = allAggregateBoard,
-                            isHero = true,
-                            isPinned = false,
-                            allowPin = false,
-                            onClick = { onBoardClick("") },
-                            onTogglePin = {},
-                            modifier = Modifier.animateItem(),
-                        )
-                    }
-                }
             }
         }
     }
 }
 
 @Composable
-private fun BentoFilterPill(
+private fun SearchScopeFilterPill(
     label: String,
     selected: Boolean,
     icon: ImageVector,
@@ -1288,7 +459,7 @@ private fun BentoFilterPill(
         } else {
             ext.cardSurface
         },
-        label = "bentoFilterBg",
+        label = "searchScopeFilterBg",
     )
     val contentColor by animateColorAsState(
         targetValue = if (selected) {
@@ -1296,7 +467,7 @@ private fun BentoFilterPill(
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant
         },
-        label = "bentoFilterFg",
+        label = "searchScopeFilterFg",
     )
     val borderColor by animateColorAsState(
         targetValue = if (selected) {
@@ -1304,7 +475,7 @@ private fun BentoFilterPill(
         } else {
             ext.cardBorder
         },
-        label = "bentoFilterBorder",
+        label = "searchScopeFilterBorder",
     )
 
     Row(
@@ -1340,420 +511,7 @@ private fun BentoFilterPill(
     }
 }
 
-@Composable
-private fun DirectorySectionHeader(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    accentColor: Color,
-    countLabel: String,
-) {
-    PulseSectionHeader(
-        title = title,
-        subtitle = subtitle,
-        icon = icon,
-        accentColor = accentColor,
-        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
-        trailing = {
-            PulseAccentPill(
-                text = countLabel,
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        },
-    )
-}
-
-@Composable
-private fun BentoBoardTile(
-    category: Category,
-    isHero: Boolean,
-    isPinned: Boolean,
-    onClick: () -> Unit,
-    onTogglePin: () -> Unit,
-    modifier: Modifier = Modifier,
-    allowPin: Boolean = category.slug.isNotBlank(),
-) {
-    val spec = NodePulseThemeTokens.categorySpec(category.slug)
-    val isDark = NodePulseThemeTokens.isDark
-    val haptics = LocalHapticFeedback.current
-    val coinCost = maxOf(category.topicCoinCost, spec.postCoinCost)
-    val shape = if (isHero) {
-        PulseArchitecturalShapes.HeroBento
-    } else {
-        PulseArchitecturalShapes.ElevatedTile
-    }
-
-    var pinBounce by remember { mutableStateOf(false) }
-    LaunchedEffect(pinBounce) {
-        if (pinBounce) {
-            delay(180)
-            pinBounce = false
-        }
-    }
-    val starScale by animateFloatAsState(
-        targetValue = if (pinBounce) 1.3f else 1.0f,
-        animationSpec = NodePulseMotion.microBounceSpring(),
-        label = "bentoPinStarScale",
-    )
-
-    PulseInteractiveCard(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
-        isHero = isHero,
-        accentColor = spec.spineColor,
-        shape = shape,
-        elevation = if (isHero) PulseElevation.Hero else PulseElevation.Card,
-    ) {
-        // Subtle editorial watermark on Hero Bento cards for depth and personality
-        if (isHero) {
-            Icon(
-                imageVector = spec.icon,
-                contentDescription = null,
-                tint = spec.spineColor,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(x = 12.dp, y = 14.dp)
-                    .size(84.dp)
-                    .graphicsLayer {
-                        alpha = if (isDark) 0.09f else 0.06f
-                        rotationZ = -14f
-                    },
-            )
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(if (isHero) 16.dp else 14.dp),
-            verticalArrangement = Arrangement.spacedBy(if (isHero) 10.dp else 9.dp),
-        ) {
-            if (isHero) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(11.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(RoundedCornerShape(13.dp))
-                            .background(spec.softTonalBrush)
-                            .border(
-                                width = 0.9.dp,
-                                color = spec.spineColor.copy(alpha = if (isDark) 0.48f else 0.28f),
-                                shape = RoundedCornerShape(13.dp),
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = spec.icon,
-                            contentDescription = null,
-                            tint = spec.contentColor,
-                            modifier = Modifier.size(22.dp),
-                        )
-                    }
-
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(
-                                text = category.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
-                            )
-                            BoardSlugBadge(
-                                slug = category.slug.ifBlank { "all" },
-                                spec = spec,
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .width(32.dp)
-                                .height(3.dp)
-                                .clip(CircleShape)
-                                .background(spec.heroBrush),
-                        )
-                    }
-
-                    if (coinCost > 0) {
-                        BoardCoinCostPill(coins = coinCost)
-                    }
-
-                    if (allowPin) {
-                        BentoPinStarButton(
-                            isPinned = isPinned,
-                            starScale = starScale,
-                            onClick = {
-                                pinBounce = true
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onTogglePin()
-                            },
-                        )
-                    }
-                }
-
-                Text(
-                    text = category.description.ifBlank { spec.editorialDescription },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(spec.containerColor.copy(alpha = if (isDark) 0.55f else 0.72f))
-                            .border(
-                                width = 0.75.dp,
-                                color = spec.spineColor.copy(alpha = if (isDark) 0.36f else 0.22f),
-                                shape = CircleShape,
-                            )
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text(
-                            text = if (category.slug.isBlank()) "全站聚合" else "进入版块",
-                            style = NodePulseThemeTokens.extraTypography.microLabel,
-                            color = spec.contentColor,
-                        )
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
-                            contentDescription = null,
-                            tint = spec.contentColor,
-                            modifier = Modifier.size(12.dp),
-                        )
-                    }
-                }
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(spec.softTonalBrush)
-                            .border(
-                                width = 0.85.dp,
-                                color = spec.spineColor.copy(alpha = if (isDark) 0.42f else 0.24f),
-                                shape = RoundedCornerShape(11.dp),
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = spec.icon,
-                            contentDescription = null,
-                            tint = spec.contentColor,
-                            modifier = Modifier.size(19.dp),
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    if (coinCost > 0) {
-                        BoardCoinCostPill(coins = coinCost)
-                        Spacer(modifier = Modifier.width(5.dp))
-                    }
-
-                    if (allowPin) {
-                        BentoPinStarButton(
-                            isPinned = isPinned,
-                            starScale = starScale,
-                            onClick = {
-                                pinBounce = true
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onTogglePin()
-                            },
-                        )
-                    }
-                }
-
-                Text(
-                    text = category.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                Text(
-                    text = category.description.ifBlank { spec.editorialDescription },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    minLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    BoardSlugBadge(
-                        slug = category.slug.ifBlank { "all" },
-                        spec = spec,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(spec.containerColor.copy(alpha = if (isDark) 0.50f else 0.70f))
-                            .border(
-                                width = 0.7.dp,
-                                color = spec.spineColor.copy(alpha = if (isDark) 0.34f else 0.20f),
-                                shape = CircleShape,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
-                            contentDescription = null,
-                            tint = spec.contentColor,
-                            modifier = Modifier.size(12.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BoardSlugBadge(
-    slug: String,
-    spec: com.nodeseek.app.ui.theme.CategoryVisualSpec,
-    modifier: Modifier = Modifier,
-) {
-    val isDark = NodePulseThemeTokens.isDark
-    val shape = RoundedCornerShape(6.dp)
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(spec.containerColor.copy(alpha = if (isDark) 0.72f else 0.85f))
-            .border(
-                width = 0.7.dp,
-                color = spec.spineColor.copy(alpha = if (isDark) 0.40f else 0.22f),
-                shape = shape,
-            )
-            .padding(horizontal = 5.5.dp, vertical = 1.5.dp),
-    ) {
-        Text(
-            text = "/$slug",
-            style = NodePulseThemeTokens.extraTypography.microLabel.copy(
-                fontFamily = FontFamily.Monospace,
-            ),
-            color = spec.contentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun BoardCoinCostPill(coins: Int) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val isDark = NodePulseThemeTokens.isDark
-    Row(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(ext.drumstickContainer)
-            .border(
-                width = 0.75.dp,
-                color = ext.drumstickGoldEnd.copy(alpha = if (isDark) 0.44f else 0.28f),
-                shape = CircleShape,
-            )
-            .padding(horizontal = 6.5.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.5.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Restaurant,
-            contentDescription = null,
-            tint = ext.onDrumstickContainer,
-            modifier = Modifier.size(10.dp),
-        )
-        Text(
-            text = "$coins",
-            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
-            color = ext.onDrumstickContainer,
-            maxLines = 1,
-            softWrap = false,
-        )
-    }
-}
-
-@Composable
-private fun BentoPinStarButton(
-    isPinned: Boolean,
-    starScale: Float,
-    onClick: () -> Unit,
-) {
-    val ext = NodePulseThemeTokens.extendedColors
-    val starTint by animateColorAsState(
-        targetValue = if (isPinned) {
-            ext.drumstickGoldStart
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
-        },
-        label = "pinStarTint",
-    )
-    val starContainer by animateColorAsState(
-        targetValue = if (isPinned) {
-            ext.drumstickContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.55f)
-        },
-        label = "pinStarBg",
-    )
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(starContainer)
-            .border(
-                width = if (isPinned) 0.8.dp else 0.dp,
-                color = if (isPinned) ext.drumstickGoldStart.copy(alpha = 0.42f) else Color.Transparent,
-                shape = CircleShape,
-            ),
-    ) {
-        Icon(
-            imageVector = if (isPinned) Icons.Rounded.Star else Icons.Rounded.StarBorder,
-            contentDescription = if (isPinned) "已常驻，点击移除" else "常驻到首页",
-            tint = starTint,
-            modifier = Modifier
-                .size(17.dp)
-                .graphicsLayer {
-                    scaleX = starScale
-                    scaleY = starScale
-                },
-        )
-    }
-}
-
-// ── Mode 2: Unified Search Experience ─────────────────────────────────────────────────────
+// ── Unified Search Experience ─────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1769,7 +527,7 @@ private fun UnifiedSearchContent(
     onSelectSort: (FeedSort) -> Unit,
     onSubmitCurrentQuery: () -> Unit,
     onOpenGoogleSearch: () -> Unit,
-    onJumpToBoard: (String) -> Unit,
+    onJumpToBoard: ((String) -> Unit)?,
     onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
     onOpenUserProfile: (uid: Long, usernameHint: String) -> Unit,
     onBookmarkToggle: (TopicSummary) -> Unit,
@@ -1846,7 +604,7 @@ private fun UnifiedSearchContent(
                         } else {
                             Icons.Rounded.PersonSearch
                         }
-                        BentoFilterPill(
+                        SearchScopeFilterPill(
                             label = scope.label,
                             selected = selected,
                             icon = scopeIcon,
@@ -1952,8 +710,8 @@ private fun UnifiedSearchContent(
             }
         }
 
-        // Instant matching Boards quick-jump row while typing
-        if (uiState.queryInput.isNotBlank() && uiState.filteredBentoCategories.isNotEmpty()) {
+        // Instant matching Boards quick-jump row while typing (switches Explore horizontal strip)
+        if (onJumpToBoard != null && uiState.queryInput.isNotBlank() && uiState.matchingCategories.isNotEmpty()) {
             item(key = "matching_boards_quick_jump") {
                 Column(
                     modifier = Modifier
@@ -1967,7 +725,7 @@ private fun UnifiedSearchContent(
                         accentColor = MaterialTheme.colorScheme.primary,
                         trailing = {
                             CompactCountBadge(
-                                count = uiState.filteredBentoCategories.size,
+                                count = uiState.matchingCategories.size,
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -1975,7 +733,7 @@ private fun UnifiedSearchContent(
                     )
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(
-                            items = uiState.filteredBentoCategories,
+                            items = uiState.matchingCategories,
                             key = { "match_board_${it.slug}" },
                         ) { cat ->
                             val spec = NodePulseThemeTokens.categorySpec(cat.slug)
@@ -2506,309 +1264,6 @@ private fun MemberSearchResultCard(
     }
 }
 
-// ── Mode 3: Filtered Inline Board Feed Sub-View ───────────────────────────────────────────
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun InlineBoardFeedContent(
-    uiState: BoardsUiState,
-    bottomContentPadding: Dp,
-    selectedTopicId: Long?,
-    onOpenTopic: (topicId: Long, initialFloor: Int, titleHint: String) -> Unit,
-    onOpenUserProfile: (uid: Long, usernameHint: String) -> Unit,
-    onBookmarkToggle: (TopicSummary) -> Unit,
-    onRefresh: () -> Unit,
-    onLoadMore: () -> Unit,
-    onVerifyWebView: () -> Unit,
-    onSwitchToFullWebFeed: () -> Unit,
-) {
-    val listState = rememberLazyListState()
-    val shouldLoadMore by remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val total = info.totalItemsCount
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            total > 0 && last >= total - 4
-        }
-    }
-    val filteredPageAutoAdvance = uiState.inlineBoardTopics.isEmpty() &&
-        uiState.inlineBoardHasNextPage &&
-        !uiState.isInlineBoardLoading &&
-        !uiState.isInlineBoardRefreshing &&
-        !uiState.inlineBoardIsRssFallback &&
-        uiState.inlineBoardError == null &&
-        uiState.inlineBoardPage < 3
-
-    LaunchedEffect(
-        shouldLoadMore,
-        filteredPageAutoAdvance,
-        uiState.inlineBoardHasNextPage,
-        uiState.isInlineBoardLoading,
-        uiState.isInlineBoardRefreshing,
-        uiState.isInlineBoardLoadingMore,
-        uiState.inlineBoardIsRssFallback,
-        uiState.inlineBoardError,
-        uiState.inlineBoardPage,
-        uiState.inlineBoardTopics.size,
-    ) {
-        if ((shouldLoadMore || filteredPageAutoAdvance) &&
-            uiState.inlineBoardHasNextPage &&
-            !uiState.isInlineBoardLoading &&
-            !uiState.isInlineBoardRefreshing &&
-            !uiState.isInlineBoardLoadingMore &&
-            !uiState.inlineBoardIsRssFallback &&
-            uiState.inlineBoardError == null
-        ) {
-            onLoadMore()
-        }
-    }
-
-    PullToRefreshBox(
-        isRefreshing = uiState.isInlineBoardRefreshing,
-        onRefresh = onRefresh,
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                top = 6.dp,
-                bottom = bottomContentPadding + 16.dp,
-            ),
-        ) {
-            if (uiState.inlineBoardPinnedTopics.isNotEmpty()) {
-                item(key = "inline_board_pinned") {
-                    Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                        CollapsiblePinnedTicker(
-                            pinnedTopics = uiState.inlineBoardPinnedTopics.map {
-                                PinnedTickerTopic(
-                                    id = it.id,
-                                    title = it.title,
-                                    categorySlug = it.categorySlug,
-                                    categoryName = it.categoryName,
-                                )
-                            },
-                            onTopicClick = { id ->
-                                val t = uiState.inlineBoardPinnedTopics.firstOrNull { it.id == id }
-                                onOpenTopic(id, t?.lastReadFloor ?: 0, t?.title.orEmpty())
-                            },
-                        )
-                    }
-                }
-            }
-
-            when {
-                uiState.isInlineBoardLoading && uiState.inlineBoardTopics.isEmpty() -> {
-                    items(count = 5, key = { "inline_skeleton_$it" }) {
-                        PulseTopicCardSkeleton()
-                    }
-                }
-
-                uiState.inlineBoardError != null && uiState.inlineBoardTopics.isEmpty() -> {
-                    item(key = "inline_error") {
-                        ExpressiveStateCard(
-                            icon = if (uiState.inlineBoardChallengeRequired) {
-                                Icons.Rounded.Shield
-                            } else {
-                                Icons.Rounded.CloudOff
-                            },
-                            title = if (uiState.inlineBoardChallengeRequired) {
-                                "需要完成安全验证"
-                            } else {
-                                "暂时无法载入版块"
-                            },
-                            description = uiState.inlineBoardError,
-                            accentColor = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            actions = {
-                                if (uiState.inlineBoardChallengeRequired) {
-                                    Button(onClick = onVerifyWebView, shape = CircleShape) {
-                                        Text(
-                                            text = "完成网页验证 / 登录",
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                }
-                                OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                                    Text(
-                                        text = "重试",
-                                        maxLines = 1,
-                                        softWrap = false,
-                                    )
-                                }
-                            },
-                        )
-                    }
-                }
-
-                !uiState.isInlineBoardLoading &&
-                    uiState.inlineBoardTopics.isEmpty() &&
-                    uiState.inlineBoardPinnedTopics.isEmpty() &&
-                    uiState.activeInlineBoardSlug != null -> {
-                    when {
-                        uiState.inlineBoardIsRssFallback -> {
-                            item(key = "inline_rss_empty") {
-                                InlineBoardRssFallbackCard(
-                                    isEmptyBoard = true,
-                                    isChallengeRequired = uiState.inlineBoardChallengeRequired,
-                                    preferRssFallback = uiState.preferRssFallback,
-                                    onVerifyWebView = onVerifyWebView,
-                                    onSwitchToFullWebFeed = onSwitchToFullWebFeed,
-                                    onRefresh = onRefresh,
-                                )
-                            }
-                        }
-
-                        uiState.inlineBoardHasNextPage &&
-                            (uiState.isInlineBoardLoadingMore || filteredPageAutoAdvance) -> {
-                            item(key = "inline_filtered_loading") {
-                                LoadingMoreFooter(label = "正在加载更多匹配主题…")
-                            }
-                        }
-
-                        else -> {
-                            item(key = "inline_empty") {
-                                ExpressiveStateCard(
-                                    icon = Icons.Rounded.Forum,
-                                    title = "该版块暂无主题",
-                                    description = "当前排序下暂未获取到主题内容，点击刷新重新拉取最新动态",
-                                    accentColor = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                                    actions = {
-                                        OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Refresh,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp),
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(text = "刷新版块")
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-
-                else -> {
-                    items(
-                        items = uiState.inlineBoardTopics,
-                        key = { "inline_topic_${it.id}" },
-                    ) { topic ->
-                        PulseTopicCard(
-                            topic = topic.toCardModel(),
-                            showCategoryTag = false,
-                            selectedTopicId = selectedTopicId,
-                            onClick = {
-                                onOpenTopic(topic.id, topic.lastReadFloor ?: 0, topic.title)
-                            },
-                            onBookmarkToggle = { onBookmarkToggle(topic) },
-                            onAuthorClick = { uid -> onOpenUserProfile(uid, topic.authorName) },
-                        )
-                    }
-
-                    when {
-                        uiState.isInlineBoardLoadingMore -> {
-                            item(key = "inline_more_spinner") {
-                                LoadingMoreFooter(label = "正在加载更多主题…")
-                            }
-                        }
-
-                        uiState.inlineBoardError != null -> {
-                            item(key = "inline_more_error") {
-                                ExpressiveStateCard(
-                                    icon = if (uiState.inlineBoardChallengeRequired) {
-                                        Icons.Rounded.Shield
-                                    } else {
-                                        Icons.Rounded.Refresh
-                                    },
-                                    title = "加载下一页未成功",
-                                    description = uiState.inlineBoardError,
-                                    accentColor = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                                    actions = {
-                                        if (uiState.inlineBoardChallengeRequired) {
-                                            Button(onClick = onVerifyWebView, shape = CircleShape) {
-                                                Text(
-                                                    text = "完成网页验证",
-                                                    maxLines = 1,
-                                                    softWrap = false,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                )
-                                            }
-                                        }
-                                        OutlinedButton(onClick = onLoadMore, shape = CircleShape) {
-                                            Text(
-                                                text = "点按重试",
-                                                maxLines = 1,
-                                                softWrap = false,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                    },
-                                )
-                            }
-                        }
-
-                        uiState.inlineBoardIsRssFallback -> {
-                            item(key = "inline_rss_footer") {
-                                InlineBoardRssFallbackCard(
-                                    isEmptyBoard = false,
-                                    isChallengeRequired = uiState.inlineBoardChallengeRequired,
-                                    preferRssFallback = uiState.preferRssFallback,
-                                    onVerifyWebView = onVerifyWebView,
-                                    onSwitchToFullWebFeed = onSwitchToFullWebFeed,
-                                    onRefresh = onRefresh,
-                                )
-                            }
-                        }
-
-                        uiState.inlineBoardHasNextPage -> {
-                            item(key = "inline_load_more") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 10.dp)
-                                        .clip(CircleShape)
-                                        .clickable(onClick = onLoadMore)
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        text = "点按加载更多",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                    )
-                                }
-                            }
-                        }
-
-                        !uiState.isInlineBoardRefreshing -> {
-                            item(key = "inline_end") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 14.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        text = "已加载全部内容",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ── Shared Local UI Primitives ────────────────────────────────────────────────────────────
 
 @Composable
@@ -2921,79 +1376,6 @@ private fun ExpressiveStateCard(
             }
         }
     }
-}
-
-@Composable
-private fun InlineBoardRssFallbackCard(
-    isEmptyBoard: Boolean,
-    isChallengeRequired: Boolean,
-    preferRssFallback: Boolean,
-    onVerifyWebView: () -> Unit,
-    onSwitchToFullWebFeed: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    ExpressiveStateCard(
-        icon = if (isChallengeRequired) Icons.Rounded.Shield else Icons.Rounded.Bolt,
-        title = if (isChallengeRequired) {
-            "当前为 RSS 精简模式（需要网页验证）"
-        } else {
-            "当前处于 RSS 精简模式"
-        },
-        description = if (isEmptyBoard) {
-            "RSS 仅包含全站最新约 20 条公开帖子，当前版块暂无匹配条目且不支持翻页。"
-        } else {
-            "RSS 仅包含全站最新约 20 条公开帖子（当前版块为本地筛选，且不支持下拉翻页）。"
-        },
-        accentColor = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-        actions = {
-            if (preferRssFallback && !isChallengeRequired) {
-                Button(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                    Text(
-                        text = "切换为完整网页流",
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                OutlinedButton(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(
-                        text = "网页验证 / 登录",
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            } else {
-                Button(onClick = onVerifyWebView, shape = CircleShape) {
-                    Text(
-                        text = "完成网页验证，加载完整内容",
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (preferRssFallback) {
-                    FilledTonalButton(onClick = onSwitchToFullWebFeed, shape = CircleShape) {
-                        Text(
-                            text = "关闭 RSS 优先",
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                } else {
-                    OutlinedButton(onClick = onRefresh, shape = CircleShape) {
-                        Text(
-                            text = "重试",
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-                }
-            }
-        },
-    )
 }
 
 @Composable
