@@ -52,7 +52,11 @@ if (hasAllReleaseSigningProps && !hasReleaseSigningConfig) {
 
 android {
     namespace = "com.nodeseek.app"
-    compileSdk = 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
 
     defaultConfig {
         applicationId = "com.nodeseek.app"
