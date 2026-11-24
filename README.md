@@ -7,7 +7,7 @@
 **Cool Mist Light & Slate Steel Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v2.12.0-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.12.1-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202026.11.01-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,12 +26,12 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v2.12.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.12.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v2.12.1`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.12.1-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v2.12.0`（`versionCode = 25`） |
+| **当前版本** | `v2.12.1`（`versionCode = 26`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 36`） |
 | **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 15 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · 双模式本地备份恢复（v1 明文核心数据 JSON + v2 口令加密完整备份） · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
@@ -44,7 +44,7 @@
 - **清雾冰蓝浅色 (`Cool Mist Light`)**：清透冰蓝雾白画布（`#F7FAFF`）搭配纯白底板（`#FFFFFF`）、细密边框（`#C0C7CD`）与沉稳青钢蓝主色（`#2D637E` / 容器 `#CDE7FB`），清爽护眼、层次分明。
 - **深岩钢蓝深色 (`Slate Steel Dark`)**：低辉度岩灰暗色画布（`#101417`）与板岩容器（`#1C2024`），配合澄澈天青蓝（`#9ACAEC` / 容器 `#114B66`）高对比点缀。
 - **纯净极黑省电 (`Pure Pitch AMOLED`)**：支持纯黑 `#000000` 画布与低功耗深碳容器（`#111518`），专为 OLED 屏幕优化夜间阅读对比度。
-- **Material You 壁纸动态取色与默认 `90%` 紧凑排版**：默认关闭动态取色以呈现标志性的清雾浅色 / 深岩深色主题（支持在设置中一键开启 Android 12+ Material You 壁纸动态取色）；全局默认字号与排版缩放调优为 **`90%`**（支持 `85%–130%` 自由调节）。开启壁纸动态取色时，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
+- **Material You 壁纸动态取色与首页卡片独立字号紧缩**：默认关闭动态取色以呈现标志性的清雾浅色 / 深岩深色主题（支持在设置中一键开启 Android 12+ Material You 壁纸动态取色）；全局界面保持稳定的 **`90%`** 视觉基准，设置中的「字号与排版」仅作用于首页帖子卡片字号与紧缩比例（默认 `90%`，支持 `75%–130%` 自由调节，同屏可浏览更多帖子且缩放不失衡）。开启壁纸动态取色时，毛玻璃顶栏、卡片描边、`发帖` 悬浮按钮、顶部光晕与底栏指示器同步随壁纸色板联动；内置 **15 套版块语义色系**、**Lv.0–Lv.6 宝石/金属等级光环**（精确按 `coins >= 100 × Lv²` 换算）与 **Drumstick Amber (`🍗`)** 鸡腿激励体系。
 
 <div align="center">
 <table>
@@ -326,7 +326,7 @@
 </table>
 </div>
 
-- **设置中心、内容过滤与双模式本地备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与安全在线升级（官方 HTTPS 源站校验、APK 包名/签名证书一致性与防降级校验，及 Release 提供摘要时的 SHA-256 校验；剔除与邮箱页重复的 Seek Mail 配置项）：
+- **设置中心、内容过滤与双模式本地备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、首页卡片字号与紧缩缩放（仅影响首页帖子卡片，默认 `90%`，支持 `75% / 85% / 90% / 100% / 115%` 快捷档位、`75%–130%` 连续调节与双卡片实时预览）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与安全在线升级（官方 HTTPS 源站校验、APK 包名/签名证书一致性与防降级校验，及 Release 提供摘要时的 SHA-256 校验；剔除与邮箱页重复的 Seek Mail 配置项）：
   - **`BackupRestoreSection`（v1 核心数据 JSON 备份，向后兼容）**：覆盖偏好设置、脉搏雷达规则与追踪主题、内容过滤与屏蔽名单、本地收藏与编辑草稿；导出默认脱敏排除 API Key，需手动勾选才写入，支持导入前计数预览与合并/覆盖恢复。
   - **`EncryptedBackupSettingsSection`（v2 口令加密完整备份，可选）**：用户设置至少 8 位口令并二次确认，采用 `PBKDF2-HMAC-SHA256`（`310,000` 次迭代 + 256-bit 随机盐）派生密钥与 `AES-256-GCM`（96-bit 随机 Nonce + 128-bit 认证标签 + 文件头 AAD 绑定）加密打包为 `.anodebackup` 文件；在 v1 全部核心数据（含 API Key）基础上额外完整包含 **VPS 资产账本与探针面板（含 Token）**、**补货监控规则**、**SSH 主机保险库（含私钥/密码/自定义脚本）**、**Seek 邮箱设置与本地标签/归档**、**海外情报与社区活动偏好**、**卖家私人备注与官方交易 API Key** 以及 **测机/汇率校准偏好**。导入时严格校验口令与 GCM 防篡改标签（口令错误或篡改即中止且零写入），全程受加密 `BackupRestoreJournal` 事务日志保护支持原子回滚，并提供「合并 / 覆盖」双模式。
 
@@ -447,8 +447,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.12.0-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v2.12.0-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.12.1-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v2.12.1-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 
