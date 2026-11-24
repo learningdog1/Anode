@@ -1,6 +1,7 @@
 package com.nodeseek.app.domain.fleet
 
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.backup.FleetBackupDto
 import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -90,6 +91,21 @@ interface FleetRepository {
         checkedPanels: Int? = null,
         failedPanels: Int = 0,
     ): FleetMonitorCheckReport
+
+    /**
+     * Exports probe panels (with plaintext API tokens for encrypted backup v2 only), VPS asset
+     * ledger records, and monitor settings.
+     */
+    suspend fun exportForBackup(): FleetBackupDto = FleetBackupDto()
+
+    /**
+     * Restores probe panels, VPS assets, and monitor settings from an encrypted v2 backup.
+     * Re-encrypts panel API tokens using the local device cipher before persisting.
+     */
+    suspend fun restoreFromBackup(
+        backup: FleetBackupDto,
+        replaceExisting: Boolean,
+    ) = Unit
 
     companion object {
         private val DEFAULT_PERSISTED_STATE_LOADED_FLOW: StateFlow<Boolean> =

@@ -1,6 +1,8 @@
 package com.nodeseek.app.data.ssh
 
 import android.content.Context
+import com.nodeseek.app.domain.backup.SshServerBackupDto
+import com.nodeseek.app.domain.backup.SshVaultBackupDto
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.DecryptedSshCredentials
 import com.nodeseek.app.domain.ssh.HostKeyTrustPolicy
@@ -575,6 +577,202 @@ class SshServerVault(
                     persistRunsStateLocked(emptyList())
                     _recentRunsFlow.value = emptyList()
                 }
+            }
+        }
+    }
+
+    override suspend fun exportForBackup(): SshVaultBackupDto = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureLoadedLocked()
+            ensureVaultWritableLocked()
+
+            val exportedServers = _serversFlow.value.map { profile ->
+                val plainSecret = if (profile.encryptedSecret.isEmpty()) {
+                    ""
+                } else {
+                    cipher.decrypt(profile.encryptedSecret)
+                }
+                val plainPassphrase = profile.encryptedPassphrase
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { cipher.decrypt(it) }
+                SshServerBackupDto(
+                    id = profile.id,
+                    alias = profile.alias,
+                    host = profile.host,
+                    port = profile.port,
+                    username = profile.username,
+                    authMethod = profile.authMethod,
+                    secret = plainSecret,
+                    passphrase = plainPassphrase,
+                    knownHostKeyFingerprint = profile.knownHostKeyFingerprint,
+                    knownHostKeyAlgorithm = profile.knownHostKeyAlgorithm,
+                    lastConnectedEpochMillis = profile.lastConnectedEpochMillis,
+                    createdAtEpochMillis = profile.createdAtEpochMillis,
+                    jumpHostId = profile.jumpHostId,
+                    groupTag = profile.groupTag,
+                    probePanelId = profile.probePanelId,
+                    probePanelName = profile.probePanelName,
+                    probePanelType = profile.probePanelType,
+                    probeServerId = profile.probeServerId,
+                    probeRegion = profile.probeRegion,
+                    probeTags = profile.probeTags,
+                    probeSyncedAtEpochMillis = profile.probeSyncedAtEpochMillis,
+                    probeReportedHost = profile.probeReportedHost,
+                    probeReportedName = profile.probeReportedName,
+                    connectionMode = profile.connectionMode,
+                )
+            }
+
+            SshVaultBackupDto(
+                servers = exportedServers,
+                customPresets = _customPresetsFlow.value,
+                collapseState = _collapseStateFlow.value,
+            )
+        }
+    }
+
+    override suspend fun restoreFromBackup(
+        backup: SshVaultBackupDto,
+        replaceExisting: Boolean,
+    ) {
+        withContext(ioDispatcher) {
+            mutex.withLock {
+                ensureLoadedLocked()
+                ensureVaultWritableLocked()
+
+                val existingServersById = _serversFlow.value.associateBy { it.id }
+                val incomingProfiles = LinkedHashMap<String, SshServerProfile>()
+
+                for (dto in backup.servers) {
+                    val cleanId = dto.id.trim().ifBlank { idGenerator() }
+                    val existing = existingServersById[cleanId]
+                    val cleanHost = dto.host.trim()
+                    val resolvedProbePanelId = dto.probePanelId?.trim()?.takeIf { it.isNotEmpty() }
+                    val resolvedProbeServerId = dto.probeServerId?.trim()?.takeIf { it.isNotEmpty() }
+                    val isProbeLinked = resolvedProbePanelId != null && resolvedProbeServerId != null
+                    val resolvedMode = if (isProbeLinked) dto.connectionMode else SshConnectionMode.DIRECT_SSH
+                    if (cleanHost.isEmpty() && !(isProbeLinked && resolvedMode == SshConnectionMode.PANEL_TERMINAL)) {
+                        continue
+                    }
+
+                    val encryptedSecret = when {
+                        dto.secret.isNotEmpty() -> cipher.encrypt(dto.secret)
+                        !replaceExisting && existing != null -> existing.encryptedSecret
+                        else -> ""
+                    }
+                    val encryptedPassphrase = when {
+                        !dto.passphrase.isNullOrEmpty() -> cipher.encrypt(dto.passphrase)
+                        !replaceExisting && existing != null -> existing.encryptedPassphrase
+                        else -> null
+                    }
+
+                    incomingProfiles[cleanId] = SshServerProfile(
+                        id = cleanId,
+                        alias = dto.alias.trim().ifBlank {
+                            cleanHost.ifBlank { resolvedProbeServerId?.let { "节点 #$it" } ?: "未命名主机" }
+                        },
+                        host = cleanHost,
+                        port = dto.port.coerceIn(1, 65535),
+                        username = dto.username.trim().ifBlank { SshServerProfile.DEFAULT_USERNAME },
+                        authMethod = dto.authMethod,
+                        encryptedSecret = encryptedSecret,
+                        encryptedPassphrase = encryptedPassphrase,
+                        knownHostKeyFingerprint = HostKeyTrustPolicy.normalizeFingerprint(dto.knownHostKeyFingerprint),
+                        knownHostKeyAlgorithm = dto.knownHostKeyAlgorithm?.trim()?.takeIf { it.isNotEmpty() },
+                        lastConnectedEpochMillis = dto.lastConnectedEpochMillis,
+                        createdAtEpochMillis = dto.createdAtEpochMillis.takeIf { it > 0L }
+                            ?: existing?.createdAtEpochMillis?.takeIf { it > 0L }
+                            ?: clock(),
+                        jumpHostId = SshJumpHostResolver.normalizeJumpHostId(dto.jumpHostId),
+                        groupTag = dto.groupTag.trim(),
+                        probePanelId = resolvedProbePanelId,
+                        probePanelName = dto.probePanelName?.trim()?.takeIf { it.isNotEmpty() },
+                        probePanelType = dto.probePanelType?.trim()?.takeIf { it.isNotEmpty() },
+                        probeServerId = resolvedProbeServerId,
+                        probeRegion = dto.probeRegion.trim(),
+                        probeTags = dto.probeTags.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+                        probeSyncedAtEpochMillis = dto.probeSyncedAtEpochMillis,
+                        probeReportedHost = dto.probeReportedHost.trim(),
+                        probeReportedName = dto.probeReportedName.trim(),
+                        connectionMode = resolvedMode,
+                    )
+                }
+
+                val mergedServerList = if (replaceExisting) {
+                    incomingProfiles.values.toList()
+                } else {
+                    val combined = LinkedHashMap<String, SshServerProfile>()
+                    _serversFlow.value.forEach { combined[it.id] = it }
+                    incomingProfiles.forEach { (id, server) -> combined[id] = server }
+                    combined.values.toList()
+                }
+
+                val validServerIds = mergedServerList.map { it.id }.toSet()
+                val sanitizedServers = mergedServerList.map { profile ->
+                    val jumpId = profile.jumpHostId
+                    if (jumpId != null && (jumpId == profile.id || jumpId !in validServerIds)) {
+                        profile.copy(jumpHostId = null)
+                    } else {
+                        profile
+                    }
+                }
+                for (server in sanitizedServers) {
+                    SshJumpHostResolver.validateJumpHostSelection(
+                        serverId = server.id,
+                        jumpHostId = server.jumpHostId,
+                        servers = sanitizedServers,
+                    )
+                }
+
+                val incomingPresets = LinkedHashMap<String, CustomSshPreset>()
+                for (preset in backup.customPresets) {
+                    val cleanName = preset.name.trim()
+                    val cleanCommand = preset.command.trim()
+                    if (cleanName.isEmpty() || cleanCommand.isEmpty()) continue
+                    val cleanId = preset.id.trim().ifBlank { "custom_${idGenerator()}" }
+                    incomingPresets[cleanId] = preset.copy(
+                        id = cleanId,
+                        name = cleanName,
+                        tabTitle = preset.tabTitle.trim().ifBlank { cleanName },
+                        description = preset.description.trim(),
+                        command = cleanCommand,
+                        createdAtEpochMillis = preset.createdAtEpochMillis.takeIf { it > 0L } ?: clock(),
+                    )
+                }
+
+                val mergedPresets = if (replaceExisting) {
+                    incomingPresets.values.toList()
+                } else {
+                    val combined = LinkedHashMap<String, CustomSshPreset>()
+                    _customPresetsFlow.value.forEach { combined[it.id] = it }
+                    incomingPresets.forEach { (id, preset) -> combined[id] = preset }
+                    combined.values.toList()
+                }
+
+                val nextCollapse = if (replaceExisting) {
+                    backup.collapseState.copy(
+                        expandedServerIds = backup.collapseState.expandedServerIds.filter { it in validServerIds }.toSet(),
+                    )
+                } else {
+                    val current = _collapseStateFlow.value
+                    SshVaultCollapseState(
+                        isVaultListCollapsed = current.isVaultListCollapsed,
+                        collapsedGroupKeys = current.collapsedGroupKeys + backup.collapseState.collapsedGroupKeys,
+                        expandedServerIds = (current.expandedServerIds + backup.collapseState.expandedServerIds)
+                            .filter { it in validServerIds }
+                            .toSet(),
+                    )
+                }
+
+                persistVaultStateLocked(
+                    servers = sanitizedServers,
+                    customPresets = mergedPresets,
+                    collapseState = nextCollapse,
+                    throwOnCorrupt = true,
+                )
+                _serversFlow.value = sanitizedServers
+                _customPresetsFlow.value = mergedPresets
+                _collapseStateFlow.value = nextCollapse
             }
         }
     }

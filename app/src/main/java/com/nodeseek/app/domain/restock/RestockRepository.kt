@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.restock
 
+import com.nodeseek.app.domain.backup.RestockBackupDto
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -39,4 +40,17 @@ interface RestockRepository {
     suspend fun updateSettings(
         transform: (RestockMonitorSettings) -> RestockMonitorSettings,
     ): RestockMonitorSettings
+
+    /**
+     * Exports restock watch rules and monitor settings for encrypted full backup v2.
+     */
+    suspend fun exportForBackup(): RestockBackupDto = RestockBackupDto()
+
+    /**
+     * Restores restock watch rules and monitor settings from an encrypted full backup v2 payload.
+     */
+    suspend fun restoreFromBackup(
+        backup: RestockBackupDto,
+        replaceExisting: Boolean,
+    ) = Unit
 }

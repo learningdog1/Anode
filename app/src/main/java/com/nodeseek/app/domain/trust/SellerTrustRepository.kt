@@ -73,4 +73,12 @@ interface SellerTrustRepository {
     )
 
     suspend fun getAllNotes(): List<LocalSellerNote>
+
+    /**
+     * Restores private local seller notes from an encrypted full backup v2 payload.
+     */
+    suspend fun restoreLocalNotesFromBackup(
+        notes: List<LocalSellerNote>,
+        replaceExisting: Boolean,
+    ) = Unit
 }

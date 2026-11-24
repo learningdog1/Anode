@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.mail
 
+import com.nodeseek.app.domain.backup.SeekMailBackupDto
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -154,4 +155,17 @@ interface SeekMailRepository {
     suspend fun clearCacheForCurrentKey() = clearCache()
 
     suspend fun clearCache()
+
+    /**
+     * Exports local Seek Mail tags, archives, and read state for the active API key.
+     */
+    suspend fun exportForBackup(): SeekMailBackupDto = SeekMailBackupDto()
+
+    /**
+     * Restores local Seek Mail tags, archives, and read state for the active API key.
+     */
+    suspend fun restoreFromBackup(
+        backup: SeekMailBackupDto,
+        replaceExisting: Boolean,
+    ) = Unit
 }

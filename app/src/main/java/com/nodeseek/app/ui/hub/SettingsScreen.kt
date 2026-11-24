@@ -1519,10 +1519,16 @@ fun SettingsScreen(
                 // ── Group 5b: 数据备份与恢复 ──
                 item(key = "settings_backup_restore") {
                     PulseStaggeredEntrance(index = 4) {
-                        BackupRestoreSettingsSection(
-                            backupManager = appContainer.backupManager,
-                            snackbarHostState = snackbarHostState,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            BackupRestoreSettingsSection(
+                                backupManager = appContainer.backupManager,
+                                snackbarHostState = snackbarHostState,
+                            )
+                            EncryptedBackupSettingsSection(
+                                backupManager = appContainer.backupManager,
+                                snackbarHostState = snackbarHostState,
+                            )
+                        }
                     }
                 }
 

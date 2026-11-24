@@ -53,6 +53,20 @@ interface OfficialTradeRepository {
      * or `null` when unconfigured.
      */
     fun maskedApiKey(): String?
+
+    /**
+     * Exports the decrypted Official Trade API Key strictly for inclusion inside an AES-256-GCM
+     * encrypted backup v2 payload. Never exported in plaintext v1 JSON backups.
+     */
+    suspend fun exportApiKeyForBackup(): String = ""
+
+    /**
+     * Restores the Official Trade API Key from an encrypted backup v2 payload.
+     */
+    suspend fun restoreApiKeyFromBackup(
+        apiKey: String,
+        merge: Boolean,
+    ) = Unit
 }
 
 /**

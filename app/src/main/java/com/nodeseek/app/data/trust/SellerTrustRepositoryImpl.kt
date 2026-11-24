@@ -433,6 +433,22 @@ class SellerTrustRepositoryImpl internal constructor(
     override suspend fun getAllNotes(): List<LocalSellerNote> =
         noteStore.getAllNotes()
 
+    override suspend fun restoreLocalNotesFromBackup(
+        notes: List<LocalSellerNote>,
+        replaceExisting: Boolean,
+    ) {
+        val affectedUids = noteStore.restoreNotes(
+            notes = notes,
+            replaceExisting = replaceExisting,
+        )
+        for (uid in affectedUids) {
+            val latest = noteStore.getNote(uid)
+            cacheStore.updateReportsForUid(uid) { existing ->
+                reEvaluateWithLocalNote(existing, latest)
+            }
+        }
+    }
+
     private fun launchPrefetchWorker(): Job = backgroundScope.launch {
         while (true) {
             val nextTarget = queueMutex.withLock {

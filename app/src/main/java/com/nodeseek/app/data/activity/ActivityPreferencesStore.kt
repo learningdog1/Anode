@@ -154,6 +154,25 @@ class ActivityPreferencesStore(
         nextSettings
     }
 
+    suspend fun exportSettingsForBackup(): ActivityMonitorSettings = getSettings()
+
+    suspend fun restoreSettingsFromBackup(settings: ActivityMonitorSettings) {
+        mutex.withLock {
+            ensureLoadedLocked()
+            val normalized = settings.normalized()
+            val nextBaselineInitialized = if (normalized.notificationsEnabled) {
+                state.baselineInitialized
+            } else {
+                false
+            }
+            val nextSnapshot = state.copy(
+                settings = normalized,
+                baselineInitialized = nextBaselineInitialized,
+            )
+            persistSnapshotLocked(nextSnapshot)
+        }
+    }
+
     /**
      * Updates [ActivityMonitorSettings.notificationsEnabled].
      *
