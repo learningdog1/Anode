@@ -2,7 +2,9 @@ package com.nodeseek.app.data.backup
 
 import androidx.room.withTransaction
 import com.nodeseek.app.data.local.NodePulseDatabase
+import com.nodeseek.app.data.local.SettingsSecretCipher
 import com.nodeseek.app.domain.backup.NodePulseBackupBundle
+import com.nodeseek.app.domain.backup.NodePulseFullBackupBundle
 import com.nodeseek.app.domain.backup.RestoreStrategy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,9 +30,11 @@ data class BackupRestoreJournalEntry(
     val createdAtEpochMillis: Long,
     val strategy: RestoreStrategy,
     val preRestoreSnapshot: NodePulseBackupBundle,
+    val preRestoreFullSnapshot: NodePulseFullBackupBundle? = null,
 ) {
     companion object {
         const val CURRENT_JOURNAL_VERSION: Int = 1
+        const val FULL_V2_JOURNAL_VERSION: Int = 2
     }
 }
 
@@ -57,6 +61,7 @@ class InMemoryBackupRestoreJournalStore : BackupRestoreJournalStore {
 
 class FileBackupRestoreJournalStore(
     private val journalFile: File,
+    private val journalCipher: SettingsSecretCipher? = null,
 ) : BackupRestoreJournalStore {
 
     private val tempFile: File
@@ -75,8 +80,17 @@ class FileBackupRestoreJournalStore(
             Files.deleteIfExists(journalFile.toPath())
             return@withContext null
         }
+        val decodedJson = if (journalCipher != null && journalCipher.isEncryptedEnvelope(raw)) {
+            journalCipher.decrypt(raw).trim()
+        } else {
+            raw
+        }
+        if (decodedJson.isEmpty()) {
+            Files.deleteIfExists(journalFile.toPath())
+            return@withContext null
+        }
         try {
-            BackupManagerImpl.backupJson.decodeFromString<BackupRestoreJournalEntry>(raw)
+            BackupManagerImpl.backupJson.decodeFromString<BackupRestoreJournalEntry>(decodedJson)
         } catch (_: SerializationException) {
             // Quarantine/remove unreadable journal bytes that could not have come from a valid commit.
             Files.deleteIfExists(journalFile.toPath())
@@ -92,11 +106,16 @@ class FileBackupRestoreJournalStore(
         if (parent != null && !parent.isDirectory && !parent.mkdirs()) {
             throw IOException("无法创建恢复事务日志目录：${parent.absolutePath}")
         }
-        val encoded = BackupManagerImpl.backupJson.encodeToString(entry)
+        val encodedJson = BackupManagerImpl.backupJson.encodeToString(entry)
+        val persistedText = if (journalCipher != null) {
+            journalCipher.encrypt(encodedJson)
+        } else {
+            encodedJson
+        }
         val staging = tempFile
         try {
             FileOutputStream(staging).use { fos ->
-                fos.write(encoded.toByteArray(Charsets.UTF_8))
+                fos.write(persistedText.toByteArray(Charsets.UTF_8))
                 fos.flush()
                 runCatching { fos.fd.sync() }
             }

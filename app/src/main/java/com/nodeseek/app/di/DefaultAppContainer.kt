@@ -10,6 +10,7 @@ import com.nodeseek.app.data.activity.ActivityWorkScheduler
 import com.nodeseek.app.data.activity.ForumWatchActivityRepositoryImpl
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
+import com.nodeseek.app.data.backup.FullBackupV2Stores
 import com.nodeseek.app.data.fleet.FleetAlertNotifier
 import com.nodeseek.app.data.fleet.FleetMonitorWorker
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
@@ -22,6 +23,7 @@ import com.nodeseek.app.data.local.FeedDiskCache
 import com.nodeseek.app.data.local.NodePulseDatabase
 import com.nodeseek.app.data.local.RadarPreferencesStore
 import com.nodeseek.app.data.local.SettingsRepositoryImpl
+import com.nodeseek.app.data.local.SettingsSecretCipherFactory
 import com.nodeseek.app.data.local.SharedPreferencesAwayDigestStore
 import com.nodeseek.app.data.mail.SeekMailApiClient
 import com.nodeseek.app.data.mail.SeekMailDiskCache
@@ -448,7 +450,23 @@ class DefaultAppContainer(
             contentFilterBackupBridge = ContentFilterRepositoryBackupBridge(contentFilterRepository),
             onRadarSettingsRestored = { restored -> radarWorkScheduler.sync(restored) },
             transactionRunner = com.nodeseek.app.data.backup.RoomLocalRestoreTransactionRunner(database),
-            restoreJournalStore = com.nodeseek.app.data.backup.FileBackupRestoreJournalStore(backupRestoreJournalFile),
+            restoreJournalStore = com.nodeseek.app.data.backup.FileBackupRestoreJournalStore(
+                journalFile = backupRestoreJournalFile,
+                journalCipher = SettingsSecretCipherFactory.createDefault(appContext),
+            ),
+            fullBackupStores = FullBackupV2Stores(
+                fleetRepository = fleetRepository,
+                restockRepository = restockRepository,
+                sshVaultRepository = sshVaultRepository,
+                seekMailRepository = seekMailRepository,
+                overseasIntelRepository = overseasIntelRepository,
+                overseasPromoPreferencesStore = overseasPromoPreferencesStore,
+                activityPreferencesStore = activityPreferencesStore,
+                sellerTrustRepository = sellerTrustRepository,
+                officialTradeRepository = officialTradeRepository,
+                netBenchHistoryStore = netBenchHistoryStore,
+                exchangeRateRepository = exchangeRateRepository,
+            ),
         )
     }
 
