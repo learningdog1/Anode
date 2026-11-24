@@ -101,6 +101,37 @@ internal class SellerTrustNoteStore(
         }
     }
 
+    suspend fun restoreNotes(
+        notes: List<LocalSellerNote>,
+        replaceExisting: Boolean,
+    ): Set<Long> = withContext(ioDispatcher) {
+        mutex.withLock {
+            ensureLoadedLocked()
+            val previousUids = notesState.value.keys
+            val nextMap = if (replaceExisting) {
+                LinkedHashMap<Long, LocalSellerNote>()
+            } else {
+                LinkedHashMap(notesState.value)
+            }
+            for (raw in notes) {
+                if (raw.uid <= 0L) continue
+                val clean = raw.copy(
+                    username = raw.username.trim(),
+                    noteText = raw.noteText.trim(),
+                    updatedAtEpochMillis = raw.updatedAtEpochMillis.coerceAtLeast(0L),
+                )
+                if (!clean.isMeaningful) continue
+                val existing = nextMap[clean.uid]
+                if (existing == null || replaceExisting || clean.updatedAtEpochMillis >= existing.updatedAtEpochMillis) {
+                    nextMap[clean.uid] = clean
+                }
+            }
+            notesState.value = nextMap.toMap()
+            writeToDiskLocked(nextMap.values.toList())
+            previousUids + nextMap.keys
+        }
+    }
+
     private suspend fun ensureLoaded() {
         if (loadedFromDisk) return
         withContext(ioDispatcher) {

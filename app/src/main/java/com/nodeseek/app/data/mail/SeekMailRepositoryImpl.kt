@@ -1,5 +1,6 @@
 package com.nodeseek.app.data.mail
 
+import com.nodeseek.app.domain.backup.SeekMailBackupDto
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -761,6 +762,156 @@ class SeekMailRepositoryImpl(
             _localArchiveStore.value = SeekMailLocalArchiveStore()
             loadedReadIdsForKey = null
             diskCache?.clearAll()
+        }
+    }
+
+    override suspend fun exportForBackup(): SeekMailBackupDto {
+        val key = reconcileActiveKey()
+        return stateMutex.withLock {
+            if (key.isEmpty()) {
+                SeekMailBackupDto()
+            } else {
+                SeekMailBackupDto(
+                    localTagStore = _localTagStore.value,
+                    localArchiveStore = _localArchiveStore.value,
+                    locallyReadMailIds = _locallyReadMailIds.value,
+                )
+            }
+        }
+    }
+
+    override suspend fun restoreFromBackup(
+        backup: SeekMailBackupDto,
+        replaceExisting: Boolean,
+    ) {
+        val key = reconcileActiveKey()
+        stateMutex.withLock {
+            if (key.isEmpty()) {
+                if (replaceExisting) {
+                    _locallyReadMailIds.value = emptySet()
+                    _localTagStore.value = SeekMailLocalTagStore()
+                    _localArchiveStore.value = SeekMailLocalArchiveStore()
+                }
+                return
+            }
+
+            val incomingTags = backup.localTagStore.tags
+                .mapNotNull { tag ->
+                    val cleanId = tag.id.trim()
+                    val cleanName = tag.name.trim().take(MAX_LOCAL_TAG_NAME_LENGTH)
+                    if (cleanId.isEmpty() || cleanName.isEmpty()) {
+                        null
+                    } else {
+                        SeekMailLocalTag(
+                            id = cleanId,
+                            name = cleanName,
+                            colorHex = normalizeLocalTagHex(tag.colorHex),
+                        )
+                    }
+                }
+                .distinctBy { it.id }
+
+            val mergedTagStore = if (replaceExisting) {
+                val validTagIds = incomingTags.map { it.id }.toSet()
+                val cleanMailTagIds = backup.localTagStore.mailTagIds
+                    .filterKeys { it > 0L }
+                    .mapValues { (_, ids) -> ids.filter { it in validTagIds }.distinct() }
+                    .filterValues { it.isNotEmpty() }
+                val cleanMailboxIds = backup.localTagStore.mailMailboxIds
+                    .filterKeys { it in cleanMailTagIds }
+                SeekMailLocalTagStore(
+                    tags = incomingTags,
+                    mailTagIds = cleanMailTagIds,
+                    mailMailboxIds = cleanMailboxIds,
+                )
+            } else {
+                val current = _localTagStore.value
+                val tagsById = LinkedHashMap<String, SeekMailLocalTag>()
+                current.tags.forEach { tagsById[it.id] = it }
+                incomingTags.forEach { tagsById[it.id] = it }
+                val validTagIds = tagsById.keys
+                val nextMailTagIds = LinkedHashMap<Long, List<String>>()
+                current.mailTagIds.forEach { (mailId, ids) ->
+                    if (mailId > 0L) {
+                        nextMailTagIds[mailId] = ids.filter { it in validTagIds }.distinct()
+                    }
+                }
+                backup.localTagStore.mailTagIds.forEach { (mailId, ids) ->
+                    if (mailId > 0L) {
+                        val combined = (nextMailTagIds[mailId].orEmpty() + ids)
+                            .filter { it in validTagIds }
+                            .distinct()
+                        if (combined.isNotEmpty()) {
+                            nextMailTagIds[mailId] = combined
+                        }
+                    }
+                }
+                val nextMailboxIds = LinkedHashMap<Long, Long>(current.mailMailboxIds)
+                backup.localTagStore.mailMailboxIds.forEach { (mailId, mailboxId) ->
+                    if (mailId > 0L && mailboxId > 0L) {
+                        nextMailboxIds[mailId] = mailboxId
+                    }
+                }
+                SeekMailLocalTagStore(
+                    tags = tagsById.values.toList(),
+                    mailTagIds = nextMailTagIds.filterValues { it.isNotEmpty() },
+                    mailMailboxIds = nextMailboxIds.filterKeys { it in nextMailTagIds },
+                )
+            }
+
+            val incomingArchive = backup.localArchiveStore
+            val mergedArchiveStore = if (replaceExisting) {
+                val cleanDeleted = incomingArchive.deletedMailIds.filter { it > 0L }.toSet()
+                val cleanArchived = incomingArchive.archivedMails
+                    .filterKeys { it > 0L && it !in cleanDeleted }
+                val cleanArchivedAt = incomingArchive.archivedAtMillis
+                    .filterKeys { it in cleanArchived }
+                SeekMailLocalArchiveStore(
+                    archivedMails = cleanArchived,
+                    archivedAtMillis = cleanArchivedAt,
+                    deletedMailIds = cleanDeleted,
+                )
+            } else {
+                val current = _localArchiveStore.value
+                val nextArchived = LinkedHashMap(current.archivedMails)
+                incomingArchive.archivedMails.forEach { (id, summary) ->
+                    if (id > 0L) nextArchived[id] = summary
+                }
+                val nextArchivedAt = LinkedHashMap(current.archivedAtMillis)
+                incomingArchive.archivedAtMillis.forEach { (id, ts) ->
+                    if (id > 0L) nextArchivedAt[id] = ts
+                }
+                val nextDeleted = (current.deletedMailIds + incomingArchive.deletedMailIds)
+                    .filter { it > 0L && it !in nextArchived }
+                    .toSet()
+                SeekMailLocalArchiveStore(
+                    archivedMails = nextArchived,
+                    archivedAtMillis = nextArchivedAt.filterKeys { it in nextArchived },
+                    deletedMailIds = nextDeleted,
+                )
+            }
+
+            val cleanIncomingReadIds = backup.locallyReadMailIds.filter { it > 0L }.toSet()
+            val mergedReadIds = if (replaceExisting) {
+                cleanIncomingReadIds
+            } else {
+                _locallyReadMailIds.value + cleanIncomingReadIds
+            }
+
+            if (diskCache == null ||
+                (
+                    diskCache.saveLocalTagStore(key, mergedTagStore) &&
+                        diskCache.saveLocalArchiveStore(key, mergedArchiveStore) &&
+                        diskCache.saveLocallyReadIds(key, mergedReadIds)
+                    )
+            ) {
+                _localTagStore.value = mergedTagStore
+                _localArchiveStore.value = mergedArchiveStore
+                _locallyReadMailIds.value = mergedReadIds
+                loadedReadIdsForKey = key
+            } else {
+                throw IOException("恢复 Seek 邮箱本地标签与归档状态失败")
+            }
         }
     }
 

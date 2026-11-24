@@ -154,6 +154,25 @@ class OverseasPromoPreferencesStore(
         nextSettings
     }
 
+    suspend fun exportSettingsForBackup(): OverseasPromoMonitorSettings = getSettings()
+
+    suspend fun restoreSettingsFromBackup(settings: OverseasPromoMonitorSettings) {
+        mutex.withLock {
+            ensureLoadedLocked()
+            val normalized = settings.normalized()
+            val nextBaselineInitialized = if (normalized.notificationsEnabled) {
+                state.baselineInitialized
+            } else {
+                false
+            }
+            val nextSnapshot = state.copy(
+                settings = normalized,
+                baselineInitialized = nextBaselineInitialized,
+            )
+            persistSnapshotLocked(nextSnapshot)
+        }
+    }
+
     /**
      * Updates [OverseasPromoMonitorSettings.notificationsEnabled].
      *

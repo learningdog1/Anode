@@ -697,6 +697,50 @@ class OverseasIntelRepositoryImpl(
         }
     }
 
+    override suspend fun exportFilterConfigForBackup(): OverseasOfferFilterConfig = withContext(ioDispatcher) {
+        loadFromCache()
+        ioMutex.withLock {
+            filterConfig
+        }
+    }
+
+    override suspend fun restoreFilterConfigFromBackup(
+        config: OverseasOfferFilterConfig,
+        merge: Boolean,
+    ) {
+        withContext(ioDispatcher) {
+            loadFromCache()
+            ioMutex.withLock {
+                val resolved = if (merge) {
+                    config.copy(
+                        blockedMerchants = (filterConfig.blockedMerchants + config.blockedMerchants)
+                            .map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+                        extraBlockedKeywords = (filterConfig.extraBlockedKeywords + config.extraBlockedKeywords)
+                            .map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+                    )
+                } else {
+                    config.copy(
+                        blockedMerchants = config.blockedMerchants
+                            .map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+                        extraBlockedKeywords = config.extraBlockedKeywords
+                            .map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+                    )
+                }
+                filterConfig = resolved
+                writeFilterPrefsLocked(resolved)
+                val filtered = OverseasOfferQualityFilter.filter(rawOffers, resolved)
+                val filteredOut = (rawOffers.size - filtered.size).coerceAtLeast(0)
+                _snapshot.update {
+                    it.copy(
+                        offers = filtered,
+                        filterConfig = resolved,
+                        filteredOutCount = filteredOut,
+                    )
+                }
+            }
+        }
+    }
+
     @Suppress("UNCHECKED_CAST")
     private suspend fun <T> coalesceInFlight(
         key: String,
