@@ -985,8 +985,8 @@ private fun ProbeServerCard(
     referenceNowEpochMillis: Long,
     onAddAssetFromProbe: (ProbeServerSnapshot) -> Unit,
     onOpenIdleSalePost: (String) -> Unit,
-    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onOpenLinkedAsset: ((VpsAssetRecord) -> Unit)? = null,
 ) {
     CompactProbeServerCard(
         snapshot = snapshot,

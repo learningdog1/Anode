@@ -485,8 +485,8 @@ fun AwayDigestBottomSheet(
 fun AwayDigestTopicRow(
     item: AwayDigestItem,
     onClick: () -> Unit,
-    onCategoryClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onCategoryClick: ((String) -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark

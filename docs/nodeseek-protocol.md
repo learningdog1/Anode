@@ -39,7 +39,7 @@ NodeSeek (`https://www.nodeseek.com`) does **not** expose a standalone public OA
 | **Publishing, Editing & Pinning** | Native Markdown composer with live preview, sticker picker, VPS valuation markdown export, NodeImage photo upload, and local Room drafts. Supports `new-discussion`, `edit-discussion`, `new-comment`, `edit-comment`, and OP `pin-comment` (`add` costs 5 coins, `remove` free). Warns before paid actions (`inside` board = 5 coins; changing existing post to private `rank=255` = 10 coins). | Implement full Markdown composer with Room draft auto-save, NodeImage upload (`api.nodeimage.com`), and coin-cost confirmation dialogs. |
 | **Notifications & Direct Messages** | Badge count (`GET /api/notification/unread-count` -> `unreadCount.all`), **回复我** (`reply-to-me/list`), **@我** (`at-me/list`), mark single or `?all=true` viewed, DM thread list (`message/list` grouped client-side by peer), 1-on-1 DM chat (`message/with/{uid}`), send DM (`message/send`), 10s foreground polling while chat is open, per-account/per-peer DM drafts. | Implement 3-tab Inbox (Replies, Mentions, Direct Messages) + 1-on-1 chat screen with foreground refresh and local draft persistence. |
 | **User Profiles, Social & Level** | Public & self profiles (`GET /api/account/getInfo/{uid}?readme=1[&signature=1]`), edit `bio`/`signature`/`readme` (`POST /api/account/introduction`), user's topics (`list-discussions`) & replies (`list-comments`, HTML converted to plain text), follow/unfollow (`fans/add|del`), following/followers lists (`fans/follow`, `fans/fans`), block list (`block-list/list|add|del`). Display level `Lv0–Lv6` computed from `coin >= 100 * Lv²`. | Compute `Lv0–Lv6` from `coins` (never confuse with permission `rank`), display Markdown `readme` & `signature`, user posts/comments, follow & block controls. |
-| **Community Tools & Ledgers** | Coin ledger (`credit/page-{p}`), Stardust ledger & P2P transfer (`stardust/list`, `payment-prepare`, `send`), Polls (`vote/*`), Drand provably-fair Lucky Draw (`floor-data` + `api.drand.sh`), Invitations (`invite/config|list|buyOne`), Moderation Rulings (`admin/ruling/*`), Account Security, Partner directory (`/providers`, `/friends`). | Core ledgers/tools in Profile & Reader; secondary web flows open in interactive WebView. |
+| **Community Tools & Ledgers** | Coin ledger (`credit/page-{p}`), Stardust ledger & P2P transfer (`stardust/list`, `payment-prepare`, `send`), Polls (`vote/*`), Drand provably-fair Lucky Draw (`floor-data` + `api.drand.sh`), Invitations (`invite/config|list|buyOne`), Moderation Rulings (`admin/ruling/*`), Account Security, Partner directory (`/providers`, `/friends`). | Protocol adapters for several secondary endpoints are encapsulated in `NodeSeekApiClient` (currently unwired in native UI) while user-facing flows open in interactive WebView; see **§7.8** for the exact endpoint wiring status. |
 | **Read History (Local Room)** | Dedicated **Room `read_history` table** recording visited `topicId`, `title`, `author`, `lastReadFloor`, `lastReadPage`, and `visitedAt` to dim read titles in feeds, resume reading floor, and browse local history. | Local-only Room persistence synchronized smoothly across Explore and Pulse Hub. |
 
 ---
@@ -282,9 +282,9 @@ Present on `GET /post-{postId}-{page}`:
 | **Recommended (推荐阅读)** | `GET /award` | `GET /award/page-{N}` | None |
 | **Topic Search** | `GET /search?q={q}&page=1&sortBy={sort}` | `GET /search?q={q}&page={N}&sortBy={sort}` | Optional `&category={key}`; replace `+` with `%2B` in query! |
 | **Topic Detail** | `GET /post-{postId}-1` | `GET /post-{postId}-{N}` | None |
-| **Partner Directory** | `GET /providers` | — | None |
-| **Friend Links** | `GET /friends` | — | None |
-| **Static Articles** | `GET /about`, `GET /termsofservice` | — | None |
+| **Partner Directory** | `GET /providers` | — | None *(Client-encapsulated via `fetchDirectory`; unwired in UI)* |
+| **Friend Links** | `GET /friends` | — | None *(Client-encapsulated via `fetchDirectory`; unwired in UI)* |
+| **Static Articles** | `GET /about`, `GET /termsofservice` | — | None *(Client-encapsulated via `fetchStaticArticle`; unwired in UI)* |
 
 ### 6.2 Feed HTML CSS Selectors & Regexes
 
@@ -325,6 +325,11 @@ When `GET /post-{id}-{page}` has container `#nsk-body-left` (or fallback `#nsk-b
 
 Unless noted otherwise, all endpoints below use base URL `https://www.nodeseek.com`, `credentials: same-origin` (shared WebView cookies), `Content-Type: application/json` when a JSON body is present, and return `"success": true | false` with optional `"message": "error description"`.
 
+> **Implementation Status Legend (`com.nodeseek.app`)**:
+> - **已接入原生 UI**：已在 `NodeSeekApiClient` 封装并通过 Repository/ViewModel 接入原生界面。
+> - **仅客户端封装（暂未接入 UI）**：已在 `NodeSeekApiClient` 完成协议适配，当前无原生 UI 入口，留待后续迭代接线（完整清单见 **§7.8**）。
+> - **WebView 兜底 / 协议参考**：当前仅作协议文档参考，客户端未封装原生请求，由网页端/WebView 处理。
+
 ### 7.1 Authentication & Account Security
 
 #### `POST /api/account/signIn` — Native Sign-In & 2FA Verification
@@ -361,15 +366,15 @@ Unless noted otherwise, all endpoints below use base URL `https://www.nodeseek.c
 - **Verification**: Re-fetch `GET /` afterward and confirm `__config__.user == null` before clearing local user state.
 
 #### Security, Avatar, Password, TOTP & Telegram Endpoints
-| Purpose | Method & Path | Headers / Request Payload | Response Shape |
-| :--- | :--- | :--- | :--- |
-| **2FA Status** | `GET /api/account/otp-status` | — | `{ "success": true, "enabled": true }` |
-| **Toggle 2FA** | `POST /api/account/otp` | `{ "action": "create" \| "remove", "password": "..." }` | `{ "success": true, "secret": "...", "otpauth": "otpauth://..." }` *(keep secret in memory only)* |
-| **Sign-In IP History** | `GET /api/account/signIn-history` | — | `{ "success": true, "historyIp": [{ "ip": "1.2.3.4", "time": "..." }] }` |
-| **Change Password** | `POST /api/account/changePassword` | `{ "oldPassword": "...", "password": "..." }` | `{ "success": true, "message": "..." }` |
-| **Upload Avatar** | `POST /api/avatar/upload` | Header `x-csrf-challenge: simple-token`; `multipart/form-data` fields: `token="123456798"`, `name="avatar"`, file `img` (`img.png`, `image/png`, center-cropped `100x100` PNG) | `{ "success": true, "message": "..." }` |
-| **Telegram Info** | `GET /api/account/telegram` | *(Call after checking `__config__.user.telegram_id` on `GET /setting`)* | `{ "success": true, "telegramDetail": { "telegram_id": ..., "username": "...", "first_name": "..." } }` |
-| **Unbind Telegram** | `POST /api/account/unbind-telegram` | Empty body | `{ "success": true }` |
+| Purpose | Method & Path | Headers / Request Payload | Response Shape | Implementation Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **2FA Status** | `GET /api/account/otp-status` | — | `{ "success": true, "enabled": true }` | 仅客户端封装（`getOtpStatus`，未接入 UI） |
+| **Toggle 2FA** | `POST /api/account/otp` | `{ "action": "create" \| "remove", "password": "..." }` | `{ "success": true, "secret": "...", "otpauth": "otpauth://..." }` *(keep secret in memory only)* | 仅客户端封装（`updateOtp`，未接入 UI） |
+| **Sign-In IP History** | `GET /api/account/signIn-history` | — | `{ "success": true, "historyIp": [{ "ip": "1.2.3.4", "time": "..." }] }` | 仅客户端封装（`getSignInHistory`，未接入 UI） |
+| **Change Password** | `POST /api/account/changePassword` | `{ "oldPassword": "...", "password": "..." }` | `{ "success": true, "message": "..." }` | 仅客户端封装（`changePassword`，未接入 UI） |
+| **Upload Avatar** | `POST /api/avatar/upload` | Header `x-csrf-challenge: simple-token`; `multipart/form-data` fields: `token="123456798"`, `name="avatar"`, file `img` (`img.png`, `image/png`, center-cropped `100x100` PNG) | `{ "success": true, "message": "..." }` | WebView 兜底（原死代码 `uploadAvatar` 已移除） |
+| **Telegram Info** | `GET /api/account/telegram` | *(Call after checking `__config__.user.telegram_id` on `GET /setting`)* | `{ "success": true, "telegramDetail": { "telegram_id": ..., "username": "...", "first_name": "..." } }` | WebView 兜底 / 协议参考 |
+| **Unbind Telegram** | `POST /api/account/unbind-telegram` | Empty body | `{ "success": true }` | 仅客户端封装（`unbindTelegram`，未接入 UI） |
 
 ---
 
@@ -517,47 +522,72 @@ All four write/edit endpoints require header **`csrf-token: <16-char-random-hex>
 | **Following / Followers** | `GET /api/fans/follow` *(singular!)* / `GET /api/fans/fans` | — | `{ "success": true, "memberList": [...] }` |
 | **Blocked Users** | `GET /api/block-list/list` | — | `{ "success": true, "data": [{ "block_member_id": 303, "block_member_name": "Spammer" }] }` |
 | **Block / Unblock** | `POST /api/block-list/add` / `POST /api/block-list/del` | Add: `{ "block_member_name": "Spammer" }`<br>Del: `{ "block_member_id": 303 }` | `{ "success": true }` *(Note: `add` takes **username**, `del` takes **numeric ID**!)* |
-| **Homepage Boards** | `GET /api/homepage` / `POST /api/homepage` | POST: `{ "data": [{ "category": "tech", "showInIndex": true }] }` | GET: `{ "success": true, "data": [{ "category": "tech", "showInIndex": true }] }`, merged with `__config__.allCategory.filter { it.customizable }`. |
-| **Website Preferences** | `POST /api/preference/list` / `POST /api/preference/set` | List: `{ "keys": ["enable_festivous_style"] }`<br>Set: `{ "enable_festivous_style": true }` | List: `{ "success": true, "data": { "enable_festivous_style": false } }` |
-| **Custom Website CSS** | `GET /api/style` / `POST /api/style` | POST: `{ "style": "body { ... }" }` | GET: `{ "success": true, "data": "css string" }` |
+| **Homepage Boards** | `GET /api/homepage` / `POST /api/homepage` | POST: `{ "data": [{ "category": "tech", "showInIndex": true }] }` | GET: `{ "success": true, "data": [{ "category": "tech", "showInIndex": true }] }`, merged with `__config__.allCategory.filter { it.customizable }`. *(Status: 仅客户端封装 `getHomepageCategories` / `saveHomepageCategories`，未接入 UI)* |
+| **Website Preferences** | `POST /api/preference/list` / `POST /api/preference/set` | List: `{ "keys": ["enable_festivous_style"] }`<br>Set: `{ "enable_festivous_style": true }` | List: `{ "success": true, "data": { "enable_festivous_style": false } }` *(Status: WebView 兜底 / 协议参考)* |
+| **Custom Website CSS** | `GET /api/style` / `POST /api/style` | POST: `{ "style": "body { ... }" }` | GET: `{ "success": true, "data": "css string" }` *(Status: WebView 兜底 / 协议参考)* |
 
 ---
 
 ### 7.7 Economy, Polls, Lucky Draw, Invitations, Rulings & NodeImage
 
-1. **Coin Ledger (鸡腿账簿)**:
+1. **Coin Ledger (鸡腿账簿)** *(Status: 仅客户端封装 `getCreditLedger`，暂未接入 UI)*:
    - `GET /api/account/credit/page-{page}` (20 items/page, max 100 pages: `hasNext = page < min(100, ceil(total / 20.0))`).
    - Response `data` is an **array of 4-element tuples**: `[change: Int, balance: Int, reason: String, createdAt: String]`, plus `total: Int`.
-2. **Stardust Ledger & P2P Transfers (星尘)** *(Requires `x-dynamic-sign` header on ALL requests!)*:
+2. **Stardust Ledger & P2P Transfers (星尘)** *(Requires `x-dynamic-sign` header on ALL requests! Status: 仅客户端封装 `listStardust` / `prepareStardustTransfer` / `sendStardust`，暂未接入 UI)*:
    - Ledger: `GET /api/stardust/list?member_id={uid}&count=10[&before_id={cursor}][&type=...][&ref_id=...][&peer_id=...]`
      - Response: `{ "success": true, "records": [{ "id": 1, "diff": 10, "result": 52, "type": "transfer", "created_at": "...", "peer_id": 202 }], "exist_more": true, "cursor": 980 }`.
      - Type labels: `system`="系统", `admin`="管理", `transfer`="转账", `upvote`="点赞", `buyCode`="购买邀请码".
    - Prepare Transfer: `POST /api/stardust/payment-prepare` with `{ "receiver_id": 202, "origin": "https://www.nodeseek.com" }` -> `{ "success": true, "receiver_name": "Bob" }`.
    - Execute Transfer: `POST /api/stardust/send` with `{ "member_id": 202, "diff": 10, "ref_id": 0 }` -> `{ "success": true }`.
-3. **Polls / Votes (投票)** *(Requires `x-dynamic-sign` header on ALL requests!)*:
+3. **Polls / Votes (投票)** *(Requires `x-dynamic-sign` header on ALL requests! Status: `getVote` / `createVote` / `castVote` / `lockVote` 仅客户端封装暂未接入 UI；`voter-of-item` 为协议参考)*:
    - Read Poll: `GET /api/vote/info/{voteId}` -> `{ "success": true, "vote": { "id": 1, "title": "...", "uid": 101, "isPublic": 1, "locked": 0, "multiple": 0, "items": [{ "vote_item_id": 11, "text": "Option A", "count": 5, "voted": 1, "voters": [101] }] } }` *(Note: before voting, `count` and `voters` may be `null`/omitted)*.
    - Create Poll: `POST /api/vote/info` with `{ "title": "...", "multiple": false, "isPublic": true, "items": ["A", "B"] }` -> `{ "success": true, "vote": { "id": 42 } }` -> insert Markdown `[投票](nsapp://vote?id=42)` into post.
    - Cast Vote: `POST /api/vote/voteforitem` with `{ "ids": [11] }`.
    - Lock/Close Poll: `POST /api/vote/lock/{voteId}` with `{ "locked": true }`.
    - Public Voters List: `GET /api/vote/voter-of-item?id={voteItemId}&page={page}` -> `{ "success": true, "voters": [101, 202] }`.
-4. **Provably Fair Lucky Draw (抽奖)**:
+4. **Provably Fair Lucky Draw (抽奖)** *(Status: WebView 兜底 / 协议参考)*:
    - Share link format: `https://www.nodeseek.com/lucky?post={postId}&time={epochMs}&count={winners}&start={firstFloor}&duplicate={true|false}&mode=view` *(note: `duplicate=false` means `removeDuplicates = true`!)*.
    - Fetch eligible floors: `GET /api/content/floor-data?postId={postId}&time={epochMs}` -> `{ "success": true, "data": [{ "floor_id": 1, "member_id": 202, "member_name": "Bob" }] }`.
    - Fetch public randomness beacon: `GET https://api.drand.sh/8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce/public/{round}` where `round = floor((revealEpochSeconds - 1595431050) / 30.0)`.
    - Deterministic winner selection: Seed **`cyrb128` + `sfc32`** PRNG with the 64-char hex `randomness` string, generate one `UInt32` per floor index `0..<floors.size`, sort indices by random value ascending, filter `floor_id >= firstFloor` (and deduplicate `member_id` from `index >= firstFloor` if `removeDuplicates`), take `count`, and sort winners by `floor_id` ascending.
-5. **Invitations (邀请码)**:
+5. **Invitations (邀请码)** *(Status: WebView 兜底 / 协议参考；`NodeSeekRequestInterceptor` 已预置 `POST /api/invite/buyOne` 的 CSRF 头规则)*:
    - Config: `GET /api/invite/config` -> `{ "payment": { "coin": { "enabled": true, "cost": 100 }, "stardust": { "enabled": true, "cost": 500 } } }`.
    - List: `GET /api/invite/list?page={page}` (50/page) -> `{ "data": [{ "code": "...", "applied": false, "created_at": "..." }], "total": 2 }`.
    - Purchase: `POST /api/invite/buyOne` with `{ "payment": "coin" | "stardust" }` + headers `x-csrf-challenge: simple-token` and `x-csrf-token: <token>`.
-6. **Moderation Rulings (管理记录)**:
+6. **Moderation Rulings (管理记录)** *(Status: WebView 兜底 / 协议参考)*:
    - List / Search: `GET /api/admin/ruling/page-{page}[?search={q}]` (20/page, max 100 pages).
    - Single Record: `GET /api/admin/ruling/id-{id}`.
 7. **NodeImage Official Image Hosting (`https://api.nodeimage.com`)**:
-   - Optional Key Grant via Forum Session: `GET /api/cAuth?target=NodeImage` on `www.nodeseek.com`.
+   - Optional Key Grant via Forum Session: `GET /api/cAuth?target=NodeImage` on `www.nodeseek.com` *(Status: WebView 兜底 / 协议参考)*.
    - All `api.nodeimage.com` requests send `X-API-Key: <key>` and `Accept: application/json` with **cookies disabled**:
-     - Upload: `POST https://api.nodeimage.com/api/upload` (`multipart/form-data`: file part `image` (`image.png` or `image.jpg`), optional form field `deleteDays` `1..365`) -> read `links.direct` (fallback `url`) and format as `![alt](url)`.
-     - List Images: `GET https://api.nodeimage.com/api/v1/images`.
-     - Delete Image: `DELETE https://api.nodeimage.com/api/v1/delete/{imageId}` (`imageId` matches `^[a-zA-Z0-9_-]+$`).
+     - Upload: `POST https://api.nodeimage.com/api/upload` (`multipart/form-data`: file part `image` (`image.png` or `image.jpg`), optional form field `deleteDays` `1..365`) -> read `links.direct` (fallback `url`) and format as `![alt](url)`. *(Status: 已接入原生 UI — `uploadNodeImage`)*
+     - List Images / Key Connectivity Check: `GET https://api.nodeimage.com/api/v1/images`. *(Status: 已接入原生 UI — `verifyNodeImageApiKey` 用于设置页图床 API Key 连通性测试)*
+     - Delete Image: `DELETE https://api.nodeimage.com/api/v1/delete/{imageId}` (`imageId` matches `^[a-zA-Z0-9_-]+$`). *(Status: 协议参考，暂未封装)*
+
+### 7.8 Unwired / Reserved Protocol Endpoints Audit Summary
+
+For traceability against `NodeSeekApiClient`, the 18 protocol endpoints audited as unwired in native UI (audit item `P2-27`) have the following exact status:
+
+| # | `NodeSeekApiClient` Method | Endpoint | Current Status |
+| :---: | :--- | :--- | :--- |
+| 1 | `fetchDirectory` | `GET /providers`, `GET /friends` | 仅客户端封装（暂未接入 UI） |
+| 2 | `fetchStaticArticle` | `GET /about`, `GET /termsofservice` | 仅客户端封装（暂未接入 UI） |
+| 3 | `getOtpStatus` | `GET /api/account/otp-status` | 仅客户端封装（暂未接入 UI） |
+| 4 | `updateOtp` | `POST /api/account/otp` | 仅客户端封装（暂未接入 UI） |
+| 5 | `getSignInHistory` | `GET /api/account/signIn-history` | 仅客户端封装（暂未接入 UI） |
+| 6 | `changePassword` | `POST /api/account/changePassword` | 仅客户端封装（暂未接入 UI） |
+| 7 | `uploadAvatar` *(removed)* | `POST /api/avatar/upload` | **已从客户端移除**（零调用死代码，由 WebView 兜底，关闭 `P2-21`） |
+| 8 | `unbindTelegram` | `POST /api/account/unbind-telegram` | 仅客户端封装（暂未接入 UI） |
+| 9 | `getHomepageCategories` | `GET /api/homepage` | 仅客户端封装（暂未接入 UI） |
+| 10 | `saveHomepageCategories` | `POST /api/homepage` | 仅客户端封装（暂未接入 UI） |
+| 11 | `getCreditLedger` | `GET /api/account/credit/page-{page}` | 仅客户端封装（暂未接入 UI，有单测覆盖） |
+| 12 | `listStardust` | `GET /api/stardust/list` | 仅客户端封装（暂未接入 UI） |
+| 13 | `prepareStardustTransfer` | `POST /api/stardust/payment-prepare` | 仅客户端封装（暂未接入 UI） |
+| 14 | `sendStardust` | `POST /api/stardust/send` | 仅客户端封装（暂未接入 UI） |
+| 15 | `getVote` | `GET /api/vote/info/{voteId}` | 仅客户端封装（暂未接入 UI） |
+| 16 | `createVote` | `POST /api/vote/info` | 仅客户端封装（暂未接入 UI，有单测覆盖） |
+| 17 | `castVote` | `POST /api/vote/voteforitem` | 仅客户端封装（暂未接入 UI） |
+| 18 | `lockVote` | `POST /api/vote/lock/{voteId}` | 仅客户端封装（暂未接入 UI） |
 
 ---
 

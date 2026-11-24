@@ -27,10 +27,6 @@ interface SeekMailRepository {
 
     suspend fun getMailboxes(forceRefresh: Boolean = false): Result<List<SeekMailbox>>
 
-    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
-    suspend fun getMailbox(id: Long): Result<SeekMailbox> =
-        Result.failure(UnsupportedOperationException("Unused endpoint"))
-
     suspend fun checkMailboxAvailable(address: String): Result<Boolean>
 
     suspend fun createMailbox(address: String): Result<SeekMailbox>
@@ -54,10 +50,6 @@ interface SeekMailRepository {
         mailId: Long,
         forceRefresh: Boolean = false,
     ): Result<SeekMailDetail>
-
-    @Deprecated("Unused endpoint; retained as default stub for PreviewAppContainer source compatibility")
-    suspend fun getRawMailEml(mailId: Long): Result<String> =
-        Result.failure(UnsupportedOperationException("Unused endpoint"))
 
     suspend fun getAttachments(mailId: Long): Result<List<SeekMailAttachment>>
 

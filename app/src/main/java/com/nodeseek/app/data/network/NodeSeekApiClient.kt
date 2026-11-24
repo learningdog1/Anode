@@ -384,26 +384,6 @@ class NodeSeekApiClient(
             responseSerializer = BasicApiResponseDto.serializer(),
         )
 
-    suspend fun uploadAvatar(pngBytes: ByteArray): BasicApiResponseDto {
-        val url = NodeSeekUrlNormalizer.buildUrl(path = "/api/avatar/upload", baseOrigin = baseOrigin)
-        val multipart = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("token", "123456798")
-            .addFormDataPart("name", "avatar")
-            .addFormDataPart("img", "img.png", pngBytes.toRequestBody("image/png".toMediaType()))
-            .build()
-        val request = Request.Builder()
-            .url(url)
-            .post(multipart)
-            .header("x-csrf-challenge", "simple-token")
-            .build()
-        val raw = executeForumCall(request) { status, headers, body ->
-            CloudflareChallengeDetector.inspectApiResponse(status, headers, body, url = url.toString())
-            ensureApiSuccess(status, body, retryAfterSeconds = parseRetryAfterSeconds(headers))
-        }
-        return json.decodeFromString(BasicApiResponseDto.serializer(), raw)
-    }
-
     suspend fun unbindTelegram(): BasicApiResponseDto =
         executeEmptyPost("/api/account/unbind-telegram", BasicApiResponseDto.serializer())
 
@@ -1820,7 +1800,6 @@ class NodeSeekApiClient(
         )
         private val SIMPLE_CSRF_CHALLENGE_PATHS = setOf(
             "/api/account/signOut",
-            "/api/avatar/upload",
             "/api/invite/buyOne",
         )
 

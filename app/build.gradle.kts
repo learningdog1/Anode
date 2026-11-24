@@ -181,6 +181,7 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil.gif)
     implementation(libs.coil.svg)
+    implementation(libs.androidx.exifinterface)
 
     // WebView Control
     implementation(libs.androidx.webkit)

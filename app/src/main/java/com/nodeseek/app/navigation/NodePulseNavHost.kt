@@ -1669,11 +1669,6 @@ fun NodePulseNavHost(
                 val route = backStackEntry.toRoute<SeekMailRoute>()
                 SeekMailScreen(
                     onBack = safePopBackStack,
-                    onOpenSettings = {
-                        navController.navigate(SettingsRoute) {
-                            launchSingleTop = true
-                        }
-                    },
                     initialMailboxId = route.initialMailboxId,
                     initialMailId = route.initialMailId,
                     container = container,
