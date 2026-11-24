@@ -226,9 +226,10 @@ fun PulseAvatar(
                 .clip(CircleShape)
                 .then(
                     if (ringWidth > 0.dp) {
+                        val ringGap = if (size < 22.dp) 0.75.dp else 1.1.dp
                         Modifier
                             .border(width = ringWidth, brush = ringBrush, shape = CircleShape)
-                            .padding(ringWidth + 1.1.dp)
+                            .padding(ringWidth + ringGap)
                             .clip(CircleShape)
                     } else {
                         Modifier
@@ -256,7 +257,7 @@ fun PulseAvatar(
                         text = monogram,
                         style = MaterialTheme.typography.labelLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            fontSize = (size.value * 0.39f).sp,
+                            fontSize = (size.value * 0.40f).coerceAtLeast(8.5f).sp,
                         ),
                         color = fallbackTextColor,
                     )

@@ -98,6 +98,11 @@ class SeekMailArchiveDeleteViewModelTest {
         try {
             assertEquals(listOf(3L, 2L, 1L), vm.uiState.value.mails.map { it.id })
             assertEquals(2, vm.uiState.value.unreadLoadedCount)
+            // Homepage card scale setting must not alter SeekMail reader fontScale
+            settings.setFontScale(0.75f)
+            assertEquals(com.nodeseek.app.domain.model.AppSettings.DEFAULT_FONT_SCALE, vm.uiState.value.fontScale, 0.0001f)
+            settings.setFontScale(1.25f)
+            assertEquals(com.nodeseek.app.domain.model.AppSettings.DEFAULT_FONT_SCALE, vm.uiState.value.fontScale, 0.0001f)
             assertEquals(0, vm.uiState.value.archivedMailCount)
 
             // Long-press opens action sheet, and can switch to tag sheet

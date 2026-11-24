@@ -29,9 +29,15 @@ enum class PulseThemeMode {
     OBSIDIAN_DARK,
 }
 
+const val DEFAULT_GLOBAL_FONT_SCALE = 0.90f
+const val DEFAULT_HOME_CARD_SCALE = 0.90f
+const val MIN_HOME_CARD_SCALE = 0.75f
+const val MAX_HOME_CARD_SCALE = 1.30f
+
 val LocalNodePulseExtendedColors = staticCompositionLocalOf { LightExtendedColors }
-val LocalNodePulseExtraTypography = staticCompositionLocalOf { buildNodePulseExtraTypography(0.90f) }
-val LocalFontScale = staticCompositionLocalOf { 0.90f }
+val LocalNodePulseExtraTypography = staticCompositionLocalOf { buildNodePulseExtraTypography(DEFAULT_GLOBAL_FONT_SCALE) }
+val LocalFontScale = staticCompositionLocalOf { DEFAULT_GLOBAL_FONT_SCALE }
+val LocalHomeCardScale = staticCompositionLocalOf { DEFAULT_HOME_CARD_SCALE }
 val LocalNodePulseDarkTheme = staticCompositionLocalOf { false }
 val LocalNodePulseDynamicColor = staticCompositionLocalOf { false }
 
@@ -53,6 +59,15 @@ object NodePulseThemeTokens {
         @Composable
         @ReadOnlyComposable
         get() = LocalFontScale.current
+
+    /**
+     * User-configured scale (`0.75f..1.30f`, default `0.90f`) that applies exclusively to
+     * homepage topic cards (`ExploreScreen`) for font sizing and card compaction.
+     */
+    val homeCardScale: Float
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalHomeCardScale.current
 
     val isDark: Boolean
         @Composable
@@ -92,7 +107,8 @@ fun NodePulseTheme(
     themeMode: PulseThemeMode = PulseThemeMode.SYSTEM,
     purePitchAmoled: Boolean = false,
     dynamicColor: Boolean = false,
-    fontScale: Float = 0.90f,
+    fontScale: Float = DEFAULT_GLOBAL_FONT_SCALE,
+    homeCardScale: Float = DEFAULT_HOME_CARD_SCALE,
     content: @Composable () -> Unit,
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -190,6 +206,7 @@ fun NodePulseTheme(
     }
 
     val clampedScale = fontScale.coerceIn(0.85f, 1.30f)
+    val clampedHomeCardScale = homeCardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
     val typography = remember(clampedScale) { buildNodePulseTypography(clampedScale) }
     val extraTypography = remember(clampedScale) { buildNodePulseExtraTypography(clampedScale) }
 
@@ -208,6 +225,7 @@ fun NodePulseTheme(
         LocalNodePulseExtendedColors provides extendedColors,
         LocalNodePulseExtraTypography provides extraTypography,
         LocalFontScale provides clampedScale,
+        LocalHomeCardScale provides clampedHomeCardScale,
         LocalNodePulseDarkTheme provides useDark,
         LocalNodePulseDynamicColor provides dynamicSupported,
     ) {

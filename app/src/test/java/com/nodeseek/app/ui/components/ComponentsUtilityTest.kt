@@ -87,4 +87,63 @@ class ComponentsUtilityTest {
             Locale.setDefault(originalLocale)
         }
     }
+
+    @Test
+    fun `resolvePulseTopicCardMetrics clamps scale and compacts card height harmoniously without breaking alignment`() {
+        val clampedLow = resolvePulseTopicCardMetrics(0.40f)
+        val at75 = resolvePulseTopicCardMetrics(0.75f)
+        assertEquals(at75, clampedLow)
+        assertEquals(0.75f, at75.scale, 0.0001f)
+
+        val clampedHigh = resolvePulseTopicCardMetrics(1.80f)
+        val at130 = resolvePulseTopicCardMetrics(1.30f)
+        assertEquals(at130, clampedHigh)
+        assertEquals(1.30f, at130.scale, 0.0001f)
+
+        val stops = listOf(0.75f, 0.85f, 0.90f, 1.00f, 1.15f, 1.30f).map(::resolvePulseTopicCardMetrics)
+        for (i in 0 until stops.lastIndex) {
+            val smaller = stops[i]
+            val larger = stops[i + 1]
+            assertTrue("titleFontSize should grow monotonically", smaller.titleFontSizeSp < larger.titleFontSizeSp)
+            assertTrue("titleLineHeight should grow monotonically", smaller.titleLineHeightSp < larger.titleLineHeightSp)
+            assertTrue("authorFontSize should grow monotonically", smaller.authorFontSizeSp < larger.authorFontSizeSp)
+            assertTrue("footerMetricFontSize should grow monotonically", smaller.footerMetricFontSizeSp < larger.footerMetricFontSizeSp)
+            assertTrue("innerVerticalPadding should grow monotonically", smaller.innerVerticalPadding < larger.innerVerticalPadding)
+            assertTrue("outerVerticalPadding should grow monotonically", smaller.outerVerticalPadding < larger.outerVerticalPadding)
+            assertTrue("avatarSize should grow monotonically", smaller.avatarSize < larger.avatarSize)
+            assertTrue("footerPillMinHeight should grow monotonically", smaller.footerPillMinHeight < larger.footerPillMinHeight)
+            assertTrue("estimated 2-line height should grow monotonically", smaller.estimatedHeightDp(2) < larger.estimatedHeightDp(2))
+        }
+
+        stops.forEach { m ->
+            // Horizontal feed rail alignment stays consistent with top header & pinned ticker
+            assertEquals(14f, m.outerHorizontalPadding.value, 0.001f)
+            // Readable typography floors & balanced line-height ratios at every stop
+            assertTrue("Title must stay legible (>=12sp)", m.titleFontSizeSp >= 12f)
+            assertTrue("Author must stay legible (>=10.5sp)", m.authorFontSizeSp >= 10.5f)
+            assertTrue("Footer pills must stay legible (>=9sp)", m.footerPillFontSizeSp >= 9f)
+            val titleRatio = m.titleLineHeightSp / m.titleFontSizeSp
+            assertTrue("Title line-height ratio $titleRatio out of balanced range", titleRatio in 1.30f..1.45f)
+            // Bookmark touch box stays mathematically centered on Row 1 and symmetrical with avatar inset
+            assertEquals(
+                m.innerVerticalPadding.value * 2f + m.authorRowMinHeight.value,
+                m.bookmarkTouchHeight.value,
+                0.01f,
+            )
+            assertEquals(
+                m.innerHorizontalPadding.value * 2f + m.bookmarkIconSize.value,
+                m.bookmarkTouchWidth.value,
+                0.01f,
+            )
+        }
+
+        // Compaction effectiveness: 75% mode reduces 2-line card footprint by >25% vs 100%
+        val at100 = resolvePulseTopicCardMetrics(1.00f)
+        assertTrue("75% 2-line card should be <= 95dp (was ${at75.estimatedHeightDp(2)})", at75.estimatedHeightDp(2) <= 95f)
+        assertTrue("100% 2-line card should be >= 125dp (was ${at100.estimatedHeightDp(2)})", at100.estimatedHeightDp(2) >= 125f)
+        assertTrue(
+            "75% compaction should save at least 25% vertical height vs 100%",
+            at75.estimatedHeightDp(2) <= at100.estimatedHeightDp(2) * 0.75f,
+        )
+    }
 }

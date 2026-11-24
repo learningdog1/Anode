@@ -171,7 +171,10 @@ import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
 import com.nodeseek.app.ui.components.PulseDialogTone
 import com.nodeseek.app.ui.components.PulseSnackbarHost
 import com.nodeseek.app.ui.components.PulseTextField
+import com.nodeseek.app.ui.components.PulseTopicCard
+import com.nodeseek.app.ui.components.PulseTopicCardModel
 import com.nodeseek.app.ui.components.RankMicroBadge
+import com.nodeseek.app.ui.components.resolvePulseTopicCardMetrics
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.ObsidianBackground
@@ -209,6 +212,34 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+private val SETTINGS_PREVIEW_PRIMARY_TOPIC = PulseTopicCardModel(
+    id = -101L,
+    title = "DMIT LAX Pro 晚高峰三网 CN2 GIA 回程实测：延迟稳定 138ms 零丢包",
+    categorySlug = "review",
+    categoryName = "测评",
+    authorName = "latency_hunter",
+    authorLevel = 5,
+    viewCount = 6840,
+    replyCount = 142,
+    lastActivityIso = "3 分钟前",
+    isBookmarked = true,
+    isHot = true,
+)
+
+private val SETTINGS_PREVIEW_SECONDARY_TOPIC = PulseTopicCardModel(
+    id = -102L,
+    title = "自建 WireGuard + Bird2 任意播选路与 MTU 调优笔记",
+    categorySlug = "tech",
+    categoryName = "技术",
+    authorName = "bgp_artisan",
+    authorLevel = 3,
+    viewCount = 1920,
+    replyCount = 46,
+    lastActivityIso = "昨天",
+    isRead = true,
+    lastReadFloor = 18,
+)
 
 data class SettingsUiState(
     val settings: AppSettings = AppSettings(),
@@ -1021,9 +1052,25 @@ fun SettingsScreen(
                 // ── Group 2: 字号与排版 ──
                 item(key = "settings_typography") {
                     var sliderFontScale by remember(settings.fontScale) {
-                        mutableFloatStateOf(settings.fontScale.coerceIn(0.85f, 1.30f))
+                        mutableFloatStateOf(
+                            settings.fontScale.coerceIn(
+                                AppSettings.MIN_FONT_SCALE,
+                                AppSettings.MAX_FONT_SCALE,
+                            ),
+                        )
                     }
                     val pct = (sliderFontScale * 100f).roundToInt()
+                    val previewMetrics = remember(sliderFontScale) {
+                        resolvePulseTopicCardMetrics(sliderFontScale)
+                    }
+                    val densityLabel = when {
+                        sliderFontScale <= 0.78f -> "极简紧凑"
+                        sliderFontScale <= 0.87f -> "紧凑"
+                        sliderFontScale <= 0.95f -> "默认"
+                        sliderFontScale <= 1.07f -> "标准"
+                        sliderFontScale <= 1.20f -> "大字"
+                        else -> "超大"
+                    }
                     PulseStaggeredEntrance(index = 1) {
                         SettingsGroupedSection(title = "字号与排版") {
                             Column(
@@ -1043,13 +1090,13 @@ fun SettingsScreen(
                                         verticalArrangement = Arrangement.spacedBy(1.dp),
                                     ) {
                                         Text(
-                                            text = "正文字号与排版缩放",
+                                            text = "首页卡片字号与紧缩",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontWeight = FontWeight.Medium,
                                             color = MaterialTheme.colorScheme.onSurface,
                                         )
                                         Text(
-                                            text = "全局调整信息流与帖子正文的文字比例",
+                                            text = "仅缩放首页帖子卡片的字号与紧凑度，不影响正文与其他页面",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
@@ -1064,26 +1111,30 @@ fun SettingsScreen(
                                 Slider(
                                     value = sliderFontScale,
                                     onValueChange = { raw ->
-                                        sliderFontScale = ((raw * 100f).roundToInt() / 100f).coerceIn(0.85f, 1.30f)
+                                        sliderFontScale = ((raw * 100f).roundToInt() / 100f).coerceIn(
+                                            AppSettings.MIN_FONT_SCALE,
+                                            AppSettings.MAX_FONT_SCALE,
+                                        )
                                     },
                                     onValueChangeFinished = {
                                         viewModel.setFontScale(sliderFontScale)
                                     },
-                                    valueRange = 0.85f..1.30f,
+                                    valueRange = AppSettings.MIN_FONT_SCALE..AppSettings.MAX_FONT_SCALE,
                                     modifier = Modifier.fillMaxWidth(),
                                 )
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
                                     listOf(
+                                        0.75f to "75%",
                                         0.85f to "85%",
                                         0.90f to "90%",
                                         1.00f to "100%",
                                         1.15f to "115%",
                                     ).forEach { (scale, label) ->
-                                        val isPresetActive = abs(sliderFontScale - scale) < 0.02f
+                                        val isPresetActive = abs(sliderFontScale - scale) < 0.006f
                                         val chipBg by animateColorAsState(
                                             targetValue = if (isPresetActive) {
                                                 MaterialTheme.colorScheme.primaryContainer
@@ -1116,7 +1167,10 @@ fun SettingsScreen(
                                                     interactionSource = presetInteraction,
                                                     indication = LocalIndication.current,
                                                     role = Role.Button,
-                                                    onClick = { viewModel.setFontScale(scale) },
+                                                    onClick = {
+                                                        sliderFontScale = scale
+                                                        viewModel.setFontScale(scale)
+                                                    },
                                                 )
                                                 .padding(vertical = 7.dp),
                                             contentAlignment = Alignment.Center,
@@ -1131,6 +1185,7 @@ fun SettingsScreen(
                                                     MaterialTheme.colorScheme.onSurfaceVariant
                                                 },
                                                 maxLines = 1,
+                                                softWrap = false,
                                             )
                                         }
                                     }
@@ -1139,40 +1194,50 @@ fun SettingsScreen(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(MaterialTheme.colorScheme.background)
                                         .border(
                                             width = 0.75.dp,
                                             color = ext.cardBorder,
-                                            shape = RoundedCornerShape(12.dp),
+                                            shape = RoundedCornerShape(14.dp),
                                         )
-                                        .padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
                                 ) {
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                     ) {
                                         Text(
-                                            text = "排版预览",
+                                            text = "首页卡片预览",
                                             style = extraType.microLabel,
                                             color = MaterialTheme.colorScheme.primary,
                                         )
                                         Text(
-                                            text = "${(16f * settings.fontScale).roundToInt()}sp",
-                                            style = extraType.microLabel,
+                                            text = "$densityLabel · 标题 ${previewMetrics.titleFontSizeSp.roundToInt()}sp",
+                                            style = extraType.microLabel.withTabularNumbers(),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
-                                    Text(
-                                        text = "DMIT LAX Pro 晚高峰三网 CN2 GIA 回程延迟稳定在 138ms，零丢包。",
-                                        style = MaterialTheme.typography.bodyLarge.copy(
-                                            fontSize = (16f * settings.fontScale).sp,
-                                            lineHeight = (25f * settings.fontScale).sp,
-                                        ),
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        PulseTopicCard(
+                                            topic = SETTINGS_PREVIEW_PRIMARY_TOPIC,
+                                            onClick = {},
+                                            cardScale = sliderFontScale,
+                                            contentPadding = PaddingValues(vertical = previewMetrics.outerVerticalPadding),
+                                            onBookmarkToggle = {},
+                                        )
+                                        PulseTopicCard(
+                                            topic = SETTINGS_PREVIEW_SECONDARY_TOPIC,
+                                            onClick = {},
+                                            cardScale = sliderFontScale,
+                                            contentPadding = PaddingValues(vertical = previewMetrics.outerVerticalPadding),
+                                            onBookmarkToggle = {},
+                                        )
+                                    }
                                 }
                             }
                         }

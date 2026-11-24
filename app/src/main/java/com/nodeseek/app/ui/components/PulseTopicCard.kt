@@ -27,7 +27,6 @@ import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,8 +47,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nodeseek.app.ui.theme.DEFAULT_HOME_CARD_SCALE
+import com.nodeseek.app.ui.theme.MAX_HOME_CARD_SCALE
+import com.nodeseek.app.ui.theme.MIN_HOME_CARD_SCALE
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.ProvideSharedPulseShimmer
 import com.nodeseek.app.ui.theme.PulseShimmerBox
@@ -82,10 +85,157 @@ data class PulseTopicCardModel(
 )
 
 /**
+ * Harmonious geometry & typography metrics for [PulseTopicCard] at a given homepage card scale
+ * (`0.75f..1.30f`). Scaling down compacts card paddings, row gaps, avatar, pills, and typography
+ * in balanced proportion so significantly more posts fit on one screen without clipping or awkward
+ * whitespace; scaling up opens breathing room so larger titles stay crisp and editorial.
+ */
+@Immutable
+data class PulseTopicCardMetrics(
+    val scale: Float,
+    val outerHorizontalPadding: Dp,
+    val outerVerticalPadding: Dp,
+    val cardCornerRadius: Dp,
+    val innerHorizontalPadding: Dp,
+    val innerVerticalPadding: Dp,
+    val selectedBarVerticalPad: Dp,
+    val headerToTitleSpacing: Dp,
+    val titleToFooterSpacing: Dp,
+    val avatarSize: Dp,
+    val avatarRankRingWidth: Dp,
+    val avatarNeutralRingWidth: Dp,
+    val avatarToAuthorSpacing: Dp,
+    val authorRowMinHeight: Dp,
+    val authorFontSizeSp: Float,
+    val authorLineHeightSp: Float,
+    val metaSeparatorSpacing: Dp,
+    val timeFontSizeSp: Float,
+    val timeLineHeightSp: Float,
+    val bookmarkIconSize: Dp,
+    val bookmarkTouchWidth: Dp,
+    val bookmarkTouchHeight: Dp,
+    val bookmarkEndClearance: Dp,
+    val titleFontSizeSp: Float,
+    val titleLineHeightSp: Float,
+    val footerPillMinHeight: Dp,
+    val footerPillHorizontalPad: Dp,
+    val footerPillVerticalPad: Dp,
+    val footerPillIconGap: Dp,
+    val footerBadgeCornerRadius: Dp,
+    val footerHorizontalGap: Dp,
+    val footerVerticalGap: Dp,
+    val footerIconSize: Dp,
+    val viewIconSize: Dp,
+    val categoryDotSize: Dp,
+    val footerMetricFontSizeSp: Float,
+    val footerMetricLineHeightSp: Float,
+    val footerPillFontSizeSp: Float,
+    val footerPillLineHeightSp: Float,
+) {
+    val outerContentPadding: PaddingValues
+        get() = PaddingValues(horizontal = outerHorizontalPadding, vertical = outerVerticalPadding)
+
+    /**
+     * Approximate total vertical footprint of a single card (including outer vertical padding)
+     * at standard system font scale (`1.0f`) for layout density checks and unit tests.
+     */
+    fun estimatedHeightDp(titleLines: Int = 2): Float {
+        val lines = titleLines.coerceIn(1, 2)
+        return outerVerticalPadding.value * 2f +
+            innerVerticalPadding.value * 2f +
+            authorRowMinHeight.value +
+            headerToTitleSpacing.value +
+            titleLineHeightSp * lines +
+            titleToFooterSpacing.value +
+            footerPillMinHeight.value
+    }
+}
+
+/**
+ * Resolves balanced typography and compaction metrics for [PulseTopicCard] from [cardScale]
+ * (`0.75f..1.30f`, default `0.90f`).
+ */
+fun resolvePulseTopicCardMetrics(cardScale: Float = DEFAULT_HOME_CARD_SCALE): PulseTopicCardMetrics {
+    val s = cardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
+    val outerVertical = interpolateCardMetric(s, at75 = 2.0f, at90 = 3.0f, at100 = 3.5f, at130 = 4.5f).dp
+    val cardCorner = interpolateCardMetric(s, at75 = 11.0f, at90 = 13.0f, at100 = 14.0f, at130 = 16.0f).dp
+    val innerHorizontal = interpolateCardMetric(s, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.0f).dp
+    val innerVertical = interpolateCardMetric(s, at75 = 6.0f, at90 = 8.5f, at100 = 10.0f, at130 = 13.0f).dp
+    val authorRowMinHeight = interpolateCardMetric(s, at75 = 19.0f, at90 = 22.5f, at100 = 25.0f, at130 = 30.0f).dp
+    val bookmarkIconSize = interpolateCardMetric(s, at75 = 15.0f, at90 = 17.0f, at100 = 18.0f, at130 = 21.0f).dp
+
+    return PulseTopicCardMetrics(
+        scale = s,
+        outerHorizontalPadding = 14.dp,
+        outerVerticalPadding = outerVertical,
+        cardCornerRadius = cardCorner,
+        innerHorizontalPadding = innerHorizontal,
+        innerVerticalPadding = innerVertical,
+        selectedBarVerticalPad = interpolateCardMetric(s, at75 = 7.5f, at90 = 9.75f, at100 = 11.0f, at130 = 14.0f).dp,
+        headerToTitleSpacing = interpolateCardMetric(s, at75 = 3.0f, at90 = 4.5f, at100 = 6.0f, at130 = 8.0f).dp,
+        titleToFooterSpacing = interpolateCardMetric(s, at75 = 4.0f, at90 = 5.5f, at100 = 7.0f, at130 = 9.5f).dp,
+        avatarSize = interpolateCardMetric(s, at75 = 18.0f, at90 = 21.5f, at100 = 24.0f, at130 = 28.0f).dp,
+        avatarRankRingWidth = interpolateCardMetric(s, at75 = 1.1f, at90 = 1.3f, at100 = 1.4f, at130 = 1.6f).dp,
+        avatarNeutralRingWidth = interpolateCardMetric(s, at75 = 0.75f, at90 = 0.8f, at100 = 0.85f, at130 = 0.95f).dp,
+        avatarToAuthorSpacing = interpolateCardMetric(s, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 8.5f).dp,
+        authorRowMinHeight = authorRowMinHeight,
+        authorFontSizeSp = interpolateCardMetric(s, at75 = 10.8f, at90 = 12.0f, at100 = 13.0f, at130 = 16.0f),
+        authorLineHeightSp = interpolateCardMetric(s, at75 = 14.0f, at90 = 15.6f, at100 = 17.0f, at130 = 21.0f),
+        metaSeparatorSpacing = interpolateCardMetric(s, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
+        timeFontSizeSp = interpolateCardMetric(s, at75 = 10.0f, at90 = 11.2f, at100 = 12.0f, at130 = 14.8f),
+        timeLineHeightSp = interpolateCardMetric(s, at75 = 13.0f, at90 = 14.6f, at100 = 16.0f, at130 = 19.6f),
+        bookmarkIconSize = bookmarkIconSize,
+        // Symmetrical width/height so the bookmark icon sits at the exact vertical center of Row 1
+        // and matches the avatar's horizontal edge inset at every scale.
+        bookmarkTouchWidth = innerHorizontal * 2 + bookmarkIconSize,
+        bookmarkTouchHeight = innerVertical * 2 + authorRowMinHeight,
+        bookmarkEndClearance = bookmarkIconSize + 10.dp,
+        titleFontSizeSp = interpolateCardMetric(s, at75 = 12.2f, at90 = 14.0f, at100 = 15.5f, at130 = 20.1f),
+        titleLineHeightSp = interpolateCardMetric(s, at75 = 16.4f, at90 = 19.3f, at100 = 21.5f, at130 = 27.9f),
+        footerPillMinHeight = interpolateCardMetric(s, at75 = 16.5f, at90 = 19.0f, at100 = 20.5f, at130 = 25.0f).dp,
+        footerPillHorizontalPad = interpolateCardMetric(s, at75 = 5.5f, at90 = 6.5f, at100 = 7.0f, at130 = 9.0f).dp,
+        footerPillVerticalPad = interpolateCardMetric(s, at75 = 1.0f, at90 = 1.5f, at100 = 2.0f, at130 = 3.0f).dp,
+        footerPillIconGap = interpolateCardMetric(s, at75 = 2.5f, at90 = 3.0f, at100 = 3.0f, at130 = 4.0f).dp,
+        footerBadgeCornerRadius = interpolateCardMetric(s, at75 = 5.0f, at90 = 5.75f, at100 = 6.0f, at130 = 7.0f).dp,
+        footerHorizontalGap = interpolateCardMetric(s, at75 = 5.0f, at90 = 6.0f, at100 = 6.5f, at130 = 8.5f).dp,
+        footerVerticalGap = interpolateCardMetric(s, at75 = 3.0f, at90 = 4.0f, at100 = 4.5f, at130 = 5.5f).dp,
+        footerIconSize = interpolateCardMetric(s, at75 = 9.5f, at90 = 11.0f, at100 = 11.5f, at130 = 14.0f).dp,
+        viewIconSize = interpolateCardMetric(s, at75 = 10.5f, at90 = 12.0f, at100 = 13.0f, at130 = 15.5f).dp,
+        categoryDotSize = interpolateCardMetric(s, at75 = 4.0f, at90 = 4.5f, at100 = 5.0f, at130 = 6.0f).dp,
+        footerMetricFontSizeSp = interpolateCardMetric(s, at75 = 9.5f, at90 = 10.7f, at100 = 11.5f, at130 = 14.0f),
+        footerMetricLineHeightSp = interpolateCardMetric(s, at75 = 12.0f, at90 = 13.5f, at100 = 14.5f, at130 = 17.8f),
+        footerPillFontSizeSp = interpolateCardMetric(s, at75 = 9.2f, at90 = 10.4f, at100 = 11.0f, at130 = 13.5f),
+        footerPillLineHeightSp = interpolateCardMetric(s, at75 = 11.6f, at90 = 13.1f, at100 = 14.0f, at130 = 17.2f),
+    )
+}
+
+private fun interpolateCardMetric(
+    scale: Float,
+    at75: Float,
+    at90: Float,
+    at100: Float,
+    at130: Float,
+): Float = when {
+    scale <= 0.90f -> {
+        val t = ((scale - MIN_HOME_CARD_SCALE) / (0.90f - MIN_HOME_CARD_SCALE)).coerceIn(0f, 1f)
+        at75 + (at90 - at75) * t
+    }
+    scale <= 1.00f -> {
+        val t = ((scale - 0.90f) / (1.00f - 0.90f)).coerceIn(0f, 1f)
+        at90 + (at100 - at90) * t
+    }
+    else -> {
+        val t = ((scale - 1.00f) / (MAX_HOME_CARD_SCALE - 1.00f)).coerceIn(0f, 1f)
+        at100 + (at130 - at100) * t
+    }
+}
+
+/**
  * Native Compact Outlined Feed Card (`PulseTopicCard`):
- * - Transparent outlined container (`14.dp` corner radius, hairline border, zero shadow/fill)
+ * - Transparent outlined container (proportionally scaled corner radius, hairline border, zero shadow/fill)
  * - Single-pass measurement with zero `IntrinsicSize.Min` or scroll-time `animate*AsState`
  * - Crisp read/unread title hierarchy + bottom-right backgroundless semantic category indicator
+ * - Supports dedicated [cardScale] (`0.75f..1.30f`) for homepage card typography & compaction
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -96,7 +246,8 @@ fun PulseTopicCard(
     showCategoryTag: Boolean = true,
     showEngagementMetrics: Boolean = true,
     resumeBadgeTextOverride: String? = null,
-    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 3.5.dp),
+    contentPadding: PaddingValues? = null,
+    cardScale: Float = DEFAULT_HOME_CARD_SCALE,
     selectedTopicId: Long? = null,
     isSelected: Boolean = selectedTopicId != null && selectedTopicId == topic.id,
     onBookmarkToggle: (() -> Unit)? = null,
@@ -106,10 +257,11 @@ fun PulseTopicCard(
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
     val extraType = NodePulseThemeTokens.extraTypography
-    val fontScale = NodePulseThemeTokens.fontScale
+    val metrics = remember(cardScale) { resolvePulseTopicCardMetrics(cardScale) }
+    val resolvedContentPadding = contentPadding ?: metrics.outerContentPadding
     val haptics = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
-    val cardShape = RoundedCornerShape(14.dp)
+    val cardShape = RoundedCornerShape(metrics.cardCornerRadius)
     val primaryColor = MaterialTheme.colorScheme.primary
     val selectedFillColor = MaterialTheme.colorScheme.primaryContainer.copy(
         alpha = if (isDark) 0.28f else 0.36f,
@@ -126,10 +278,28 @@ fun PulseTopicCard(
         MaterialTheme.colorScheme.onSurface
     }
     val titleStyle = (if (topic.isRead && !isSelected) extraType.titleMediumRead else extraType.titleMediumUnread).copy(
-        fontSize = (15.5f * fontScale).sp,
-        lineHeight = (21.5f * fontScale).sp,
+        fontSize = metrics.titleFontSizeSp.sp,
+        lineHeight = metrics.titleLineHeightSp.sp,
         fontWeight = if (topic.isRead && !isSelected) FontWeight.Normal else FontWeight.SemiBold,
     )
+    val authorTextStyle = MaterialTheme.typography.labelMedium.copy(
+        fontSize = metrics.authorFontSizeSp.sp,
+        lineHeight = metrics.authorLineHeightSp.sp,
+    )
+    val timeTextStyle = MaterialTheme.typography.labelMedium.copy(
+        fontSize = metrics.timeFontSizeSp.sp,
+        lineHeight = metrics.timeLineHeightSp.sp,
+    )
+    val footerPillTextStyle = MaterialTheme.typography.labelSmall.copy(
+        fontSize = metrics.footerPillFontSizeSp.sp,
+        lineHeight = metrics.footerPillLineHeightSp.sp,
+    )
+    val footerMetricTextStyle = MaterialTheme.typography.labelSmall.copy(
+        fontSize = metrics.footerMetricFontSizeSp.sp,
+        lineHeight = metrics.footerMetricLineHeightSp.sp,
+        fontWeight = FontWeight.Medium,
+    )
+
     val hasCategoryTag = showCategoryTag &&
         (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank())
     val resumeBadgeText = resumeBadgeTextOverride?.takeIf { it.isNotBlank() }
@@ -138,7 +308,7 @@ fun PulseTopicCard(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(contentPadding),
+            .padding(resolvedContentPadding),
     ) {
         Column(
             modifier = Modifier
@@ -161,7 +331,7 @@ fun PulseTopicCard(
                     drawContent()
                     if (isSelected) {
                         val barW = 3.dp.toPx()
-                        val vPad = 11.dp.toPx()
+                        val vPad = metrics.selectedBarVerticalPad.toPx()
                         if (size.height > vPad * 2f) {
                             val r = 2.dp.toPx()
                             drawRoundRect(
@@ -182,11 +352,16 @@ fun PulseTopicCard(
                     indication = LocalIndication.current,
                     onClick = onClick,
                 )
-                .padding(horizontal = 13.dp, vertical = 10.dp),
+                .padding(
+                    horizontal = metrics.innerHorizontalPadding,
+                    vertical = metrics.innerVerticalPadding,
+                ),
         ) {
-            // ── Row 1: Compact Author + Time (Bookmark rendered as 48dp sibling at TopEnd) ──
+            // ── Row 1: Compact Author + Time (Bookmark rendered as aligned sibling at TopEnd) ──
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = metrics.authorRowMinHeight),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val canClickAuthor = onAuthorClick != null &&
@@ -203,12 +378,12 @@ fun PulseTopicCard(
                             .then(
                                 if (canClickAuthor) {
                                     Modifier
-                                        .heightIn(min = 32.dp)
-                                        .clip(RoundedCornerShape(8.dp))
+                                        .heightIn(min = metrics.authorRowMinHeight)
+                                        .clip(RoundedCornerShape(metrics.footerBadgeCornerRadius))
                                         .clickable(
                                             role = Role.Button,
                                             onClickLabel = "查看用户主页",
-                                            onClick = { onAuthorClick?.invoke(resolvedAuthorId) },
+                                            onClick = { onAuthorClick(resolvedAuthorId) },
                                         )
                                         .padding(end = 4.dp)
                                 } else {
@@ -220,20 +395,21 @@ fun PulseTopicCard(
                         PulseAvatar(
                             avatarUrl = topic.authorAvatarUrl,
                             username = topic.authorName,
-                            size = 24.dp,
+                            size = metrics.avatarSize,
                             rankLevel = topic.authorLevel,
-                            ringWidth = if (topic.authorLevel != null) 1.4.dp else 0.85.dp,
+                            ringWidth = if (topic.authorLevel != null) {
+                                metrics.avatarRankRingWidth
+                            } else {
+                                metrics.avatarNeutralRingWidth
+                            },
                             onClick = null,
                         )
 
-                        Spacer(modifier = Modifier.width(7.dp))
+                        Spacer(modifier = Modifier.width(metrics.avatarToAuthorSpacing))
 
                         Text(
                             text = topic.authorName.ifBlank { "匿名用户" },
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                fontSize = (13f * fontScale).sp,
-                                lineHeight = (17f * fontScale).sp,
-                            ),
+                            style = authorTextStyle,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
@@ -242,24 +418,26 @@ fun PulseTopicCard(
                     }
 
                     if (topic.lastActivityIso.isNotBlank()) {
-                        Spacer(modifier = Modifier.width(5.dp))
+                        Spacer(modifier = Modifier.width(metrics.metaSeparatorSpacing))
                         Text(
                             text = "·",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = timeTextStyle,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        RelativeTimeText(isoTimestamp = topic.lastActivityIso)
+                        Spacer(modifier = Modifier.width(metrics.metaSeparatorSpacing))
+                        RelativeTimeText(
+                            isoTimestamp = topic.lastActivityIso,
+                            style = timeTextStyle,
+                        )
                     }
                 }
 
                 if (onBookmarkToggle != null) {
-                    // Reserve horizontal clearance for the 48dp sibling IconButton at TopEnd
-                    Spacer(modifier = Modifier.width(34.dp))
+                    Spacer(modifier = Modifier.width(metrics.bookmarkEndClearance))
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(metrics.headerToTitleSpacing))
 
             // ── Row 2: Editorial Title (Unread SemiBold Ink vs Read Normal Muted) ──
             Text(
@@ -270,18 +448,18 @@ fun PulseTopicCard(
                 overflow = TextOverflow.Ellipsis,
             )
 
-            Spacer(modifier = Modifier.height(7.dp))
+            Spacer(modifier = Modifier.height(metrics.titleToFooterSpacing))
 
             // ── Row 3: Telemetry Footer + Floor Resume + Plain Category Tag ──
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(metrics.footerHorizontalGap),
             ) {
                 FlowRow(
                     modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(metrics.footerHorizontalGap),
+                    verticalArrangement = Arrangement.spacedBy(metrics.footerVerticalGap),
                 ) {
                     if (showEngagementMetrics) {
                         HeatCommentPill(
@@ -289,27 +467,32 @@ fun PulseTopicCard(
                             viewCount = topic.viewCount,
                             isHotOverride = topic.isHot,
                             compact = true,
+                            minHeight = metrics.footerPillMinHeight,
+                            horizontalPadding = metrics.footerPillHorizontalPad,
+                            verticalPadding = metrics.footerPillVerticalPad,
+                            iconSize = metrics.footerIconSize,
+                            iconTextGap = metrics.footerPillIconGap,
+                            textStyle = footerPillTextStyle.withTabularNumbers(),
                             modifier = Modifier.align(Alignment.CenterVertically),
                         )
 
                         if (topic.viewCount > 0) {
                             Row(
-                                modifier = Modifier.align(Alignment.CenterVertically),
+                                modifier = Modifier
+                                    .align(Alignment.CenterVertically)
+                                    .heightIn(min = metrics.footerPillMinHeight),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(metrics.footerPillIconGap),
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Visibility,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                                    modifier = Modifier.size(13.dp),
+                                    modifier = Modifier.size(metrics.viewIconSize),
                                 )
                                 Text(
                                     text = formatCompactCount(topic.viewCount),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = (11.5f * fontScale).sp,
-                                        fontWeight = FontWeight.Medium,
-                                    ).withTabularNumbers(),
+                                    style = footerMetricTextStyle.withTabularNumbers(),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -321,6 +504,7 @@ fun PulseTopicCard(
                             categorySlug = topic.categorySlug,
                             categoryName = topic.categoryName,
                             isRead = topic.isRead,
+                            metrics = metrics,
                             onCategoryClick = onCategoryClick,
                             modifier = Modifier.align(Alignment.CenterVertically),
                         )
@@ -330,22 +514,25 @@ fun PulseTopicCard(
                         Row(
                             modifier = Modifier
                                 .align(Alignment.CenterVertically)
-                                .heightIn(min = 20.dp)
+                                .heightIn(min = metrics.footerPillMinHeight)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                .padding(
+                                    horizontal = metrics.footerPillHorizontalPad,
+                                    vertical = metrics.footerPillVerticalPad,
+                                ),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(metrics.footerPillIconGap),
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.PushPin,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.size(10.5.dp),
+                                modifier = Modifier.size(metrics.footerIconSize),
                             )
                             Text(
                                 text = "置顶",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = footerPillTextStyle,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -357,6 +544,12 @@ fun PulseTopicCard(
                         AccessLockChip(
                             requiredLevel = topic.requiredViewLevel ?: 0,
                             compact = true,
+                            minHeight = metrics.footerPillMinHeight,
+                            horizontalPadding = metrics.footerPillHorizontalPad,
+                            verticalPadding = metrics.footerPillVerticalPad,
+                            cornerRadius = metrics.footerBadgeCornerRadius,
+                            iconSize = metrics.footerIconSize,
+                            textStyle = footerPillTextStyle.withTabularNumbers(),
                             modifier = Modifier.align(Alignment.CenterVertically),
                         )
                     }
@@ -366,13 +559,13 @@ fun PulseTopicCard(
                 if (resumeBadgeText != null || showRightCategoryTag) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(metrics.footerHorizontalGap),
                     ) {
                         if (resumeBadgeText != null) {
-                            val resumeShape = RoundedCornerShape(6.dp)
+                            val resumeShape = RoundedCornerShape(metrics.footerBadgeCornerRadius)
                             Row(
                                 modifier = Modifier
-                                    .heightIn(min = 20.dp)
+                                    .heightIn(min = metrics.footerPillMinHeight)
                                     .clip(resumeShape)
                                     .background(
                                         MaterialTheme.colorScheme.primaryContainer.copy(
@@ -384,12 +577,15 @@ fun PulseTopicCard(
                                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
                                         shape = resumeShape,
                                     )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    .padding(
+                                        horizontal = metrics.footerPillHorizontalPad,
+                                        vertical = metrics.footerPillVerticalPad,
+                                    ),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
                                     text = resumeBadgeText,
-                                    style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                                    style = footerPillTextStyle.withTabularNumbers(),
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
@@ -403,6 +599,7 @@ fun PulseTopicCard(
                                 categorySlug = topic.categorySlug,
                                 categoryName = topic.categoryName,
                                 isRead = topic.isRead,
+                                metrics = metrics,
                                 onCategoryClick = onCategoryClick,
                             )
                         }
@@ -412,12 +609,27 @@ fun PulseTopicCard(
         }
 
         if (onBookmarkToggle != null) {
-            IconButton(
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onBookmarkToggle()
-                },
-                modifier = Modifier.align(Alignment.TopEnd),
+            val bookmarkInteraction = remember { MutableInteractionSource() }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(
+                        width = metrics.bookmarkTouchWidth,
+                        height = metrics.bookmarkTouchHeight,
+                    )
+                    .pulsePressScale(interactionSource = bookmarkInteraction, pressedScale = 0.88f)
+                    .clip(CircleShape)
+                    .clickable(
+                        interactionSource = bookmarkInteraction,
+                        indication = LocalIndication.current,
+                        role = Role.Button,
+                        onClickLabel = if (topic.isBookmarked) "取消收藏" else "收藏帖子",
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onBookmarkToggle()
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = if (topic.isBookmarked) {
@@ -431,7 +643,7 @@ fun PulseTopicCard(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
                     },
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(metrics.bookmarkIconSize),
                 )
             }
         }
@@ -443,37 +655,40 @@ private fun PulseCardCategoryTag(
     categorySlug: String,
     categoryName: String,
     isRead: Boolean,
+    metrics: PulseTopicCardMetrics,
     onCategoryClick: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    val fontScale = NodePulseThemeTokens.fontScale
     val categorySpec = NodePulseThemeTokens.categorySpec(categorySlug)
     val categoryLabel = categoryName.ifBlank { categorySpec.defaultTitle }
-    val categoryShape = RoundedCornerShape(6.dp)
+    val categoryShape = RoundedCornerShape(metrics.footerBadgeCornerRadius)
     val isClickable = onCategoryClick != null && categorySlug.isNotBlank()
 
     Row(
         modifier = modifier
-            .then(if (isClickable) Modifier.heightIn(min = 28.dp) else Modifier)
+            .heightIn(min = metrics.footerPillMinHeight)
             .clip(categoryShape)
             .then(
                 if (isClickable) {
                     Modifier.clickable(
                         role = Role.Button,
                         onClickLabel = "筛选$categoryLabel",
-                        onClick = { onCategoryClick?.invoke(categorySlug) },
+                        onClick = { onCategoryClick(categorySlug) },
                     )
                 } else {
                     Modifier
                 },
             )
-            .padding(horizontal = if (isClickable) 4.dp else 2.dp, vertical = 2.dp),
+            .padding(
+                horizontal = if (isClickable) 4.dp else 2.dp,
+                vertical = metrics.footerPillVerticalPad,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(metrics.footerPillIconGap + 1.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(5.dp)
+                .size(metrics.categoryDotSize)
                 .clip(CircleShape)
                 .background(
                     categorySpec.spineColor.copy(
@@ -484,7 +699,8 @@ private fun PulseCardCategoryTag(
         Text(
             text = categoryLabel,
             style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = (11.5f * fontScale).sp,
+                fontSize = metrics.footerMetricFontSizeSp.sp,
+                lineHeight = metrics.footerMetricLineHeightSp.sp,
                 fontWeight = FontWeight.Medium,
                 letterSpacing = 0.1.sp,
             ),
@@ -501,21 +717,27 @@ private fun PulseCardCategoryTag(
 }
 
 /**
- * Diagonal shimmer skeleton placeholder matching compact outlined `PulseTopicCard` geometry.
+ * Diagonal shimmer skeleton placeholder matching compact outlined `PulseTopicCard` geometry
+ * at the active [cardScale].
  */
 @Composable
 fun PulseTopicCardSkeleton(
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 3.5.dp),
+    contentPadding: PaddingValues? = null,
+    cardScale: Float = DEFAULT_HOME_CARD_SCALE,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val cardShape = RoundedCornerShape(14.dp)
+    val metrics = remember(cardScale) { resolvePulseTopicCardMetrics(cardScale) }
+    val resolvedContentPadding = contentPadding ?: metrics.outerContentPadding
+    val cardShape = RoundedCornerShape(metrics.cardCornerRadius)
+    val titleBarHeight = (metrics.titleFontSizeSp * 0.96f).dp
+    val titleLineGap = (metrics.titleLineHeightSp - metrics.titleFontSizeSp).coerceAtLeast(3.5f).dp
 
     ProvideSharedPulseShimmer {
         Box(
             modifier = modifier
                 .fillMaxWidth()
-                .padding(contentPadding),
+                .padding(resolvedContentPadding),
         ) {
             Column(
                 modifier = Modifier
@@ -526,66 +748,73 @@ fun PulseTopicCardSkeleton(
                         color = ext.cardBorder,
                         shape = cardShape,
                     )
-                    .padding(horizontal = 13.dp, vertical = 10.dp),
+                    .padding(
+                        horizontal = metrics.innerHorizontalPadding,
+                        vertical = metrics.innerVerticalPadding,
+                    ),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = metrics.authorRowMinHeight),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     PulseShimmerBox(
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(metrics.avatarSize),
                         shape = CircleShape,
                     )
-                    Spacer(modifier = Modifier.width(7.dp))
+                    Spacer(modifier = Modifier.width(metrics.avatarToAuthorSpacing))
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width(88.dp)
-                            .height(12.dp),
+                            .width((84f * metrics.scale).dp)
+                            .height(metrics.authorFontSizeSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     PulseShimmerBox(
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(metrics.bookmarkIconSize),
                         shape = RoundedCornerShape(4.dp),
                     )
                 }
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(metrics.headerToTitleSpacing))
                 PulseShimmerBox(
                     modifier = Modifier
                         .fillMaxWidth(0.92f)
-                        .height(15.dp),
+                        .height(titleBarHeight),
                     shape = RoundedCornerShape(4.dp),
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(titleLineGap))
                 PulseShimmerBox(
                     modifier = Modifier
                         .fillMaxWidth(0.62f)
-                        .height(15.dp),
+                        .height(titleBarHeight),
                     shape = RoundedCornerShape(4.dp),
                 )
-                Spacer(modifier = Modifier.height(7.dp))
+                Spacer(modifier = Modifier.height(metrics.titleToFooterSpacing))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = metrics.footerPillMinHeight),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(metrics.footerHorizontalGap),
                 ) {
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width(48.dp)
-                            .height(20.dp),
+                            .width((46f * metrics.scale).dp)
+                            .height(metrics.footerPillMinHeight),
                         shape = CircleShape,
                     )
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width(40.dp)
-                            .height(14.dp),
+                            .width((38f * metrics.scale).dp)
+                            .height(metrics.footerMetricLineHeightSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     PulseShimmerBox(
                         modifier = Modifier
-                            .width(38.dp)
-                            .height(13.dp),
+                            .width((36f * metrics.scale).dp)
+                            .height(metrics.footerMetricLineHeightSp.dp),
                         shape = RoundedCornerShape(4.dp),
                     )
                 }

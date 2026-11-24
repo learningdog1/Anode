@@ -762,6 +762,7 @@ private fun ExploreBoardFeedPage(
     onSwitchToFullWebFeed: () -> Unit,
 ) {
     val pageScope = rememberCoroutineScope()
+    val homeCardScale = NodePulseThemeTokens.homeCardScale
     var scrollToTopJob by remember { mutableStateOf<Job?>(null) }
     val latestOnScrollToTopConsumed by rememberUpdatedState(onScrollToTopConsumed)
     val latestRefreshOnScrollToTop by rememberUpdatedState(refreshOnScrollToTop)
@@ -931,7 +932,7 @@ private fun ExploreBoardFeedPage(
                 // 1. Shimmer Skeletons during cold load
                 slice.isInitialLoading && slice.topics.isEmpty() -> {
                     items(count = 6, key = { "skeleton_${board.slug}_$it" }) {
-                        PulseTopicCardSkeleton()
+                        PulseTopicCardSkeleton(cardScale = homeCardScale)
                     }
                 }
 
@@ -1018,6 +1019,7 @@ private fun ExploreBoardFeedPage(
                         PulseTopicCard(
                             topic = topic.toCardModel(),
                             showCategoryTag = showCategoryOnRow,
+                            cardScale = homeCardScale,
                             selectedTopicId = selectedTopicId,
                             onClick = {
                                 onOpenTopic(

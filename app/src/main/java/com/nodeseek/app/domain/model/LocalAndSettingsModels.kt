@@ -40,7 +40,10 @@ data class AppSettings(
     val awayDigestThresholdMinutes: Int = DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES,
 ) {
     companion object {
+        /** Default scale for homepage topic cards (font size & card compaction) and global UI baseline. */
         const val DEFAULT_FONT_SCALE: Float = 0.90f
+        const val MIN_FONT_SCALE: Float = 0.75f
+        const val MAX_FONT_SCALE: Float = 1.30f
         const val DEFAULT_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 60
         const val MIN_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 5
         const val MAX_AWAY_DIGEST_THRESHOLD_MINUTES: Int = 72 * 60

@@ -437,8 +437,8 @@ class SettingsRepositoryImpl(
     }
 
     companion object {
-        const val MIN_FONT_SCALE = 0.85f
-        const val MAX_FONT_SCALE = 1.30f
+        const val MIN_FONT_SCALE = AppSettings.MIN_FONT_SCALE
+        const val MAX_FONT_SCALE = AppSettings.MAX_FONT_SCALE
         const val MAX_RECENT_SEARCHES = 12
     }
 }

@@ -574,7 +574,7 @@ class SeekMailViewModel(
             showSshOverwriteConfirm = state.showSshOverwriteConfirm,
             exportingKey = state.exportingKey,
             rateLimit = rateLimit,
-            fontScale = settings.fontScale,
+            fontScale = AppSettings.DEFAULT_FONT_SCALE,
             purePitchAmoled = settings.purePitchAmoled,
         )
     }.stateIn(
@@ -584,7 +584,7 @@ class SeekMailViewModel(
             hasConfiguredKey = settingsRepository.settings.value.seekMailApiKey.trim().isNotEmpty(),
             apiKeyMaskedHint = maskApiKeyHint(settingsRepository.settings.value.seekMailApiKey.trim()),
             selectedMailboxId = initialMailboxId.takeIf { it > 0L },
-            fontScale = settingsRepository.settings.value.fontScale,
+            fontScale = AppSettings.DEFAULT_FONT_SCALE,
             purePitchAmoled = settingsRepository.settings.value.purePitchAmoled,
         ),
     )

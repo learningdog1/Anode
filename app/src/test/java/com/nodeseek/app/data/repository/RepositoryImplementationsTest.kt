@@ -810,8 +810,12 @@ class RepositoryImplementationsTest {
                 )
             }
 
-            // Font scale clamps to 1.30f max
+            // Font scale clamps to [0.75f, 1.30f]
+            assertEquals(0.75f, SettingsRepositoryImpl.MIN_FONT_SCALE, 0.0001f)
             assertEquals(1.30f, SettingsRepositoryImpl.MAX_FONT_SCALE, 0.0001f)
+            repo.setFontScale(0.50f)
+            val clampedLow = withTimeout(5_000L) { repo.settings.first { it.fontScale == 0.75f } }
+            assertEquals(0.75f, clampedLow.fontScale, 0.0001f)
             repo.setFontScale(1.50f)
             val clamped = withTimeout(5_000L) { repo.settings.first { it.fontScale == 1.30f } }
             assertEquals(1.30f, clamped.fontScale, 0.0001f)

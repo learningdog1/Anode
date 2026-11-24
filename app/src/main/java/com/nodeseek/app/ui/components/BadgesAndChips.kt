@@ -341,6 +341,12 @@ fun HeatCommentPill(
     viewCount: Int = 0,
     isHotOverride: Boolean = false,
     compact: Boolean = false,
+    minHeight: Dp? = null,
+    horizontalPadding: Dp? = null,
+    verticalPadding: Dp? = null,
+    iconSize: Dp? = null,
+    iconTextGap: Dp? = null,
+    textStyle: TextStyle? = null,
 ) {
     val isHot = isHotOverride || replyCount >= 30 || viewCount >= 1500
     val ext = NodePulseThemeTokens.extendedColors
@@ -363,36 +369,42 @@ fun HeatCommentPill(
         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f)
     }
     val fgColor = if (isHot) ext.onHeatContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val resolvedMinHeight = minHeight ?: if (compact) 20.dp else 22.dp
+    val resolvedHorizontalPadding = horizontalPadding ?: if (compact) 7.dp else 8.dp
+    val resolvedVerticalPadding = verticalPadding ?: if (compact) 2.dp else 3.dp
+    val resolvedIconSize = iconSize ?: if (compact) 11.dp else 12.dp
+    val resolvedIconTextGap = iconTextGap ?: if (compact) 3.dp else 3.5.dp
+    val resolvedTextStyle = textStyle ?: if (compact) {
+        MaterialTheme.typography.labelSmall.copy(
+            fontSize = (11f * fontScale).sp,
+            lineHeight = (13.5f * fontScale).sp,
+        ).withTabularNumbers()
+    } else {
+        MaterialTheme.typography.labelMedium.withTabularNumbers()
+    }
 
     Row(
         modifier = modifier
-            .heightIn(min = if (compact) 20.dp else 22.dp)
+            .heightIn(min = resolvedMinHeight)
             .clip(CircleShape)
             .background(bgBrush)
             .border(width = 0.75.dp, color = borderColor, shape = CircleShape)
             .padding(
-                horizontal = if (compact) 7.dp else 8.dp,
-                vertical = if (compact) 2.dp else 3.dp,
+                horizontal = resolvedHorizontalPadding,
+                vertical = resolvedVerticalPadding,
             ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 3.5.dp),
+        horizontalArrangement = Arrangement.spacedBy(resolvedIconTextGap),
     ) {
         Icon(
             imageVector = if (isHot) Icons.Rounded.LocalFireDepartment else Icons.Rounded.ChatBubbleOutline,
             contentDescription = null,
             tint = fgColor,
-            modifier = Modifier.size(if (compact) 11.dp else 12.dp),
+            modifier = Modifier.size(resolvedIconSize),
         )
         Text(
             text = formatCompactCount(replyCount),
-            style = if (compact) {
-                MaterialTheme.typography.labelSmall.copy(
-                    fontSize = (11f * fontScale).sp,
-                    lineHeight = (13.5f * fontScale).sp,
-                ).withTabularNumbers()
-            } else {
-                MaterialTheme.typography.labelMedium.withTabularNumbers()
-            },
+            style = resolvedTextStyle,
             fontWeight = if (isHot) FontWeight.Bold else FontWeight.Medium,
             color = fgColor,
             maxLines = 1,
@@ -440,16 +452,27 @@ fun AccessLockChip(
     requiredLevel: Int,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    minHeight: Dp? = null,
+    horizontalPadding: Dp? = null,
+    verticalPadding: Dp? = null,
+    cornerRadius: Dp? = null,
+    iconSize: Dp? = null,
+    textStyle: TextStyle? = null,
 ) {
     if (requiredLevel <= 0) return
     val isDark = NodePulseThemeTokens.isDark
     val insideSpec = NodePulseThemeTokens.categorySpec("inside")
     val label = if (requiredLevel >= 255) "仅作者可见" else "Lv.$requiredLevel+"
-    val shape = RoundedCornerShape(if (compact) 6.dp else 7.dp)
+    val shape = RoundedCornerShape(cornerRadius ?: if (compact) 6.dp else 7.dp)
+    val resolvedMinHeight = minHeight ?: if (compact) 20.dp else null
+    val resolvedHorizontalPadding = horizontalPadding ?: if (compact) 6.dp else 6.5.dp
+    val resolvedVerticalPadding = verticalPadding ?: 2.dp
+    val resolvedIconSize = iconSize ?: if (compact) 10.5.dp else 11.dp
+    val resolvedTextStyle = textStyle ?: MaterialTheme.typography.labelSmall.withTabularNumbers()
 
     Row(
         modifier = modifier
-            .then(if (compact) Modifier.heightIn(min = 20.dp) else Modifier)
+            .then(if (resolvedMinHeight != null) Modifier.heightIn(min = resolvedMinHeight) else Modifier)
             .clip(shape)
             .background(insideSpec.softTonalBrush)
             .border(
@@ -457,7 +480,7 @@ fun AccessLockChip(
                 color = insideSpec.spineColor.copy(alpha = if (isDark) 0.40f else 0.24f),
                 shape = shape,
             )
-            .padding(horizontal = if (compact) 6.dp else 6.5.dp, vertical = 2.dp),
+            .padding(horizontal = resolvedHorizontalPadding, vertical = resolvedVerticalPadding),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
@@ -465,11 +488,11 @@ fun AccessLockChip(
             imageVector = Icons.Rounded.Lock,
             contentDescription = null,
             tint = insideSpec.contentColor,
-            modifier = Modifier.size(if (compact) 10.5.dp else 11.dp),
+            modifier = Modifier.size(resolvedIconSize),
         )
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+            style = resolvedTextStyle,
             color = insideSpec.contentColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
