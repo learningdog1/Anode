@@ -224,7 +224,7 @@ class WebViewSameOriginActionRunner(
                 loadsImagesAutomatically = false
                 blockNetworkImage = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                val configuredUa = userAgentProvider.getUserAgent(appContext)
+                val configuredUa = userAgentProvider.refreshSystemUserAgentOnMain(appContext)
                 if (!userAgentProvider.isSystemWebViewDefault && configuredUa.isNotBlank()) {
                     userAgentString = configuredUa
                 }
