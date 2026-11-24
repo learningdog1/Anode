@@ -32,8 +32,8 @@
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
 | **当前版本** | `v2.11.2`（`versionCode = 23`） |
-| **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 35`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 15 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · 核心数据 JSON 备份恢复 · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
+| **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 36`） |
+| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 15 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · 双模式本地备份恢复（v1 明文核心数据 JSON + v2 口令加密完整备份） · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
@@ -326,7 +326,9 @@
 </table>
 </div>
 
-- **设置中心、内容过滤与核心数据备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、**`BackupRestoreSection` 核心数据版本化 JSON 备份与预览合并/覆盖恢复**（覆盖偏好设置、脉搏雷达规则与追踪主题、内容过滤与屏蔽名单、本地收藏与编辑草稿；不含 VPS 资产账本、补货监控规则、卖家信任备注、浏览历史、海外情报/社区活动、SeekMail 缓存、测速历史与 SSH 保险库凭据；导出默认脱敏排除 API Key，需手动勾选才写入）、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与安全在线升级（官方 HTTPS 源站校验、APK 包名/签名证书一致性与防降级校验，及 Release 提供摘要时的 SHA-256 校验；剔除与邮箱页重复的 Seek Mail 配置项）。
+- **设置中心、内容过滤与双模式本地备份 (`SettingsScreen`)**：重构为与「我的」个人中心协调一致的圆角分组列表卡片与 `30.dp` 图标视觉规范，支持切换 `跟随系统 / 清雾浅色 / 深岩深色`、`Pure Pitch #000000 AMOLED`、Material You 动态取色、全局字号与排版缩放（默认 `90%`，支持 `85% / 90% / 100% / 115%` 快捷档位与连续调节）、`保底 +5 / 手气随机` 签到偏好、**`ContentFilterSection` 信息流内容过滤屏蔽**（静音版块、关键词/正则拦截规则）、NodeImage 图床 API Key 模态配置与连通性测试、脉搏雷达轮询与免打扰设置（冷启动并发竞态与 Worker 调度加固）、屏蔽用户管理、图片/浏览记录缓存清理，以及基于 GitHub Releases 的应用内版本检查、预发布通道开关与安全在线升级（官方 HTTPS 源站校验、APK 包名/签名证书一致性与防降级校验，及 Release 提供摘要时的 SHA-256 校验；剔除与邮箱页重复的 Seek Mail 配置项）：
+  - **`BackupRestoreSection`（v1 核心数据 JSON 备份，向后兼容）**：覆盖偏好设置、脉搏雷达规则与追踪主题、内容过滤与屏蔽名单、本地收藏与编辑草稿；导出默认脱敏排除 API Key，需手动勾选才写入，支持导入前计数预览与合并/覆盖恢复。
+  - **`EncryptedBackupSettingsSection`（v2 口令加密完整备份，可选）**：用户设置至少 8 位口令并二次确认，采用 `PBKDF2-HMAC-SHA256`（`310,000` 次迭代 + 256-bit 随机盐）派生密钥与 `AES-256-GCM`（96-bit 随机 Nonce + 128-bit 认证标签 + 文件头 AAD 绑定）加密打包为 `.anodebackup` 文件；在 v1 全部核心数据（含 API Key）基础上额外完整包含 **VPS 资产账本与探针面板（含 Token）**、**补货监控规则**、**SSH 主机保险库（含私钥/密码/自定义脚本）**、**Seek 邮箱设置与本地标签/归档**、**海外情报与社区活动偏好**、**卖家私人备注与官方交易 API Key** 以及 **测机/汇率校准偏好**。导入时严格校验口令与 GCM 防篡改标签（口令错误或篡改即中止且零写入），全程受加密 `BackupRestoreJournal` 事务日志保护支持原子回滚，并提供「合并 / 覆盖」双模式。
 
 ---
 
@@ -357,7 +359,7 @@ app/src/main/java/com/nodeseek/app/
 ├── notifications/                   # 通知渠道、Android 13+ 权限诊断与点击意图路由
 ├── domain/
 │   ├── activity/                    # ForumWatch 社区活动领域模型、实时到期流转与前后台巡检控制器契约
-│   ├── backup/                      # 版本化 JSON 备份导出、预览与合并/覆盖恢复领域模型
+│   ├── backup/                      # 版本化 JSON 核心备份（v1）与口令加密完整备份（v2）领域模型与契约
 │   ├── filter/                      # 信息流与搜索关键词/正则过滤引擎及静音版块配置
 │   ├── fleet/                       # 哪吒/Komari 探针聚合、VPS 资产账本与一键出机发帖模型
 │   ├── mail/                        # SeekMail 模型、仓库接口与 VerificationCodeExtractor
@@ -373,7 +375,7 @@ app/src/main/java/com/nodeseek/app/
 │   └── valuation/                   # BigDecimal VPS 剩余价值与过户交易估值引擎
 ├── data/
 │   ├── activity/                    # ForumWatchActivityApiClient（TLS Pinning / HMAC / AES-GCM / ETag）、磁盘缓存与新活动巡检 Worker
-│   ├── backup/                      # BackupManagerImpl 核心数据（偏好/雷达/收藏/草稿/过滤规则）序列化恢复
+│   ├── backup/                      # BackupManagerImpl（v1 核心数据 + v2 全量恢复）、BackupCryptoV2（PBKDF2-HMAC-SHA256 + AES-256-GCM）与加密 WAL 事务回滚日志
 │   ├── fleet/                       # 哪吒 v0/v1 / Komari 探针 API 客户端、资产持久化与巡检 Worker
 │   ├── local/                       # Room 数据库（离线收藏快照、阅读进度、雷达规则、版块）与 DataStore
 │   ├── mail/                        # 会话隔离 SeekMailApiClient、Jsoup HTML 消毒器与磁盘缓存
@@ -419,14 +421,14 @@ app/src/main/java/com/nodeseek/app/
 
 | 领域 | 技术选型 |
 | :--- | :--- |
-| **语言与构建工具链** | Kotlin `2.1.10` · Java `17` · Android Gradle Plugin `8.8.2` · Gradle `8.11.1` · KSP `2.1.10-1.0.31` |
-| **Android SDK** | `minSdk = 26`（Android 8.0） · `targetSdk = 35` · `compileSdk = 35` |
-| **UI 与设计系统** | Jetpack Compose（`BOM 2025.02.00`） · Material 3 Expressive · WindowSizeClass · Edge-to-Edge WindowInsets |
-| **导航与生命周期** | Navigation Compose `2.8.9`（Type-safe Kotlinx Serialization 路由） · Lifecycle `2.8.7` |
-| **网络、SSH 与解析** | OkHttp `4.12.0` · JSch (`com.github.mwiede:jsch` `2.27.5`) · Jsoup `1.19.1` · Kotlinx Serialization JSON `1.8.0` · AndroidX WebKit `1.13.0` |
-| **本地持久化与后台** | Room `2.7.0`（离线帖子快照、阅读楼层与雷达数据） · Preferences DataStore `1.1.3` · WorkManager `2.10.0` |
-| **图片加载** | Coil `3.1.0`（`coil-compose` + `coil-network-okhttp` + GIF / SVG 解码与 Referer 策略） |
-| **单元测试** | JUnit `4.13.2` · Kotlinx Coroutines Test `1.10.1` · OkHttp `MockWebServer` `4.12.0` |
+| **语言与构建工具链** | Kotlin `2.4.21` · Java `17` · Android Gradle Plugin `9.5.2`（Built-in Kotlin） · Gradle `9.9.2` · KSP `2.3.14` |
+| **Android SDK** | `minSdk = 26`（Android 8.0） · `targetSdk = 36`（Android 16） · `compileSdk = 37.1`（Android 17） |
+| **UI 与设计系统** | Jetpack Compose（`BOM 2026.11.01` · Compose `1.13.0` / Material3 `1.5.0`） · Material 3 Expressive · WindowSizeClass · Edge-to-Edge WindowInsets |
+| **导航与生命周期** | Navigation Compose `2.10.2`（Type-safe Kotlinx Serialization 路由） · Lifecycle `2.11.1` |
+| **网络、SSH 与解析** | OkHttp `5.5.1` · JSch (`com.github.mwiede:jsch` `2.28.8`) · Jsoup `1.24.1` · Kotlinx Serialization JSON `1.13.0` · AndroidX WebKit `1.18.0` |
+| **本地持久化与后台** | Room `2.8.5`（离线帖子快照、阅读楼层、雷达数据与导出 Schema） · Preferences DataStore `1.3.0` · WorkManager `2.12.0` |
+| **图片加载** | Coil `3.6.3`（`coil-compose` + `coil-network-okhttp` + GIF / SVG 解码与 Referer 策略） · AndroidX ExifInterface `1.4.2` |
+| **测试体系** | JUnit `4.13.2` · Kotlinx Coroutines Test `1.11.0` · OkHttp `MockWebServer` `5.5.1` · Room Testing `2.8.5`（真实 SQLite 迁移与 DAO 仪器化测试） |
 
 ---
 
@@ -434,7 +436,7 @@ app/src/main/java/com/nodeseek/app/
 
 ### 环境要求
 - **JDK 17**（Gradle 构建与 Compose Preview 渲染需运行在 Java 17 上）
-- **Android SDK Platform 35**（在项目根目录配置 `local.properties` 或环境变量 `ANDROID_HOME`）
+- **Android SDK Platform 37.1**（在项目根目录配置 `local.properties` 或环境变量 `ANDROID_HOME`）
 
 ### 构建 APK
 ```bash
@@ -461,6 +463,6 @@ app/src/main/java/com/nodeseek/app/
 ## 🔒 隐私安全与免责声明 · Privacy & Disclaimer
 
 - **第三方开源客户端**：Anode 为面向 NodeSeek 社区的第三方开源 Android 客户端，与 NodeSeek 官方无从属或背书关系。
-- **本地凭据安全**：应用已关闭 Android 系统云备份与设备迁移（`allowBackup="false"`），论坛登录会话 Cookie、阅读记录、脉搏雷达规则与卖家本地私人备注（`seller_trust_notes.json`）均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token、`NodeSeek` 官方交易平台 API Key 以及 `NodeImage` / `Seek Mail` API Key 均优先采用 **Android Keystore `AES-256-GCM`** 硬件/系统级密钥在本地加密存储（在部分不支持 Keystore 的设备或 JVM 环境下会降级为应用私有无备份目录的软件 `AES-256-GCM` 密钥并在相关界面明确提示），绝不上传至任何第三方统计或中转服务器；外站图床、邮件、社区活动与海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）以及测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。
+- **本地凭据安全**：应用已关闭 Android 系统云备份与设备迁移（`allowBackup="false"`），论坛登录会话 Cookie、阅读记录、脉搏雷达规则与卖家本地私人备注（`seller_trust_notes.json`）均仅保存在用户本机沙盒存储中；轻量 SSH 主机凭据（私钥/密码）、探针面板 API Token、`NodeSeek` 官方交易平台 API Key 以及 `NodeImage` / `Seek Mail` API Key 均优先采用 **Android Keystore `AES-256-GCM`** 硬件/系统级密钥在本地加密存储（在部分不支持 Keystore 的设备或 JVM 环境下会降级为应用私有无备份目录的软件 `AES-256-GCM` 密钥并在相关界面明确提示），绝不上传至任何第三方统计或中转服务器；外站图床、邮件、社区活动与海外情报（`HMAC-SHA256` 签名 + `AES-256-GCM` 响应解密）以及测机/翻译接口均采用严格的 Cookie 隔离与本机 IP 自动脱敏策略。若用户主动使用「加密完整备份 (v2)」导出全量迁移包，所有敏感凭据（SSH 私钥/密码、探针 Token、官方交易及图床/邮箱 API Key）仅在用户自设口令派生的 `AES-256-GCM` 密文包内受保护存储，绝不以明文落盘，且导入后立即经目标设备 Keystore 重新加密保存。
 - **合规安全验证**：当触发登录、两步验证（2FA）或站点安全检查时，应用通过内置官方网页视图由用户本人手动完成，不采用任何自动化脚本规避站点校验机制。
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源。
