@@ -1,0 +1,373 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "f7668b40d2afd9315649e5dd390ab647",
+    "entities": [
+      {
+        "tableName": "read_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountUid` INTEGER NOT NULL, `topicId` INTEGER NOT NULL, `title` TEXT NOT NULL, `categorySlug` TEXT NOT NULL, `categoryName` TEXT NOT NULL, `authorName` TEXT NOT NULL, `authorAvatarUrl` TEXT NOT NULL, `lastReadPage` INTEGER NOT NULL, `lastReadFloor` INTEGER NOT NULL, `visitedAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`accountUid`, `topicId`))",
+        "fields": [
+          {
+            "fieldPath": "accountUid",
+            "columnName": "accountUid",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicId",
+            "columnName": "topicId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categorySlug",
+            "columnName": "categorySlug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categoryName",
+            "columnName": "categoryName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorName",
+            "columnName": "authorName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorAvatarUrl",
+            "columnName": "authorAvatarUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastReadPage",
+            "columnName": "lastReadPage",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastReadFloor",
+            "columnName": "lastReadFloor",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "visitedAtEpochMillis",
+            "columnName": "visitedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountUid",
+            "topicId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_read_history_accountUid_visitedAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "accountUid",
+              "visitedAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_read_history_accountUid_visitedAtEpochMillis` ON `${TABLE_NAME}` (`accountUid`, `visitedAtEpochMillis`)"
+          }
+        ]
+      },
+      {
+        "tableName": "bookmarks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountUid` INTEGER NOT NULL, `topicId` INTEGER NOT NULL, `title` TEXT NOT NULL, `categorySlug` TEXT NOT NULL, `categoryName` TEXT NOT NULL, `authorId` INTEGER, `authorName` TEXT NOT NULL, `authorAvatarUrl` TEXT NOT NULL, `authorLevel` INTEGER, `viewCount` INTEGER NOT NULL, `replyCount` INTEGER NOT NULL, `lastActivityIso` TEXT NOT NULL, `requiredViewLevel` INTEGER, `isLocked` INTEGER NOT NULL, `offlineDetailJson` TEXT, `isSyncedWithServer` INTEGER NOT NULL, `savedAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`accountUid`, `topicId`))",
+        "fields": [
+          {
+            "fieldPath": "accountUid",
+            "columnName": "accountUid",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicId",
+            "columnName": "topicId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categorySlug",
+            "columnName": "categorySlug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categoryName",
+            "columnName": "categoryName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorId",
+            "columnName": "authorId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "authorName",
+            "columnName": "authorName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorAvatarUrl",
+            "columnName": "authorAvatarUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorLevel",
+            "columnName": "authorLevel",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "viewCount",
+            "columnName": "viewCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "replyCount",
+            "columnName": "replyCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastActivityIso",
+            "columnName": "lastActivityIso",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requiredViewLevel",
+            "columnName": "requiredViewLevel",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isLocked",
+            "columnName": "isLocked",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "offlineDetailJson",
+            "columnName": "offlineDetailJson",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isSyncedWithServer",
+            "columnName": "isSyncedWithServer",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "savedAtEpochMillis",
+            "columnName": "savedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountUid",
+            "topicId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_bookmarks_accountUid_savedAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "accountUid",
+              "savedAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_bookmarks_accountUid_savedAtEpochMillis` ON `${TABLE_NAME}` (`accountUid`, `savedAtEpochMillis`)"
+          }
+        ]
+      },
+      {
+        "tableName": "editor_drafts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountUid` INTEGER NOT NULL, `draftKey` TEXT NOT NULL, `title` TEXT NOT NULL, `markdownContent` TEXT NOT NULL, `categorySlug` TEXT NOT NULL, `updatedAtMillis` INTEGER NOT NULL, PRIMARY KEY(`accountUid`, `draftKey`))",
+        "fields": [
+          {
+            "fieldPath": "accountUid",
+            "columnName": "accountUid",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "draftKey",
+            "columnName": "draftKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "markdownContent",
+            "columnName": "markdownContent",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categorySlug",
+            "columnName": "categorySlug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMillis",
+            "columnName": "updatedAtMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountUid",
+            "draftKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_editor_drafts_accountUid_updatedAtMillis",
+            "unique": false,
+            "columnNames": [
+              "accountUid",
+              "updatedAtMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_editor_drafts_accountUid_updatedAtMillis` ON `${TABLE_NAME}` (`accountUid`, `updatedAtMillis`)"
+          }
+        ]
+      },
+      {
+        "tableName": "categories",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountUid` INTEGER NOT NULL, `slug` TEXT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `sortOrder` INTEGER NOT NULL, `isCustomizable` INTEGER NOT NULL, `visibleOnHome` INTEGER NOT NULL, `isAdminOnly` INTEGER NOT NULL, `topicCoinCost` INTEGER NOT NULL, `supportsRss` INTEGER NOT NULL, `syncedAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`accountUid`, `slug`))",
+        "fields": [
+          {
+            "fieldPath": "accountUid",
+            "columnName": "accountUid",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "slug",
+            "columnName": "slug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sortOrder",
+            "columnName": "sortOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCustomizable",
+            "columnName": "isCustomizable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "visibleOnHome",
+            "columnName": "visibleOnHome",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isAdminOnly",
+            "columnName": "isAdminOnly",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicCoinCost",
+            "columnName": "topicCoinCost",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "supportsRss",
+            "columnName": "supportsRss",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedAtEpochMillis",
+            "columnName": "syncedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountUid",
+            "slug"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_categories_accountUid_sortOrder",
+            "unique": false,
+            "columnNames": [
+              "accountUid",
+              "sortOrder"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_categories_accountUid_sortOrder` ON `${TABLE_NAME}` (`accountUid`, `sortOrder`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f7668b40d2afd9315649e5dd390ab647')"
+    ]
+  }
+}
