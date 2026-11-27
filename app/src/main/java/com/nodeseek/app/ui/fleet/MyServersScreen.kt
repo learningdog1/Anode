@@ -14,7 +14,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,13 +37,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Autorenew
@@ -68,7 +65,6 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -108,10 +104,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nodeseek.app.data.fleet.DomainRdapClient
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.domain.fleet.AssetExpiryUrgency
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetPortfolioSummary
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.fleet.FleetTrafficAndIdleAnalyzer
@@ -120,6 +118,7 @@ import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
 import com.nodeseek.app.domain.fleet.ServerIdleAssessment
 import com.nodeseek.app.domain.fleet.ServerTrafficForecast
+import com.nodeseek.app.domain.fleet.TlsCertificateInspector
 import com.nodeseek.app.domain.fleet.UpcomingRenewalItem
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.fleet.formatBytesBinary
@@ -164,15 +163,27 @@ fun MyServersScreen(
     viewModel: MyServersViewModel? = null,
     previewProbeViewMode: ProbeViewMode? = null,
     initialHighlightAssetId: String? = null,
+    domainRdapClient: DomainRdapClient? = null,
+    tlsCertificateInspector: TlsCertificateInspector? = null,
 ) {
     val context = LocalContext.current
     val resolvedViewModel: MyServersViewModel = viewModel ?: run {
-        val factory = remember(context, fleetRepository, exchangeRateRepository, fleetWorkScheduler, initialTab) {
+        val factory = remember(
+            context,
+            fleetRepository,
+            exchangeRateRepository,
+            fleetWorkScheduler,
+            initialTab,
+            domainRdapClient,
+            tlsCertificateInspector,
+        ) {
             MyServersViewModel.factory(
                 fleetRepository = fleetRepository ?: FleetRepositoryImpl.forContext(context),
                 exchangeRateRepository = exchangeRateRepository ?: ExchangeRateRepository.forContext(context),
                 workScheduler = fleetWorkScheduler ?: FleetWorkScheduler(context),
                 initialTab = initialTab,
+                domainRdapClient = domainRdapClient,
+                tlsCertificateInspector = tlsCertificateInspector,
             )
         }
         viewModel(factory = factory)
@@ -191,8 +202,12 @@ fun MyServersScreen(
         mutableStateOf(initialHighlightAssetId?.trim()?.takeIf { it.isNotEmpty() })
     }
 
+    val vpsAssets = remember(uiState.assets) { uiState.assets.filter { !it.isDomainAsset } }
+    val vpsUpcomingRenewals = remember(uiState.portfolioSummary.upcomingRenewals) {
+        uiState.portfolioSummary.upcomingRenewals.filter { !it.asset.isDomainAsset }
+    }
     val hasEnabledPanels = remember(uiState.panels) { uiState.panels.any { it.enabled } }
-    val existingAssetTags = remember(uiState.assets) { VpsAssetRecord.collectDistinctTags(uiState.assets) }
+    val existingAssetTags = remember(vpsAssets) { VpsAssetRecord.collectDistinctTags(vpsAssets) }
     val hasActiveModalSheet = uiState.showPanelManagerSheet ||
         uiState.assetEditorDraft != null ||
         uiState.salePostAsset != null ||
@@ -267,6 +282,7 @@ fun MyServersScreen(
             ) {
                 FleetPortfolioHeroCard(
                     summary = uiState.portfolioSummary,
+                    vpsUpcomingRenewals = vpsUpcomingRenewals,
                     usdRateDisplay = uiState.fxRatesState?.rateFor(ValuationCurrency.USD)?.let {
                         "1 USD ≈ ¥${it.setScale(2, java.math.RoundingMode.HALF_UP)}"
                     },
@@ -275,7 +291,7 @@ fun MyServersScreen(
                     onOpenMonitorSettings = resolvedViewModel::openMonitorSettings,
                 )
 
-                val tabOptions = remember(uiState.snapshots.size, uiState.assets.size) {
+                val tabOptions = remember(uiState.snapshots.size, vpsAssets.size) {
                     listOf(
                         SortSegmentItem(
                             MyServersTab.PROBES,
@@ -283,7 +299,7 @@ fun MyServersScreen(
                         ),
                         SortSegmentItem(
                             MyServersTab.ASSETS,
-                            "资产账本 (${uiState.assets.size})",
+                            "资产账本 (${vpsAssets.size})",
                         ),
                     )
                 }
@@ -312,6 +328,8 @@ fun MyServersScreen(
                 MyServersTab.ASSETS -> {
                     AssetsTabContent(
                         uiState = uiState,
+                        vpsAssets = vpsAssets,
+                        vpsUpcomingRenewals = vpsUpcomingRenewals,
                         highlightAssetId = pendingHighlightAssetId,
                         onHighlightConsumed = { pendingHighlightAssetId = null },
                         onAddAsset = resolvedViewModel::openAddAssetSheet,
@@ -361,6 +379,13 @@ fun MyServersScreen(
             existingTags = existingAssetTags,
             initialTags = draft.tags,
             initialAutoRenew = draft.autoRenew,
+            isLookingUpRdap = uiState.isLookingUpRdap,
+            rdapLookupError = uiState.rdapLookupError,
+            isCheckingTls = uiState.isCheckingTls,
+            tlsCheckResultMessage = uiState.tlsCheckResultMessage,
+            onLookupDomainRdap = resolvedViewModel::lookupDomainRdapForDraft,
+            onCheckTlsCertificate = resolvedViewModel::checkTlsForDraft,
+            lockedAssetType = FleetAssetType.VPS,
         )
     }
 
@@ -578,14 +603,17 @@ private fun MyServersTopBar(
 @Composable
 private fun FleetPortfolioHeroCard(
     summary: FleetPortfolioSummary,
+    vpsUpcomingRenewals: List<UpcomingRenewalItem>,
     usdRateDisplay: String?,
     backgroundMonitorEnabled: Boolean,
     onRefreshFx: () -> Unit,
     onOpenMonitorSettings: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
-    val hasExpiredOrCritical = remember(summary.expiredRenewalCount, summary.dueRenewals) {
-        summary.expiredRenewalCount > 0 || summary.dueRenewals.any {
+    val vpsDueRenewals = remember(vpsUpcomingRenewals) { vpsUpcomingRenewals.filter { it.isRenewalDue } }
+    val vpsDueSoonCount = vpsDueRenewals.size
+    val hasExpiredOrCritical = remember(vpsDueRenewals) {
+        vpsDueRenewals.any {
             it.urgency == AssetExpiryUrgency.EXPIRED || it.urgency == AssetExpiryUrgency.CRITICAL
         }
     }
@@ -602,14 +630,14 @@ private fun FleetPortfolioHeroCard(
     )
     val renewalValueColor = when {
         hasExpiredOrCritical -> MaterialTheme.colorScheme.error
-        summary.dueSoonRenewalCount > 0 || summary.dueRenewals.isNotEmpty() -> ext.onDrumstickContainer
+        vpsDueSoonCount > 0 -> ext.onDrumstickContainer
         else -> MaterialTheme.colorScheme.onSurface
     }
-    val monthlyDisplay = remember(summary.totalMonthlyCostCny) {
-        "¥${formatHeroCurrencyValue(summary.totalMonthlyCostCny)}"
+    val monthlyDisplay = remember(summary.vpsMonthlyCostCny) {
+        "¥${formatHeroCurrencyValue(summary.vpsMonthlyCostCny)}"
     }
-    val annualizedDisplay = remember(summary.totalAnnualizedCostCny) {
-        "¥${formatHeroCurrencyValue(summary.totalAnnualizedCostCny)}"
+    val annualizedDisplay = remember(summary.vpsAnnualizedCostCny) {
+        "¥${formatHeroCurrencyValue(summary.vpsAnnualizedCostCny)}"
     }
 
     Column(
@@ -651,7 +679,7 @@ private fun FleetPortfolioHeroCard(
             HeroVerticalDivider()
             HeroKpiColumn(
                 label = "近期续费",
-                value = "${summary.dueSoonRenewalCount} 台",
+                value = "$vpsDueSoonCount 台",
                 valueColor = renewalValueColor,
                 modifier = Modifier.weight(0.84f),
             )
@@ -684,7 +712,7 @@ private fun FleetPortfolioHeroCard(
                     modifier = Modifier.size(11.dp),
                 )
                 Text(
-                    text = "账本在册 ${summary.totalMachineCount} 台" +
+                    text = "账本在册 ${summary.vpsCount} 台" +
                         (usdRateDisplay?.let { " · $it" }.orEmpty()),
                     style = NodePulseThemeTokens.extraTypography.microLabel.copy(
                         fontWeight = FontWeight.Normal,
@@ -1036,11 +1064,13 @@ private fun LivePulseDot(
     )
 }
 
-// ── Tab 2: Assets Ledger Tab ──────────────────────────────────────────────────
+// ── Tab 2: Assets Ledger Tab (VPS Servers Only) ───────────────────────────────
 
 @Composable
 private fun AssetsTabContent(
     uiState: MyServersUiState,
+    vpsAssets: List<VpsAssetRecord>,
+    vpsUpcomingRenewals: List<UpcomingRenewalItem>,
     highlightAssetId: String?,
     onHighlightConsumed: () -> Unit,
     onAddAsset: () -> Unit,
@@ -1053,14 +1083,14 @@ private fun AssetsTabContent(
     onOpenUrl: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
-    val renewalsByAssetId = remember(uiState.portfolioSummary.upcomingRenewals) {
-        uiState.portfolioSummary.upcomingRenewals.associateBy { it.asset.id }
+    val renewalsByAssetId = remember(vpsUpcomingRenewals) {
+        vpsUpcomingRenewals.associateBy { it.asset.id }
     }
     val probesByKey = remember(uiState.snapshots) {
         uiState.snapshots.associateBy { it.probeKey }
     }
-    val sortedAssets = remember(uiState.assets, renewalsByAssetId) {
-        uiState.assets.sortedWith(
+    val sortedAssets = remember(vpsAssets, renewalsByAssetId) {
+        vpsAssets.sortedWith(
             compareBy<VpsAssetRecord> { renewalsByAssetId[it.id]?.daysRemaining ?: Long.MAX_VALUE }
                 .thenBy { it.nickname.lowercase() }
                 .thenBy { it.id },
@@ -1071,7 +1101,7 @@ private fun AssetsTabContent(
         val targetId = highlightAssetId ?: return@LaunchedEffect
         val idx = sortedAssets.indexOfFirst { it.id == targetId }
         if (idx >= 0) {
-            // +1 accounts for the renewal timeline header item at index 0
+            // +1 accounts for renewal timeline header item
             listState.animateScrollToItem(idx + 1)
             onHighlightConsumed()
         }
@@ -1088,8 +1118,8 @@ private fun AssetsTabContent(
         ) {
             item(key = "assets_renewal_timeline", contentType = "assets_timeline") {
                 AssetRenewalTimelineStrip(
-                    totalAssetCount = uiState.assets.size,
-                    upcomingRenewals = uiState.portfolioSummary.upcomingRenewals,
+                    totalAssetCount = sortedAssets.size,
+                    upcomingRenewals = vpsUpcomingRenewals,
                     modifier = Modifier.padding(bottom = 2.dp),
                 )
             }
@@ -1099,7 +1129,7 @@ private fun AssetsTabContent(
                     FleetEmptyStateCard(
                         icon = Icons.Rounded.Storage,
                         title = "资产账本还是空的",
-                        description = "记录每台 VPS 的配置、线路、续费币种与到期日，自动折算月均/年化人民币开销，并支持「不想续了 · 一键估值出机」。",
+                        description = "记录每台 VPS 的续费币种与到期日，自动折算月均/年化人民币开销，并支持「不想续了 · 一键估值出机」。",
                         actionLabel = "录入第一台服务器",
                         onAction = onAddAsset,
                     )
@@ -1156,6 +1186,8 @@ private fun VpsAssetCard(
     onOpenSalePost: () -> Unit,
     onOpenUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onRefreshDomainAndTls: () -> Unit = {},
+    isRefreshingDomainAndTls: Boolean = false,
 ) {
     AssetTicketCard(
         asset = asset,
@@ -1170,6 +1202,8 @@ private fun VpsAssetCard(
         onOpenSalePost = onOpenSalePost,
         onOpenUrl = onOpenUrl,
         modifier = modifier,
+        onRefreshDomainAndTls = onRefreshDomainAndTls,
+        isRefreshingDomainAndTls = isRefreshingDomainAndTls,
     )
 }
 

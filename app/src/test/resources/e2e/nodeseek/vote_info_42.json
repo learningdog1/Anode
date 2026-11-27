@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "vote": {
+    "id": 42,
+    "title": "你最常用的 VPS 系统？",
+    "uid": 101,
+    "isPublic": 1,
+    "locked": 0,
+    "multiple": 0,
+    "items": [
+      {
+        "vote_item_id": 1001,
+        "text": "Debian 12",
+        "count": 18,
+        "voted": 0,
+        "voters": [202, 203]
+      },
+      {
+        "vote_item_id": 1002,
+        "text": "Alpine Linux",
+        "count": 7,
+        "voted": 1,
+        "voters": [101]
+      },
+      {
+        "vote_item_id": 1003,
+        "text": "Ubuntu 24.04",
+        "count": 5,
+        "voted": 0,
+        "voters": [204]
+      }
+    ]
+  }
+}

@@ -12,6 +12,7 @@ import androidx.work.PeriodicWorkRequest
 import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import androidx.work.testing.TestListenableWorkerBuilder
+import com.nodeseek.app.data.fleet.FleetAlertNotifier
 import com.nodeseek.app.data.fleet.FleetAlertSink
 import com.nodeseek.app.data.fleet.FleetMonitorRunner
 import com.nodeseek.app.data.fleet.FleetMonitorWorker
@@ -22,6 +23,7 @@ import com.nodeseek.app.data.fleet.ProbePanelClient
 import com.nodeseek.app.data.fleet.SoftwareAesGcmTokenCipher
 import com.nodeseek.app.domain.fleet.FleetAlertEvaluator
 import com.nodeseek.app.domain.fleet.FleetAlertTrackerState
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
@@ -491,5 +493,38 @@ class FleetAlertsAndMonitorTest {
             })
             .build()
         assertEquals(ListenableWorker.Result.retry(), retryWorker.doWork())
+    }
+
+    @Test
+    fun `FleetAlertNotifier routes domain renewal reminders to domains tab and uses domain copy`() {
+        val vpsAsset = VpsAssetRecord(
+            id = "vps_1",
+            nickname = "HK Box",
+            providerName = "DMIT",
+            specsSummary = "1C/1G",
+            region = "HK",
+            renewalAmount = "10",
+            expiryDateIso = "2026-11-20",
+            assetType = FleetAssetType.VPS,
+        )
+        val domainAsset = VpsAssetRecord(
+            id = "dom_1",
+            nickname = "0ne.icu",
+            providerName = "Spaceship, Inc.",
+            specsSummary = "",
+            region = "",
+            renewalAmount = "10",
+            expiryDateIso = "2026-11-20",
+            assetType = FleetAssetType.DOMAIN_CERT,
+            domainName = "0ne.icu",
+        )
+
+        assertEquals(FleetAlertNotifier.EXTRA_TAB_ASSETS, FleetAlertNotifier.resolveRenewalTargetTab(vpsAsset))
+        assertEquals(FleetAlertNotifier.EXTRA_TAB_DOMAINS, FleetAlertNotifier.resolveRenewalTargetTab(domainAsset))
+
+        val (_, _, vpsBody) = FleetAlertNotifier.formatRenewalReminderCopy(vpsAsset, daysRemaining = -1L, renewalCny = BigDecimal("70.00"))
+        val (_, _, domBody) = FleetAlertNotifier.formatRenewalReminderCopy(domainAsset, daysRemaining = -1L, renewalCny = BigDecimal("70.00"))
+        assertTrue(vpsBody.contains("进入资产账本"))
+        assertTrue(domBody.contains("进入域名资产"))
     }
 }

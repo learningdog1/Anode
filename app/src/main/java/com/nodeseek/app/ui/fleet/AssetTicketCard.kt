@@ -34,9 +34,12 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EventRepeat
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -447,6 +450,7 @@ internal fun AssetRenewalTimelineStrip(
     totalAssetCount: Int,
     upcomingRenewals: List<UpcomingRenewalItem>,
     modifier: Modifier = Modifier,
+    unitLabel: String = "台",
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -510,7 +514,7 @@ internal fun AssetRenewalTimelineStrip(
                             fontSize = 11.sp,
                         ),
                     ) {
-                        append(" · 共 ${summary.totalAssetCount} 台")
+                        append(" · 共 ${summary.totalAssetCount} $unitLabel")
                     }
                 },
                 maxLines = 1,
@@ -746,6 +750,8 @@ internal fun AssetTicketCard(
     onOpenSalePost: () -> Unit,
     onOpenUrl: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onRefreshDomainAndTls: () -> Unit = {},
+    isRefreshingDomainAndTls: Boolean = false,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -823,7 +829,13 @@ internal fun AssetTicketCard(
     val hasExpandableDetails = linkedProbe != null ||
         asset.trafficResetDay != null ||
         asset.autoRenewNote.isNotBlank() ||
-        asset.notes.isNotBlank()
+        asset.notes.isNotBlank() ||
+        (asset.isDomainAsset && (
+            !asset.domainCreatedIso.isNullOrBlank() ||
+                asset.rdapStatusTags.isNotEmpty() ||
+                !asset.tlsCheckError.isNullOrBlank() ||
+                !asset.effectiveTlsHost.isNullOrBlank()
+            ))
 
     // Live animated probe metrics when bound
     val probeDotColor by animateColorAsState(
@@ -949,18 +961,34 @@ internal fun AssetTicketCard(
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                // Row 1: Probe status dot + Nickname + Tags (max 2 + "+N") + AutoRenew icon
+                // Row 1: Probe/Domain status indicator + Nickname + Tags/TLS pill + AutoRenew icon
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    ProbeBindingDot(
-                        isBound = linkedProbe != null,
-                        isOnline = linkedProbe?.isOnline == true,
-                        dotColor = probeDotColor,
-                        mutedColor = mutedColor,
-                    )
+                    val tlsDays = remember(asset.tlsExpiresAtEpochMillis) { asset.tlsDaysRemaining() }
+                    if (asset.isDomainAsset) {
+                        val domainIconColor = when {
+                            !asset.tlsCheckError.isNullOrBlank() || (tlsDays != null && tlsDays < 0L) -> errorColor
+                            tlsDays != null && tlsDays <= 14L -> goldColor
+                            tlsDays != null -> primaryColor
+                            else -> mutedColor
+                        }
+                        Icon(
+                            imageVector = Icons.Rounded.Language,
+                            contentDescription = "域名资产",
+                            tint = domainIconColor,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    } else {
+                        ProbeBindingDot(
+                            isBound = linkedProbe != null,
+                            isOnline = linkedProbe?.isOnline == true,
+                            dotColor = probeDotColor,
+                            mutedColor = mutedColor,
+                        )
+                    }
 
                     Text(
                         text = asset.nickname,
@@ -975,8 +1003,48 @@ internal fun AssetTicketCard(
                         modifier = Modifier.weight(1f, fill = false),
                     )
 
+                    if (asset.isDomainAsset) {
+                        val (tlsText, tlsBg, tlsFg) = when {
+                            isRefreshingDomainAndTls -> Triple(
+                                "检测中...",
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            tlsDays != null && tlsDays < 0L -> Triple(
+                                "TLS 已过期",
+                                MaterialTheme.colorScheme.errorContainer,
+                                MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                            tlsDays != null && tlsDays <= 14L -> Triple(
+                                "TLS ${tlsDays}天",
+                                ext.drumstickContainer,
+                                ext.onDrumstickContainer,
+                            )
+                            tlsDays != null -> Triple(
+                                "TLS ${tlsDays}天",
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+                                MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            !asset.tlsCheckError.isNullOrBlank() -> Triple(
+                                "TLS 异常",
+                                MaterialTheme.colorScheme.errorContainer,
+                                MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                            else -> Triple(
+                                "域名",
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TicketTagPill(
+                            text = tlsText,
+                            containerColor = tlsBg,
+                            contentColor = tlsFg,
+                        )
+                    }
+
                     // Tag pills: optional gold "闲置" badge + up to 2 tags (+N overflow)
-                    val maxRegularTags = if (isIdle) 1 else 2
+                    val maxRegularTags = if (isIdle || asset.isDomainAsset) 1 else 2
                     val visibleTags = displayTags.take(maxRegularTags)
                     val overflowCount = (displayTags.size - visibleTags.size).coerceAtLeast(0)
 
@@ -1021,15 +1089,30 @@ internal fun AssetTicketCard(
                     }
                 }
 
-                // Row 2: provider · region · specs (specs monospace)
-                val providerRegionPrefix = remember(asset.providerName, asset.region) {
-                    buildList {
-                        if (asset.providerName.isNotBlank()) add(asset.providerName.trim())
-                        if (asset.region.isNotBlank()) add(asset.region.trim())
-                    }.joinToString(" · ")
+                // Row 2: provider/registrar · region · specs/issuer
+                val providerRegionPrefix = remember(asset.assetType, asset.registrarName, asset.providerName, asset.region, asset.domainName) {
+                    if (asset.isDomainAsset) {
+                        buildList {
+                            val reg = asset.registrarName.ifBlank { asset.providerName }.trim()
+                            if (reg.isNotBlank()) add(reg)
+                            val dom = asset.domainName?.trim().orEmpty()
+                            if (dom.isNotBlank() && !dom.equals(asset.nickname.trim(), ignoreCase = true)) {
+                                add(dom)
+                            }
+                        }.joinToString(" · ")
+                    } else {
+                        buildList {
+                            if (asset.providerName.isNotBlank()) add(asset.providerName.trim())
+                            if (asset.region.isNotBlank()) add(asset.region.trim())
+                        }.joinToString(" · ")
+                    }
                 }
-                val compactSpecs = remember(asset.specsSummary) {
-                    asset.specsSummary.trim().replace(" / ", "/")
+                val compactSpecs = remember(asset.assetType, asset.specsSummary, asset.tlsIssuer) {
+                    if (asset.isDomainAsset) {
+                        asset.tlsIssuer.trim()
+                    } else {
+                        asset.specsSummary.trim().replace(" / ", "/")
+                    }
                 }
                 if (providerRegionPrefix.isNotBlank() || compactSpecs.isNotBlank()) {
                     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1206,13 +1289,16 @@ internal fun AssetTicketCard(
                             onOpenSalePost = onOpenSalePost,
                             onOpenUrl = onOpenUrl,
                             onDelete = onDelete,
+                            onRefreshDomainAndTls = onRefreshDomainAndTls,
                         )
                     }
 
                     TicketPrimaryActionPill(
+                        isDomainAsset = asset.isDomainAsset,
                         tone = tone,
                         onMarkRenewed = onMarkRenewed,
                         onOpenSalePost = onOpenSalePost,
+                        onRefreshDomainAndTls = onRefreshDomainAndTls,
                     )
                 }
             }
@@ -1355,9 +1441,11 @@ private fun TicketTagPill(
 
 @Composable
 private fun TicketPrimaryActionPill(
+    isDomainAsset: Boolean,
     tone: AssetTicketVisualTone,
     onMarkRenewed: () -> Unit,
     onOpenSalePost: () -> Unit,
+    onRefreshDomainAndTls: () -> Unit,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -1369,31 +1457,36 @@ private fun TicketPrimaryActionPill(
     }
     val goldFg = if (isDark) ext.drumstickContainer else ext.cardSurface
 
-    val (label, icon, bg, fg, action) = when (tone) {
-        AssetTicketVisualTone.RENEWAL_DUE -> PillActionSpec(
+    val (label, icon, bg, fg, action) = when {
+        tone == AssetTicketVisualTone.RENEWAL_DUE -> PillActionSpec(
             label = "已续费",
             icon = Icons.Rounded.Check,
             containerColor = goldBg,
             contentColor = goldFg,
             onClick = onMarkRenewed,
         )
-        AssetTicketVisualTone.IDLE -> PillActionSpec(
+        !isDomainAsset && tone == AssetTicketVisualTone.IDLE -> PillActionSpec(
             label = "出掉回血",
             icon = Icons.Rounded.LocalOffer,
             containerColor = goldBg,
             contentColor = goldFg,
             onClick = onOpenSalePost,
         )
-        AssetTicketVisualTone.CRITICAL_OR_EXPIRED -> PillActionSpec(
+        tone == AssetTicketVisualTone.CRITICAL_OR_EXPIRED -> PillActionSpec(
             label = "已续费",
             icon = Icons.Rounded.Check,
             containerColor = MaterialTheme.colorScheme.error,
             contentColor = MaterialTheme.colorScheme.onError,
             onClick = onMarkRenewed,
         )
-        AssetTicketVisualTone.NORMAL,
-        AssetTicketVisualTone.UNKNOWN,
-        -> PillActionSpec(
+        isDomainAsset -> PillActionSpec(
+            label = "测证书",
+            icon = Icons.Rounded.Security,
+            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.16f else 0.13f),
+            contentColor = MaterialTheme.colorScheme.primary,
+            onClick = onRefreshDomainAndTls,
+        )
+        else -> PillActionSpec(
             label = "出机",
             icon = Icons.Rounded.LocalOffer,
             containerColor = MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.16f else 0.13f),
@@ -1600,6 +1693,16 @@ private fun AssetTicketExpandedDetails(
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val infoParts = buildList {
+        if (asset.isDomainAsset) {
+            if (!asset.domainCreatedIso.isNullOrBlank()) add("注册于 ${asset.domainCreatedIso}")
+            if (asset.rdapStatusTags.isNotEmpty()) add("状态：${asset.rdapStatusTags.take(2).joinToString(", ")}")
+            val host = asset.effectiveTlsHost
+            if (!host.isNullOrBlank()) {
+                val portSuffix = if (asset.tlsPort != VpsAssetRecord.DEFAULT_TLS_PORT) ":${asset.tlsPort}" else ""
+                add("TLS：$host$portSuffix")
+            }
+            if (!asset.tlsCheckError.isNullOrBlank()) add("证书提示：${asset.tlsCheckError}")
+        }
         if (asset.trafficResetDay != null) add("每月 ${asset.trafficResetDay} 号重置流量")
         if (asset.autoRenewNote.isNotBlank()) add(asset.autoRenewNote.trim())
         if (asset.notes.isNotBlank()) add(asset.notes.trim())
@@ -1682,6 +1785,7 @@ private fun AssetTicketOverflowMenu(
     onOpenSalePost: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onDelete: () -> Unit,
+    onRefreshDomainAndTls: () -> Unit,
 ) {
     val hasPanelUrl = asset.panelManageUrl.isNotBlank()
     val hasPurchaseUrl = asset.purchaseUrl.isNotBlank()
@@ -1750,14 +1854,25 @@ private fun AssetTicketOverflowMenu(
                 onEdit()
             },
         )
-        DropdownMenuItem(
-            text = { Text(if (linkedProbe != null) "更换探针" else "绑定探针") },
-            leadingIcon = { Icon(Icons.Rounded.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
-            onClick = {
-                onDismiss()
-                onBindProbe()
-            },
-        )
+        if (asset.isDomainAsset) {
+            DropdownMenuItem(
+                text = { Text("刷新 RDAP / 检测 TLS 证书") },
+                leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    onDismiss()
+                    onRefreshDomainAndTls()
+                },
+            )
+        } else {
+            DropdownMenuItem(
+                text = { Text(if (linkedProbe != null) "更换探针" else "绑定探针") },
+                leadingIcon = { Icon(Icons.Rounded.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                    onDismiss()
+                    onBindProbe()
+                },
+            )
+        }
         DropdownMenuItem(
             text = { Text("标记已续费") },
             leadingIcon = { Icon(Icons.Rounded.EventRepeat, contentDescription = null, modifier = Modifier.size(18.dp)) },
@@ -1766,7 +1881,7 @@ private fun AssetTicketOverflowMenu(
                 onMarkRenewed()
             },
         )
-        if (tone == AssetTicketVisualTone.RENEWAL_DUE || tone == AssetTicketVisualTone.CRITICAL_OR_EXPIRED) {
+        if (!asset.isDomainAsset && (tone == AssetTicketVisualTone.RENEWAL_DUE || tone == AssetTicketVisualTone.CRITICAL_OR_EXPIRED)) {
             DropdownMenuItem(
                 text = { Text("生成出售帖（出机）") },
                 leadingIcon = { Icon(Icons.Rounded.LocalOffer, contentDescription = null, modifier = Modifier.size(18.dp)) },

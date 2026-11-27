@@ -52,7 +52,28 @@
                 <data android:path="/award" />
                 <data android:path="/board" />
                 <data android:path="/notification" />
+                <data android:path="/lucky" />
+                <data android:pathPrefix="/lucky" />
             </intent-filter>
+
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="lucky.nodeseek.com" />
+                <data android:host="m.nodeseek.com" />
+                <data android:path="/lucky" />
+                <data android:pathPrefix="/lucky" />
+                <data android:pathPrefix="/draw/" />
+                <data android:path="/" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <service
@@ -60,6 +81,34 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <receiver
+            android:name=".notifications.CopyOtpBroadcastReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".widget.ServerStatusGlanceWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_server_status_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_server_status_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.DailyPulseGlanceWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_daily_pulse_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_daily_pulse_info" />
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

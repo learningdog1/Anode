@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.domain.model.AccountSession
+import com.nodeseek.app.domain.model.AccountSlotSummary
+import com.nodeseek.app.domain.model.AccountSwitchResult
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.BookmarkedTopic
@@ -15,13 +17,19 @@ import com.nodeseek.app.domain.model.DirectMessageSummary
 import com.nodeseek.app.domain.model.NotificationItem
 import com.nodeseek.app.domain.model.ReadHistoryEntry
 import com.nodeseek.app.domain.model.TopicSummary
+import com.nodeseek.app.domain.repository.MultiAccountManager
+import com.nodeseek.app.domain.repository.NoOpMultiAccountManager
 import com.nodeseek.app.domain.repository.SignInStepResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -80,11 +88,17 @@ data class PulseHubUiState(
     val nativeSignIn: NativeSignInDialogState = NativeSignInDialogState(),
     val unreadNotificationCount: Int = 0,
     val unreadDirectMessageCount: Int = 0,
+    val accounts: List<AccountSlotSummary> = emptyList(),
+    val isSwitchingAccount: Boolean = false,
 )
 
 class PulseHubViewModel(
     private val container: AppContainer,
 ) : ViewModel() {
+
+    private val multiAccountManager: MultiAccountManager by lazy {
+        runCatching { container.multiAccountManager }.getOrDefault(NoOpMultiAccountManager)
+    }
 
     private val transientState = MutableStateFlow(PulseHubTransientState())
 
@@ -125,7 +139,9 @@ class PulseHubViewModel(
         baseDataFlow,
         transientState.asStateFlow(),
         container.checkInRepository.checkInStatus,
-    ) { base, transient, sharedCheckInStatus ->
+        multiAccountManager.accountsFlow,
+        multiAccountManager.isSwitchingFlow,
+    ) { base, transient, sharedCheckInStatus, accounts, isSwitchingAccount ->
         val mergedBookmarks = mergeHubBookmarks(
             local = base.localBookmarks,
             server = transient.serverBookmarks,
@@ -165,6 +181,8 @@ class PulseHubViewModel(
             nativeSignIn = transient.nativeSignIn,
             unreadNotificationCount = notifUnread,
             unreadDirectMessageCount = dmUnread,
+            accounts = accounts,
+            isSwitchingAccount = isSwitchingAccount,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -173,31 +191,103 @@ class PulseHubViewModel(
     )
 
     private var lastObservedUid: Long? = null
+    private var telemetryGeneration: Long = 0L
+    private var activeTelemetryJob: Job? = null
+    private var activeAuthTelemetryJob: Job? = null
+    private var activeRefreshJob: Job? = null
+    private var activeLoadMoreBookmarksJob: Job? = null
+    private var activeHubVisibleJob: Job? = null
     private var lastTelemetryRefreshedAtMs: Long = 0L
     private var lastTelemetryBeijingDate: LocalDate? = null
 
+    private val cachedLocalBookmarkedIds = MutableStateFlow(
+        (container.bookmarkAndHistoryRepository.observeLocalBookmarks() as? StateFlow<List<BookmarkedTopic>>)?.value
+            ?.mapTo(HashSet()) { it.topicId }
+            ?: emptySet(),
+    )
+    private val cachedRepoBookmarkedIds = MutableStateFlow(
+        (container.bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+            ?: emptySet(),
+    )
+
+    @Volatile
+    private var hasReceivedLocalBookmarks =
+        container.bookmarkAndHistoryRepository.observeLocalBookmarks() is StateFlow<*>
+
+    @Volatile
+    private var hasReceivedRepoBookmarks =
+        container.bookmarkAndHistoryRepository.observeBookmarkedIds() is StateFlow<*>
+
+    private suspend fun isTopicBookmarkedWithoutUiState(topicId: Long): Boolean {
+        if (transientState.value.serverBookmarks.any { it.id == topicId }) return true
+        if (topicId in cachedLocalBookmarkedIds.value || topicId in cachedRepoBookmarkedIds.value) return true
+        val liveLocal = (container.bookmarkAndHistoryRepository.observeLocalBookmarks() as? StateFlow<List<BookmarkedTopic>>)?.value
+        if (liveLocal?.any { it.topicId == topicId } == true) return true
+        val liveIds = (container.bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+        if (liveIds?.contains(topicId) == true) return true
+        if (!hasReceivedRepoBookmarks) {
+            val ids = container.bookmarkAndHistoryRepository.observeBookmarkedIds().firstOrNull()
+            if (ids != null) {
+                cachedRepoBookmarkedIds.value = ids
+                hasReceivedRepoBookmarks = true
+                if (topicId in ids) return true
+            }
+        }
+        if (!hasReceivedLocalBookmarks) {
+            val localList = container.bookmarkAndHistoryRepository.observeLocalBookmarks().firstOrNull()
+            if (localList != null) {
+                val localIds = localList.mapTo(HashSet(localList.size)) { it.topicId }
+                cachedLocalBookmarkedIds.value = localIds
+                hasReceivedLocalBookmarks = true
+                if (topicId in localIds) return true
+            }
+        }
+        return container.bookmarkAndHistoryRepository.getOfflineBookmarkSnapshot(topicId) != null
+    }
+
     init {
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.observeLocalBookmarks().collect { list ->
+                cachedLocalBookmarkedIds.value = list.mapTo(HashSet(list.size)) { it.topicId }
+                hasReceivedLocalBookmarks = true
+            }
+        }
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.observeBookmarkedIds().collect { ids ->
+                cachedRepoBookmarkedIds.value = ids
+                hasReceivedRepoBookmarks = true
+            }
+        }
         viewModelScope.launch {
             container.sessionRepository.sessionState.collect { session ->
                 val uid = session?.uid
                 if (uid != lastObservedUid) {
                     lastObservedUid = uid
-                    if (uid != null) {
-                        loadSignedInTelemetry(
-                            resetBookmarks = true,
-                            forceCheckInRefresh = true,
+                    telemetryGeneration++
+                    val expectedGen = telemetryGeneration
+                    cancelActiveTelemetryJobs()
+                    container.checkInRepository.clearCachedStatus()
+                    lastTelemetryRefreshedAtMs = 0L
+                    lastTelemetryBeijingDate = null
+                    transientState.update {
+                        it.copy(
+                            isRefreshing = false,
+                            isLoadingCheckInStatus = false,
+                            dailyQuota = null,
+                            isCheckingIn = false,
+                            serverBookmarks = emptyList(),
+                            serverBookmarksPage = 1,
+                            hasMoreServerBookmarks = false,
+                            isLoadingServerBookmarks = false,
                         )
-                    } else {
-                        container.checkInRepository.clearCachedStatus()
-                        lastTelemetryRefreshedAtMs = 0L
-                        lastTelemetryBeijingDate = null
-                        transientState.update {
-                            it.copy(
-                                isLoadingCheckInStatus = false,
-                                dailyQuota = null,
-                                serverBookmarks = emptyList(),
-                                serverBookmarksPage = 1,
-                                hasMoreServerBookmarks = false,
+                    }
+                    if (uid != null) {
+                        activeTelemetryJob = viewModelScope.launch {
+                            loadSignedInTelemetry(
+                                expectedUid = uid,
+                                expectedGen = expectedGen,
+                                resetBookmarks = true,
+                                forceCheckInRefresh = true,
                             )
                         }
                     }
@@ -207,15 +297,40 @@ class PulseHubViewModel(
 
         viewModelScope.launch {
             container.sessionRepository.authVerifiedEpoch.collect { epoch ->
-                if (epoch > 0L && container.sessionRepository.sessionState.value != null) {
-                    loadSignedInTelemetry(
-                        resetBookmarks = false,
-                        forceCheckInRefresh = true,
-                    )
+                val session = container.sessionRepository.sessionState.value
+                if (epoch > 0L && session != null) {
+                    val expectedUid = session.uid
+                    val expectedGen = telemetryGeneration
+                    activeAuthTelemetryJob?.cancel()
+                    activeAuthTelemetryJob = viewModelScope.launch {
+                        loadSignedInTelemetry(
+                            expectedUid = expectedUid,
+                            expectedGen = expectedGen,
+                            resetBookmarks = false,
+                            forceCheckInRefresh = true,
+                        )
+                    }
                 }
             }
         }
     }
+
+    private fun cancelActiveTelemetryJobs() {
+        activeTelemetryJob?.cancel()
+        activeTelemetryJob = null
+        activeAuthTelemetryJob?.cancel()
+        activeAuthTelemetryJob = null
+        activeRefreshJob?.cancel()
+        activeRefreshJob = null
+        activeLoadMoreBookmarksJob?.cancel()
+        activeLoadMoreBookmarksJob = null
+        activeHubVisibleJob?.cancel()
+        activeHubVisibleJob = null
+    }
+
+    private fun isCurrentTelemetryContext(expectedUid: Long, expectedGen: Long): Boolean =
+        container.sessionRepository.sessionState.value?.uid == expectedUid &&
+            telemetryGeneration == expectedGen
 
     fun onHubVisible() {
         val now = System.currentTimeMillis()
@@ -235,8 +350,13 @@ class PulseHubViewModel(
             (now - lastTelemetryRefreshedAtMs) >= HUB_VISIBLE_REFRESH_THROTTLE_MS
 
         if (shouldRefresh && !transientState.value.isRefreshing) {
-            viewModelScope.launch {
+            val expectedUid = session.uid
+            val expectedGen = telemetryGeneration
+            activeHubVisibleJob?.cancel()
+            activeHubVisibleJob = viewModelScope.launch {
                 loadSignedInTelemetry(
+                    expectedUid = expectedUid,
+                    expectedGen = expectedGen,
                     resetBookmarks = false,
                     forceCheckInRefresh = true,
                 )
@@ -251,23 +371,45 @@ class PulseHubViewModel(
     fun refresh() = refreshAll()
 
     fun refreshAll() {
-        viewModelScope.launch {
+        val initialUid = container.sessionRepository.sessionState.value?.uid
+        val initialGen = telemetryGeneration
+        activeRefreshJob?.cancel()
+        activeRefreshJob = viewModelScope.launch {
             transientState.update { it.copy(isRefreshing = true) }
-            container.sessionRepository.refreshSession()
-            if (container.sessionRepository.sessionState.value != null) {
-                loadSignedInTelemetry(
-                    resetBookmarks = true,
-                    forceCheckInRefresh = true,
-                )
+            try {
+                container.sessionRepository.refreshSession()
+                val currentSession = container.sessionRepository.sessionState.value
+                if (currentSession != null) {
+                    val targetUid = currentSession.uid
+                    val targetGen = if (targetUid == initialUid && telemetryGeneration == initialGen) {
+                        initialGen
+                    } else if (targetUid == lastObservedUid) {
+                        telemetryGeneration
+                    } else {
+                        return@launch
+                    }
+                    loadSignedInTelemetry(
+                        expectedUid = targetUid,
+                        expectedGen = targetGen,
+                        resetBookmarks = true,
+                        forceCheckInRefresh = true,
+                    )
+                }
+            } finally {
+                if (telemetryGeneration == initialGen) {
+                    transientState.update { it.copy(isRefreshing = false) }
+                }
             }
-            transientState.update { it.copy(isRefreshing = false) }
         }
     }
 
     private suspend fun loadSignedInTelemetry(
+        expectedUid: Long,
+        expectedGen: Long,
         resetBookmarks: Boolean,
         forceCheckInRefresh: Boolean,
     ) {
+        if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return
         val now = System.currentTimeMillis()
         lastTelemetryRefreshedAtMs = now
         lastTelemetryBeijingDate = Instant.ofEpochMilli(now).atZone(BEIJING_ZONE).toLocalDate()
@@ -275,63 +417,110 @@ class PulseHubViewModel(
         if (container.checkInRepository.checkInStatus.value == null) {
             transientState.update { it.copy(isLoadingCheckInStatus = true) }
         }
-        val checkInJob = viewModelScope.launch {
-            try {
-                container.checkInRepository.getCheckInBoard(
-                    page = 1,
-                    forceRefresh = forceCheckInRefresh,
-                )
-            } finally {
-                transientState.update { it.copy(isLoadingCheckInStatus = false) }
-            }
-        }
-        val quotaJob = viewModelScope.launch {
-            container.checkInRepository.getDailyProgress()
-                .onSuccess { quota ->
-                    transientState.update { it.copy(dailyQuota = quota) }
+        coroutineScope {
+            val checkInJob = launch {
+                try {
+                    container.checkInRepository.getCheckInBoard(
+                        page = 1,
+                        forceRefresh = forceCheckInRefresh,
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                } finally {
+                    if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                        transientState.update { it.copy(isLoadingCheckInStatus = false) }
+                    }
                 }
+            }
+            val quotaJob = launch {
+                try {
+                    container.checkInRepository.getDailyProgress()
+                        .onSuccess { quota ->
+                            if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                                transientState.update { it.copy(dailyQuota = quota) }
+                            }
+                        }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                }
+            }
+            val inboxJob = launch {
+                try {
+                    container.inboxRepository.refreshUnreadCount()
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                }
+            }
+            if (resetBookmarks) {
+                loadServerBookmarks(
+                    expectedUid = expectedUid,
+                    expectedGen = expectedGen,
+                    page = 1,
+                    append = false,
+                )
+            }
+            checkInJob.join()
+            quotaJob.join()
+            inboxJob.join()
         }
-        val inboxJob = viewModelScope.launch {
-            container.inboxRepository.refreshUnreadCount()
-        }
-        if (resetBookmarks) {
-            loadServerBookmarks(page = 1, append = false)
-        }
-        checkInJob.join()
-        quotaJob.join()
-        inboxJob.join()
     }
 
     fun loadMoreServerBookmarks() {
+        val expectedUid = container.sessionRepository.sessionState.value?.uid ?: return
+        val expectedGen = telemetryGeneration
         val snapshot = transientState.value
         if (snapshot.isLoadingServerBookmarks || !snapshot.hasMoreServerBookmarks) return
-        viewModelScope.launch {
-            loadServerBookmarks(page = snapshot.serverBookmarksPage + 1, append = true)
+        activeLoadMoreBookmarksJob?.cancel()
+        activeLoadMoreBookmarksJob = viewModelScope.launch {
+            loadServerBookmarks(
+                expectedUid = expectedUid,
+                expectedGen = expectedGen,
+                page = snapshot.serverBookmarksPage + 1,
+                append = true,
+            )
         }
     }
 
-    private suspend fun loadServerBookmarks(page: Int, append: Boolean) {
-        if (container.sessionRepository.sessionState.value == null) return
+    private suspend fun loadServerBookmarks(
+        expectedUid: Long,
+        expectedGen: Long,
+        page: Int,
+        append: Boolean,
+    ) {
+        if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return
         transientState.update { it.copy(isLoadingServerBookmarks = true) }
-        container.bookmarkAndHistoryRepository.getServerBookmarks(page = page)
-            .onSuccess { (items, hasNext) ->
-                transientState.update { state ->
-                    val combined = if (append) {
-                        (state.serverBookmarks + items).distinctBy { it.id }
-                    } else {
-                        items
+        try {
+            container.bookmarkAndHistoryRepository.getServerBookmarks(page = page)
+                .onSuccess { (items, hasNext) ->
+                    if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return@onSuccess
+                    transientState.update { state ->
+                        val combined = if (append) {
+                            (state.serverBookmarks + items).distinctBy { it.id }
+                        } else {
+                            items
+                        }
+                        state.copy(
+                            serverBookmarks = combined,
+                            serverBookmarksPage = page,
+                            hasMoreServerBookmarks = hasNext,
+                            isLoadingServerBookmarks = false,
+                        )
                     }
-                    state.copy(
-                        serverBookmarks = combined,
-                        serverBookmarksPage = page,
-                        hasMoreServerBookmarks = hasNext,
-                        isLoadingServerBookmarks = false,
-                    )
+                }
+                .onFailure {
+                    if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return@onFailure
+                    transientState.update { it.copy(isLoadingServerBookmarks = false) }
+                }
+        } finally {
+            if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                transientState.update {
+                    if (it.isLoadingServerBookmarks) it.copy(isLoadingServerBookmarks = false) else it
                 }
             }
-            .onFailure {
-                transientState.update { it.copy(isLoadingServerBookmarks = false) }
-            }
+        }
     }
 
     fun setPreferRandomCheckIn(preferRandom: Boolean) {
@@ -366,61 +555,83 @@ class PulseHubViewModel(
         }
         if (transientState.value.isCheckingIn) return
 
+        val expectedUid = currentSession.uid
+        val expectedGen = telemetryGeneration
         val randomMode = container.settingsRepository.settings.value.preferRandomCheckIn
         viewModelScope.launch {
             transientState.update { it.copy(isCheckingIn = true) }
-            container.checkInRepository.checkIn(randomReward = randomMode)
-                .onSuccess { status ->
-                    transientState.update { it.copy(isCheckingIn = false) }
-                    val gainLabel = when (val gain = status.todayGain) {
-                        null -> "签到完成"
-                        0 -> "0 鸡腿"
-                        else -> "+$gain 鸡腿"
+            try {
+                container.checkInRepository.checkIn(randomReward = randomMode)
+                    .onSuccess { status ->
+                        if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return@onSuccess
+                        transientState.update { it.copy(isCheckingIn = false) }
+                        val gainLabel = when (val gain = status.todayGain) {
+                            null -> "签到完成"
+                            0 -> "0 鸡腿"
+                            else -> "+$gain 鸡腿"
+                        }
+                        _events.trySend(status.message?.takeIf { it.isNotBlank() } ?: "今日签到成功：$gainLabel")
+                        container.sessionRepository.refreshSession()
+                        if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return@onSuccess
+                        container.checkInRepository.getDailyProgress()
+                            .onSuccess { quota ->
+                                if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                                    transientState.update { it.copy(dailyQuota = quota) }
+                                }
+                            }
                     }
-                    _events.trySend(status.message?.takeIf { it.isNotBlank() } ?: "今日签到成功：$gainLabel")
-                    container.sessionRepository.refreshSession()
-                    container.checkInRepository.getDailyProgress()
-                        .onSuccess { quota -> transientState.update { it.copy(dailyQuota = quota) } }
+                    .onFailure { error ->
+                        if (!isCurrentTelemetryContext(expectedUid, expectedGen)) return@onFailure
+                        transientState.update { it.copy(isCheckingIn = false) }
+                        _events.trySend(error.message ?: "签到请求失败，请稍后重试")
+                    }
+            } finally {
+                if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                    transientState.update {
+                        if (it.isCheckingIn) it.copy(isCheckingIn = false) else it
+                    }
                 }
-                .onFailure { error ->
-                    transientState.update { it.copy(isCheckingIn = false) }
-                    _events.trySend(error.message ?: "签到请求失败，请稍后重试")
-                }
+            }
         }
     }
 
     fun removeBookmark(topicId: Long) {
         viewModelScope.launch {
-            val isSignedIn = container.sessionRepository.sessionState.value != null
-            if (isSignedIn) {
-                val remoteResult = container.bookmarkAndHistoryRepository
-                    .setTopicBookmarked(topicId, bookmarked = false)
-                if (remoteResult.isFailure) {
-                    val err = remoteResult.exceptionOrNull()
-                    _events.trySend(
-                        err?.message?.takeIf { it.isNotBlank() }
-                            ?: "取消云端收藏失败，请稍后重试",
-                    )
-                    return@launch
-                }
-            }
-            container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId)
-            transientState.update { state ->
-                state.copy(
-                    serverBookmarks = state.serverBookmarks.filterNot { it.id == topicId },
-                )
-            }
-            _events.trySend("已从收藏移除")
+            removeBookmarkInternal(topicId)
         }
     }
 
-    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
-        val currentlyBookmarked = uiState.value.bookmarks.any { it.topicId == entry.topicId }
-        if (currentlyBookmarked) {
-            removeBookmark(entry.topicId)
-            return
+    private suspend fun removeBookmarkInternal(topicId: Long) {
+        val isSignedIn = container.sessionRepository.sessionState.value != null
+        if (isSignedIn) {
+            val remoteResult = container.bookmarkAndHistoryRepository
+                .setTopicBookmarked(topicId, bookmarked = false)
+            if (remoteResult.isFailure) {
+                val err = remoteResult.exceptionOrNull()
+                _events.trySend(
+                    err?.message?.takeIf { it.isNotBlank() }
+                        ?: "取消云端收藏失败，请稍后重试",
+                )
+                return
+            }
         }
+        container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId)
+        cachedLocalBookmarkedIds.update { it - topicId }
+        cachedRepoBookmarkedIds.update { it - topicId }
+        transientState.update { state ->
+            state.copy(
+                serverBookmarks = state.serverBookmarks.filterNot { it.id == topicId },
+            )
+        }
+        _events.trySend("已从收藏移除")
+    }
+
+    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
         viewModelScope.launch {
+            if (isTopicBookmarkedWithoutUiState(entry.topicId)) {
+                removeBookmarkInternal(entry.topicId)
+                return@launch
+            }
             val summary = TopicSummary(
                 id = entry.topicId,
                 title = entry.title,
@@ -437,6 +648,7 @@ class PulseHubViewModel(
                 detailSnapshot = null,
                 syncedWithServer = false,
             )
+            cachedLocalBookmarkedIds.update { it + entry.topicId }
             if (container.sessionRepository.sessionState.value != null) {
                 container.bookmarkAndHistoryRepository.setTopicBookmarked(entry.topicId, bookmarked = true)
                     .onSuccess {
@@ -471,9 +683,80 @@ class PulseHubViewModel(
         }
     }
 
-    fun dismissNativeSignInDialog() {
+    fun dismissNativeSignInDialog(cancelPendingAddAccount: Boolean = true) {
         transientState.update {
             it.copy(nativeSignIn = NativeSignInDialogState(isVisible = false))
+        }
+        if (cancelPendingAddAccount && multiAccountManager.pendingAddAccountFlow.value) {
+            cancelPendingAddAccountIfUnauthenticated()
+        }
+    }
+
+    fun switchAccount(
+        targetUid: Long,
+        onChallengeRequired: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            when (val result = multiAccountManager.switchAccount(targetUid)) {
+                is AccountSwitchResult.Switched -> {
+                    _events.trySend("已切换至账号：${result.session.username}")
+                }
+                is AccountSwitchResult.ChallengeRequired -> {
+                    _events.trySend("已切换至 ${result.session.username}，请先完成安全验证")
+                    onChallengeRequired()
+                }
+                is AccountSwitchResult.OfflineUsingSnapshot -> {
+                    _events.trySend("离线模式：已使用本地快照切换至 ${result.session.username}")
+                }
+                is AccountSwitchResult.TargetExpiredRolledBack -> {
+                    val rollbackHint = result.restoredSession?.let { "，已恢复当前账号 ${it.username}" } ?: ""
+                    _events.trySend("账号 ${result.expiredUsername} 登录已过期，请重新登录$rollbackHint")
+                }
+                is AccountSwitchResult.Failure -> {
+                    _events.trySend(result.message)
+                }
+            }
+        }
+    }
+
+    fun beginAddAccountWithWebView(onReadyToOpenWebView: () -> Unit) {
+        viewModelScope.launch {
+            multiAccountManager.beginAddAccount()
+                .onSuccess { onReadyToOpenWebView() }
+                .onFailure { err ->
+                    _events.trySend(err.message ?: "无法准备添加账号")
+                }
+        }
+    }
+
+    fun beginAddAccountWithNativeSignIn() {
+        viewModelScope.launch {
+            multiAccountManager.beginAddAccount()
+                .onSuccess { openNativeSignInDialog() }
+                .onFailure { err ->
+                    _events.trySend(err.message ?: "无法准备添加账号")
+                }
+        }
+    }
+
+    fun cancelPendingAddAccountIfUnauthenticated() {
+        viewModelScope.launch {
+            val restored = multiAccountManager.cancelAddAccountIfUnauthenticated()
+            if (restored != null) {
+                _events.trySend("已取消添加账号，恢复至 ${restored.username}")
+            }
+        }
+    }
+
+    fun removeSavedAccount(uid: Long) {
+        viewModelScope.launch {
+            multiAccountManager.removeAccount(uid)
+                .onSuccess {
+                    _events.trySend("已移除该账号的本地登录凭证")
+                }
+                .onFailure { err ->
+                    _events.trySend(err.message ?: "移除账号失败")
+                }
         }
     }
 
@@ -611,10 +894,19 @@ class PulseHubViewModel(
                 .onSuccess { session ->
                     if (session != null) {
                         _events.trySend("已连接账号：${session.username}")
-                        loadSignedInTelemetry(
-                            resetBookmarks = true,
-                            forceCheckInRefresh = true,
-                        )
+                        val expectedUid = session.uid
+                        val expectedGen = telemetryGeneration
+                        if (isCurrentTelemetryContext(expectedUid, expectedGen)) {
+                            activeTelemetryJob?.cancel()
+                            activeTelemetryJob = viewModelScope.launch {
+                                loadSignedInTelemetry(
+                                    expectedUid = expectedUid,
+                                    expectedGen = expectedGen,
+                                    resetBookmarks = true,
+                                    forceCheckInRefresh = true,
+                                )
+                            }
+                        }
                     }
                 }
         }

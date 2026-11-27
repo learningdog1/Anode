@@ -4,6 +4,7 @@ import com.nodeseek.app.data.activity.ActivityPreferencesStore
 import com.nodeseek.app.data.netbench.NetBenchHistoryStore
 import com.nodeseek.app.data.overseas.OverseasPromoPreferencesStore
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
@@ -30,4 +31,5 @@ data class FullBackupV2Stores(
     val officialTradeRepository: OfficialTradeRepository? = null,
     val netBenchHistoryStore: NetBenchHistoryStore? = null,
     val exchangeRateRepository: ExchangeRateRepository? = null,
+    val benchmarkBaselineRepository: BenchmarkBaselineRepository? = null,
 )

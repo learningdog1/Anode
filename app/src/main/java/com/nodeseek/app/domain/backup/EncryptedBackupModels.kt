@@ -1,6 +1,8 @@
 package com.nodeseek.app.domain.backup
 
 import com.nodeseek.app.domain.activity.ActivityMonitorSettings
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineSnapshot
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.fleet.ProbePanelType
@@ -119,6 +121,7 @@ data class NodePulseFullBackupBundle(
     val trust: TrustBackupDto = TrustBackupDto(),
     val netBench: NetBenchBackupDto = NetBenchBackupDto(),
     val valuation: ValuationBackupDto = ValuationBackupDto(),
+    val benchmarkBaselines: List<BenchmarkBaselineSnapshot> = emptyList(),
 ) {
     fun toCoreV1Bundle(): NodePulseBackupBundle = NodePulseBackupBundle(
         schemaVersion = NodePulseBackupBundle.CURRENT_SCHEMA_VERSION,
@@ -212,6 +215,19 @@ data class VpsAssetBackupDto(
     val billingAnchorDay: Int? = null,
     val createdAtEpochMillis: Long = 0L,
     val updatedAtEpochMillis: Long = 0L,
+    val assetType: String = FleetAssetType.VPS.name,
+    val domainName: String? = null,
+    val registrarName: String = "",
+    val domainCreatedIso: String? = null,
+    val rdapSyncedAtEpochMillis: Long? = null,
+    val rdapStatusTags: List<String> = emptyList(),
+    val tlsHost: String? = null,
+    val tlsPort: Int = VpsAssetRecord.DEFAULT_TLS_PORT,
+    val tlsExpiresAtEpochMillis: Long? = null,
+    val tlsIssuer: String = "",
+    val tlsSubject: String = "",
+    val tlsCheckedAtEpochMillis: Long? = null,
+    val tlsCheckError: String? = null,
 ) {
     fun toDomain(): VpsAssetRecord {
         val resolvedTags = if (tags.isNotEmpty()) {
@@ -246,6 +262,20 @@ data class VpsAssetBackupDto(
             tags = resolvedTags,
             autoRenew = autoRenew,
             billingAnchorDay = billingAnchorDay?.takeIf { it in 1..31 },
+            assetType = runCatching { FleetAssetType.valueOf(assetType.trim().uppercase()) }
+                .getOrDefault(FleetAssetType.VPS),
+            domainName = domainName?.let { VpsAssetRecord.normalizeDomainName(it) ?: it.trim() },
+            registrarName = registrarName.trim(),
+            domainCreatedIso = domainCreatedIso?.trim()?.takeIf { it.isNotEmpty() },
+            rdapSyncedAtEpochMillis = rdapSyncedAtEpochMillis,
+            rdapStatusTags = rdapStatusTags.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+            tlsHost = tlsHost?.trim()?.takeIf { it.isNotEmpty() },
+            tlsPort = tlsPort.coerceIn(1, 65535),
+            tlsExpiresAtEpochMillis = tlsExpiresAtEpochMillis,
+            tlsIssuer = tlsIssuer.trim(),
+            tlsSubject = tlsSubject.trim(),
+            tlsCheckedAtEpochMillis = tlsCheckedAtEpochMillis,
+            tlsCheckError = tlsCheckError?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
 }
@@ -277,6 +307,19 @@ fun VpsAssetRecord.toBackupDto(): VpsAssetBackupDto {
         billingAnchorDay = billingAnchorDay,
         createdAtEpochMillis = createdAtEpochMillis,
         updatedAtEpochMillis = updatedAtEpochMillis,
+        assetType = assetType.name,
+        domainName = domainName,
+        registrarName = registrarName,
+        domainCreatedIso = domainCreatedIso,
+        rdapSyncedAtEpochMillis = rdapSyncedAtEpochMillis,
+        rdapStatusTags = rdapStatusTags,
+        tlsHost = tlsHost,
+        tlsPort = tlsPort,
+        tlsExpiresAtEpochMillis = tlsExpiresAtEpochMillis,
+        tlsIssuer = tlsIssuer,
+        tlsSubject = tlsSubject,
+        tlsCheckedAtEpochMillis = tlsCheckedAtEpochMillis,
+        tlsCheckError = tlsCheckError,
     )
 }
 
@@ -459,6 +502,7 @@ data class EncryptedBackupPreviewSummary(
     val activityNotificationsEnabled: Boolean,
     val manualFxOverrideCount: Int,
     val targetSyncAccount: BackupSyncTargetAccount? = null,
+    val baselineCount: Int = 0,
 )
 
 data class EncryptedBackupRestoreSummary(
@@ -485,6 +529,7 @@ data class EncryptedBackupRestoreSummary(
     val sellerNotesImported: Int,
     val officialTradeApiKeyImported: Boolean,
     val manualFxOverridesImported: Int,
+    val baselinesImported: Int = 0,
 ) {
     val hasPendingRemoteBlockSync: Boolean
         get() = pendingRemoteBlockUsers.isNotEmpty()

@@ -7,13 +7,20 @@ import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.FeedPageResult
 import com.nodeseek.app.domain.model.FeedSort
+import com.nodeseek.app.domain.model.FloorAuthor
+import com.nodeseek.app.domain.model.FloorComment
+import com.nodeseek.app.domain.model.PollDetail
+import com.nodeseek.app.domain.model.PollOption
 import com.nodeseek.app.domain.model.ReactionResult
 import com.nodeseek.app.domain.model.ReactionType
+import com.nodeseek.app.domain.model.StardustTransferPreview
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.domain.repository.DraftRepository
 import com.nodeseek.app.domain.repository.ForumRepository
+import com.nodeseek.app.domain.repository.PollAndStardustRepository
 import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SignInStepResult
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -21,7 +28,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -130,6 +139,207 @@ class TopicComposerViewModelTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun `onPublishClicked succeeds without active uiState collector including inside coin confirm`() = runTest {
+        val forum = FakeComposerForumRepository()
+        val session = FakeComposerSessionRepository().apply {
+            sessionState.value = AccountSession(uid = 7L, username = "poster")
+        }
+        val drafts = InMemoryComposerDraftRepository()
+
+        // 1. Standard board without any uiState collector
+        val vm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            initialCategorySlug = "daily",
+            initialTitle = "无 collector 发帖标题",
+            initialMarkdown = "无 collector 发帖正文",
+        )
+        vm.onPublishClicked()
+        assertEquals(1, forum.createCount)
+
+        // 2. Inside board (costs 5 coins) without any uiState collector -> prompts coin confirm, then publishes on confirm
+        val insideVm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            initialCategorySlug = "inside",
+            initialTitle = "内版帖子标题",
+            initialMarkdown = "内版帖子正文",
+        )
+        insideVm.onPublishClicked()
+        assertEquals("Inside board must still trigger coin confirmation first", 1, forum.createCount)
+        insideVm.confirmCoinSpendAndPublish()
+        assertEquals(2, forum.createCount)
+    }
+
+    @Test
+    fun `double-tapping onPublishClicked or confirmCoinSpendAndPublish before dispatcher yield triggers only one write`() = runTest {
+        val stdDispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(stdDispatcher)
+
+        val createGate = CompletableDeferred<Result<Unit>>()
+        val editGate = CompletableDeferred<Result<Unit>>()
+        val forum = FakeComposerForumRepository().apply {
+            createHandler = { createGate.await() }
+            editHandler = { editGate.await() }
+            detailHandler = { id, _ ->
+                Result.success(
+                    TopicDetailPage(
+                        topicId = id,
+                        title = "原帖标题",
+                        categorySlug = "tech",
+                        categoryName = "技术",
+                        author = FloorAuthor(uid = 7L, username = "poster"),
+                        currentPage = 1,
+                        totalPages = 1,
+                        requiredViewLevel = 0,
+                        openingFloor = FloorComment(
+                            commentId = 1L,
+                            floorNumber = 0,
+                            author = FloorAuthor(uid = 7L, username = "poster"),
+                            createdAtIso = "2026-11-27T00:00:00Z",
+                            markdownBody = "原帖正文",
+                        ),
+                    ),
+                )
+            }
+        }
+        val session = FakeComposerSessionRepository().apply {
+            sessionState.value = AccountSession(uid = 7L, username = "poster")
+        }
+        val drafts = InMemoryComposerDraftRepository()
+
+        // 1. New topic double-tap before yield
+        val createVm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            initialCategorySlug = "daily",
+            initialTitle = "防连点标题",
+            initialMarkdown = "防连点正文",
+        )
+        advanceUntilIdle()
+        createVm.onPublishClicked()
+        createVm.onPublishClicked()
+        testScheduler.runCurrent()
+        assertEquals("Rapid double-tap onPublishClicked must invoke createTopic only once", 1, forum.createCount)
+        createGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        assertEquals(1, forum.createCount)
+
+        // 2. Edit topic confirmCoinSpendAndPublish double-tap before yield
+        val editVm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            editTopicId = 55L,
+        )
+        advanceUntilIdle()
+        editVm.selectRequiredViewLevel(255)
+        editVm.onPublishClicked()
+        editVm.confirmCoinSpendAndPublish()
+        editVm.confirmCoinSpendAndPublish()
+        testScheduler.runCurrent()
+        assertEquals("Rapid double-tap confirmCoinSpendAndPublish must invoke editTopic only once", 1, forum.editCount)
+        editGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        assertEquals(1, forum.editCount)
+    }
+
+    @Test
+    fun `double-tapping createPollAndInsert before dispatcher yield triggers only one createVote and resets on failure`() = runTest {
+        val stdDispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(stdDispatcher)
+
+        val pollGate = CompletableDeferred<Result<PollDetail>>()
+        var createVoteCount = 0
+        var shouldFail = true
+        val pollRepo = object : PollAndStardustRepository {
+            override suspend fun getVote(voteId: Long): Result<PollDetail> = Result.failure(UnsupportedOperationException())
+            override suspend fun createVote(
+                title: String,
+                multiple: Boolean,
+                isPublic: Boolean,
+                options: List<String>,
+            ): Result<PollDetail> {
+                createVoteCount++
+                return if (createVoteCount == 1) {
+                    pollGate.await()
+                } else if (shouldFail) {
+                    Result.failure(RuntimeException("fail"))
+                } else {
+                    Result.success(
+                        PollDetail(
+                            id = 777L,
+                            title = title,
+                            creatorUid = 7L,
+                            isPublic = isPublic,
+                            isLocked = false,
+                            isMultiple = multiple,
+                            options = options.mapIndexed { idx, opt ->
+                                PollOption(voteItemId = idx.toLong(), text = opt, count = 0)
+                            },
+                        ),
+                    )
+                }
+            }
+            override suspend fun castVote(voteId: Long, voteItemIds: List<Long>): Result<PollDetail> = Result.failure(UnsupportedOperationException())
+            override suspend fun lockVote(voteId: Long): Result<PollDetail> = Result.failure(UnsupportedOperationException())
+            override suspend fun prepareStardustTransfer(receiverId: Long): Result<StardustTransferPreview> = Result.failure(UnsupportedOperationException())
+            override suspend fun sendStardust(memberId: Long, amount: Int, refId: Long): Result<Unit> = Result.failure(UnsupportedOperationException())
+        }
+
+        val session = FakeComposerSessionRepository().apply {
+            sessionState.value = AccountSession(uid = 7L, username = "poster")
+        }
+        val vm = TopicComposerViewModel(
+            container = buildContainer(FakeComposerForumRepository(), session, InMemoryComposerDraftRepository()),
+            pollAndStardustRepositoryOverride = pollRepo,
+        )
+        advanceUntilIdle()
+
+        vm.createPollAndInsert("选哪个", multiple = false, isPublic = true, options = listOf("A", "B"))
+        vm.createPollAndInsert("选哪个", multiple = false, isPublic = true, options = listOf("A", "B"))
+        testScheduler.runCurrent()
+        assertEquals("Rapid double-tap createPollAndInsert must invoke createVote only once", 1, createVoteCount)
+
+        // Fail first attempt, ensure guard resets so retry works
+        pollGate.complete(Result.failure(RuntimeException("temporary error")))
+        advanceUntilIdle()
+        shouldFail = false
+        vm.createPollAndInsert("选哪个", multiple = false, isPublic = true, options = listOf("A", "B"))
+        advanceUntilIdle()
+        assertEquals(2, createVoteCount)
+    }
+
+    @Test
+    fun `selectCategory rejects isAdminOnly category and onPublishClicked does not publish to admin board without uiState collector`() = runTest {
+        val adminCat = Category(slug = "notice", name = "公告", isAdminOnly = true)
+        val forum = FakeComposerForumRepository().apply {
+            categoriesFlow.value = Category.DEFAULT_CATEGORIES + adminCat
+        }
+        val session = FakeComposerSessionRepository().apply {
+            sessionState.value = AccountSession(uid = 7L, username = "poster")
+        }
+        val drafts = InMemoryComposerDraftRepository()
+
+        // 1. Headless composer (zero uiState collectors): selectCategory("notice") must be rejected
+        val vm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            initialCategorySlug = "daily",
+            initialTitle = "常规发帖",
+            initialMarkdown = "正文内容",
+        )
+        vm.selectCategory("notice")
+        vm.onPublishClicked()
+        assertEquals(1, forum.createCount)
+        assertEquals("daily", forum.lastCreatedCategorySlug)
+
+        // 2. Even if initialCategorySlug targets an admin-only board headlessly, publishing is blocked
+        val directAdminVm = TopicComposerViewModel(
+            container = buildContainer(forum, session, drafts),
+            initialCategorySlug = "notice",
+            initialTitle = "越权公告",
+            initialMarkdown = "越权正文",
+        )
+        directAdminVm.onPublishClicked()
+        assertEquals("Publishing directly to an isAdminOnly category must be blocked", 1, forum.createCount)
+    }
+
     private class InMemoryComposerDraftRepository : DraftRepository {
         private val map = linkedMapOf<Pair<Long, String>, EditorDraft>()
         override suspend fun getDraft(accountUid: Long, draftKey: String): EditorDraft? =
@@ -149,9 +359,15 @@ class TopicComposerViewModelTest {
 
     private class FakeComposerForumRepository : ForumRepository {
         var createCount = 0
-        override fun observeCategories(): Flow<List<Category>> = flowOf(Category.DEFAULT_CATEGORIES)
+        var lastCreatedCategorySlug: String? = null
+        var editCount = 0
+        val categoriesFlow = MutableStateFlow(Category.DEFAULT_CATEGORIES)
+        var createHandler: (suspend () -> Result<Unit>)? = null
+        var editHandler: (suspend () -> Result<Unit>)? = null
+        var detailHandler: (suspend (Long, Int) -> Result<TopicDetailPage>)? = null
+        override fun observeCategories(): Flow<List<Category>> = categoriesFlow
         override suspend fun refreshCategories(force: Boolean): Result<List<Category>> =
-            Result.success(Category.DEFAULT_CATEGORIES)
+            Result.success(categoriesFlow.value)
 
         override suspend fun getFeed(
             categorySlug: String,
@@ -172,7 +388,7 @@ class TopicComposerViewModelTest {
         ): Result<FeedPageResult> = Result.success(FeedPageResult(topics = emptyList(), currentPage = page, hasNextPage = false))
 
         override suspend fun getTopicDetail(topicId: Long, page: Int, includeBlocked: Boolean): Result<TopicDetailPage> =
-            Result.failure(UnsupportedOperationException())
+            detailHandler?.invoke(topicId, page) ?: Result.failure(UnsupportedOperationException())
 
         override suspend fun createTopic(
             categorySlug: String,
@@ -181,7 +397,8 @@ class TopicComposerViewModelTest {
             requiredViewLevel: Int,
         ): Result<Unit> {
             createCount++
-            return Result.success(Unit)
+            lastCreatedCategorySlug = categorySlug
+            return createHandler?.invoke() ?: Result.success(Unit)
         }
 
         override suspend fun editTopic(
@@ -189,7 +406,10 @@ class TopicComposerViewModelTest {
             title: String,
             markdownContent: String,
             requiredViewLevel: Int,
-        ): Result<Unit> = Result.success(Unit)
+        ): Result<Unit> {
+            editCount++
+            return editHandler?.invoke() ?: Result.success(Unit)
+        }
 
         override suspend fun postReply(topicId: Long, markdownContent: String): Result<Unit> = Result.success(Unit)
         override suspend fun editReply(commentId: Long, markdownContent: String): Result<Unit> = Result.success(Unit)

@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.LocalFireDepartment
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -172,6 +173,7 @@ fun ExploreScreen(
     val coroutineScope = rememberCoroutineScope()
     var showBuiltInWebViewSheet by rememberSaveable { mutableStateOf(false) }
     var showAwayDigestSheet by rememberSaveable { mutableStateOf(false) }
+    var showCategoryReorderSheet by rememberSaveable { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
 
     val boardTabs = uiState.orderedBoardTabs
@@ -254,8 +256,8 @@ fun ExploreScreen(
         }
     }
 
-    // Keep active category pill visible inside the horizontal strip when swiping pages
-    LaunchedEffect(visualTabIndex, boardTabs.size) {
+    // Keep active category pill visible inside the horizontal strip when swiping pages or reordering
+    LaunchedEffect(visualTabIndex, boardTabs) {
         if (visualTabIndex in boardTabs.indices) {
             val visibleItems = categoryRowState.layoutInfo.visibleItemsInfo
             val currentItem = visibleItems.firstOrNull { it.index == visualTabIndex }
@@ -275,10 +277,7 @@ fun ExploreScreen(
     LaunchedEffect(pagerState, boardTabs) {
         if (externalCategorySlug == null) {
             val expectedIndex = boardTabs.indexOfFirst { it.slug == currentSelectedSlug }
-            if (expectedIndex >= 0 &&
-                pagerState.currentPage != expectedIndex &&
-                !pagerState.isScrollInProgress
-            ) {
+            if (expectedIndex >= 0 && pagerState.currentPage != expectedIndex) {
                 pagerState.scrollToPage(expectedIndex)
             }
         }
@@ -430,33 +429,64 @@ fun ExploreScreen(
                     }
                 }
 
-                LazyRow(
-                    state = categoryRowState,
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 1.dp, bottom = 7.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    itemsIndexed(
-                        items = boardTabs,
-                        key = { _, board -> board.slug.ifBlank { "__all__" } },
-                    ) { index, board ->
-                        val isSelected = index == visualTabIndex
-                        ExploreCategoryTab(
-                            board = board,
-                            selected = isSelected,
-                            onClick = {
-                                viewModel.selectCategory(board.slug)
-                                coroutineScope.launch {
-                                    if (abs(index - pagerState.currentPage) <= 1) {
-                                        pagerState.animateScrollToPage(index)
-                                    } else {
-                                        pagerState.scrollToPage(index)
+                    LazyRow(
+                        state = categoryRowState,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(start = 14.dp, end = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        itemsIndexed(
+                            items = boardTabs,
+                            key = { _, board -> board.slug.ifBlank { "__all__" } },
+                        ) { index, board ->
+                            val isSelected = index == visualTabIndex
+                            ExploreCategoryTab(
+                                board = board,
+                                selected = isSelected,
+                                onClick = {
+                                    viewModel.selectCategory(board.slug)
+                                    coroutineScope.launch {
+                                        if (abs(index - pagerState.currentPage) <= 1) {
+                                            pagerState.animateScrollToPage(index)
+                                        } else {
+                                            pagerState.scrollToPage(index)
+                                        }
                                     }
-                                }
-                            },
+                                },
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 10.dp)
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f))
+                            .pulseBouncyClickable(
+                                pressedScale = NodePulseMotion.chipPressScale,
+                                role = Role.Button,
+                                onClickLabel = "定制频道排序与显示",
+                                showRipple = false,
+                                onClick = {
+                                    viewModel.syncHomepageCategories(surfaceError = false)
+                                    showCategoryReorderSheet = true
+                                },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Tune,
+                            contentDescription = "定制频道排序",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
                         )
                     }
                 }
@@ -533,6 +563,28 @@ fun ExploreScreen(
                 )
             },
             onSelectCategory = selectAndScrollToCategory,
+        )
+    }
+
+    if (showCategoryReorderSheet) {
+        val reorderCandidates = remember(
+            uiState.categories,
+            uiState.homepageCategoryOrder,
+            uiState.pinnedCategorySlugs,
+        ) {
+            ExploreViewModel.buildCustomizableCategoriesForReorder(
+                categories = uiState.categories,
+                homepageCategoryOrder = uiState.homepageCategoryOrder,
+                pinnedCategorySlugs = uiState.pinnedCategorySlugs,
+            )
+        }
+        CategoryReorderSheet(
+            initialCategories = reorderCandidates,
+            isSyncing = uiState.isSyncingCategories,
+            isSaving = uiState.isSavingCategories,
+            onDismiss = { showCategoryReorderSheet = false },
+            onSave = viewModel::saveCategoryPreferences,
+            onReset = viewModel::resetCategoryPreferences,
         )
     }
 

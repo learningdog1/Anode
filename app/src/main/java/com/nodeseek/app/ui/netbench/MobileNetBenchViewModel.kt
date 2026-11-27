@@ -15,9 +15,18 @@ import com.nodeseek.app.data.netbench.NetBenchNetworkBridge
 import com.nodeseek.app.data.netbench.NetBenchTargetResolver
 import com.nodeseek.app.data.netbench.SystemDefaultNetworkBridge
 import com.nodeseek.app.data.netbench.TcpPingRunner
+import com.nodeseek.app.data.netbench.TracerouteRunner
 import com.nodeseek.app.data.radar.AppContainerHost
+import com.nodeseek.app.domain.baseline.BaselineDiffEngine
+import com.nodeseek.app.domain.baseline.BaselineDiffReport
+import com.nodeseek.app.domain.baseline.BaselineSnapshotExtractor
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineSnapshot
+import com.nodeseek.app.domain.baseline.NoOpBenchmarkBaselineRepository
+import com.nodeseek.app.domain.netbench.BackboneRouteTagger
 import com.nodeseek.app.domain.netbench.ClientEgressSnapshot
 import com.nodeseek.app.domain.netbench.ClientNetworkInfo
+import com.nodeseek.app.domain.netbench.HopLossClassification
 import com.nodeseek.app.domain.netbench.HttpLatencyResult
 import com.nodeseek.app.domain.netbench.IcmpPingConfig
 import com.nodeseek.app.domain.netbench.IcmpPingProgress
@@ -36,19 +45,29 @@ import com.nodeseek.app.domain.netbench.NetBenchTargetParser
 import com.nodeseek.app.domain.netbench.NetBenchUploadedImages
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.ResolvedTarget
+import com.nodeseek.app.domain.netbench.ReverseTracerouteCodec
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPingProgress
+import com.nodeseek.app.domain.netbench.TracerouteConfig
+import com.nodeseek.app.domain.netbench.TracerouteDirection
+import com.nodeseek.app.domain.netbench.TracerouteProgress
+import com.nodeseek.app.domain.netbench.TracerouteSummary
 import com.nodeseek.app.domain.repository.ImageHostRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
+import com.nodeseek.app.domain.ssh.HostKeyInfo
+import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
 import com.nodeseek.app.domain.ssh.SshServerProfile
 import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.ui.ssh.LiteSshSessionManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,7 +77,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -70,6 +92,8 @@ enum class NetBenchPhase(val label: String) {
     RESOLVING("正在解析目标地址…"),
     ICMP_PING("正在进行 ICMP Ping 延迟探测…"),
     TCPING("正在进行 TCPing 延迟探测…"),
+    TRACEROUTE("正在执行去程路由追踪 (MTR)…"),
+    REVERSE_TRACEROUTE("正在执行回程路由追踪 (VPS → 本机)…"),
     HTTP_PROBE("正在探测 HTTP 延迟…"),
     IP_INTELLIGENCE("正在查询 IP 归属与原生/广播属性…"),
     IPERF_DOWNLOAD("正在进行 iperf3 下载测速 (-R)…"),
@@ -78,6 +102,15 @@ enum class NetBenchPhase(val label: String) {
     CANCELLED("已停止测机"),
     ERROR("测机出错"),
 }
+
+@Immutable
+data class PendingReverseHostKeyMismatch(
+    val serverId: String,
+    val serverAlias: String,
+    val expectedFingerprint: String,
+    val actualHostKey: HostKeyInfo,
+    val mismatchServerId: String = serverId,
+)
 
 @Immutable
 data class MobileNetBenchUiState(
@@ -124,6 +157,21 @@ data class MobileNetBenchUiState(
     val clientEgress: ClientEgressSnapshot? = null,
     val isRefreshingEgress: Boolean = false,
     val testViaProxy: Boolean = false,
+    val enableTraceroute: Boolean = false,
+    val enableReverseTraceroute: Boolean = false,
+    val tracerouteProbesPerHop: Int = TracerouteConfig.DEFAULT_PROBES_PER_HOP,
+    val tracerouteProgress: TracerouteProgress? = null,
+    val isRunningReverseTrace: Boolean = false,
+    val reverseTracerouteResult: TracerouteSummary? = null,
+    val reverseTraceError: String? = null,
+    val selectedReverseServerId: String? = null,
+    val pendingReverseTraceHostKeyMismatch: PendingReverseHostKeyMismatch? = null,
+    val savedBaselines: List<BenchmarkBaselineSnapshot> = emptyList(),
+    val matchingBaselines: List<BenchmarkBaselineSnapshot> = emptyList(),
+    val selectedBaselineIdForCompare: String? = null,
+    val activeBaselineDiff: BaselineDiffReport? = null,
+    val showSaveBaselineDialog: Boolean = false,
+    val showBaselineCompareSheet: Boolean = false,
 ) {
     val effectiveTcpPort: Int
         get() = tcpPortText.trim().toIntOrNull()?.coerceIn(1, 65535) ?: TcpPingConfig.DEFAULT_PORT
@@ -137,10 +185,18 @@ data class MobileNetBenchUiState(
             httpLatencyResult != null ||
             ipIntelligence != null ||
             iperfDownloadProgress != null ||
-            iperfUploadProgress != null
+            iperfUploadProgress != null ||
+            (enableTraceroute && tracerouteProgress != null) ||
+            (enableReverseTraceroute && reverseTracerouteResult != null)
 
     val hasAnyModuleEnabled: Boolean
-        get() = enableIcmpPing || enableTcpPing || enableHttpProbe || enableIpCheck || enableIperf3
+        get() = enableIcmpPing ||
+            enableTcpPing ||
+            enableHttpProbe ||
+            enableIpCheck ||
+            enableIperf3 ||
+            enableTraceroute ||
+            enableReverseTraceroute
 
     val canStart: Boolean
         get() = targetInput.isNotBlank() && hasAnyModuleEnabled && !isRunning
@@ -170,6 +226,13 @@ class NetBenchSessionController(
     initialMarkdownStyle: NetBenchMarkdownStyle? = null,
     private val sshVaultRepository: SshVaultRepository? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val tracerouteRunner: TracerouteRunner = TracerouteRunner(
+        resolver = targetResolver,
+        networkBridge = networkBridge,
+        ipIntelligenceClient = ipIntelligenceClient,
+    ),
+    private val sshSessionManager: LiteSshSessionManager? = null,
+    private val benchmarkBaselineRepository: BenchmarkBaselineRepository = NoOpBenchmarkBaselineRepository,
 ) {
     private val persistMarkdownStylePreference: Boolean = initialMarkdownStyle == null
 
@@ -180,6 +243,8 @@ class NetBenchSessionController(
             maskTargetIpInReport = historyStore.preferences.value.maskTargetIp,
             includeClientNetworkInReport = historyStore.preferences.value.includeClientNetwork,
             includeReportImages = historyStore.preferences.value.includeReportImages,
+            enableTraceroute = historyStore.preferences.value.enableForwardTraceroute,
+            enableReverseTraceroute = historyStore.preferences.value.enableReverseTraceroute,
             recentTargets = historyStore.entries.value,
             vaultServers = sshVaultRepository?.serversFlow?.value.orEmpty(),
         ),
@@ -192,15 +257,51 @@ class NetBenchSessionController(
     private var activeJob: Job? = null
     private var egressJob: Job? = null
     private var imageUploadJob: Job? = null
+    private var reverseTraceJob: Job? = null
+    private val reverseTraceGeneration = AtomicLong(0L)
     private val benchmarkGeneration = AtomicLong(0L)
     private val imageUploadGeneration = AtomicLong(0L)
     private val uploadedUrlCache = ConcurrentHashMap<String, String>()
     private var cachedEgressSnapshot: ClientEgressSnapshot? = null
     private var lastAppliedInitialTarget: String = initialTarget.trim()
+    @Volatile
+    private var userToggledForwardTrace: Boolean = false
+    @Volatile
+    private var userToggledReverseTrace: Boolean = false
 
     init {
         scope.launch {
             historyStore.reload()
+        }
+        scope.launch {
+            benchmarkBaselineRepository.ensureLoaded()
+        }
+        scope.launch {
+            benchmarkBaselineRepository.baselinesFlow.collect { baselines ->
+                _uiState.update { state ->
+                    val matching = computeMatchingBaselines(state, baselines)
+                    val updatedDiff = if (state.showBaselineCompareSheet) {
+                        val selected = baselines.firstOrNull { it.id == state.selectedBaselineIdForCompare }
+                            ?: matching.firstOrNull()
+                            ?: baselines.firstOrNull()
+                        selected?.let {
+                            val currentSnap = BaselineSnapshotExtractor.fromNetBenchReport(
+                                report = state.toNetBenchReport(),
+                                id = "current_netbench",
+                                label = "当前实测",
+                            )
+                            BaselineDiffEngine.compare(it, currentSnap)
+                        }
+                    } else {
+                        state.activeBaselineDiff
+                    }
+                    state.copy(
+                        savedBaselines = baselines,
+                        matchingBaselines = matching,
+                        activeBaselineDiff = updatedDiff,
+                    )
+                }
+            }
         }
         scope.launch {
             historyStore.entries.collect { entries ->
@@ -220,10 +321,14 @@ class NetBenchSessionController(
             historyStore.preferences.collect { prefs ->
                 _uiState.update { state ->
                     val targetStyle = if (persistMarkdownStylePreference) prefs.markdownStyle else state.markdownStyle
+                    val targetForward = if (userToggledForwardTrace) state.enableTraceroute else prefs.enableForwardTraceroute
+                    val targetReverse = if (userToggledReverseTrace) state.enableReverseTraceroute else prefs.enableReverseTraceroute
                     if (state.maskTargetIpInReport == prefs.maskTargetIp &&
                         state.includeClientNetworkInReport == prefs.includeClientNetwork &&
                         state.includeReportImages == prefs.includeReportImages &&
-                        state.markdownStyle == targetStyle
+                        state.markdownStyle == targetStyle &&
+                        state.enableTraceroute == targetForward &&
+                        state.enableReverseTraceroute == targetReverse
                     ) {
                         state
                     } else {
@@ -232,6 +337,8 @@ class NetBenchSessionController(
                             maskTargetIpInReport = prefs.maskTargetIp,
                             includeClientNetworkInReport = prefs.includeClientNetwork,
                             includeReportImages = prefs.includeReportImages,
+                            enableTraceroute = targetForward,
+                            enableReverseTraceroute = targetReverse,
                         ).withRegeneratedMarkdown()
                     }
                 }
@@ -375,6 +482,60 @@ class NetBenchSessionController(
 
     fun toggleIpCheck(enabled: Boolean) {
         _uiState.update { it.copy(enableIpCheck = enabled) }
+    }
+
+    fun toggleTraceroute(enabled: Boolean) {
+        userToggledForwardTrace = true
+        _uiState.update { state ->
+            state.copy(
+                enableTraceroute = enabled,
+                tracerouteProgress = if (enabled) state.tracerouteProgress else null,
+            ).withRegeneratedMarkdown()
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(enableForwardTraceroute = enabled) }
+        }
+    }
+
+    fun toggleReverseTraceroute(enabled: Boolean) {
+        userToggledReverseTrace = true
+        if (!enabled) {
+            reverseTraceGeneration.incrementAndGet()
+            reverseTraceJob?.cancel()
+            reverseTraceJob = null
+        }
+        _uiState.update { state ->
+            state.copy(
+                enableReverseTraceroute = enabled,
+                isRunningReverseTrace = if (enabled) state.isRunningReverseTrace else false,
+                reverseTracerouteResult = if (enabled) state.reverseTracerouteResult else null,
+                reverseTraceError = if (enabled) state.reverseTraceError else null,
+                pendingReverseTraceHostKeyMismatch = if (enabled) state.pendingReverseTraceHostKeyMismatch else null,
+            ).withRegeneratedMarkdown()
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(enableReverseTraceroute = enabled) }
+        }
+    }
+
+    fun selectReverseServer(serverId: String?) {
+        _uiState.update {
+            it.copy(
+                selectedReverseServerId = serverId,
+                reverseTraceError = null,
+            )
+        }
+    }
+
+    fun updateTracerouteProbesPerHop(count: Int) {
+        _uiState.update {
+            it.copy(
+                tracerouteProbesPerHop = count.coerceIn(
+                    TracerouteConfig.MIN_PROBES_PER_HOP,
+                    TracerouteConfig.MAX_PROBES_PER_HOP,
+                ),
+            )
+        }
     }
 
     fun toggleIperf3(enabled: Boolean) {
@@ -597,6 +758,7 @@ class NetBenchSessionController(
             state.copy(
                 targetInput = selection.host,
                 tcpPortText = selection.port.toString(),
+                selectedReverseServerId = server.id,
                 errorMessage = null,
             )
         }
@@ -620,6 +782,9 @@ class NetBenchSessionController(
 
     fun clearResults() {
         stopBenchmark(silent = true)
+        reverseTraceGeneration.incrementAndGet()
+        reverseTraceJob?.cancel()
+        reverseTraceJob = null
         cancelActiveImageUpload()
         _uiState.update { state ->
             state.copy(
@@ -631,6 +796,11 @@ class NetBenchSessionController(
                 ipIntelligence = null,
                 iperfDownloadProgress = null,
                 iperfUploadProgress = null,
+                tracerouteProgress = null,
+                isRunningReverseTrace = false,
+                reverseTracerouteResult = null,
+                reverseTraceError = null,
+                pendingReverseTraceHostKeyMismatch = null,
                 isUploadingReportImages = false,
                 reportImagesProgressText = null,
                 reportImagesError = null,
@@ -640,6 +810,404 @@ class NetBenchSessionController(
                 generatedMarkdown = "",
             )
         }
+    }
+
+    fun runForwardTracerouteOnly() {
+        val snapshot = _uiState.value
+        if (snapshot.isRunning) return
+        val rawInput = snapshot.targetInput.trim()
+        val parsed = NetBenchTargetParser.parse(rawInput)
+        if (parsed == null) {
+            val msg = "请输入有效的 IPv4、IPv6 或域名（支持 host:port）"
+            _uiState.update { it.copy(errorMessage = msg) }
+            _snackbarChannel.trySend(msg)
+            return
+        }
+
+        val runGen = benchmarkGeneration.incrementAndGet()
+        activeJob?.cancel()
+        cancelActiveImageUpload()
+        val effectiveTcpPort = parsed.effectivePort(snapshot.effectiveTcpPort)
+        userToggledForwardTrace = true
+
+        _uiState.update {
+            it.copy(
+                enableTraceroute = true,
+                isRunning = true,
+                activePhase = NetBenchPhase.TRACEROUTE,
+                tracerouteProgress = null,
+                errorMessage = null,
+            )
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(enableForwardTraceroute = true) }
+        }
+
+        activeJob = scope.launch {
+            try {
+                val resolvedResult = targetResolver.resolve(
+                    rawTarget = rawInput,
+                    defaultPort = effectiveTcpPort,
+                    preferredFamily = snapshot.preferredFamily,
+                    useProxy = snapshot.testViaProxy,
+                )
+                val endpoint = resolvedResult.getOrElse { err ->
+                    if (benchmarkGeneration.get() == runGen) {
+                        val errMsg = err.message ?: "无法解析目标主机"
+                        _uiState.update {
+                            it.copy(
+                                isRunning = false,
+                                activePhase = NetBenchPhase.ERROR,
+                                errorMessage = errMsg,
+                            )
+                        }
+                        _snackbarChannel.trySend(errMsg)
+                    }
+                    return@launch
+                }
+                _uiState.update { it.copy(resolvedTarget = endpoint.resolvedTarget) }
+
+                val config = TracerouteConfig(
+                    target = endpoint.resolvedTarget.resolvedIp,
+                    probesPerHop = snapshot.tracerouteProbesPerHop,
+                    preferredFamily = snapshot.preferredFamily,
+                    useProxy = snapshot.testViaProxy,
+                    tcpProbePort = effectiveTcpPort,
+                )
+                tracerouteRunner.run(config, preResolvedEndpoint = endpoint).collect { progress ->
+                    val corrected = progress.copy(resolvedTarget = endpoint.resolvedTarget)
+                    _uiState.update { state ->
+                        state.copy(tracerouteProgress = corrected).withRegeneratedMarkdown()
+                    }
+                }
+                if (benchmarkGeneration.get() == runGen) {
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = NetBenchPhase.COMPLETED,
+                        ).withRegeneratedMarkdown()
+                    }
+                }
+            } catch (ce: CancellationException) {
+                if (benchmarkGeneration.get() == runGen) {
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
+                        ).withRegeneratedMarkdown()
+                    }
+                }
+                throw ce
+            } catch (t: Throwable) {
+                if (benchmarkGeneration.get() == runGen) {
+                    val msg = t.message ?: "路由追踪失败"
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunning = false,
+                            activePhase = NetBenchPhase.ERROR,
+                            errorMessage = msg,
+                        ).withRegeneratedMarkdown()
+                    }
+                    _snackbarChannel.trySend(msg)
+                }
+            }
+        }
+    }
+
+    fun runReverseTraceroute(
+        serverProfile: SshServerProfile,
+        allowHostKeyMismatchOverride: Boolean = false,
+        mismatchOverrideServerId: String? = null,
+    ) {
+        val manager = sshSessionManager
+        if (manager == null) {
+            val msg = "SSH 会话管理器未就绪，请先前往「轻量 SSH」页面配置主机"
+            _uiState.update { it.copy(reverseTraceError = msg) }
+            _snackbarChannel.trySend(msg)
+            return
+        }
+
+        val revGen = reverseTraceGeneration.incrementAndGet()
+        reverseTraceJob?.cancel()
+        userToggledReverseTrace = true
+        _uiState.update {
+            it.copy(
+                enableReverseTraceroute = true,
+                isRunningReverseTrace = true,
+                selectedReverseServerId = serverProfile.id,
+                reverseTraceError = null,
+                pendingReverseTraceHostKeyMismatch = null,
+            )
+        }
+        scope.launch {
+            historyStore.updatePreferences { it.copy(enableReverseTraceroute = true) }
+        }
+
+        reverseTraceJob = scope.launch {
+            executeReverseTraceroute(
+                manager = manager,
+                serverProfile = serverProfile,
+                revGen = revGen,
+                allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                mismatchOverrideServerId = mismatchOverrideServerId,
+                emitCompletionSnackbar = true,
+            )
+        }
+    }
+
+    private suspend fun executeReverseTraceroute(
+        manager: LiteSshSessionManager,
+        serverProfile: SshServerProfile,
+        revGen: Long,
+        allowHostKeyMismatchOverride: Boolean = false,
+        mismatchOverrideServerId: String? = null,
+        emitCompletionSnackbar: Boolean = false,
+    ) {
+        try {
+            var egressSnapshot = _uiState.value.clientEgress
+            if (egressSnapshot?.directNetwork?.rawIp.isNullOrBlank()) {
+                val refreshed = runCatching { ipIntelligenceClient.detectClientEgress() }.getOrNull()
+                if (refreshed != null) {
+                    egressSnapshot = refreshed
+                    cachedEgressSnapshot = refreshed
+                    _uiState.update { state ->
+                        val effective = refreshed.activeNetworkForTest(state.testViaProxy)
+                        state.copy(
+                            clientEgress = refreshed,
+                            clientNetwork = effective ?: state.clientNetwork,
+                        )
+                    }
+                }
+            }
+
+            val rawClientIp = egressSnapshot?.directNetwork?.rawIp
+            val validatedIp = ReverseTracerouteCodec.validateClientPublicIp(rawClientIp).getOrElse { err ->
+                if (reverseTraceGeneration.get() == revGen) {
+                    val msg = err.message ?: "无法获取本机真实公网 IP"
+                    _uiState.update {
+                        it.copy(
+                            isRunningReverseTrace = false,
+                            reverseTraceError = msg,
+                        )
+                    }
+                    _snackbarChannel.trySend(msg)
+                }
+                return
+            }
+
+            val command = ReverseTracerouteCodec.buildShellCommand(validatedIp)
+            val cmdResult = manager.runOneShotCommand(
+                profile = serverProfile,
+                command = command,
+                autoRespondPrompts = false,
+                allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                mismatchOverrideServerId = mismatchOverrideServerId,
+                timeoutMillis = REVERSE_TRACE_SSH_TIMEOUT_MILLIS,
+            )
+
+            cmdResult.fold(
+                onSuccess = { outcome ->
+                    val parsedSummary = ReverseTracerouteCodec.parseOutput(
+                        plainOutput = outcome.plainOutput,
+                        targetIp = validatedIp,
+                        sourceLabel = serverProfile.displayName,
+                    )
+                    val enrichedSummary = enrichReverseSummaryHops(parsedSummary)
+                    if (reverseTraceGeneration.get() == revGen) {
+                        _uiState.update { state ->
+                            state.copy(
+                                isRunningReverseTrace = false,
+                                reverseTracerouteResult = enrichedSummary,
+                                reverseTraceError = enrichedSummary.errorMessage,
+                            ).withRegeneratedMarkdown()
+                        }
+                        if (emitCompletionSnackbar && enrichedSummary.errorMessage == null) {
+                            _snackbarChannel.trySend("已完成「${serverProfile.displayName}」反向回程路由追踪")
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    if (reverseTraceGeneration.get() != revGen) return@fold
+                    if (err is SshHostKeyMismatchException) {
+                        val resolvedMismatchId = err.serverId ?: serverProfile.id
+                        val resolvedAlias = err.serverAlias
+                            ?: _uiState.value.vaultServers.firstOrNull { it.id == resolvedMismatchId }?.displayName
+                            ?: serverProfile.displayName
+                        _uiState.update {
+                            it.copy(
+                                isRunningReverseTrace = false,
+                                reverseTraceError = "检测到主机密钥变更，已阻断连接",
+                                pendingReverseTraceHostKeyMismatch = PendingReverseHostKeyMismatch(
+                                    serverId = serverProfile.id,
+                                    serverAlias = resolvedAlias,
+                                    expectedFingerprint = err.expectedFingerprint,
+                                    actualHostKey = err.actualHostKey,
+                                    mismatchServerId = resolvedMismatchId,
+                                ),
+                            )
+                        }
+                    } else {
+                        val msg = err.message?.takeIf { it.isNotBlank() } ?: "反向回程追踪失败"
+                        _uiState.update {
+                            it.copy(
+                                isRunningReverseTrace = false,
+                                reverseTraceError = msg,
+                            )
+                        }
+                        if (emitCompletionSnackbar) {
+                            _snackbarChannel.trySend(msg)
+                        }
+                    }
+                },
+            )
+        } catch (ce: CancellationException) {
+            if (reverseTraceGeneration.get() == revGen) {
+                _uiState.update { it.copy(isRunningReverseTrace = false) }
+            }
+            throw ce
+        } catch (t: Throwable) {
+            if (reverseTraceGeneration.get() == revGen) {
+                val msg = t.message?.takeIf { it.isNotBlank() } ?: "反向回程追踪异常"
+                _uiState.update {
+                    it.copy(
+                        isRunningReverseTrace = false,
+                        reverseTraceError = msg,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun resolveReverseServerForBenchmark(
+        state: MobileNetBenchUiState,
+        rawInput: String,
+        resolvedIp: String?,
+    ): SshServerProfile? {
+        val servers = state.vaultServers
+        if (servers.isEmpty()) return null
+        state.selectedReverseServerId?.let { id ->
+            servers.firstOrNull { it.id == id }?.let { return it }
+        }
+        val normInput = normalizeHostForVaultMatch(rawInput)
+        val normResolved = resolvedIp?.let(::normalizeHostForVaultMatch).orEmpty()
+        return servers.firstOrNull { server ->
+            val normServer = normalizeHostForVaultMatch(server.resolvableNetBenchHost())
+            normServer.isNotEmpty() && (normServer == normInput || (normResolved.isNotEmpty() && normServer == normResolved))
+        }
+    }
+
+    fun confirmTrustReverseTraceHostKey() {
+        val mismatch = _uiState.value.pendingReverseTraceHostKeyMismatch ?: return
+        val vault = sshVaultRepository ?: return
+        val server = _uiState.value.vaultServers.firstOrNull { it.id == mismatch.serverId } ?: return
+        _uiState.update { it.copy(pendingReverseTraceHostKeyMismatch = null) }
+        scope.launch {
+            vault.updateHostKeyFingerprint(
+                serverId = mismatch.mismatchServerId,
+                fingerprintSha256 = mismatch.actualHostKey.fingerprintSha256,
+                algorithm = mismatch.actualHostKey.algorithm,
+            )
+            val refreshed = vault.serversFlow.value.firstOrNull { it.id == server.id }
+                ?: server.copy(
+                    knownHostKeyFingerprint = if (mismatch.mismatchServerId == server.id) {
+                        mismatch.actualHostKey.fingerprintSha256
+                    } else {
+                        server.knownHostKeyFingerprint
+                    },
+                    knownHostKeyAlgorithm = if (mismatch.mismatchServerId == server.id) {
+                        mismatch.actualHostKey.algorithm
+                    } else {
+                        server.knownHostKeyAlgorithm
+                    },
+                )
+            runReverseTraceroute(
+                serverProfile = refreshed,
+                allowHostKeyMismatchOverride = false,
+                mismatchOverrideServerId = null,
+            )
+        }
+    }
+
+    fun dismissReverseTraceHostKeyMismatch() {
+        _uiState.update {
+            it.copy(
+                pendingReverseTraceHostKeyMismatch = null,
+                reverseTraceError = "已因主机密钥变更取消反向回程追踪",
+            )
+        }
+    }
+
+    private suspend fun enrichReverseSummaryHops(summary: TracerouteSummary): TracerouteSummary {
+        if (summary.hops.isEmpty()) return summary
+        val candidateIps = summary.hops
+            .asSequence()
+            .mapNotNull { hop ->
+                val ip = hop.ip ?: return@mapNotNull null
+                if (hop.isPrivateOrCgnat || BackboneRouteTagger.isPrivateOrCgnat(ip)) return@mapNotNull null
+                if (hop.asn != null && hop.countryCode != null) return@mapNotNull null
+                ip
+            }
+            .distinct()
+            .take(15)
+            .toList()
+        if (candidateIps.isEmpty()) return summary
+
+        val sem = Semaphore(4)
+        val intelMap = coroutineScope {
+            candidateIps.map { ip ->
+                async {
+                    sem.withPermit {
+                        val intel = runCatching {
+                            withTimeoutOrNull(2_000L) { ipIntelligenceClient.lookupTargetIp(ip) }
+                        }.getOrNull()
+                        ip to intel
+                    }
+                }
+            }.awaitAll().toMap()
+        }
+
+        val updatedHops = summary.hops.map { hop ->
+            val intel = hop.ip?.let { intelMap[it] }
+            if (intel == null) {
+                hop
+            } else {
+                val mergedAsn = hop.asn ?: intel.asn
+                val mergedOrg = hop.orgName ?: intel.orgName
+                val mergedIsp = hop.ispName ?: intel.ispName
+                val tags = BackboneRouteTagger.classifyHop(
+                    ip = hop.ip,
+                    asn = mergedAsn,
+                    rdns = hop.hostname,
+                    orgName = mergedOrg,
+                    ispName = mergedIsp,
+                )
+                hop.copy(
+                    asn = mergedAsn,
+                    orgName = mergedOrg,
+                    ispName = mergedIsp,
+                    countryCode = hop.countryCode ?: intel.countryCode,
+                    countryName = hop.countryName ?: intel.countryName,
+                    regionName = hop.regionName ?: intel.regionName,
+                    cityName = hop.cityName ?: intel.cityName,
+                    backboneTags = if (tags.isNotEmpty()) tags else hop.backboneTags,
+                )
+            }
+        }
+        val lossClassified = BackboneRouteTagger.classifyHopLosses(updatedHops)
+        val pathClass = BackboneRouteTagger.classifyPath(lossClassified, TracerouteDirection.REVERSE)
+        val peakHop = lossClassified.filter { it.sent > 0 && it.received > 0 }.maxByOrNull { it.lossPercent }
+        val hasRealLoss = lossClassified.any { it.lossClassification == HopLossClassification.REAL_PACKET_LOSS }
+        val hasRateLimitOnly = !hasRealLoss &&
+            lossClassified.any { it.lossClassification == HopLossClassification.INTERMEDIATE_RATE_LIMIT }
+        return summary.copy(
+            hops = lossClassified,
+            peakHopLossPercent = peakHop?.lossPercent ?: 0.0,
+            peakLossHopNumber = peakHop?.takeIf { it.lossPercent > 0.0 }?.hopNumber,
+            hasRealPacketLoss = hasRealLoss,
+            hasIntermediateRateLimitOnly = hasRateLimitOnly,
+            dominantBackboneTags = pathClass.dominantTags,
+            routeSignature = pathClass.routeSignature,
+        )
     }
 
     fun startBenchmark() {
@@ -653,7 +1221,7 @@ class NetBenchSessionController(
             return
         }
         if (!snapshot.hasAnyModuleEnabled) {
-            val msg = "请至少开启一项测机模块（Ping / TCPing / IP 鉴定 / iperf3）"
+            val msg = "请至少开启一项测机模块（Ping / TCPing / 去程 MTR / 回程 MTR / IP 鉴定 / iperf3）"
             _uiState.update { it.copy(errorMessage = msg) }
             _snackbarChannel.trySend(msg)
             return
@@ -661,6 +1229,9 @@ class NetBenchSessionController(
 
         val runGen = benchmarkGeneration.incrementAndGet()
         activeJob?.cancel()
+        reverseTraceGeneration.incrementAndGet()
+        reverseTraceJob?.cancel()
+        reverseTraceJob = null
         cancelActiveImageUpload()
         val effectiveTcpPort = parsed.effectivePort(snapshot.effectiveTcpPort)
         val effectiveIperfPort = snapshot.effectiveIperfPort
@@ -677,6 +1248,11 @@ class NetBenchSessionController(
                 ipIntelligence = null,
                 iperfDownloadProgress = null,
                 iperfUploadProgress = null,
+                tracerouteProgress = null,
+                isRunningReverseTrace = false,
+                reverseTracerouteResult = null,
+                reverseTraceError = null,
+                pendingReverseTraceHostKeyMismatch = null,
                 isUploadingReportImages = false,
                 reportImagesProgressText = null,
                 reportImagesError = null,
@@ -774,6 +1350,74 @@ class NetBenchSessionController(
                     }
                 }
 
+                // Step 1c: Optional Forward Visual Traceroute / MTR (before iperf3 saturation)
+                if (snapshot.enableTraceroute) {
+                    _uiState.update { it.copy(activePhase = NetBenchPhase.TRACEROUTE) }
+                    val traceConfig = TracerouteConfig(
+                        target = endpoint.resolvedTarget.resolvedIp,
+                        probesPerHop = snapshot.tracerouteProbesPerHop,
+                        preferredFamily = snapshot.preferredFamily,
+                        useProxy = snapshot.testViaProxy,
+                        tcpProbePort = effectiveTcpPort,
+                    )
+                    tracerouteRunner.run(traceConfig, preResolvedEndpoint = endpoint).collect { progress ->
+                        val corrected = progress.copy(resolvedTarget = endpoint.resolvedTarget)
+                        _uiState.update { state ->
+                            state.copy(tracerouteProgress = corrected).withRegeneratedMarkdown()
+                        }
+                    }
+                }
+
+                // Collect local egress carrier info if ready (needed before Reverse MTR & Markdown)
+                clientEgressDeferred?.await()?.let { detected ->
+                    cachedEgressSnapshot = detected
+                    _uiState.update { state ->
+                        val effective = detected.activeNetworkForTest(state.testViaProxy)
+                        state.copy(
+                            clientEgress = detected,
+                            clientNetwork = effective ?: state.clientNetwork,
+                        ).withRegeneratedMarkdown()
+                    }
+                }
+
+                // Step 1d: Optional Reverse MTR via SSH VPS (before iperf3 link saturation)
+                if (snapshot.enableReverseTraceroute) {
+                    val manager = sshSessionManager
+                    val targetServer = resolveReverseServerForBenchmark(
+                        state = _uiState.value,
+                        rawInput = rawInput,
+                        resolvedIp = endpoint.resolvedTarget.resolvedIp,
+                    )
+                    when {
+                        manager == null -> {
+                            val msg = "SSH 会话管理器未就绪，请先前往「轻量 SSH」页面配置主机"
+                            _uiState.update { it.copy(reverseTraceError = msg) }
+                        }
+                        targetServer == null -> {
+                            val msg = "未匹配到对应的 SSH 服务器，请在「回程 MTR」开关下选择要执行回程追踪的 VPS"
+                            _uiState.update { it.copy(reverseTraceError = msg) }
+                        }
+                        else -> {
+                            val revGen = reverseTraceGeneration.incrementAndGet()
+                            _uiState.update {
+                                it.copy(
+                                    activePhase = NetBenchPhase.REVERSE_TRACEROUTE,
+                                    isRunningReverseTrace = true,
+                                    selectedReverseServerId = targetServer.id,
+                                    reverseTraceError = null,
+                                    pendingReverseTraceHostKeyMismatch = null,
+                                )
+                            }
+                            executeReverseTraceroute(
+                                manager = manager,
+                                serverProfile = targetServer,
+                                revGen = revGen,
+                                emitCompletionSnackbar = false,
+                            )
+                        }
+                    }
+                }
+
                 // Step 2: Optional HTTP/HTTPS Latency Probe
                 if (snapshot.enableHttpProbe) {
                     _uiState.update { it.copy(activePhase = NetBenchPhase.HTTP_PROBE) }
@@ -795,18 +1439,6 @@ class NetBenchSessionController(
                     val intel = ipIntelligenceClient.lookupTargetIp(endpoint.resolvedTarget.resolvedIp)
                     _uiState.update { state ->
                         state.copy(ipIntelligence = intel).withRegeneratedMarkdown()
-                    }
-                }
-
-                // Collect local egress carrier info if ready
-                clientEgressDeferred?.await()?.let { detected ->
-                    cachedEgressSnapshot = detected
-                    _uiState.update { state ->
-                        val effective = detected.activeNetworkForTest(state.testViaProxy)
-                        state.copy(
-                            clientEgress = detected,
-                            clientNetwork = effective ?: state.clientNetwork,
-                        ).withRegeneratedMarkdown()
                     }
                 }
 
@@ -946,7 +1578,11 @@ class NetBenchSessionController(
 
     fun stopBenchmark(silent: Boolean = false) {
         val wasRunning = activeJob?.isActive == true
+        val wasInReversePhase = _uiState.value.activePhase == NetBenchPhase.REVERSE_TRACEROUTE
         benchmarkGeneration.incrementAndGet()
+        if (wasInReversePhase) {
+            reverseTraceGeneration.incrementAndGet()
+        }
         activeJob?.cancel()
         activeJob = null
         if (silent) {
@@ -955,6 +1591,7 @@ class NetBenchSessionController(
         _uiState.update { state ->
             state.copy(
                 isRunning = false,
+                isRunningReverseTrace = if (wasInReversePhase) false else state.isRunningReverseTrace,
                 activePhase = if (state.hasAnyResult) NetBenchPhase.CANCELLED else NetBenchPhase.IDLE,
             ).withRegeneratedMarkdown()
         }
@@ -1125,6 +1762,149 @@ class NetBenchSessionController(
         }
     }
 
+    // ── Purchase Baseline & Before-vs-After Comparison (R7) ───────────────────────────────
+
+    fun openSaveBaselineDialog() {
+        if (!_uiState.value.hasAnyResult) {
+            _snackbarChannel.trySend("请先完成一次测机后再保存基线")
+            return
+        }
+        _uiState.update { it.copy(showSaveBaselineDialog = true) }
+    }
+
+    fun dismissSaveBaselineDialog() {
+        _uiState.update { it.copy(showSaveBaselineDialog = false) }
+    }
+
+    fun saveCurrentAsBaseline(
+        label: String = "",
+        notes: String = "",
+    ) {
+        val state = _uiState.value
+        if (!state.hasAnyResult) return
+        val matchedServerId = state.selectedReverseServerId ?: state.vaultServers.firstOrNull { server ->
+            val normTarget = NetBenchTargetParser.parse(state.targetInput)?.host?.lowercase()
+            normTarget != null && server.host.trim().equals(normTarget, ignoreCase = true)
+        }?.id
+        val snapshot = BaselineSnapshotExtractor.fromNetBenchReport(
+            report = state.toNetBenchReport(),
+            id = java.util.UUID.randomUUID().toString(),
+            label = label.trim().ifBlank { null },
+            serverId = matchedServerId,
+        ).copy(notes = notes.trim())
+
+        _uiState.update { it.copy(showSaveBaselineDialog = false) }
+        scope.launch {
+            val saved = benchmarkBaselineRepository.saveBaseline(snapshot)
+            _snackbarChannel.trySend("已保存购入基线「${saved.label}」")
+        }
+    }
+
+    fun openBaselineCompareSheet(baselineId: String? = null) {
+        val state = _uiState.value
+        if (!state.hasAnyResult) {
+            _snackbarChannel.trySend("请先完成一次测机后再对比基线")
+            return
+        }
+        val all = benchmarkBaselineRepository.baselinesFlow.value
+        val matching = computeMatchingBaselines(state, all)
+        val chosen = baselineId?.let { id -> all.firstOrNull { it.id == id } }
+            ?: matching.firstOrNull()
+            ?: all.firstOrNull()
+        if (chosen == null) {
+            _snackbarChannel.trySend("暂无已保存的购入基线")
+            return
+        }
+        val currentSnap = BaselineSnapshotExtractor.fromNetBenchReport(
+            report = state.toNetBenchReport(),
+            id = "current_netbench",
+            label = "当前实测",
+            serverId = chosen.serverId,
+        )
+        val diff = BaselineDiffEngine.compare(chosen, currentSnap)
+        _uiState.update {
+            it.copy(
+                savedBaselines = all,
+                matchingBaselines = matching,
+                selectedBaselineIdForCompare = chosen.id,
+                activeBaselineDiff = diff,
+                showBaselineCompareSheet = true,
+            )
+        }
+    }
+
+    fun dismissBaselineCompareSheet() {
+        _uiState.update { it.copy(showBaselineCompareSheet = false) }
+    }
+
+    fun selectBaselineForComparison(baselineId: String) {
+        val state = _uiState.value
+        val all = state.savedBaselines
+        val chosen = all.firstOrNull { it.id == baselineId } ?: return
+        val currentSnap = BaselineSnapshotExtractor.fromNetBenchReport(
+            report = state.toNetBenchReport(),
+            id = "current_netbench",
+            label = "当前实测",
+            serverId = chosen.serverId,
+        )
+        val diff = BaselineDiffEngine.compare(chosen, currentSnap)
+        _uiState.update {
+            it.copy(
+                selectedBaselineIdForCompare = chosen.id,
+                activeBaselineDiff = diff,
+            )
+        }
+    }
+
+    fun deleteBaseline(baselineId: String) {
+        scope.launch {
+            benchmarkBaselineRepository.deleteBaseline(baselineId)
+            val remaining = benchmarkBaselineRepository.baselinesFlow.value
+            val state = _uiState.value
+            val matching = computeMatchingBaselines(state, remaining)
+            val nextSelected = matching.firstOrNull() ?: remaining.firstOrNull()
+            val nextDiff = nextSelected?.let {
+                val currentSnap = BaselineSnapshotExtractor.fromNetBenchReport(
+                    report = state.toNetBenchReport(),
+                    id = "current_netbench",
+                    label = "当前实测",
+                    serverId = it.serverId,
+                )
+                BaselineDiffEngine.compare(it, currentSnap)
+            }
+            _uiState.update {
+                it.copy(
+                    savedBaselines = remaining,
+                    matchingBaselines = matching,
+                    selectedBaselineIdForCompare = nextSelected?.id,
+                    activeBaselineDiff = nextDiff,
+                    showBaselineCompareSheet = if (remaining.isEmpty()) false else it.showBaselineCompareSheet,
+                )
+            }
+            _snackbarChannel.trySend("已删除购入基线")
+        }
+    }
+
+    private fun computeMatchingBaselines(
+        state: MobileNetBenchUiState,
+        allBaselines: List<BenchmarkBaselineSnapshot>,
+    ): List<BenchmarkBaselineSnapshot> {
+        val hostCandidate = state.resolvedTarget?.displayHost?.takeIf { it.isNotBlank() }
+            ?: state.resolvedTarget?.resolvedIp?.takeIf { it.isNotBlank() }
+            ?: state.targetInput.trim().takeIf { it.isNotEmpty() }
+            ?: return emptyList()
+        val key = BaselineSnapshotExtractor.normalizeTargetKey(hostOrIp = hostCandidate)
+        val ipKey = state.resolvedTarget?.resolvedIp?.takeIf { it.isNotBlank() }?.let {
+            BaselineSnapshotExtractor.normalizeTargetKey(hostOrIp = it)
+        }
+        return allBaselines.filter { b ->
+            b.targetKey == key ||
+                (ipKey != null && b.targetKey == ipKey) ||
+                b.hostDisplay.equals(hostCandidate, ignoreCase = true) ||
+                (state.resolvedTarget?.resolvedIp != null && b.resolvedIp == state.resolvedTarget.resolvedIp)
+        }
+    }
+
     private fun MobileNetBenchUiState.toNetBenchReport(): NetBenchReport {
         val effectiveClientNet = clientEgress?.activeNetworkForTest(testViaProxy) ?: clientNetwork
         return NetBenchReport(
@@ -1140,6 +1920,8 @@ class NetBenchSessionController(
             iperfUploadResult = iperfUploadProgress?.finalResult,
             testedViaProxy = testViaProxy,
             proxyNetwork = clientEgress?.proxyNetwork,
+            forwardTraceroute = if (enableTraceroute) tracerouteProgress?.summary else null,
+            reverseTraceroute = if (enableReverseTraceroute) reverseTracerouteResult else null,
         )
     }
 
@@ -1183,6 +1965,7 @@ class NetBenchSessionController(
             generatedMarkdown = md,
             uploadedReportImages = resolvedImages,
             plannedReportCardCount = plannedCount,
+            matchingBaselines = computeMatchingBaselines(this, savedBaselines),
         )
     }
 
@@ -1197,6 +1980,10 @@ class NetBenchSessionController(
             count++
         }
         return count
+    }
+
+    companion object {
+        private const val REVERSE_TRACE_SSH_TIMEOUT_MILLIS = 60_000L
     }
 }
 
@@ -1221,6 +2008,13 @@ class MobileNetBenchViewModel(
     renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
     initialTarget: String = "",
     sshVaultRepository: SshVaultRepository? = null,
+    tracerouteRunner: TracerouteRunner = TracerouteRunner(
+        resolver = targetResolver,
+        networkBridge = networkBridge,
+        ipIntelligenceClient = ipIntelligenceClient,
+    ),
+    sshSessionManager: LiteSshSessionManager? = null,
+    benchmarkBaselineRepository: BenchmarkBaselineRepository = NoOpBenchmarkBaselineRepository,
 ) : ViewModel() {
 
     private val controller = NetBenchSessionController(
@@ -1239,6 +2033,9 @@ class MobileNetBenchViewModel(
         renderDispatcher = renderDispatcher,
         initialTarget = initialTarget,
         sshVaultRepository = sshVaultRepository,
+        tracerouteRunner = tracerouteRunner,
+        sshSessionManager = sshSessionManager,
+        benchmarkBaselineRepository = benchmarkBaselineRepository,
     )
 
     val uiState: StateFlow<MobileNetBenchUiState> = controller.uiState
@@ -1254,6 +2051,14 @@ class MobileNetBenchViewModel(
     fun toggleTcpPing(enabled: Boolean) = controller.toggleTcpPing(enabled)
     fun toggleHttpProbe(enabled: Boolean) = controller.toggleHttpProbe(enabled)
     fun toggleIpCheck(enabled: Boolean) = controller.toggleIpCheck(enabled)
+    fun toggleTraceroute(enabled: Boolean) = controller.toggleTraceroute(enabled)
+    fun toggleReverseTraceroute(enabled: Boolean) = controller.toggleReverseTraceroute(enabled)
+    fun selectReverseServer(serverId: String?) = controller.selectReverseServer(serverId)
+    fun updateTracerouteProbesPerHop(count: Int) = controller.updateTracerouteProbesPerHop(count)
+    fun runForwardTracerouteOnly() = controller.runForwardTracerouteOnly()
+    fun runReverseTraceroute(serverProfile: SshServerProfile) = controller.runReverseTraceroute(serverProfile)
+    fun confirmTrustReverseTraceHostKey() = controller.confirmTrustReverseTraceHostKey()
+    fun dismissReverseTraceHostKeyMismatch() = controller.dismissReverseTraceHostKeyMismatch()
     fun toggleIperf3(enabled: Boolean) = controller.toggleIperf3(enabled)
     fun openIperf3ServerPrompt() = controller.openIperf3ServerPrompt()
     fun dismissIperf3ServerPrompt() = controller.dismissIperf3ServerPrompt()
@@ -1280,6 +2085,14 @@ class MobileNetBenchViewModel(
     fun clearResults() = controller.clearResults()
     fun startBenchmark() = controller.startBenchmark()
     fun stopBenchmark() = controller.stopBenchmark()
+    fun openSaveBaselineDialog() = controller.openSaveBaselineDialog()
+    fun dismissSaveBaselineDialog() = controller.dismissSaveBaselineDialog()
+    fun saveCurrentAsBaseline(label: String = "", notes: String = "") =
+        controller.saveCurrentAsBaseline(label = label, notes = notes)
+    fun openBaselineCompareSheet(baselineId: String? = null) = controller.openBaselineCompareSheet(baselineId)
+    fun dismissBaselineCompareSheet() = controller.dismissBaselineCompareSheet()
+    fun selectBaselineForComparison(baselineId: String) = controller.selectBaselineForComparison(baselineId)
+    fun deleteBaseline(baselineId: String) = controller.deleteBaseline(baselineId)
 
     override fun onCleared() {
         controller.stopBenchmark(silent = true)
@@ -1293,6 +2106,7 @@ class MobileNetBenchViewModel(
             imageHostRepository: ImageHostRepository? = null,
             settingsRepository: SettingsRepository? = null,
             sshVaultRepository: SshVaultRepository? = null,
+            sshSessionManager: LiteSshSessionManager? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1305,6 +2119,9 @@ class MobileNetBenchViewModel(
                     settingsRepository = settingsRepository ?: appContainer?.settingsRepository,
                     initialTarget = initialTarget,
                     sshVaultRepository = sshVaultRepository ?: appContainer?.sshVaultRepository,
+                    sshSessionManager = sshSessionManager ?: appContainer?.sshSessionManager,
+                    benchmarkBaselineRepository = appContainer?.benchmarkBaselineRepository
+                        ?: NoOpBenchmarkBaselineRepository,
                 ) as T
             }
         }

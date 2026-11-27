@@ -409,6 +409,132 @@ class NodeImageHostRepositoryTest {
         assertTrue(blankRes.isFailure)
     }
 
+    @Test
+    fun `listImages parses schema variants with pagination and cookie-free X-API-Key`() = runBlocking {
+        val repo = NodeImageHostRepositoryImpl(
+            apiClientProvider = { apiClient },
+            settingsRepository = settingsRepository,
+            sessionRepository = sessionRepository,
+        )
+
+        // Variant 1: nested data.images + links.direct + created_at + sizeBytes + totalCount
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "success": true,
+                      "data": {
+                        "images": [
+                          {
+                            "image_id": "img_alpha_01",
+                            "filename": "bench.png",
+                            "links": {
+                              "direct": "//img.nodeimage.com/i/bench.png",
+                              "thumbnail": "/thumb/bench.png"
+                            },
+                            "size": "20480",
+                            "created_at": "2026-11-26T08:00:00Z"
+                          }
+                        ],
+                        "page": 2,
+                        "total": 45,
+                        "limit": 20
+                      }
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val page2 = repo.listImages(page = 2, limit = 20).getOrThrow()
+        assertEquals(2, page2.page)
+        assertEquals(45, page2.totalCount)
+        assertTrue(page2.hasMore)
+        assertEquals(1, page2.items.size)
+        assertEquals("img_alpha_01", page2.items[0].imageId)
+        assertEquals("bench.png", page2.items[0].fileName)
+        assertEquals("https://img.nodeimage.com/i/bench.png", page2.items[0].url)
+        assertEquals(20480L, page2.items[0].sizeBytes)
+        assertEquals("2026-11-26T08:00:00Z", page2.items[0].createdAt)
+
+        val req1 = server.takeRequest()
+        assertEquals("GET", req1.method)
+        assertEquals("/api/v1/images?page=2&limit=20", req1.path)
+        assertEquals(testApiKey, req1.getHeader("X-API-Key"))
+        assertNull(req1.getHeader("Cookie"))
+
+        // Variant 2: top-level list array + id + src + uploadedAt
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """
+                    {
+                      "success": 1,
+                      "list": [
+                        {
+                          "id": "img_beta_02",
+                          "originalName": "router.jpg",
+                          "src": "http://img.nodeimage.com/i/router.jpg",
+                          "bytes": 4096,
+                          "uploadedAt": "2026-11-25"
+                        }
+                      ]
+                    }
+                    """.trimIndent(),
+                ),
+        )
+        val page1 = repo.listImages().getOrThrow()
+        assertEquals(1, page1.items.size)
+        assertEquals("img_beta_02", page1.items[0].imageId)
+        assertEquals("https://img.nodeimage.com/i/router.jpg", page1.items[0].url)
+        assertEquals(4096L, page1.items[0].sizeBytes)
+        val req2 = server.takeRequest()
+        assertEquals("/api/v1/images", req2.path)
+    }
+
+    @Test
+    fun `deleteImage validates imageId before network call, sends DELETE, and blocks unsafe redirects`() = runBlocking {
+        val repo = NodeImageHostRepositoryImpl(
+            apiClientProvider = { apiClient },
+            settingsRepository = settingsRepository,
+            sessionRepository = sessionRepository,
+        )
+
+        // Invalid IDs must fail locally with 0 HTTP requests
+        for (badId in listOf("", "   ", "../etc/passwd", "img?foo=1", "bad id", "a/b")) {
+            val res = repo.deleteImage(badId)
+            assertTrue("Expected failure for invalid imageId '$badId'", res.isFailure)
+        }
+        assertEquals(0, server.requestCount)
+
+        // Valid ID succeeds via DELETE /api/v1/delete/{id} with no Cookie
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"success":true}"""))
+        val ok = repo.deleteImage("img_ok-123")
+        assertTrue(ok.isSuccess)
+        val delReq = server.takeRequest()
+        assertEquals("DELETE", delReq.method)
+        assertEquals("/api/v1/delete/img_ok-123", delReq.path)
+        assertEquals(testApiKey, delReq.getHeader("X-API-Key"))
+        assertNull(delReq.getHeader("Cookie"))
+
+        // 302 redirect on DELETE is rejected (only 307/308 allowed for non-GET/HEAD)
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(302)
+                .addHeader("Location", "/api/v1/delete/other"),
+        )
+        val redirectFail = repo.deleteImage("img_ok-123")
+        assertTrue(redirectFail.isFailure)
+        assertTrue(redirectFail.exceptionOrNull()?.message.orEmpty().contains("307/308"))
+
+        // Missing API key fails locally
+        settingsRepository.setNodeImageApiKey("")
+        assertTrue(repo.listImages().isFailure)
+        assertTrue(repo.deleteImage("img_ok-123").isFailure)
+    }
+
     private fun makeJpegBytes(): ByteArray =
         byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 0x00, 0x10)
 

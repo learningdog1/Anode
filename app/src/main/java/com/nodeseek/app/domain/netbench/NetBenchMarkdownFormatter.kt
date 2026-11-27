@@ -158,6 +158,14 @@ object NetBenchMarkdownFormatter {
             lines += "> - **HTTP 探测**：${formatHttpCompact(http)}"
         }
 
+        sanitized.forwardTraceroute?.let { trace ->
+            lines += "> - **去程路由**：${formatTracerouteCompact(trace)}"
+        }
+
+        sanitized.reverseTraceroute?.let { trace ->
+            lines += "> - **回程路由（VPS → 本机）**：${formatTracerouteCompact(trace)}"
+        }
+
         val iperfStreams = listOfNotNull(
             sanitized.iperfDownload?.parallelStreams,
             sanitized.iperfUpload?.parallelStreams,
@@ -391,6 +399,43 @@ object NetBenchMarkdownFormatter {
                     sb.appendLine("```text")
                     sb.appendLine(buildIperf3IntervalLogText(res))
                     sb.appendLine("```")
+                }
+            }
+        }
+
+        // 4.5 Visual Traceroute / MTR & Reverse Trace (only when present)
+        val traces = listOfNotNull(sanitized.forwardTraceroute, sanitized.reverseTraceroute)
+        if (traces.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("### 🧭 路由追踪与骨干网识别 (MTR / 回程)")
+            sb.appendLine()
+            val summaryRows = traces.map { buildTracerouteSummaryRow(it) }
+            sb.appendLine(
+                renderAlignedMarkdownTable(
+                    headers = listOf("方向 / 时段", "路由识别标签", "跳数与终点状态", "丢包与延迟概览"),
+                    rows = summaryRows,
+                    cellPreprocessor = cellScrubber,
+                ),
+            )
+            for (trace in traces) {
+                if (trace.hops.isNotEmpty()) {
+                    val subHeading = if (trace.direction == TracerouteDirection.REVERSE) {
+                        val src = trace.sourceLabel.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+                        "#### 🔁 回程逐跳明细（VPS$src → 本机出口 · `${trace.toolName}`）"
+                    } else {
+                        "#### 🛫 去程逐跳明细（本机 → 目标节点 · `${trace.toolName}`）"
+                    }
+                    sb.appendLine()
+                    sb.appendLine(subHeading)
+                    sb.appendLine()
+                    val hopRows = trace.hops.map { hop -> buildTracerouteHopRow(hop) }
+                    sb.appendLine(
+                        renderAlignedMarkdownTable(
+                            headers = listOf("#", "节点 IP", "骨干标签 / ASN", "归属地", "丢包", "均延 / 峰值"),
+                            rows = hopRows,
+                            cellPreprocessor = cellScrubber,
+                        ),
+                    )
                 }
             }
         }
@@ -1217,6 +1262,23 @@ object NetBenchMarkdownFormatter {
             }
         }
 
+        // 4. Routing / Backbone Verdict (when Traceroute / Reverse Trace present)
+        listOfNotNull(sanitized.forwardTraceroute, sanitized.reverseTraceroute).forEach { trace ->
+            val dirLabel = if (trace.direction == TracerouteDirection.REVERSE) "回程路由" else "去程路由"
+            val tagBadge = if (trace.dominantBackboneTags.isNotEmpty()) {
+                "**${trace.routeSignature}**"
+            } else {
+                trace.routeSignature.ifBlank { "常规直连" }
+            }
+            val lossSummary = when {
+                trace.hasRealPacketLoss -> "存在真实链路丢包（峰值 `${formatPercent(trace.peakHopLossPercent)}` @ Hop ${trace.peakLossHopNumber ?: "-"}）"
+                trace.hasIntermediateRateLimitOnly -> "仅中间跳控制面 ICMP 限速（终点零真实丢包）"
+                else -> "全程零丢包"
+            }
+            val rttPart = trace.terminalAvgMs?.let { "，终点均延 `${formatMs(it)}`" }.orEmpty()
+            bullets += "**$dirLabel（${trace.timeWindowLabel.ifBlank { "实时" }}）**：经由 $tagBadge（共 ${trace.totalHops} 跳$rttPart），$lossSummary。"
+        }
+
         return bullets
     }
 
@@ -1243,7 +1305,91 @@ object NetBenchMarkdownFormatter {
         sanitized.ipIntelligence?.takeIf { it.originType != IpOriginType.UNKNOWN }?.let { intel ->
             segments += intel.originType.label
         }
+        sanitized.forwardTraceroute?.takeIf { it.dominantBackboneTags.isNotEmpty() }?.let { trace ->
+            segments += "去程 ${trace.routeSignature}"
+        }
+        sanitized.reverseTraceroute?.takeIf { it.dominantBackboneTags.isNotEmpty() }?.let { trace ->
+            segments += "回程 ${trace.routeSignature}"
+        }
         return segments.joinToString(" · ")
+    }
+
+    private fun formatTracerouteCompact(trace: SanitizedTraceroutePresentation): String {
+        if (!trace.publicErrorMessage.isNullOrBlank() && trace.hops.isEmpty()) {
+            return "失败（${sanitizeInline(trace.publicErrorMessage)}）"
+        }
+        val parts = mutableListOf<String>()
+        if (trace.routeSignature.isNotBlank()) {
+            parts += "**${sanitizeInline(trace.routeSignature)}**"
+        }
+        parts += "${trace.totalHops}跳"
+        trace.terminalAvgMs?.let { parts += "终点 `${formatMs(it)}`" }
+        val lossDesc = when {
+            trace.hasRealPacketLoss -> "真实丢包 `${formatPercent(trace.peakHopLossPercent)}`"
+            trace.hasIntermediateRateLimitOnly -> "中间跳限速(无真实丢包)"
+            else -> "零丢包"
+        }
+        parts += lossDesc
+        if (trace.isPeakHourWindow) {
+            parts += "晚高峰"
+        }
+        return parts.joinToString(" · ")
+    }
+
+    private fun buildTracerouteSummaryRow(trace: SanitizedTraceroutePresentation): List<String> {
+        val dirCell = buildString {
+            append(trace.direction.label)
+            if (trace.timeWindowLabel.isNotBlank()) {
+                append(" · ").append(trace.timeWindowLabel)
+            }
+        }
+        val tagCell = if (trace.dominantBackboneTags.isNotEmpty()) {
+            trace.dominantBackboneTags.joinToString(" · ") { "**${it.displayLabel}**" }
+        } else {
+            trace.routeSignature.ifBlank { EMPTY_CELL_PLACEHOLDER }
+        }
+        val hopStatus = buildString {
+            append("${trace.totalHops} 跳")
+            append(if (trace.reachedTarget) " · 已达终点" else " · 未达终点")
+        }
+        val lossAndLatency = if (!trace.publicErrorMessage.isNullOrBlank() && trace.hops.isEmpty()) {
+            sanitizeInline(trace.publicErrorMessage)
+        } else {
+            val rttStr = trace.terminalAvgMs?.let { "终点 ${formatMs(it)}" } ?: "无终点 RTT"
+            val lossStr = when {
+                trace.hasRealPacketLoss -> "真实丢包 ${formatPercent(trace.peakHopLossPercent)}"
+                trace.hasIntermediateRateLimitOnly -> "中间跳限速（实际零丢包）"
+                else -> "零丢包"
+            }
+            "$rttStr · $lossStr"
+        }
+        return listOf(dirCell, tagCell, hopStatus, lossAndLatency)
+    }
+
+    private fun buildTracerouteHopRow(hop: SanitizedTracerouteHopPresentation): List<String> {
+        val numCell = hop.hopNumber.toString()
+        val ipCell = if (hop.displayIp == "*") "*" else "`${sanitizeCodeInline(hop.displayIp)}`"
+        val tagAndAsn = buildList {
+            if (hop.backboneTags.isNotEmpty()) {
+                add(hop.backboneTags.joinToString("/") { "**${it.displayLabel}**" })
+            }
+            hop.asn?.takeIf { it.isNotBlank() }?.let(::add)
+        }.joinToString(" · ").ifBlank { EMPTY_CELL_PLACEHOLDER }
+        val locCell = hop.locationSummary?.takeIf { it.isNotBlank() } ?: EMPTY_CELL_PLACEHOLDER
+        val lossCell = when {
+            hop.received == 0 -> "100% (超时)"
+            hop.lossPercent > 0.0 && hop.lossClassification == HopLossClassification.INTERMEDIATE_RATE_LIMIT ->
+                "${formatPercent(hop.lossPercent)} (限速)"
+            hop.lossPercent > 0.0 -> formatPercent(hop.lossPercent)
+            else -> "0.0%"
+        }
+        val latCell = if (hop.avgMs != null) {
+            val maxPart = hop.maxMs?.let { " / ${formatMs(it)}" }.orEmpty()
+            "${formatMs(hop.avgMs)}$maxPart"
+        } else {
+            EMPTY_CELL_PLACEHOLDER
+        }
+        return listOf(numCell, ipCell, tagAndAsn, locCell, lossCell, latCell)
     }
 
     private fun buildSignatureFooter(timestamp: String): String =

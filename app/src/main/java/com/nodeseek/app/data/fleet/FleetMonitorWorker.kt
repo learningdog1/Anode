@@ -3,11 +3,16 @@ package com.nodeseek.app.data.fleet
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.nodeseek.app.data.radar.AppContainerHost
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.domain.alerts.AlertForwarder
+import com.nodeseek.app.domain.alerts.ForwardableAlertEvent
+import com.nodeseek.app.domain.alerts.NoOpAlertForwarder
 import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
+import com.nodeseek.app.widget.GlanceWidgetUpdater
 import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import java.time.Clock
@@ -25,20 +30,77 @@ class FleetMonitorRunner(
     private val fxRatesProvider: suspend () -> com.nodeseek.app.data.valuation.FxRatesState? = { null },
     private val todayProvider: () -> LocalDate = { VpsValuationEngine.todayInShanghai(Clock.system(VALUATION_ZONE_ID)) },
     private val nowMillisProvider: () -> Long = { System.currentTimeMillis() },
+    private val alertForwarder: AlertForwarder = NoOpAlertForwarder,
 ) {
     suspend fun runOnce(): FleetMonitorCheckReport {
         fleetRepository.loadPersistedState()
         val refreshSummary = fleetRepository.refreshAllPanels()
         val fxRates = runCatching { fxRatesProvider() }.getOrNull()
+        val nowMillis = nowMillisProvider()
         val report = fleetRepository.evaluateAlerts(
             today = todayProvider(),
-            nowEpochMillis = nowMillisProvider(),
+            nowEpochMillis = nowMillis,
             fxRatesState = fxRates,
             checkedPanels = refreshSummary.refreshedPanelCount,
             failedPanels = refreshSummary.failedPanelErrors.size,
         )
         alertSink.dispatchReport(report)
+        forwardReportAlerts(report, nowMillis)
         return report
+    }
+
+    private suspend fun forwardReportAlerts(
+        report: FleetMonitorCheckReport,
+        occurredAtMillis: Long,
+    ) {
+        for (offline in report.offlineAlerts) {
+            safeForward(
+                ForwardableAlertEvent.ProbeOffline(
+                    panelName = offline.panelName,
+                    serverName = offline.server.name,
+                    probeKey = offline.server.probeKey,
+                    flagEmoji = offline.server.resolvedFlagEmoji,
+                    occurredAtEpochMillis = occurredAtMillis,
+                ),
+            )
+        }
+        for (recovered in report.recoveryAlerts) {
+            safeForward(
+                ForwardableAlertEvent.ProbeRecovered(
+                    panelName = recovered.panelName,
+                    serverName = recovered.server.name,
+                    probeKey = recovered.server.probeKey,
+                    flagEmoji = recovered.server.resolvedFlagEmoji,
+                    occurredAtEpochMillis = occurredAtMillis,
+                ),
+            )
+        }
+        for (traffic in report.trafficAlerts) {
+            safeForward(
+                ForwardableAlertEvent.TrafficThreshold(
+                    panelName = traffic.panelName,
+                    serverName = traffic.server.name,
+                    probeKey = traffic.server.probeKey,
+                    flagEmoji = traffic.server.resolvedFlagEmoji,
+                    usedBytes = traffic.usedBytes,
+                    limitBytes = traffic.limitBytes,
+                    usageRatio = traffic.usageRatio,
+                    nextResetDateIso = traffic.nextResetDateIso,
+                    exhaustionForecastText = traffic.exhaustionForecastText,
+                    occurredAtEpochMillis = occurredAtMillis,
+                ),
+            )
+        }
+    }
+
+    private suspend fun safeForward(event: ForwardableAlertEvent) {
+        try {
+            alertForwarder.forward(event)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            // External forwarding failures must never abort background monitoring.
+        }
     }
 }
 
@@ -67,14 +129,20 @@ class FleetMonitorWorker internal constructor(
             } else {
                 val repo = externalRepositoryFactory?.invoke(applicationContext)
                     ?: FleetRepositoryImpl.forContext(applicationContext)
+                val forwarder = externalAlertForwarderFactory?.invoke(applicationContext)
+                    ?: (applicationContext as? AppContainerHost)?.container?.alertForwarder
+                    ?: NoOpAlertForwarder
                 val fxRepo = ExchangeRateRepository.forContext(applicationContext)
                 val notifier = FleetAlertNotifier(applicationContext)
                 FleetMonitorRunner(
                     fleetRepository = repo,
                     alertSink = notifier,
                     fxRatesProvider = { fxRepo.loadPersistedState() },
+                    alertForwarder = forwarder,
                 ).runOnce()
             }
+
+            GlanceWidgetUpdater.updateAll(applicationContext)
 
             if (report.checkedPanels > 0 &&
                 report.failedPanels == report.checkedPanels &&
@@ -102,5 +170,12 @@ class FleetMonitorWorker internal constructor(
          */
         @Volatile
         var externalRepositoryFactory: ((Context) -> FleetRepository)? = null
+
+        /**
+         * Optional DI hook allowing [com.nodeseek.app.NodePulseApp] to provide the singleton
+         * [AlertForwarder] to [FleetMonitorWorker]. Defaults to [NoOpAlertForwarder] unless hosted.
+         */
+        @Volatile
+        var externalAlertForwarderFactory: ((Context) -> AlertForwarder)? = null
     }
 }

@@ -7,7 +7,7 @@
 **Cool Mist Light & Slate Steel Telemetry**  
 面向 [NodeSeek](https://www.nodeseek.com) 主机与开发者社区的原生 Jetpack Compose / Material 3 Expressive Android 客户端
 
-[![Release](https://img.shields.io/badge/Release-v2.12.2-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.13.0-2D637E?style=for-the-badge)](https://github.com/learningdog1/Anode/releases/latest)
 [![Platform](https://img.shields.io/badge/Android-8.0%2B%20(API%2026%2B)-0B7A75?style=for-the-badge&logo=android&logoColor=white)](https://github.com/learningdog1/Anode/releases/latest)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-BOM%202026.11.01-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
@@ -26,14 +26,14 @@
 ## 📥 下载与安装 · Download & Install
 
 > [!TIP]
-> 前往 [**GitHub Releases (`v2.12.2`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.12.2-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
+> 前往 [**GitHub Releases (`v2.13.0`)**](https://github.com/learningdog1/Anode/releases/latest) 下载已签名正式版 APK（`Anode-v2.13.0-release.apk`），下载后可直接在 Android 设备安装（后续亦可在应用内检查与升级）。
 
 | 项目 | 说明 |
 | :--- | :--- |
 | **应用名称 / 包名** | `Anode`（`com.nodeseek.app`） |
-| **当前版本** | `v2.12.2`（`versionCode = 27`） |
+| **当前版本** | `v2.13.0`（`versionCode = 28`） |
 | **系统要求** | Android 8.0 及以上（`minSdk = 26` · `targetSdk = 36`） |
-| **核心模块一览** | 极简脉冲首页与全版块文字频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸） · Markdown 发帖与 NodeImage 上传 · 15 币种 VPS 估值折算器 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`) 与账单邮件入库 · 签名加密社区活动聚合（精确抽奖链接分类与二级状态筛选 / 新活动通知） · 个人中心与一行签到/分组入口 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达 · VPS 补货监控 · 卖家交易信誉卡（曝光版快照与深度查验） · 哪吒/Komari 探针 2s 实时遥测与 VPS 资产账本（多选标签 / 周期顺延续费与自动续费） · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双出口 IP 与物理网络绑定 · 轻量 SSH（探针同步与可折叠主机保险库 / 探针 WebSocket 终端与直连交互 SSH / ProxyJump 跳板 / 自动应答 / 终端自适应缩放 / NodeQuality 官方四栏导出） · LET 签名加密海外情报聚合与质量过滤 · 内容过滤屏蔽 · 双模式本地备份恢复（v1 明文核心数据 JSON + v2 口令加密完整备份） · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
+| **核心模块一览** | 极简脉冲首页与自定义排序全版块频道栏 · 独立全站统一搜索 · 杂志级帖子阅读器（ANSI / 多标签页 / 表情贴纸 / 投票与星尘打赏 / 帖子长图二维码分享） · Markdown 发帖、隐私打码编辑与 NodeImage 云端图库管理 · 15 币种 VPS 估值折算器、同款市场溢价参考（精准机型提取与防 404 兜底）、交易闭环核验清单与拼车合租工具 · 悬浮三标签底栏（`首页 / 功能栏 / 我的`）与功能聚合中心 · 隔离式 Seek 邮箱 (`seek.li`)、OTP 验证码守望一键复制与 VPS/域名账单自动入库 · 签名加密社区活动聚合与 drand 公平抽奖 · 多账号隔离切换、个人中心一行签到、鸡腿/星尘账本与邀请码/仲裁记录 · 统一信息流卡片的收藏、足迹与个人空间 · 聚合收件箱与实时私信 · WorkManager 后台脉搏雷达与外部告警转发（Telegram / Bark / Webhook） · VPS 补货监控 · 卖家交易信誉卡 · 哪吒/Komari 探针 2s 实时遥测、VPS 资产账本与域名 RDAP/TLS 证书巡检 · 手机端 ICMP Ping / TCPing / `-P` 原生 iperf3 / 双向 Traceroute 骨干网线路识别与物理网络绑定 · 轻量 SSH（探针同步保险库 / WebSocket 探针终端与直连 SSH / SFTP 可视化文件抽屉 / ProxyJump / NodeQuality 四栏导出与历史测评基线对比） · LET 签名加密海外情报聚合 · Jetpack Glance 桌面小组件与 App Shortcuts 快捷入口 · 内容过滤屏蔽 · 双模式本地备份恢复（v1 明文 + v2 口令加密） · 平板/折叠屏双栏适配 · 分组卡片式设置与 GitHub Releases 应用内更新 |
 
 ---
 
@@ -338,10 +338,10 @@ Anode 采用清晰的单向多层架构（`ui` → `domain` ← `data`），通�
 
 ```mermaid
 flowchart TD
-    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · adaptive · explore · boards · topic · composer · hub · activity · mail · radar · valuation · restock · trust · fleet · netbench · ssh · overseas · update"]
-    NAV["Navigation Shell<br/>MainActivity · NavHost · UrlRouter · AppDestination"]
-    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost · Activity · Backup · Filter · SeekMail · Radar · Valuation · Restock · Trust · Fleet · NetBench · Ssh · Overseas · Update"]
-    DATA["Data Layer<br/>Repositories · NodeSeekApiClient · SeekMailApiClient · ForumWatchActivityApiClient & OverseasIntelApiClient (HMAC/AES-GCM) · GitHubReleaseClient · Jsoup/RSS · JSch SSH · ICMP/TCP/iperf3 NetBench · Room DB · DataStore · Keystore · Backup"]
+    UI["UI Layer (Jetpack Compose + ViewModels)<br/>theme · components · adaptive · explore · boards · topic · composer · share · hub · activity · mail · radar · valuation · trade · carpool · restock · trust · fleet · netbench · ssh · baseline · overseas · update · widget"]
+    NAV["Navigation Shell<br/>MainActivity · NavHost · UrlRouter · AppDestination · ShortcutIntentParser"]
+    DOMAIN["Domain Layer (Pure Kotlin Contracts & Models)<br/>Forum · Session · MultiAccount · Poll/Stardust · CheckIn · Inbox · User · Bookmark · Settings · Draft · ImageHost/Mosaic · Activity/Drand · Alerts · Backup · Baseline · Carpool · Filter · SeekMail/OTP · Radar · Valuation/MarketRef · Trade · Restock · Trust · Fleet/Domain · NetBench/Traceroute · Ssh/Sftp · Overseas · Update · Widget"]
+    DATA["Data Layer<br/>Repositories · NodeSeekApiClient · MultiAccountCookieVault · SeekMailApiClient · ForumWatchActivity/Drand & OverseasIntelApiClient · AlertForwarder · DomainRdap/TlsInspector · GitHubReleaseClient · Jsoup/RSS · JSch SSH/SFTP · ICMP/TCP/iperf3/Traceroute · Room DB · DataStore · Keystore · Backup · Glance Widgets"]
 
     NAV --> UI
     UI --> DOMAIN
@@ -423,11 +423,11 @@ app/src/main/java/com/nodeseek/app/
 | :--- | :--- |
 | **语言与构建工具链** | Kotlin `2.4.21` · Java `17` · Android Gradle Plugin `9.5.2`（Built-in Kotlin） · Gradle `9.9.2` · KSP `2.3.14` |
 | **Android SDK** | `minSdk = 26`（Android 8.0） · `targetSdk = 36`（Android 16） · `compileSdk = 37.1`（Android 17） |
-| **UI 与设计系统** | Jetpack Compose（`BOM 2026.11.01` · Compose `1.13.0` / Material3 `1.5.0`） · Material 3 Expressive · WindowSizeClass · Edge-to-Edge WindowInsets |
-| **导航与生命周期** | Navigation Compose `2.10.2`（Type-safe Kotlinx Serialization 路由） · Lifecycle `2.11.1` |
-| **网络、SSH 与解析** | OkHttp `5.5.1` · JSch (`com.github.mwiede:jsch` `2.28.8`) · Jsoup `1.24.1` · Kotlinx Serialization JSON `1.13.0` · AndroidX WebKit `1.18.0` |
+| **UI 与设计系统** | Jetpack Compose（`BOM 2026.11.01` · Compose `1.13.0` / Material3 `1.5.0`） · Material 3 Expressive · Jetpack Glance `1.2.0`（桌面小组件） · WindowSizeClass · Edge-to-Edge WindowInsets |
+| **导航与生命周期** | Navigation Compose `2.10.2`（Type-safe Kotlinx Serialization 路由与 App Shortcuts） · Lifecycle `2.11.1` |
+| **网络、SSH 与解析** | OkHttp `5.5.1` · JSch (`com.github.mwiede:jsch` `2.28.8`，SSH + SFTP) · Jsoup `1.24.1` · Kotlinx Serialization JSON `1.13.0` · AndroidX WebKit `1.18.0` |
 | **本地持久化与后台** | Room `2.8.5`（离线帖子快照、阅读楼层、雷达数据与导出 Schema） · Preferences DataStore `1.3.0` · WorkManager `2.12.0` |
-| **图片加载** | Coil `3.6.3`（`coil-compose` + `coil-network-okhttp` + GIF / SVG 解码与 Referer 策略） · AndroidX ExifInterface `1.4.2` |
+| **图片与二维码** | Coil `3.6.3`（`coil-compose` + `coil-network-okhttp` + GIF / SVG 解码与 Referer 策略） · AndroidX ExifInterface `1.4.2` · ZXing Core `3.5.3`（帖子长图分享二维码） |
 | **测试体系** | JUnit `4.13.2` · Kotlinx Coroutines Test `1.11.0` · OkHttp `MockWebServer` `5.5.1` · Room Testing `2.8.5`（真实 SQLite 迁移与 DAO 仪器化测试） |
 
 ---
@@ -447,8 +447,8 @@ app/src/main/java/com/nodeseek/app/
 ./gradlew assembleRelease
 ```
 产物输出目录：
-- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.12.2-release.apk`）
-- Debug：`app/build/outputs/apk/debug/Anode-v2.12.2-debug.apk`
+- Release：`app/build/outputs/apk/release/`（配置签名后生成 `Anode-v2.13.0-release.apk`）
+- Debug：`app/build/outputs/apk/debug/Anode-v2.13.0-debug.apk`
 
 如需对 Release 进行本地签名，可在项目根目录创建未纳入版本控制的 `key.properties`（配置 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`），或在 CI 环境中设置 `KEYSTORE_FILE`、`KEYSTORE_PASSWORD`、`KEY_ALIAS` 与 `KEY_PASSWORD`。
 

@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.mail.NoOpSeekMailOtpWatcher
 import com.nodeseek.app.domain.mail.NoOpVpsMailAutoIngestService
+import com.nodeseek.app.domain.mail.OtpWatchState
 import com.nodeseek.app.domain.mail.ParsedVpsBillingMail
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
@@ -13,7 +15,10 @@ import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
 import com.nodeseek.app.domain.mail.SeekMailErrorKind
 import com.nodeseek.app.domain.mail.SeekMailException
+import com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore
 import com.nodeseek.app.domain.mail.SeekMailLocalTag
+import com.nodeseek.app.domain.mail.SeekMailLocalTagStore
+import com.nodeseek.app.domain.mail.SeekMailOtpWatcher
 import com.nodeseek.app.domain.mail.SeekMailPage
 import com.nodeseek.app.domain.mail.SeekMailRateLimit
 import com.nodeseek.app.domain.mail.SeekMailRepository
@@ -27,6 +32,7 @@ import com.nodeseek.app.domain.mail.VpsMailMatchStatus
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.ssh.SshAuthMethod
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -189,6 +195,7 @@ data class SeekMailUiState(
     val showSshOverwriteConfirm: Boolean = false,
     val exportingKey: String? = null,
     val rateLimit: SeekMailRateLimit? = null,
+    val otpWatchState: OtpWatchState = OtpWatchState.Idle,
     val fontScale: Float = AppSettings.DEFAULT_FONT_SCALE,
     val purePitchAmoled: Boolean = false,
 ) {
@@ -227,6 +234,8 @@ class SeekMailViewModel(
     private val vpsMailAutoIngestService: VpsMailAutoIngestService = NoOpVpsMailAutoIngestService,
     private val initialMailboxId: Long = 0L,
     initialMailId: Long = 0L,
+    private val seekMailOtpWatcher: SeekMailOtpWatcher = NoOpSeekMailOtpWatcher,
+    private val processingDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     private data class InternalState(
@@ -342,14 +351,29 @@ class SeekMailViewModel(
         Triple(assets, sshServers, autoUpdates)
     }
 
-    val uiState: StateFlow<SeekMailUiState> = combine(
-        _internalState,
-        settingsRepository.settings,
-        localOverlayFlow,
+    private val rateLimitAndWatchFlow = combine(
         seekMailRepository.latestRateLimit,
-        vpsSyncContextFlow,
-    ) { state, settings, (readIds, localTagStore, archiveStore), rateLimit, (assets, sshServers, autoUpdates) ->
-        val trimmedKey = settings.seekMailApiKey.trim()
+        seekMailOtpWatcher.state,
+        ::Pair,
+    )
+
+    private data class MailListProjection(
+        val deletedIds: Set<Long>,
+        val archivedIds: Set<Long>,
+        val activeInboxMails: List<SeekMailSummary>,
+        val archivedMailsForMailbox: List<SeekMailSummary>,
+        val localTagsByMailId: Map<Long, List<SeekMailLocalTag>>,
+        val localTagCounts: Map<String, Int>,
+        val effectiveSelectedLocalTagId: String?,
+        val visibleMails: List<SeekMailSummary>,
+    )
+
+    private fun projectMailList(
+        state: InternalState,
+        readIds: Set<Long>,
+        localTagStore: SeekMailLocalTagStore,
+        archiveStore: SeekMailLocalArchiveStore,
+    ): MailListProjection {
         val deletedIds = archiveStore.deletedMailIds
         val archivedIds = archiveStore.archivedMailIds - deletedIds
         val overlaidMails = if (readIds.isEmpty()) {
@@ -447,6 +471,47 @@ class SeekMailViewModel(
             }
             else -> activeInboxMails
         }
+        return MailListProjection(
+            deletedIds = deletedIds,
+            archivedIds = archivedIds,
+            activeInboxMails = activeInboxMails,
+            archivedMailsForMailbox = archivedMailsForMailbox,
+            localTagsByMailId = localTagsByMailId,
+            localTagCounts = localTagCounts,
+            effectiveSelectedLocalTagId = effectiveSelectedLocalTagId,
+            visibleMails = visibleMails,
+        )
+    }
+
+    private fun currentVisibleMails(): List<SeekMailSummary> = projectMailList(
+        state = _internalState.value,
+        readIds = seekMailRepository.locallyReadMailIds.value,
+        localTagStore = seekMailRepository.localTagStore.value,
+        archiveStore = seekMailRepository.localArchiveStore.value,
+    ).visibleMails
+
+    val uiState: StateFlow<SeekMailUiState> = combine(
+        _internalState,
+        settingsRepository.settings,
+        localOverlayFlow,
+        rateLimitAndWatchFlow,
+        vpsSyncContextFlow,
+    ) { state, settings, (readIds, localTagStore, archiveStore), (rateLimit, otpWatchState), (assets, sshServers, autoUpdates) ->
+        val trimmedKey = settings.seekMailApiKey.trim()
+        val projection = projectMailList(
+            state = state,
+            readIds = readIds,
+            localTagStore = localTagStore,
+            archiveStore = archiveStore,
+        )
+        val deletedIds = projection.deletedIds
+        val archivedIds = projection.archivedIds
+        val activeInboxMails = projection.activeInboxMails
+        val archivedMailsForMailbox = projection.archivedMailsForMailbox
+        val localTagsByMailId = projection.localTagsByMailId
+        val localTagCounts = projection.localTagCounts
+        val effectiveSelectedLocalTagId = projection.effectiveSelectedLocalTagId
+        val visibleMails = projection.visibleMails
         val isArchivedMode = state.filterMode == SeekMailFilterMode.ARCHIVED
         val hiddenLoadedCount = when {
             state.filterMode == SeekMailFilterMode.UNREAD && effectiveSelectedLocalTagId == null -> {
@@ -574,6 +639,7 @@ class SeekMailViewModel(
             showSshOverwriteConfirm = state.showSshOverwriteConfirm,
             exportingKey = state.exportingKey,
             rateLimit = rateLimit,
+            otpWatchState = otpWatchState,
             fontScale = AppSettings.DEFAULT_FONT_SCALE,
             purePitchAmoled = settings.purePitchAmoled,
         )
@@ -793,12 +859,12 @@ class SeekMailViewModel(
     }
 
     fun refresh() {
-        if (!uiState.value.hasConfiguredKey) return
+        if (settingsRepository.settings.value.seekMailApiKey.trim().isEmpty()) return
         loadWorkspace(forceRefresh = true, skipMailboxesFetch = false)
     }
 
     fun retryLoadMails() {
-        if (!uiState.value.hasConfiguredKey) return
+        if (settingsRepository.settings.value.seekMailApiKey.trim().isEmpty()) return
         if (_internalState.value.mailboxes.isEmpty()) {
             loadWorkspace(forceRefresh = true, skipMailboxesFetch = false)
         } else {
@@ -925,7 +991,7 @@ class SeekMailViewModel(
     }
 
     fun toggleSelectAllVisible() {
-        val visibleIds = uiState.value.mails.map { it.id }
+        val visibleIds = currentVisibleMails().map { it.id }
         if (visibleIds.isEmpty()) return
         _internalState.update { current ->
             val visibleSet = visibleIds.toSet()
@@ -940,7 +1006,7 @@ class SeekMailViewModel(
     private fun resolveSelectedVisibleMails(): List<SeekMailSummary> {
         val selectedIds = _internalState.value.selectedMailIds
         if (selectedIds.isEmpty()) return emptyList()
-        return uiState.value.mails.filter { it.id in selectedIds }
+        return currentVisibleMails().filter { it.id in selectedIds }
     }
 
     fun archiveSelectedMails() {
@@ -2003,7 +2069,7 @@ class SeekMailViewModel(
         detailLoadJob = viewModelScope.launch {
             if (previewSummary != null) {
                 launch {
-                    val previewParsed = withContext(Dispatchers.Default) {
+                    val previewParsed = withContext(processingDispatcher) {
                         VpsBillingMailParser.parse(
                             subject = previewSummary.subject,
                             bodyText = previewSummary.snippet,
@@ -2023,7 +2089,7 @@ class SeekMailViewModel(
             seekMailRepository.getMailDetail(mailId = mailId, forceRefresh = forceRefresh)
                 .onSuccess { detail ->
                     if (_internalState.value.openedMailId != mailId) return@onSuccess
-                    val parsedDetail = withContext(Dispatchers.Default) {
+                    val parsedDetail = withContext(processingDispatcher) {
                         VpsBillingMailParser.parseDetail(detail)
                     }
                     if (_internalState.value.openedMailId != mailId) return@onSuccess
@@ -2034,7 +2100,13 @@ class SeekMailViewModel(
                     } else {
                         SeekMailReaderMode.HTML
                     }
+                    var detailApplied = false
                     _internalState.update { current ->
+                        if (current.openedMailId != mailId) {
+                            detailApplied = false
+                            return@update current
+                        }
+                        detailApplied = true
                         val updatedMails = current.mails.map { item ->
                             if (item.id == mailId) detail.summary else item
                         }
@@ -2048,10 +2120,13 @@ class SeekMailViewModel(
                             readerMode = preferredMode,
                         )
                     }
+                    if (!detailApplied) return@onSuccess
                     if (detail.summary.hasAttachments || previewSummary?.hasAttachments == true) {
                         loadAttachments(mailId)
                     } else {
-                        _internalState.update { it.copy(isLoadingAttachments = false) }
+                        _internalState.update { current ->
+                            if (current.openedMailId != mailId) current else current.copy(isLoadingAttachments = false)
+                        }
                     }
                 }
                 .onFailure { err ->
@@ -2147,7 +2222,14 @@ class SeekMailViewModel(
         if (current.isIngestingVpsMail) return
 
         val parsed = current.openedParsedVpsMail ?: return
-        val existingSsh = uiState.value.openedVpsInsight?.matchStatus?.matchedSshProfile
+        val activeSummary = current.openedDetail?.summary ?: current.openedPreviewSummary
+        val existingSsh = vpsMailAutoIngestService.resolveMatchStatus(
+            summary = activeSummary,
+            parsed = parsed,
+            assets = vpsMailAutoIngestService.assetsFlow.value,
+            sshServers = vpsMailAutoIngestService.sshServersFlow.value,
+            autoUpdatesByMailKey = vpsMailAutoIngestService.autoUpdatesByMailKeyFlow.value,
+        ).matchedSshProfile
         if (parsed.hasSshCredentials && existingSsh != null && existingSsh.authMethod == SshAuthMethod.PRIVATE_KEY) {
             _internalState.update { it.copy(showSshOverwriteConfirm = true) }
             return
@@ -2302,6 +2384,25 @@ class SeekMailViewModel(
         }
     }
 
+    fun startOtpWatch() {
+        val current = _internalState.value
+        val selectedMailbox = current.selectedMailboxId?.let { id ->
+            current.mailboxes.firstOrNull { it.id == id }
+        }
+        seekMailOtpWatcher.startWatch(
+            mailboxId = current.selectedMailboxId,
+            mailboxAddress = selectedMailbox?.address,
+        )
+    }
+
+    fun stopOtpWatch() {
+        seekMailOtpWatcher.stopWatch()
+    }
+
+    fun dismissOtpWatchResult() {
+        seekMailOtpWatcher.dismissResult()
+    }
+
     companion object {
         private const val MAIL_PAGE_SIZE = 20
         private const val UNREAD_PAGE_SIZE = 50
@@ -2323,6 +2424,7 @@ class SeekMailViewModel(
                     vpsMailAutoIngestService = container.vpsMailAutoIngestService,
                     initialMailboxId = initialMailboxId,
                     initialMailId = initialMailId,
+                    seekMailOtpWatcher = container.seekMailOtpWatcher,
                 ) as T
             }
         }

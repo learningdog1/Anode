@@ -65,6 +65,10 @@ class BookmarkAndHistoryRepositoryImpl(
 
     fun getCachedTopicSummary(topicId: Long): TopicSummary? = recentSummaryCache[topicId]
 
+    override fun clearMemoryCache() {
+        recentSummaryCache.clear()
+    }
+
     override suspend fun setTopicBookmarked(
         topicId: Long,
         bookmarked: Boolean,

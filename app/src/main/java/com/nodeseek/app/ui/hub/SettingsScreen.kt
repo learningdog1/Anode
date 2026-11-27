@@ -71,6 +71,7 @@ import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.NotificationsOff
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Radar
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Schedule
@@ -176,6 +177,7 @@ import com.nodeseek.app.ui.components.PulseTopicCard
 import com.nodeseek.app.ui.components.PulseTopicCardModel
 import com.nodeseek.app.ui.components.RankMicroBadge
 import com.nodeseek.app.ui.components.resolvePulseTopicCardMetrics
+import com.nodeseek.app.ui.composer.NodeImageGallerySheet
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.ObsidianBackground
@@ -784,6 +786,7 @@ class SettingsViewModel(
         if (transient.value.isSigningOut) return
         viewModelScope.launch {
             transient.update { it.copy(isSigningOut = true) }
+            val signedOutUid = container.sessionRepository.sessionState.value?.uid
             val result = if (revokeRemoteSession) {
                 container.sessionRepository.signOut()
             } else {
@@ -791,6 +794,9 @@ class SettingsViewModel(
             }
             result
                 .onSuccess {
+                    runCatching { container.multiAccountManager }
+                        .getOrNull()
+                        ?.onActiveAccountSignedOut(signedOutUid)
                     transient.update { it.copy(isSigningOut = false) }
                     _events.trySend(
                         if (revokeRemoteSession) {
@@ -917,6 +923,7 @@ fun SettingsScreen(
     }
 
     var showNodeImageKeyDialog by rememberSaveable { mutableStateOf(false) }
+    var showNodeImageGallerySheet by rememberSaveable { mutableStateOf(false) }
     var showAwayDigestCustomDurationDialog by rememberSaveable { mutableStateOf(false) }
     var showClearHistoryConfirm by rememberSaveable { mutableStateOf(false) }
     var showSignOutConfirm by rememberSaveable { mutableStateOf(false) }
@@ -1486,6 +1493,16 @@ fun SettingsScreen(
                     }
                 }
 
+                // ── Group 4.2: 监控告警外部推送转发 ──
+                item(key = "settings_alert_forwarding") {
+                    PulseStaggeredEntrance(index = 3) {
+                        AlertForwardingSettingsSection(
+                            alertForwarder = appContainer.alertForwarder,
+                            snackbarHostState = snackbarHostState,
+                        )
+                    }
+                }
+
                 // ── Group 4.8: 官方交易平台 ──
                 item(key = "settings_official_trade") {
                     PulseStaggeredEntrance(index = 4) {
@@ -1532,6 +1549,16 @@ fun SettingsScreen(
                                     MaterialTheme.colorScheme.onSurfaceVariant
                                 },
                                 onClick = { showNodeImageKeyDialog = true },
+                            )
+
+                            SettingsGroupDivider()
+
+                            SettingsNavRow(
+                                icon = Icons.Rounded.PhotoLibrary,
+                                title = "NodeImage 图床相册",
+                                subtitle = "浏览、复制外链或删除云端已上传图片",
+                                trailingText = if (hasNodeImageKey) "管理相册" else "需先配置",
+                                onClick = { showNodeImageGallerySheet = true },
                             )
 
                             SettingsGroupDivider()
@@ -1719,6 +1746,21 @@ fun SettingsScreen(
                 viewModel.clearNodeImageFeedback()
                 showNodeImageKeyDialog = false
             },
+        )
+    }
+
+    if (showNodeImageGallerySheet) {
+        NodeImageGallerySheet(
+            hasApiKey = settings.nodeImageApiKey.isNotBlank(),
+            imageHostRepository = appContainer.imageHostRepository,
+            onOpenApiKeyConfig = {
+                showNodeImageGallerySheet = false
+                showNodeImageKeyDialog = true
+            },
+            onFeedbackMessage = { msg ->
+                settingsScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = { showNodeImageGallerySheet = false },
         )
     }
 

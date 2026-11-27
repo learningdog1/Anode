@@ -3,6 +3,7 @@ package com.nodeseek.app.navigation
 import androidx.compose.ui.platform.UriHandler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -83,5 +84,29 @@ class NodePulseUrlRouterAndDeepLinkTest {
             onOpenCurated = { curatedOpened = true },
         )
         assertTrue(curatedOpened)
+    }
+
+    @Test
+    fun `DeepLinkParser and openNodeSeekOrExternalUrl route concrete lucky links natively`() {
+        val parsed = DeepLinkParser.parseUrl(
+            "https://www.nodeseek.com/lucky?post=123&time=1795438800000&count=2&start=1&duplicate=false",
+        ) as NodePulseDeepLink.LuckyDraw
+        assertEquals(123L, parsed.postId)
+        assertEquals(1795438800000L, parsed.drawTimeEpochMillis)
+        assertEquals(2, parsed.winnerCount)
+        assertEquals(1, parsed.firstFloor)
+        assertTrue(parsed.removeDuplicates)
+
+        assertNull(DeepLinkParser.parseUrl("https://www.nodeseek.com/lucky"))
+
+        val handler = RecordingUriHandler()
+        var openedDraw: NodePulseDeepLink.LuckyDraw? = null
+        openNodeSeekOrExternalUrl(
+            rawUrl = "/lucky?post=123&time=1795438800000",
+            uriHandler = handler,
+            onOpenLuckyDraw = { openedDraw = it },
+        )
+        assertEquals(123L, openedDraw?.postId)
+        assertTrue("Native /lucky handler must not invoke external UriHandler", handler.opened.isEmpty())
     }
 }

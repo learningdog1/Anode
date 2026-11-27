@@ -2,11 +2,14 @@ package com.nodeseek.app.data.network
 
 import com.nodeseek.app.data.parser.ConfigPayloadDto
 import com.nodeseek.app.data.parser.DirectoryItemDto
+import com.nodeseek.app.data.parser.FeedTopicDto
 import com.nodeseek.app.data.parser.NodeSeekHtmlParser
 import com.nodeseek.app.data.parser.ParsedFeedPageDto
 import com.nodeseek.app.data.parser.ParsedThreadPageDto
 import com.nodeseek.app.data.parser.RssFeedParser
 import com.nodeseek.app.data.parser.TempScriptParser
+import com.nodeseek.app.domain.model.NodeImageGalleryPage
+import com.nodeseek.app.domain.model.NodeImageItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -52,6 +55,8 @@ class NodeSeekApiClient(
     private val json: Json = TempScriptParser.json,
     private val sameOriginTransport: SameOriginTransport? = null,
     private val onConfigObserved: ((ConfigPayloadDto) -> Unit)? = null,
+    private val sessionGenerationProvider: () -> Long = { 0L },
+    private val onConfigObservedWithGeneration: ((ConfigPayloadDto, Long) -> Unit)? = null,
 ) {
 
     // Forum transport with automatic redirects disabled so custom CSRF / captcha / dynamic-sign
@@ -100,14 +105,24 @@ class NodeSeekApiClient(
     // 1. HTML Document Endpoints (Feed, Curated, Search, Thread, Session, Directory)
     // =========================================================================
 
+    private fun notifyConfigObserved(config: ConfigPayloadDto, requestGeneration: Long) {
+        val genObserver = onConfigObservedWithGeneration
+        if (genObserver != null) {
+            genObserver.invoke(config, requestGeneration)
+        } else {
+            onConfigObserved?.invoke(config)
+        }
+    }
+
     suspend fun fetchSessionConfig(notifyObserver: Boolean = true): ConfigPayloadDto {
+        val requestGeneration = sessionGenerationProvider()
         val url = NodeSeekUrlNormalizer.buildUrl(path = "/", baseOrigin = baseOrigin)
         val html = executeHtmlGet(url = url, checkingPostAccess = false, requireTempScript = true)
         val config = withContext(Dispatchers.Default) {
             TempScriptParser.extractFromHtml(html, baseUri = url.toString(), requireAllCategory = true)
         } ?: throw CloudflareChallengeException(url = url.toString())
         if (notifyObserver) {
-            onConfigObserved?.invoke(config)
+            notifyConfigObserved(config, requestGeneration)
         }
         return config
     }
@@ -119,6 +134,7 @@ class NodeSeekApiClient(
         includeBlocked: Boolean = false,
         bypassHttpCache: Boolean = true,
     ): ParsedFeedPageDto {
+        val requestGeneration = sessionGenerationProvider()
         val safePage = page.coerceAtLeast(1)
         val slug = categorySlug.trim()
         val path = when {
@@ -130,12 +146,24 @@ class NodeSeekApiClient(
             queryParams = listOf("sortBy" to sortBy),
             baseOrigin = baseOrigin,
         )
-        val html = executeHtmlGet(
-            url = url,
-            checkingPostAccess = false,
-            requireTempScript = true,
-            bypassHttpCache = bypassHttpCache,
-        )
+        val html = try {
+            executeHtmlGet(
+                url = url,
+                checkingPostAccess = false,
+                requireTempScript = true,
+                bypassHttpCache = bypassHttpCache,
+            )
+        } catch (err: NodeSeekApiException) {
+            if (safePage > 1 && err.statusCode == 404) {
+                return ParsedFeedPageDto(
+                    pinnedTopics = emptyList(),
+                    topics = emptyList(),
+                    currentPage = safePage,
+                    hasNextPage = false,
+                )
+            }
+            throw err
+        }
         return withContext(Dispatchers.Default) {
             NodeSeekHtmlParser.parseFeedPage(
                 html = html,
@@ -143,7 +171,7 @@ class NodeSeekApiClient(
                 includeBlocked = includeBlocked,
             )
         }.also { parsed ->
-            parsed.config?.let { onConfigObserved?.invoke(it) }
+            parsed.config?.let { notifyConfigObserved(it, requestGeneration) }
         }
     }
 
@@ -151,6 +179,7 @@ class NodeSeekApiClient(
         page: Int = 1,
         includeBlocked: Boolean = false,
     ): ParsedFeedPageDto {
+        val requestGeneration = sessionGenerationProvider()
         val safePage = page.coerceAtLeast(1)
         val path = if (safePage == 1) "/award" else "/award/page-$safePage"
         val url = NodeSeekUrlNormalizer.buildUrl(path = path, baseOrigin = baseOrigin)
@@ -162,7 +191,7 @@ class NodeSeekApiClient(
                 includeBlocked = includeBlocked,
             )
         }.also { parsed ->
-            parsed.config?.let { onConfigObserved?.invoke(it) }
+            parsed.config?.let { notifyConfigObserved(it, requestGeneration) }
         }
     }
 
@@ -173,13 +202,24 @@ class NodeSeekApiClient(
         page: Int = 1,
         includeBlocked: Boolean = false,
     ): ParsedFeedPageDto {
+        val requestGeneration = sessionGenerationProvider()
         val safePage = page.coerceAtLeast(1)
+        val normalizedQuery = query.replace(SEARCH_CONTROL_WHITESPACE_REGEX, " ").trim()
+        if (normalizedQuery.isEmpty()) {
+            return ParsedFeedPageDto(
+                pinnedTopics = emptyList(),
+                topics = emptyList(),
+                currentPage = safePage,
+                hasNextPage = false,
+            )
+        }
+        val trimmedCategory = categorySlug.trim()
         val params = buildList {
-            add("q" to query)
+            add("q" to normalizedQuery)
             add("page" to safePage.toString())
             add("sortBy" to sortBy)
-            if (categorySlug.isNotBlank()) {
-                add("category" to categorySlug.trim())
+            if (trimmedCategory.isNotBlank()) {
+                add("category" to trimmedCategory)
             }
         }
         val url = NodeSeekUrlNormalizer.buildUrl(
@@ -187,16 +227,68 @@ class NodeSeekApiClient(
             queryParams = params,
             baseOrigin = baseOrigin,
         )
-        val html = executeHtmlGet(url = url, checkingPostAccess = false, requireTempScript = true)
-        return withContext(Dispatchers.Default) {
+        val (resolvedUrl, html, usedUnscopedFallback) = try {
+            Triple(
+                url,
+                executeHtmlGet(url = url, checkingPostAccess = false, requireTempScript = true),
+                false,
+            )
+        } catch (err: NodeSeekApiException) {
+            if (err.statusCode != 404) {
+                throw err
+            }
+            if (safePage > 1) {
+                return ParsedFeedPageDto(
+                    pinnedTopics = emptyList(),
+                    topics = emptyList(),
+                    currentPage = safePage,
+                    hasNextPage = false,
+                )
+            }
+            // Page 1 returned HTTP 404 with full query params (`page`, `sortBy`, `category`):
+            // retry once with minimal `/search?q=...` and apply category filtering client-side.
+            val minimalUrl = NodeSeekUrlNormalizer.buildUrl(
+                path = "/search",
+                queryParams = listOf("q" to normalizedQuery),
+                baseOrigin = baseOrigin,
+            )
+            if (minimalUrl == url) {
+                throw err
+            }
+            val fallbackHtml = executeHtmlGet(
+                url = minimalUrl,
+                checkingPostAccess = false,
+                requireTempScript = true,
+            )
+            Triple(minimalUrl, fallbackHtml, trimmedCategory.isNotBlank())
+        }
+        val parsed = withContext(Dispatchers.Default) {
             NodeSeekHtmlParser.parseFeedPage(
                 html = html,
-                pageUrl = url.toString(),
+                pageUrl = resolvedUrl.toString(),
                 includeBlocked = includeBlocked,
             )
-        }.also { parsed ->
-            parsed.config?.let { onConfigObserved?.invoke(it) }
         }
+        parsed.config?.let { notifyConfigObserved(it, requestGeneration) }
+
+        return if (usedUnscopedFallback && trimmedCategory.isNotBlank()) {
+            parsed.copy(
+                pinnedTopics = parsed.pinnedTopics.filter { matchesSearchCategory(it, trimmedCategory) },
+                topics = parsed.topics.filter { matchesSearchCategory(it, trimmedCategory) },
+            )
+        } else {
+            parsed
+        }
+    }
+
+    private fun matchesSearchCategory(topic: FeedTopicDto, requestedSlug: String): Boolean {
+        if (requestedSlug.isBlank()) return true
+        val key = topic.categoryKey.trim()
+        if (key.equals(requestedSlug, ignoreCase = true)) return true
+        val expectedName = NodeSeekHtmlParser.DEFAULT_CATEGORY_NAMES[requestedSlug.lowercase(Locale.ROOT)]
+        val actualName = topic.categoryName.trim()
+        if (expectedName != null && actualName.equals(expectedName, ignoreCase = true)) return true
+        return key.isEmpty() && actualName.isEmpty()
     }
 
     suspend fun fetchThreadPage(
@@ -204,6 +296,7 @@ class NodeSeekApiClient(
         page: Int = 1,
         includeBlocked: Boolean = false,
     ): ParsedThreadPageDto {
+        val requestGeneration = sessionGenerationProvider()
         val safePage = page.coerceAtLeast(1)
         val url = NodeSeekUrlNormalizer.buildUrl(
             path = "/post-$postId-$safePage",
@@ -217,7 +310,7 @@ class NodeSeekApiClient(
                 includeBlocked = includeBlocked,
             )
         }.also { parsed ->
-            onConfigObserved?.invoke(parsed.config)
+            notifyConfigObserved(parsed.config, requestGeneration)
         }
     }
 
@@ -499,6 +592,37 @@ class NodeSeekApiClient(
         requestSerializer = NewDiscussionRequestDto.serializer(),
         responseSerializer = BasicApiResponseDto.serializer(),
         extraHeaders = mapOf("Referer" to "${NodeSeekUrlNormalizer.ORIGIN}/new-discussion"),
+    )
+
+    suspend fun createDiscussionWithResult(
+        title: String,
+        markdownContent: String,
+        categorySlug: String,
+        requiredRank: Int = 0,
+    ): CreateDiscussionResponseDto = executeJsonPost(
+        path = "/api/content/new-discussion",
+        requestBodyDto = NewDiscussionRequestDto(
+            title = title,
+            content = markdownContent,
+            category = categorySlug,
+            rank = requiredRank,
+        ),
+        requestSerializer = NewDiscussionRequestDto.serializer(),
+        responseSerializer = CreateDiscussionResponseDto.serializer(),
+        extraHeaders = mapOf("Referer" to "${NodeSeekUrlNormalizer.ORIGIN}/new-discussion"),
+    )
+
+    suspend fun getLuckyFloorData(
+        postId: Long,
+        timeEpochMillis: Long,
+    ): LuckyFloorDataResponseDto = executeJsonGet(
+        path = "/api/content/floor-data",
+        responseSerializer = LuckyFloorDataResponseDto.serializer(),
+        queryParams = listOf(
+            "postId" to postId.toString(),
+            "time" to timeEpochMillis.toString(),
+        ),
+        extraHeaders = postRefererHeaders(postId),
     )
 
     /**
@@ -836,10 +960,188 @@ class NodeSeekApiClient(
         )
 
     // =========================================================================
+    // 8b. Invitations (邀请码) & Moderation Rulings (小黑屋公示)
+    // =========================================================================
+
+    suspend fun getInviteConfig(): InviteConfigResponseDto =
+        executeJsonGet(
+            path = "/api/invite/config",
+            responseSerializer = InviteConfigResponseDto.serializer(),
+            extraHeaders = mapOf("Referer" to "${NodeSeekUrlNormalizer.ORIGIN}/invite"),
+        )
+
+    suspend fun listInvites(page: Int = 1): InviteListResponseDto =
+        executeJsonGet(
+            path = "/api/invite/list",
+            responseSerializer = InviteListResponseDto.serializer(),
+            queryParams = listOf("page" to page.coerceAtLeast(1).toString()),
+            extraHeaders = mapOf("Referer" to "${NodeSeekUrlNormalizer.ORIGIN}/invite"),
+        )
+
+    suspend fun buyInviteCode(payment: String): BuyInviteResponseDto {
+        require(payment == "coin" || payment == "stardust") {
+            "Unsupported invite payment method: $payment"
+        }
+        return executeJsonPost(
+            path = "/api/invite/buyOne",
+            requestBodyDto = BuyInviteRequestDto(payment = payment),
+            requestSerializer = BuyInviteRequestDto.serializer(),
+            responseSerializer = BuyInviteResponseDto.serializer(),
+            extraHeaders = mapOf("Referer" to "${NodeSeekUrlNormalizer.ORIGIN}/invite"),
+        )
+    }
+
+    suspend fun warmInviteCsrfPage() {
+        val url = NodeSeekUrlNormalizer.buildUrl(
+            path = "/invite",
+            baseOrigin = baseOrigin,
+        )
+        executeHtmlGet(
+            url = url,
+            checkingPostAccess = false,
+            requireTempScript = false,
+        )
+    }
+
+    suspend fun listModerationRulings(
+        page: Int = 1,
+        search: String? = null,
+    ): RulingListResponseDto =
+        executeJsonGet(
+            path = "/api/admin/ruling/page-${page.coerceAtLeast(1)}",
+            responseSerializer = RulingListResponseDto.serializer(),
+            queryParams = listOfNotNull(
+                search?.trim()?.takeIf { it.isNotEmpty() }?.let { "search" to it },
+            ),
+        )
+
+    suspend fun getModerationRulingDetail(id: Long): RulingDetailResponseDto =
+        executeJsonGet(
+            path = "/api/admin/ruling/id-$id",
+            responseSerializer = RulingDetailResponseDto.serializer(),
+        )
+
+    // =========================================================================
     // 9. NodeImage Official Image Hosting (`https://api.nodeimage.com`)
     // =========================================================================
 
     suspend fun verifyNodeImageApiKey(apiKey: String) {
+        val trimmedKey = validateNodeImageKeyAndOrigin(apiKey)
+        val listUrl = nodeImageOrigin.resolve("/api/v1/images")
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
+        validateNodeImageTargetUrl(listUrl)
+        executeNodeImageRequestWithRedirects(
+            method = "GET",
+            initialUrl = listUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+        )
+    }
+
+    suspend fun listNodeImages(
+        apiKey: String,
+        page: Int = 1,
+        limit: Int? = null,
+    ): NodeImageGalleryPage {
+        val trimmedKey = validateNodeImageKeyAndOrigin(apiKey)
+        val safePage = page.coerceAtLeast(1)
+        val safeLimit = limit?.takeIf { it > 0 }?.coerceAtMost(100)
+        val baseListUrl = nodeImageOrigin.resolve("/api/v1/images")
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
+        val listUrl = if (safePage <= 1 && safeLimit == null) {
+            baseListUrl
+        } else {
+            baseListUrl.newBuilder().apply {
+                if (safePage > 1 || safeLimit != null) {
+                    addQueryParameter("page", safePage.toString())
+                }
+                if (safeLimit != null) {
+                    addQueryParameter("limit", safeLimit.toString())
+                }
+            }.build()
+        }
+        validateNodeImageTargetUrl(listUrl)
+        val rawBody = executeNodeImageRequestWithRedirects(
+            method = "GET",
+            initialUrl = listUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+        )
+        val dto = json.decodeFromString(NodeImageGalleryResponseDto.serializer(), rawBody)
+        if (dto.success == false) {
+            val msg = dto.message?.takeIf { it.isNotBlank() }
+                ?: dto.error?.takeIf { it.isNotBlank() }
+                ?: "获取图床相册列表失败。"
+            throw NodeSeekApiException(msg, serverMessage = msg)
+        }
+        val resolvedPage = dto.page.coerceAtLeast(safePage)
+        val resolvedPerPage = dto.perPage ?: safeLimit
+        val resolvedHasMore = dto.explicitHasMore
+            ?: dto.totalPages?.let { resolvedPage < it }
+            ?: if (dto.totalCount != null && resolvedPerPage != null && resolvedPerPage > 0) {
+                resolvedPage * resolvedPerPage < dto.totalCount
+            } else if (dto.totalCount != null && dto.items.isNotEmpty()) {
+                dto.items.size < dto.totalCount && (resolvedPage * dto.items.size < dto.totalCount)
+            } else {
+                false
+            }
+        return NodeImageGalleryPage(
+            items = dto.items.map { item ->
+                val resolvedUrl = normalizeUploadedImageUrl(item.url)
+                val resolvedThumb = if (item.thumbnailUrl.isNotBlank()) {
+                    normalizeUploadedImageUrl(item.thumbnailUrl)
+                } else {
+                    resolvedUrl
+                }
+                NodeImageItem(
+                    imageId = item.imageId,
+                    fileName = item.fileName,
+                    url = resolvedUrl,
+                    thumbnailUrl = resolvedThumb,
+                    sizeBytes = item.sizeBytes,
+                    mimeType = item.mimeType,
+                    createdAt = item.createdAt,
+                    deleteAfterDays = item.deleteAfterDays,
+                )
+            },
+            page = resolvedPage,
+            totalCount = dto.totalCount,
+            hasMore = resolvedHasMore,
+        )
+    }
+
+    suspend fun deleteNodeImage(
+        apiKey: String,
+        imageId: String,
+    ) {
+        val trimmedId = imageId.trim()
+        if (!NODE_IMAGE_ID_REGEX.matches(trimmedId)) {
+            throw NodeSeekApiException("无效的图片 ID。")
+        }
+        val trimmedKey = validateNodeImageKeyAndOrigin(apiKey)
+        val deleteUrl = nodeImageOrigin.resolve("/api/v1/delete/$trimmedId")
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 删除地址无效。")
+        validateNodeImageTargetUrl(deleteUrl)
+        val rawBody = executeNodeImageRequestWithRedirects(
+            method = "DELETE",
+            initialUrl = deleteUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+        )
+        if (rawBody.isNotBlank()) {
+            val parsed = runCatching {
+                json.decodeFromString(NodeImageDeleteResponseDto.serializer(), rawBody)
+            }.getOrNull()
+            if (parsed?.success == false) {
+                val msg = parsed.message?.takeIf { it.isNotBlank() }
+                    ?: parsed.error?.takeIf { it.isNotBlank() }
+                    ?: "删除图片失败。"
+                throw NodeSeekApiException(msg, serverMessage = msg)
+            }
+        }
+    }
+
+    private fun validateNodeImageKeyAndOrigin(apiKey: String): String {
         val trimmedKey = apiKey.trim()
         if (!NODE_IMAGE_KEY_REGEX.matches(trimmedKey)) {
             throw NodeSeekApiException("NodeImage API Key 格式无效，请检查设置中的 32–128 位十六进制密钥。")
@@ -849,26 +1151,72 @@ class NodeSeekApiClient(
                 "安全校验失败：NodeImage 图床请求必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送 API Key。",
             )
         }
-        val listUrl = nodeImageOrigin.resolve("/api/v1/images")
-            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
-        if (hasUserInfo(listUrl) || !isAllowedCredentialOrigin(listUrl) || !isSameOrigin(nodeImageOrigin, listUrl)) {
+        return trimmedKey
+    }
+
+    private fun validateNodeImageTargetUrl(targetUrl: HttpUrl) {
+        if (hasUserInfo(targetUrl) ||
+            !isAllowedCredentialOrigin(targetUrl) ||
+            !isSameOrigin(nodeImageOrigin, targetUrl)
+        ) {
             throw NodeSeekApiException(
                 "安全校验失败：禁止向非预期源站发送 NodeImage API Key。",
             )
         }
-        executeNodeImageGetWithRedirects(
-            initialUrl = listUrl,
-            expectedOrigin = nodeImageOrigin,
-            apiKey = trimmedKey,
-        )
     }
 
-    private suspend fun executeNodeImageGetWithRedirects(
+    suspend fun uploadImageToNodeImage(
+        imageBytes: ByteArray,
+        apiKey: String,
+        mimeType: String = "image/png",
+        deleteAfterDays: Int? = null,
+        fileName: String? = null,
+    ): String {
+        if (imageBytes.isEmpty()) {
+            throw NodeSeekApiException("所选图片内容为空，请重新选择。")
+        }
+        val trimmedKey = validateNodeImageKeyAndOrigin(apiKey)
+
+        val uploadUrl = nodeImageOrigin.resolve("/api/upload")
+            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
+        validateNodeImageTargetUrl(uploadUrl)
+
+        val (normalizedMime, canonicalExt) = resolveUploadMimeAndExtension(mimeType = mimeType, fileName = fileName)
+        val resolvedFileName = buildSafeUploadFileName(rawFileName = fileName, extension = canonicalExt)
+
+        fun buildMultipartBody(): MultipartBody {
+            val multipartBuilder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("image", resolvedFileName, imageBytes.toRequestBody(normalizedMime.toMediaType()))
+            if (deleteAfterDays != null && deleteAfterDays in 1..365) {
+                multipartBuilder.addFormDataPart("deleteDays", deleteAfterDays.toString())
+            }
+            return multipartBuilder.build()
+        }
+
+        val rawBody = executeNodeImageRequestWithRedirects(
+            method = "POST",
+            initialUrl = uploadUrl,
+            expectedOrigin = nodeImageOrigin,
+            apiKey = trimmedKey,
+            bodyFactory = ::buildMultipartBody,
+        )
+
+        val parsed = json.decodeFromString(NodeImageUploadResponseDto.serializer(), rawBody)
+        val rawDirectUrl = parsed.resolvedDirectUrl
+            ?: throw NodeSeekApiException("图床未返回可用的直链地址。")
+        return normalizeUploadedImageUrl(rawDirectUrl)
+    }
+
+    private suspend fun executeNodeImageRequestWithRedirects(
+        method: String,
         initialUrl: HttpUrl,
         expectedOrigin: HttpUrl,
         apiKey: String,
+        bodyFactory: (() -> RequestBody)? = null,
     ): String {
         var currentUrl = initialUrl
+        val isGetOrHead = method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
         for (hop in 0..MAX_REDIRECT_HOPS) {
             if (hasUserInfo(currentUrl) ||
                 !isAllowedCredentialOrigin(currentUrl) ||
@@ -879,14 +1227,19 @@ class NodeSeekApiClient(
                 )
             }
 
-            val request = Request.Builder()
+            val builder = Request.Builder()
                 .url(currentUrl)
-                .get()
                 .header("Accept", "application/json")
                 .header("X-API-Key", apiKey)
-                .build()
 
-            val raw = nodeImageHttpClient.newCall(request).awaitRawResponse()
+            when (method.uppercase(Locale.ROOT)) {
+                "GET" -> builder.get()
+                "HEAD" -> builder.head()
+                "DELETE" -> builder.delete(bodyFactory?.invoke())
+                else -> builder.method(method.uppercase(Locale.ROOT), bodyFactory?.invoke())
+            }
+
+            val raw = nodeImageHttpClient.newCall(builder.build()).awaitRawResponse()
             val status = raw.code
 
             if (status in REDIRECT_STATUS_CODES) {
@@ -926,156 +1279,9 @@ class NodeSeekApiClient(
                         statusCode = status,
                     )
                 }
-                currentUrl = nextUrl
-                continue
-            }
-
-            if (status in 300..399) {
-                throw NodeSeekApiException(
-                    message = "安全校验失败：图床返回不受支持的重定向状态 ($status)。",
-                    statusCode = status,
-                )
-            }
-
-            val body = raw.body
-            val parsedError = runCatching {
-                json.decodeFromString(NodeImageUploadResponseDto.serializer(), body)
-            }.getOrNull()
-            if (status !in 200..299 || parsedError?.success == false) {
-                val msg = parsedError?.message?.takeIf { it.isNotBlank() }
-                    ?: if (status == 401 || status == 403) {
-                        "图床密钥无效或没有权限，请检查 API Key。"
-                    } else {
-                        parsedError?.error?.takeIf { it.isNotBlank() } ?: "图床连通性校验失败 ($status)。"
-                    }
-                throw NodeSeekApiException(msg, statusCode = status, serverMessage = msg)
-            }
-            return body
-        }
-        throw NodeSeekApiException("安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。")
-    }
-
-    suspend fun uploadImageToNodeImage(
-        imageBytes: ByteArray,
-        apiKey: String,
-        mimeType: String = "image/png",
-        deleteAfterDays: Int? = null,
-        fileName: String? = null,
-    ): String {
-        if (imageBytes.isEmpty()) {
-            throw NodeSeekApiException("所选图片内容为空，请重新选择。")
-        }
-        val trimmedKey = apiKey.trim()
-        if (!NODE_IMAGE_KEY_REGEX.matches(trimmedKey)) {
-            throw NodeSeekApiException("NodeImage API Key 格式无效，请检查设置中的 32–128 位十六进制密钥。")
-        }
-        if (hasUserInfo(nodeImageOrigin) || !isAllowedCredentialOrigin(nodeImageOrigin)) {
-            throw NodeSeekApiException(
-                "安全校验失败：NodeImage 图床上传必须使用 HTTPS 加密连接，拒绝通过明文 HTTP 发送 API Key。",
-            )
-        }
-
-        val uploadUrl = nodeImageOrigin.resolve("/api/upload")
-            ?: throw NodeSeekApiException("安全校验失败：NodeImage 图床地址无效。")
-        if (hasUserInfo(uploadUrl) || !isAllowedCredentialOrigin(uploadUrl) || !isSameOrigin(nodeImageOrigin, uploadUrl)) {
-            throw NodeSeekApiException(
-                "安全校验失败：禁止向非预期源站发送 NodeImage API Key。",
-            )
-        }
-
-        val (normalizedMime, canonicalExt) = resolveUploadMimeAndExtension(mimeType = mimeType, fileName = fileName)
-        val resolvedFileName = buildSafeUploadFileName(rawFileName = fileName, extension = canonicalExt)
-
-        fun buildMultipartBody(): MultipartBody {
-            val multipartBuilder = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("image", resolvedFileName, imageBytes.toRequestBody(normalizedMime.toMediaType()))
-            if (deleteAfterDays != null && deleteAfterDays in 1..365) {
-                multipartBuilder.addFormDataPart("deleteDays", deleteAfterDays.toString())
-            }
-            return multipartBuilder.build()
-        }
-
-        val rawBody = executeNodeImagePostWithRedirects(
-            initialUrl = uploadUrl,
-            expectedOrigin = nodeImageOrigin,
-            apiKey = trimmedKey,
-            bodyFactory = ::buildMultipartBody,
-        )
-
-        val parsed = json.decodeFromString(NodeImageUploadResponseDto.serializer(), rawBody)
-        val rawDirectUrl = parsed.resolvedDirectUrl
-            ?: throw NodeSeekApiException("图床未返回可用的直链地址。")
-        return normalizeUploadedImageUrl(rawDirectUrl)
-    }
-
-    private suspend fun executeNodeImagePostWithRedirects(
-        initialUrl: HttpUrl,
-        expectedOrigin: HttpUrl,
-        apiKey: String,
-        bodyFactory: () -> RequestBody,
-    ): String {
-        var currentUrl = initialUrl
-        for (hop in 0..MAX_REDIRECT_HOPS) {
-            if (hasUserInfo(currentUrl) ||
-                !isAllowedCredentialOrigin(currentUrl) ||
-                !isSameOrigin(expectedOrigin, currentUrl)
-            ) {
-                throw NodeSeekApiException(
-                    "安全校验失败：禁止向非同源或非加密地址发送 NodeImage API Key。",
-                )
-            }
-
-            val request = Request.Builder()
-                .url(currentUrl)
-                .post(bodyFactory())
-                .header("Accept", "application/json")
-                .header("X-API-Key", apiKey)
-                .build()
-
-            val raw = nodeImageHttpClient.newCall(request).awaitRawResponse()
-            val status = raw.code
-
-            if (status in REDIRECT_STATUS_CODES) {
-                if (hop >= MAX_REDIRECT_HOPS) {
+                if (!isGetOrHead && status != 307 && status != 308) {
                     throw NodeSeekApiException(
-                        message = "安全校验失败：图床重定向次数过多（超过 $MAX_REDIRECT_HOPS 次）。",
-                        statusCode = status,
-                    )
-                }
-                val rawLocation = raw.headers["Location"]?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: throw NodeSeekApiException(
-                        message = "安全校验失败：图床重定向响应缺少 Location 头 ($status)。",
-                        statusCode = status,
-                    )
-                val nextUrl = currentUrl.resolve(rawLocation)
-                    ?: throw NodeSeekApiException(
-                        message = "安全校验失败：图床重定向目标地址无效或协议不受支持 ($status)。",
-                        statusCode = status,
-                    )
-                if (hasUserInfo(nextUrl)) {
-                    throw NodeSeekApiException(
-                        message = "安全校验失败：拒绝重定向至包含内嵌用户信息的图床地址 ($status)。",
-                        statusCode = status,
-                    )
-                }
-                if (currentUrl.scheme.equals("https", ignoreCase = true) &&
-                    !nextUrl.scheme.equals("https", ignoreCase = true)
-                ) {
-                    throw NodeSeekApiException(
-                        message = "安全校验失败：拒绝将图床上传请求从 HTTPS 降级重定向至明文 HTTP ($status)。",
-                        statusCode = status,
-                    )
-                }
-                if (!isAllowedCredentialOrigin(nextUrl) || !isSameOrigin(expectedOrigin, nextUrl)) {
-                    throw NodeSeekApiException(
-                        message = "安全校验失败：拒绝跨源重定向图床上传请求，已阻止泄露 API Key ($status)。",
-                        statusCode = status,
-                    )
-                }
-                if (status != 307 && status != 308) {
-                    throw NodeSeekApiException(
-                        message = "图床上传遇到改变请求方法的重定向 ($status)，仅允许同源 307/308 重定向。",
+                        message = "图床请求遇到改变请求方法的重定向 ($status)，仅允许同源 307/308 重定向。",
                         statusCode = status,
                     )
                 }
@@ -1792,6 +1998,8 @@ class NodeSeekApiClient(
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
         private val VALID_REACTIONS = setOf("upvote", "like", "dislike")
         private val NODE_IMAGE_KEY_REGEX = Regex("""^[a-fA-F0-9]{32,128}$""")
+        internal val NODE_IMAGE_ID_REGEX = Regex("""^[a-zA-Z0-9_-]+$""")
+        private val SEARCH_CONTROL_WHITESPACE_REGEX = Regex("""[\u0000-\u001F\u007F\s]+""")
         private val EDITOR_CSRF_PATHS = setOf(
             "/api/content/new-discussion",
             "/api/content/edit-discussion",

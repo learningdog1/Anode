@@ -1,6 +1,10 @@
 package com.nodeseek.app.ui.mail
 
 import com.nodeseek.app.data.repository.FakeSettingsRepository
+import com.nodeseek.app.domain.fleet.VpsAssetRecord
+import com.nodeseek.app.domain.mail.OtpWatchState
+import com.nodeseek.app.domain.mail.ParsedVpsBillingMail
+import com.nodeseek.app.domain.mail.RenewalAutoUpdateRecord
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -8,6 +12,7 @@ import com.nodeseek.app.domain.mail.SeekMailDetail
 import com.nodeseek.app.domain.mail.SeekMailLocalArchiveStore
 import com.nodeseek.app.domain.mail.SeekMailLocalTag
 import com.nodeseek.app.domain.mail.SeekMailLocalTagStore
+import com.nodeseek.app.domain.mail.SeekMailOtpWatcher
 import com.nodeseek.app.domain.mail.SeekMailPage
 import com.nodeseek.app.domain.mail.SeekMailRateLimit
 import com.nodeseek.app.domain.mail.SeekMailRepository
@@ -15,13 +20,21 @@ import com.nodeseek.app.domain.mail.SeekMailSummary
 import com.nodeseek.app.domain.mail.SeekMailTag
 import com.nodeseek.app.domain.mail.SeekMailUnreadPage
 import com.nodeseek.app.domain.mail.SeekMailbox
+import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
+import com.nodeseek.app.domain.mail.VpsMailIngestOutcome
+import com.nodeseek.app.domain.mail.VpsMailMatchStatus
+import com.nodeseek.app.domain.ssh.SshAuthMethod
+import com.nodeseek.app.domain.ssh.SshServerProfile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.io.OutputStream
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -90,6 +103,7 @@ class SeekMailArchiveDeleteViewModelTest {
         val vm = SeekMailViewModel(
             seekMailRepository = repo,
             settingsRepository = settings,
+            processingDispatcher = testDispatcher,
         )
         val snackbars = mutableListOf<SeekMailSnackbarEvent>()
         val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
@@ -177,6 +191,7 @@ class SeekMailArchiveDeleteViewModelTest {
         val vm = SeekMailViewModel(
             seekMailRepository = repo,
             settingsRepository = settings,
+            processingDispatcher = testDispatcher,
         )
         val snackbars = mutableListOf<SeekMailSnackbarEvent>()
         val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
@@ -239,6 +254,7 @@ class SeekMailArchiveDeleteViewModelTest {
         val vm = SeekMailViewModel(
             seekMailRepository = repo,
             settingsRepository = settings,
+            processingDispatcher = testDispatcher,
         )
         val snackbars = mutableListOf<SeekMailSnackbarEvent>()
         val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
@@ -356,7 +372,11 @@ class SeekMailArchiveDeleteViewModelTest {
             setSeekMailApiKey("sk_live_test_key_1234567890")
         }
 
-        val vm = SeekMailViewModel(seekMailRepository = repo, settingsRepository = settings)
+        val vm = SeekMailViewModel(
+            seekMailRepository = repo,
+            settingsRepository = settings,
+            processingDispatcher = testDispatcher,
+        )
         val snackbars = mutableListOf<SeekMailSnackbarEvent>()
         val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
         val snackbarJob = launch(testDispatcher) { vm.snackbarEvents.collect { snackbars += it } }
@@ -422,7 +442,11 @@ class SeekMailArchiveDeleteViewModelTest {
             setSeekMailApiKey("sk_live_key_a_1234567890")
         }
 
-        val vm = SeekMailViewModel(seekMailRepository = repo, settingsRepository = settings)
+        val vm = SeekMailViewModel(
+            seekMailRepository = repo,
+            settingsRepository = settings,
+            processingDispatcher = testDispatcher,
+        )
         val stateJob = launch(testDispatcher) { vm.uiState.collect {} }
 
         try {
@@ -454,10 +478,152 @@ class SeekMailArchiveDeleteViewModelTest {
         }
     }
 
+    @Test
+    fun `headless SeekMailViewModel without uiState collectors supports startOtpWatch, verify+refresh, selectAll+archive, and VPS SSH overwrite confirm`() = runTest {
+        val vpsMail = SeekMailSummary(
+            id = 501L,
+            mailboxId = 42L,
+            fromAddress = "billing@racknerd.com",
+            fromName = "RackNerd Billing",
+            toAddress = "alice@seek.li",
+            subject = "[RackNerd] New Server Information",
+            snippet = "Main IP: 198.51.100.88 SSH Port: 22 Root Password: Kw9#mP2\$vL8!qR",
+            isRead = false,
+            receivedAt = "2026-11-27T10:00:00Z",
+        )
+        val regularMail = sampleMail(id = 502L, mailboxId = 42L, subject = "Welcome", isRead = false)
+        val vpsDetail = SeekMailDetail(
+            summary = vpsMail.copy(isRead = true),
+            bodyText = """
+                New Account Information
+                Product/Service: 2GB KVM VPS
+                Hostname: rn-lax-01.example.com
+                Main IP: 198.51.100.88
+                SSH Port: 22
+                Root Password: Kw9#mP2${'$'}vL8!qR
+                Recurring Amount: ${'$'}10.98 USD
+                Billing Cycle: Annually
+                Next Due Date: 03/15/2027
+            """.trimIndent(),
+            bodyHtml = "<p>VPS</p>",
+            sanitizedBodyHtml = "<p>VPS</p>",
+        )
+
+        val repo = FakeSeekMailRepository(
+            mailboxes = listOf(SeekMailbox(id = 42L, address = "alice@seek.li")),
+            allMails = listOf(vpsMail, regularMail),
+            customDetails = mapOf(501L to vpsDetail),
+        )
+        val settings = FakeSettingsRepository()
+
+        var watchedMailboxId: Long? = -1L
+        var watchedMailboxAddress: String? = "unset"
+        val recordingWatcher = object : SeekMailOtpWatcher {
+            override val state: StateFlow<OtpWatchState> = MutableStateFlow(OtpWatchState.Idle)
+            override fun startWatch(mailboxId: Long?, mailboxAddress: String?, durationMillis: Long) {
+                watchedMailboxId = mailboxId
+                watchedMailboxAddress = mailboxAddress
+            }
+            override fun stopWatch() = Unit
+        }
+
+        val existingPrivateKeySsh = SshServerProfile(
+            id = "ssh_1",
+            alias = "RN LAX",
+            host = "198.51.100.88",
+            port = 22,
+            username = "root",
+            authMethod = SshAuthMethod.PRIVATE_KEY,
+        )
+        val ingestCalls = mutableListOf<Boolean>()
+        val fakeIngestService = object : VpsMailAutoIngestService {
+            override val assetsFlow: StateFlow<List<VpsAssetRecord>> = MutableStateFlow(emptyList())
+            override val sshServersFlow: StateFlow<List<SshServerProfile>> = MutableStateFlow(listOf(existingPrivateKeySsh))
+            override val autoUpdatesByMailKeyFlow: StateFlow<Map<String, RenewalAutoUpdateRecord>> = MutableStateFlow(emptyMap())
+            override val renewalAutoUpdateEvents: Flow<RenewalAutoUpdateRecord> = emptyFlow()
+            override suspend fun ensureLoaded() = Unit
+            override suspend fun processIncomingSummaries(summaries: List<SeekMailSummary>) = emptyList<RenewalAutoUpdateRecord>()
+            override suspend fun processMailDetail(detail: SeekMailDetail) = emptyList<RenewalAutoUpdateRecord>()
+            override fun resolveMatchStatus(
+                summary: SeekMailSummary?,
+                parsed: ParsedVpsBillingMail,
+                assets: List<VpsAssetRecord>,
+                sshServers: List<SshServerProfile>,
+                autoUpdatesByMailKey: Map<String, RenewalAutoUpdateRecord>,
+            ): VpsMailMatchStatus = VpsMailMatchStatus(matchedSshProfile = sshServers.firstOrNull())
+
+            override suspend fun ingestMail(
+                summary: SeekMailSummary?,
+                parsed: ParsedVpsBillingMail,
+                overwriteExistingSshCredentials: Boolean,
+            ): Result<VpsMailIngestOutcome> {
+                ingestCalls += overwriteExistingSshCredentials
+                return Result.success(
+                    VpsMailIngestOutcome(
+                        asset = VpsAssetRecord(
+                            id = "a1",
+                            nickname = "RN",
+                            providerName = "RackNerd",
+                            specsSummary = "2C2G",
+                            region = "US",
+                            renewalAmount = "10.98",
+                            expiryDateIso = "2027-03-15",
+                        ),
+                        assetCreated = true,
+                        summaryMessage = "ok",
+                    ),
+                )
+            }
+        }
+
+        val vm = SeekMailViewModel(
+            seekMailRepository = repo,
+            settingsRepository = settings,
+            vpsMailAutoIngestService = fakeIngestService,
+            seekMailOtpWatcher = recordingWatcher,
+            processingDispatcher = testDispatcher,
+        )
+        // ZERO uiState collectors active throughout all commands below!
+
+        // 1. verifyAndSaveApiKey + refresh()
+        vm.verifyAndSaveApiKey("sk_live_headless_1234567890")
+        val callsAfterVerify = repo.getMailsCallCount
+        assertEquals(1, callsAfterVerify)
+        vm.refresh()
+        assertEquals("refresh() must fetch mails after verifyAndSaveApiKey without uiState collector", callsAfterVerify + 1, repo.getMailsCallCount)
+
+        // 2. selectMailbox(42L) + startOtpWatch()
+        vm.selectMailbox(42L)
+        vm.startOtpWatch()
+        assertEquals(42L, watchedMailboxId)
+        assertEquals("alice@seek.li", watchedMailboxAddress)
+
+        // 3. openMail(vpsMail) + ingestOpenedVpsMail() opens showSshOverwriteConfirm for PRIVATE_KEY match
+        vm.openMail(vpsMail)
+        vm.ingestOpenedVpsMail()
+        assertTrue("PRIVATE_KEY SSH match must trigger overwrite confirmation instead of immediate ingest", ingestCalls.isEmpty())
+
+        // 4. toggleSelectAllVisible() + archiveSelectedMails() archives all visible mails
+        vm.toggleSelectAllVisible()
+        vm.archiveSelectedMails()
+        assertEquals(setOf(501L, 502L), repo.localArchiveStore.value.archivedMailIds)
+
+        // Check final uiState snapshot shows showSshOverwriteConfirm = true (still true because mail 502 didn't close 501? Wait: archiving 501 closes opened detail! Let's assert showSshOverwriteConfirm BEFORE archiving!)
+        // Re-open and test confirm dialog flag on first emission cleanly:
+        vm.unarchiveMail(vpsMail)
+        vm.openMail(vpsMail)
+        vm.ingestOpenedVpsMail()
+        assertTrue(ingestCalls.isEmpty())
+        assertTrue(vm.uiState.first().showSshOverwriteConfirm)
+        vm.confirmIngestOpenedVpsMail(overwriteExistingSshCredentials = false)
+        assertEquals(listOf(false), ingestCalls)
+    }
+
     private class FakeSeekMailRepository(
         private val mailboxes: List<SeekMailbox>,
         private val allMails: List<SeekMailSummary>,
         private val contacts: List<SeekMailContact> = emptyList(),
+        private val customDetails: Map<Long, SeekMailDetail> = emptyMap(),
     ) : SeekMailRepository {
         var mailsGate: CompletableDeferred<Unit>? = null
         var verifyMailboxesOverride: List<SeekMailbox>? = null
@@ -526,6 +692,10 @@ class SeekMailArchiveDeleteViewModelTest {
         }
 
         override suspend fun getMailDetail(mailId: Long, forceRefresh: Boolean): Result<SeekMailDetail> {
+            customDetails[mailId]?.let { custom ->
+                markMailReadLocally(mailId)
+                return Result.success(custom)
+            }
             val summary = allMails.first { it.id == mailId }
             markMailReadLocally(mailId)
             return Result.success(

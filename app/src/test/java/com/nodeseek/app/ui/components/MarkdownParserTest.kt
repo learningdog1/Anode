@@ -2,6 +2,10 @@ package com.nodeseek.app.ui.components
 
 import com.nodeseek.app.data.network.CoilHttpClientFactory
 import com.nodeseek.app.data.parser.NodeSeekHtmlParser
+import com.nodeseek.app.domain.model.NsAppWidgetTarget
+import com.nodeseek.app.domain.model.StardustTipTarget
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -786,5 +790,104 @@ class MarkdownParserTest {
             ),
             gallery,
         )
+    }
+
+    @Test
+    fun `nsapp vote and stardust widgets parse into SpecialWidget and AST helpers are internal`() {
+        val md = """
+            [最喜欢的线路](nsapp://vote?id=42)
+
+            <center>[投喂星尘](nsapp://stardust-receive?uid=101&amount=10&ref=123&once=1&note=tip)</center>
+        """.trimIndent()
+
+        val doc = parseNodeSeekMarkdownDocument(md)
+        val widgets = doc.blocks.filterIsInstance<MdBlock.SpecialWidget>()
+        assertEquals(2, widgets.size)
+        assertEquals("最喜欢的线路", widgets[0].title)
+        assertEquals("nsapp://vote?id=42", widgets[0].url)
+        assertEquals("投喂星尘", widgets[1].title)
+        assertTrue(widgets[1].url.startsWith("nsapp://stardust-receive?uid=101"))
+
+        assertTrue(SPECIAL_WIDGET_REGEX.matches("[Poll](nsapp://vote?id=7)"))
+        val segments = splitParagraphSegments(
+            tokenizeMarkdownInline("hello ![img](https://img.example.com/pic.png) world", doc.referenceLinks),
+        )
+        assertTrue(segments.any { it is ParagraphRenderSegment.InlineRun })
+        assertTrue(segments.any { it is ParagraphRenderSegment.PromotedImage })
+    }
+
+    @Test
+    fun `dispatchMarkdownUrlClick intercepts inline nsapp vote and stardust links without falling through to external UriHandler`() {
+        val loadedVoteIds = mutableListOf<Long>()
+        val openedStardustTargets = mutableListOf<StardustTipTarget>()
+        val liveController = object : NsAppWidgetController {
+            override fun pollStateFor(voteId: Long): StateFlow<PollCardUiState> = MutableStateFlow(PollCardUiState())
+            override fun stardustStateFor(widgetKey: String): StateFlow<StardustCardUiState> = MutableStateFlow(StardustCardUiState())
+            override fun ensureVoteLoaded(voteId: Long) {
+                loadedVoteIds += voteId
+            }
+            override fun reloadVote(voteId: Long) = Unit
+            override fun togglePollOption(voteId: Long, optionId: Long, isMultiple: Boolean) = Unit
+            override fun submitVote(voteId: Long) = Unit
+            override fun lockVote(voteId: Long) = Unit
+            override fun openStardustTip(target: StardustTipTarget) {
+                openedStardustTargets += target
+            }
+        }
+
+        val inlineVoteTargets = mutableListOf<NsAppWidgetTarget.Vote>()
+        val delegatedUrls = mutableListOf<String>()
+        val externalUrls = mutableListOf<String>()
+
+        dispatchMarkdownUrlClick(
+            rawUrl = "nsapp://vote?id=42",
+            nsAppWidgetController = liveController,
+            onOpenInlineVote = { inlineVoteTargets += it },
+            onUrlClick = { delegatedUrls += it },
+            onOpenExternalUri = { externalUrls += it },
+        )
+        assertEquals(listOf(42L), loadedVoteIds)
+        assertEquals(listOf(42L), inlineVoteTargets.map { it.voteId })
+        assertTrue(delegatedUrls.isEmpty())
+        assertTrue(externalUrls.isEmpty())
+
+        dispatchMarkdownUrlClick(
+            rawUrl = "nsapp://stardust-receive?uid=101&amount=5",
+            nsAppWidgetController = liveController,
+            onOpenInlineVote = { inlineVoteTargets += it },
+            onUrlClick = { delegatedUrls += it },
+            onOpenExternalUri = { externalUrls += it },
+        )
+        assertEquals(listOf(101L), openedStardustTargets.map { it.receiverUid })
+        assertTrue(delegatedUrls.isEmpty())
+        assertTrue(externalUrls.isEmpty())
+
+        dispatchMarkdownUrlClick(
+            rawUrl = "nsapp://unknown",
+            nsAppWidgetController = liveController,
+            onOpenInlineVote = { inlineVoteTargets += it },
+            onUrlClick = { delegatedUrls += it },
+            onOpenExternalUri = { externalUrls += it },
+        )
+        assertTrue(delegatedUrls.isEmpty())
+        assertTrue(externalUrls.isEmpty())
+
+        dispatchMarkdownUrlClick(
+            rawUrl = "nsapp://vote?id=42",
+            nsAppWidgetController = NoOpNsAppWidgetController,
+            onOpenInlineVote = { inlineVoteTargets += it },
+            onUrlClick = null,
+            onOpenExternalUri = { externalUrls += it },
+        )
+        assertTrue("NoOp controller without onUrlClick must still not send nsapp:// to UriHandler", externalUrls.isEmpty())
+
+        dispatchMarkdownUrlClick(
+            rawUrl = "https://example.com/topic",
+            nsAppWidgetController = liveController,
+            onOpenInlineVote = { inlineVoteTargets += it },
+            onUrlClick = null,
+            onOpenExternalUri = { externalUrls += it },
+        )
+        assertEquals(listOf("https://example.com/topic"), externalUrls)
     }
 }

@@ -1852,6 +1852,8 @@ class SellerTrustRepositoryImpl internal constructor(
             userAgentProvider: UserAgentProvider? = null,
             sameOriginTransport: SameOriginTransport? = null,
             onConfigObserved: ((ConfigPayloadDto) -> Unit)? = null,
+            sessionGenerationProvider: () -> Long = { 0L },
+            onConfigObservedWithGeneration: ((ConfigPayloadDto, Long) -> Unit)? = null,
         ): SellerTrustRepositoryImpl {
             val appCtx = context.applicationContext ?: context
             val notesFile = File(appCtx.filesDir, NOTES_FILE_NAME)
@@ -1869,6 +1871,8 @@ class SellerTrustRepositoryImpl internal constructor(
                     userAgentProvider = userAgentProvider ?: UserAgentProvider().also { it.initFromContext(appCtx) },
                     sameOriginTransport = sameOriginTransport,
                     onConfigObserved = onConfigObserved,
+                    sessionGenerationProvider = sessionGenerationProvider,
+                    onConfigObservedWithGeneration = onConfigObservedWithGeneration,
                     forumRepository = forumRepository,
                 )
             } else {

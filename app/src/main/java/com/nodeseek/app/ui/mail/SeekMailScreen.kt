@@ -96,6 +96,7 @@ import androidx.compose.material.icons.rounded.MarkEmailUnread
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.Shield
@@ -165,6 +166,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.mail.OtpWatchState
 import com.nodeseek.app.domain.mail.SeekMailAttachment
 import com.nodeseek.app.domain.mail.SeekMailAuthTelemetry
 import com.nodeseek.app.domain.mail.SeekMailContact
@@ -178,6 +180,7 @@ import com.nodeseek.app.domain.mail.SeekMailbox
 import com.nodeseek.app.domain.mail.VpsBillingMailParser
 import com.nodeseek.app.domain.mail.VpsMailSummaryHint
 import com.nodeseek.app.domain.mail.VpsMailType
+import com.nodeseek.app.notifications.OtpWatchNotificationHelper
 import com.nodeseek.app.ui.components.CompactCountBadge
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -435,6 +438,17 @@ fun SeekMailScreen(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         )
                     }
+
+                    SeekMailOtpWatchStrip(
+                        otpWatchState = uiState.otpWatchState,
+                        onStartWatch = viewModel::startOtpWatch,
+                        onStopWatch = viewModel::stopOtpWatch,
+                        onDismissResult = viewModel::dismissOtpWatchResult,
+                        onCopyCode = { code ->
+                            copyWithFeedback("验证码", code, "已复制验证码：$code", true)
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
 
                     SeekMailFilterAndTagRail(
                         filterMode = uiState.filterMode,
@@ -994,6 +1008,216 @@ private fun MailTopCircleButton(
                 tint = tint,
                 modifier = Modifier.size(iconSize),
             )
+        }
+    }
+}
+
+@Composable
+private fun SeekMailOtpWatchStrip(
+    otpWatchState: OtpWatchState,
+    onStartWatch: () -> Unit,
+    onStopWatch: () -> Unit,
+    onDismissResult: () -> Unit,
+    onCopyCode: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val containerColor = when (otpWatchState) {
+        is OtpWatchState.Watching -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.68f)
+        is OtpWatchState.Found -> NodePulseThemeTokens.extendedColors.drumstickContainer.copy(alpha = 0.72f)
+        is OtpWatchState.Error -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+        is OtpWatchState.TimedOut,
+        OtpWatchState.Idle,
+        -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val borderColor = when (otpWatchState) {
+        is OtpWatchState.Watching -> MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+        is OtpWatchState.Found -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+        is OtpWatchState.Error -> MaterialTheme.colorScheme.error.copy(alpha = 0.35f)
+        is OtpWatchState.TimedOut,
+        OtpWatchState.Idle,
+        -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(PulseArchitecturalShapes.ElevatedTile)
+            .background(containerColor)
+            .border(1.dp, borderColor, PulseArchitecturalShapes.ElevatedTile)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        when (otpWatchState) {
+            OtpWatchState.Idle -> {
+                Icon(
+                    imageVector = Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "等待验证码灵动通知",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "后台自动轮询 3 分钟，收到新验证码即弹高优复制通知",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                FilledTonalButton(
+                    onClick = onStartWatch,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = "监听验证码（3 分钟）",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+
+            is OtpWatchState.Watching -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "正在监听验证码 · ${OtpWatchNotificationHelper.formatRemainingCountdown(otpWatchState.remainingSeconds)}",
+                        style = MaterialTheme.typography.labelLarge.withTabularNumbers()
+                            .copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = otpWatchState.mailboxAddress?.let { "监听 $it · 已轮询 ${otpWatchState.pollCount} 次" }
+                            ?: "切回桌面或浏览器后仍将弹窗提醒",
+                        style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = onStopWatch) {
+                    Text("停止")
+                }
+            }
+
+            is OtpWatchState.Found -> {
+                Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "已捕获验证码：${otpWatchState.code}",
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = OtpWatchNotificationHelper.formatFoundSubtitle(otpWatchState),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                FilledTonalButton(
+                    onClick = { onCopyCode(otpWatchState.code) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("复制", style = MaterialTheme.typography.labelMedium)
+                }
+                IconButton(
+                    onClick = onDismissResult,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+
+            is OtpWatchState.TimedOut -> {
+                Icon(
+                    imageVector = Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "3 分钟监听已结束，暂未收到新验证码",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                TextButton(onClick = onStartWatch) {
+                    Text("重新监听")
+                }
+                IconButton(
+                    onClick = onDismissResult,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+
+            is OtpWatchState.Error -> {
+                Icon(
+                    imageVector = Icons.Rounded.ErrorOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = otpWatchState.message,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                TextButton(onClick = onStartWatch) {
+                    Text("重试")
+                }
+                IconButton(
+                    onClick = onDismissResult,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "关闭提示",
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
         }
     }
 }

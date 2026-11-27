@@ -1,0 +1,20 @@
+{
+  "uid101": {
+    "success": true,
+    "data": [
+      { "category": "tech", "showInIndex": true },
+      { "category": "trade", "showInIndex": true },
+      { "category": "review", "showInIndex": true },
+      { "category": "daily", "showInIndex": false }
+    ]
+  },
+  "uid202": {
+    "success": true,
+    "data": [
+      { "category": "carpool", "showInIndex": true },
+      { "category": "info", "showInIndex": true },
+      { "category": "daily", "showInIndex": true },
+      { "category": "trade", "showInIndex": false }
+    ]
+  }
+}

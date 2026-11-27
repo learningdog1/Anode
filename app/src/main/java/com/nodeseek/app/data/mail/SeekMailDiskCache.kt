@@ -190,6 +190,45 @@ class SeekMailDiskCache(
         }
     }
 
+    /**
+     * Returns all cached default first-page mail snapshots (all-mailboxes `mb_0` plus any
+     * per-mailbox `mb_<id>` pages) for [apiKey] from memory and disk without hitting network.
+     */
+    suspend fun getCachedDefaultMailsPagesForKey(
+        apiKey: String,
+    ): List<CachedMailPageEntry> {
+        val ns = keyNamespace(apiKey) ?: return emptyList()
+        val prefix = "${ns}_mails_mb_"
+        val keys = LinkedHashSet<String>()
+        keys.add(defaultMailPageKey(ns, null))
+        mailPageMemory.keys
+            .filter { it.startsWith(prefix) }
+            .sorted()
+            .forEach { keys.add(it) }
+        val diskKeys = withContext(ioDispatcher) {
+            diskMutex.withLock {
+                cacheDir.listFiles { file ->
+                    file.isFile && file.name.startsWith(prefix) && file.name.endsWith(".json")
+                }?.map { file ->
+                    file.name.removeSuffix(".json")
+                }?.sorted().orEmpty()
+            }
+        }
+        diskKeys.forEach { keys.add(it) }
+
+        val entries = ArrayList<CachedMailPageEntry>(keys.size)
+        for (key in keys) {
+            val cached = mailPageMemory[key]
+                ?: readFromDisk(key, CachedMailPageEntry.serializer())?.also {
+                    mailPageMemory[key] = it
+                }
+            if (cached != null) {
+                entries += cached
+            }
+        }
+        return entries
+    }
+
     suspend fun saveDefaultMailsPage(
         apiKey: String,
         mailboxId: Long? = null,

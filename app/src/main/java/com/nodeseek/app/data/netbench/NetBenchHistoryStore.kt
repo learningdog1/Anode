@@ -26,6 +26,8 @@ data class NetBenchReportPreferences(
     val includeClientNetwork: Boolean = true,
     val markdownStyle: NetBenchMarkdownStyle = NetBenchMarkdownStyle.FULL_TABLE,
     val includeReportImages: Boolean = false,
+    val enableForwardTraceroute: Boolean = false,
+    val enableReverseTraceroute: Boolean = false,
 )
 
 @Serializable

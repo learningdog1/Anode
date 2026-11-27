@@ -29,6 +29,7 @@ data class AppSettings(
     val homeCardScale: Float = DEFAULT_HOME_CARD_SCALE,
     val preferRandomCheckIn: Boolean = false,
     val pinnedCategorySlugs: Set<String> = DEFAULT_PINNED_CATEGORY_SLUGS,
+    val homepageCategoryOrder: List<String> = emptyList(),
     val includeBlockedTopics: Boolean = false,
     val preferRssFallback: Boolean = false,
     val nodeImageApiKey: String = "",

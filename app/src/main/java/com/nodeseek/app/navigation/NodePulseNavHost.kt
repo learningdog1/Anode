@@ -108,6 +108,7 @@ import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.DefaultAppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.FeedSort
@@ -129,6 +130,7 @@ import com.nodeseek.app.ui.adaptive.calculatePulseAdaptiveLayoutInfo
 import com.nodeseek.app.ui.adaptive.isDualPaneListHost
 import com.nodeseek.app.ui.adaptive.resolveAdaptivePostureTransition
 import com.nodeseek.app.ui.boards.BoardsScreen
+import com.nodeseek.app.ui.hub.InviteAndRulingsScreen
 import com.nodeseek.app.ui.components.InAppMessagePopupOverlay
 import com.nodeseek.app.ui.components.PulseBottomDockOverlay
 import com.nodeseek.app.ui.components.PulseNavTab
@@ -140,6 +142,7 @@ import com.nodeseek.app.ui.activity.openActivityAppNotificationSettings
 import com.nodeseek.app.ui.activity.rememberActivityNotificationBinding
 import com.nodeseek.app.ui.composer.TopicComposerScreen
 import com.nodeseek.app.ui.explore.ExploreScreen
+import com.nodeseek.app.ui.fleet.DomainAssetsScreen
 import com.nodeseek.app.ui.fleet.MyServersScreen
 import com.nodeseek.app.ui.fleet.MyServersTab
 import com.nodeseek.app.ui.hub.CheckInBoardScreen
@@ -203,6 +206,7 @@ fun NodePulseRootShell(
     onDeepLinkConsumed: () -> Unit = {},
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
     shortcutDestinationFlow: Flow<AppDestination>? = null,
+    externalFeedbackFlow: Flow<String>? = null,
     onDarkThemeResolved: (Boolean) -> Unit = {},
 ) {
     CompositionLocalProvider(
@@ -257,6 +261,7 @@ fun NodePulseRootShell(
                             onDeepLinkConsumed = onDeepLinkConsumed,
                             notificationTapFlow = notificationTapFlow,
                             shortcutDestinationFlow = shortcutDestinationFlow,
+                            externalFeedbackFlow = externalFeedbackFlow,
                         )
                     }
                 }
@@ -279,6 +284,7 @@ fun NodePulseNavHost(
     onDeepLinkConsumed: () -> Unit = {},
     notificationTapFlow: Flow<NotificationTapTarget>? = null,
     shortcutDestinationFlow: Flow<AppDestination>? = null,
+    externalFeedbackFlow: Flow<String>? = null,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -400,8 +406,15 @@ fun NodePulseNavHost(
         }
     }
 
-    // Keep pending check-in dot & popup queue synchronized with active session
+    // Keep pending check-in dot, dual-pane selection & popup queue synchronized with active session
+    var lastObservedSessionUidForPane by rememberSaveable { mutableStateOf(session?.uid) }
     LaunchedEffect(session?.uid) {
+        val currentUid = session?.uid
+        if (currentUid != lastObservedSessionUidForPane) {
+            lastObservedSessionUidForPane = currentUid
+            selectedPaneTopic = null
+            isDetailPaneMaximized = false
+        }
         inAppPopupState.clear()
         val currentSession = session
         if (currentSession == null) {
@@ -849,6 +862,28 @@ fun NodePulseNavHost(
         }
     }
 
+    val openInviteAndRulings: (initialTab: Int) -> Unit = remember(navController) {
+        { initialTab ->
+            isDetailPaneMaximized = false
+            navController.navigate(
+                InviteAndRulingsRoute(initialTab = initialTab.coerceIn(0, 1)),
+            ) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    val openDomainAssets: (highlightAssetId: String) -> Unit = remember(navController) {
+        { highlightAssetId ->
+            isDetailPaneMaximized = false
+            navController.navigate(
+                DomainAssetsRoute(highlightAssetId = highlightAssetId),
+            ) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     val openComposerWithPrefill: (categorySlug: String, title: String, markdown: String) -> Unit =
         remember(navController) {
             { categorySlug, title, markdown ->
@@ -884,6 +919,14 @@ fun NodePulseNavHost(
             }
             navController.navigate(destination) {
                 launchSingleTop = true
+            }
+        }
+    }
+
+    LaunchedEffect(externalFeedbackFlow) {
+        externalFeedbackFlow?.collect { message ->
+            if (message.isNotBlank()) {
+                rootSnackbarHostState.showSnackbar(message)
             }
         }
     }
@@ -1001,6 +1044,7 @@ fun NodePulseNavHost(
     }
 
     // Incoming OS / App-Link deep-link handling
+    var pendingLuckyDrawSpec by remember { mutableStateOf<LuckyDrawSpec?>(null) }
     val incomingDeepLinkUri = deepLinkUriFlow?.collectAsStateWithLifecycle()?.value
     LaunchedEffect(incomingDeepLinkUri) {
         val uri = incomingDeepLinkUri ?: return@LaunchedEffect
@@ -1027,6 +1071,9 @@ fun NodePulseNavHost(
                 navController.navigate(InboxRoute(initialTab = 0)) {
                     launchSingleTop = true
                 }
+            }
+            is NodePulseDeepLink.LuckyDraw -> {
+                pendingLuckyDrawSpec = parsed.toSpec()
             }
             null -> Unit
         }
@@ -1252,6 +1299,7 @@ fun NodePulseNavHost(
                                             onOpenMyServers = { openMyServers(0, "", "", "") },
                                             onOpenNetBench = { openMobileNetBench("") },
                                             onOpenLiteSsh = openLiteSsh,
+                                            onOpenDomainAssets = { openDomainAssets("") },
                                             contentBottomPadding = featureHubBottomPadding,
                                             scrollToTopTrigger = featureHubScrollToTopTrigger,
                                             onScrollToTopConsumed = { featureHubScrollToTopTrigger = 0 },
@@ -1288,6 +1336,7 @@ fun NodePulseNavHost(
                                                     launchSingleTop = true
                                                 }
                                             },
+                                            onOpenInviteAndRulings = openInviteAndRulings,
                                             onRequestWebViewAuth = {
                                                 openWebViewAuth(SIGN_IN_URL, true)
                                             },
@@ -1556,6 +1605,7 @@ fun NodePulseNavHost(
                     onOpenDirectMessage = openDirectMessage,
                     onOpenUserProfile = navigateToUser,
                     onOpenCategory = selectBoardAndOpenExplore,
+                    onOpenInviteAndRulings = openInviteAndRulings,
                     onRequestWebViewAuth = openWebViewAuth,
                 )
             }
@@ -1760,6 +1810,8 @@ fun NodePulseNavHost(
                     initialHighlightAssetId = route.highlightAssetId.takeIf { it.isNotBlank() },
                     pendingRestockPrefill = pendingImportPrefill,
                     onConsumeRestockPrefill = { pendingImportPrefill = null },
+                    domainRdapClient = container.domainRdapClient,
+                    tlsCertificateInspector = container.tlsCertificateInspector,
                 )
             }
 
@@ -1817,6 +1869,33 @@ fun NodePulseNavHost(
                         openMyServers(0, "", "", "")
                     },
                     viewModel = sshViewModel,
+                )
+            }
+
+            composable<InviteAndRulingsRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<InviteAndRulingsRoute>()
+                InviteAndRulingsScreen(
+                    initialTab = route.initialTab,
+                    onBack = safePopBackStack,
+                    onOpenUserProfile = navigateToUser,
+                    onOpenTopic = openTopic,
+                    onRequestWebViewAuth = {
+                        openWebViewAuth(SIGN_IN_URL, true)
+                    },
+                )
+            }
+
+            // Domain & TLS Certificate Asset Management (independent from Server Asset Ledger)
+            composable<DomainAssetsRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<DomainAssetsRoute>()
+                DomainAssetsScreen(
+                    onBack = safePopBackStack,
+                    fleetRepository = container.fleetRepository,
+                    exchangeRateRepository = container.exchangeRateRepository,
+                    fleetWorkScheduler = container.fleetWorkScheduler,
+                    domainRdapClient = container.domainRdapClient,
+                    tlsCertificateInspector = container.tlsCertificateInspector,
+                    initialHighlightAssetId = route.highlightAssetId.takeIf { it.isNotBlank() },
                 )
             }
         }
@@ -1936,6 +2015,31 @@ fun NodePulseNavHost(
         )
 
         // Centralized first-party WebView authentication & challenge recovery sheet
+        pendingLuckyDrawSpec?.let { luckySpec ->
+            val viewerSession by container.sessionRepository.sessionState.collectAsStateWithLifecycle()
+            com.nodeseek.app.ui.activity.LuckyDrawSheet(
+                spec = luckySpec,
+                initialMode = com.nodeseek.app.ui.activity.LuckyDrawSheetMode.VERIFY,
+                allowGeneratorMode = false,
+                isViewerTopicAuthor = false,
+                viewerUid = viewerSession?.uid,
+                luckyDrawRepository = container.luckyDrawRepository,
+                forumRepository = container.forumRepository,
+                onDismiss = { pendingLuckyDrawSpec = null },
+                onFeedbackMessage = { msg ->
+                    appScope.launch { rootSnackbarHostState.showSnackbar(msg) }
+                },
+                onOpenTopicFloor = { targetPostId, targetFloor ->
+                    pendingLuckyDrawSpec = null
+                    openTopicFromExternal(targetPostId, targetFloor, "")
+                },
+                onOpenUser = { uid, username ->
+                    pendingLuckyDrawSpec = null
+                    navigateToUser(uid, username)
+                },
+            )
+        }
+
         activeWebViewRequest?.let { request ->
             val userAgentProvider = (container as? DefaultAppContainer)?.userAgentProvider
             val synchronizedUserAgent = remember(userAgentProvider, context, request) {
@@ -1952,6 +2056,9 @@ fun NodePulseNavHost(
                 useSystemDefaultUserAgent = useSystemDefaultUserAgent,
                 onDismiss = {
                     val hadPendingComposer = pendingComposerSlugAfterAuth != null
+                    val hadPendingAddAccount = runCatching {
+                        container.multiAccountManager.pendingAddAccountFlow.value
+                    }.getOrDefault(false)
                     pendingComposerSlugAfterAuth = null
                     activeWebViewRequest = null
                     navController.currentBackStackEntry
@@ -1961,8 +2068,15 @@ fun NodePulseNavHost(
                         val updatedSession = container.sessionRepository.onWebViewDismissed().getOrNull()
                         if (updatedSession != null) {
                             container.inboxRepository.refreshUnreadCount()
-                        } else if (hadPendingComposer) {
-                            // Keep clean state if user cancelled login
+                        } else {
+                            if (hadPendingAddAccount) {
+                                runCatching {
+                                    container.multiAccountManager.cancelAddAccountIfUnauthenticated()
+                                }
+                            }
+                            if (hadPendingComposer) {
+                                // Keep clean state if user cancelled login
+                            }
                         }
                     }
                 },

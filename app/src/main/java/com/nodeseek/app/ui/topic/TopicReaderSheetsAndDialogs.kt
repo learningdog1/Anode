@@ -213,6 +213,7 @@ internal fun ReplyComposerBottomSheet(
     onOpenFullNetBench: ((String) -> Unit)? = null,
     onOpenFullLiteSsh: (() -> Unit)? = null,
     onPublishSshToComposer: ((suggestedTitle: String, markdownContent: String) -> Unit)? = null,
+    initialValuationMachineLabel: String = "",
 ) {
     val appContainer = LocalAppContainer.current
     val ext = NodePulseThemeTokens.extendedColors
@@ -655,6 +656,8 @@ internal fun ReplyComposerBottomSheet(
                 applyTransform { insertMarkdownBlockAtCursor(it, markdown) }
             },
             onDismiss = { showValuationSheet = false },
+            initialMachineLabel = initialValuationMachineLabel,
+            marketReferenceRepository = appContainer.tradeMarketReferenceRepository,
         )
     }
 

@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
@@ -32,6 +33,7 @@ import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.VpnLock
 import androidx.compose.material3.BottomSheetDefaults
@@ -139,6 +141,9 @@ internal class NetBenchQuickSheetViewModel(
     sshVaultRepository: SshVaultRepository?,
     initialTarget: String,
     initialMarkdownStyle: NetBenchMarkdownStyle,
+    sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager? = null,
+    benchmarkBaselineRepository: com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository =
+        com.nodeseek.app.domain.baseline.NoOpBenchmarkBaselineRepository,
 ) : ViewModel() {
 
     val controller = NetBenchSessionController(
@@ -150,6 +155,8 @@ internal class NetBenchQuickSheetViewModel(
         initialTarget = initialTarget,
         initialMarkdownStyle = initialMarkdownStyle,
         sshVaultRepository = sshVaultRepository,
+        sshSessionManager = sshSessionManager,
+        benchmarkBaselineRepository = benchmarkBaselineRepository,
     )
 
     override fun onCleared() {
@@ -165,6 +172,9 @@ internal class NetBenchQuickSheetViewModel(
             sshVaultRepository: SshVaultRepository?,
             initialTarget: String,
             initialMarkdownStyle: NetBenchMarkdownStyle,
+            sshSessionManager: com.nodeseek.app.ui.ssh.LiteSshSessionManager? = null,
+            benchmarkBaselineRepository: com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository =
+                com.nodeseek.app.domain.baseline.NoOpBenchmarkBaselineRepository,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -177,6 +187,8 @@ internal class NetBenchQuickSheetViewModel(
                     sshVaultRepository = sshVaultRepository,
                     initialTarget = initialTarget,
                     initialMarkdownStyle = initialMarkdownStyle,
+                    sshSessionManager = sshSessionManager,
+                    benchmarkBaselineRepository = benchmarkBaselineRepository,
                 ) as T
             }
         }
@@ -234,6 +246,8 @@ fun NetBenchQuickBottomSheet(
                 sshVaultRepository = appContainer.sshVaultRepository,
                 initialTarget = initialTarget,
                 initialMarkdownStyle = initialMarkdownStyle,
+                sshSessionManager = appContainer.sshSessionManager,
+                benchmarkBaselineRepository = appContainer.benchmarkBaselineRepository,
             ),
         )
         quickViewModel.controller
@@ -253,6 +267,7 @@ fun NetBenchQuickBottomSheet(
     var inlineBanner by remember { mutableStateOf<String?>(null) }
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
     var showVaultHostPicker by rememberSaveable { mutableStateOf(false) }
+    var showReverseVaultPicker by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(controller) {
         controller.snackbarMessages.collect { msg ->
@@ -506,6 +521,20 @@ fun NetBenchQuickBottomSheet(
                         onClick = { controller.toggleTcpPing(!uiState.enableTcpPing) },
                     )
                     NetBenchSelectableChip(
+                        label = "去程 MTR",
+                        selected = uiState.enableTraceroute,
+                        icon = Icons.AutoMirrored.Rounded.AltRoute,
+                        enabled = !uiState.isRunning,
+                        onClick = { controller.toggleTraceroute(!uiState.enableTraceroute) },
+                    )
+                    NetBenchSelectableChip(
+                        label = "回程 MTR",
+                        selected = uiState.enableReverseTraceroute,
+                        icon = Icons.Rounded.SwapHoriz,
+                        enabled = !uiState.isRunning,
+                        onClick = { controller.toggleReverseTraceroute(!uiState.enableReverseTraceroute) },
+                    )
+                    NetBenchSelectableChip(
                         label = "IP 归属与原生鉴定",
                         selected = uiState.enableIpCheck,
                         icon = Icons.Rounded.Public,
@@ -711,6 +740,54 @@ fun NetBenchQuickBottomSheet(
                     )
                 }
 
+                if (uiState.enableTraceroute ||
+                    uiState.enableReverseTraceroute ||
+                    uiState.tracerouteProgress != null ||
+                    uiState.reverseTracerouteResult != null ||
+                    uiState.isRunningReverseTrace ||
+                    !uiState.reverseTraceError.isNullOrBlank()
+                ) {
+                    val selectedReverseServer = uiState.selectedReverseServerId?.let { id ->
+                        uiState.vaultServers.firstOrNull { it.id == id }
+                    }
+                    val matchedServer = remember(uiState.targetInput, uiState.vaultServers) {
+                        val norm = normalizeHostForVaultMatch(uiState.targetInput)
+                        if (norm.isEmpty()) null else uiState.vaultServers.firstOrNull {
+                            normalizeHostForVaultMatch(it.resolvableNetBenchHost()) == norm
+                        }
+                    }
+                    NetBenchTracerouteCard(
+                        targetInput = uiState.targetInput,
+                        isRunningBenchmark = uiState.isRunning,
+                        forwardProgress = if (uiState.enableTraceroute) uiState.tracerouteProgress else null,
+                        reverseSummary = if (uiState.enableReverseTraceroute) uiState.reverseTracerouteResult else null,
+                        isRunningReverseTrace = uiState.isRunningReverseTrace,
+                        reverseTraceError = if (uiState.enableReverseTraceroute) uiState.reverseTraceError else null,
+                        selectedReverseServer = selectedReverseServer,
+                        clientEgress = uiState.clientEgress,
+                        vaultServers = uiState.vaultServers,
+                        enableForwardTrace = uiState.enableTraceroute,
+                        enableReverseTrace = uiState.enableReverseTraceroute,
+                        onRunForwardTraceOnly = {
+                            keyboardController?.hide()
+                            controller.runForwardTracerouteOnly()
+                        },
+                        onTriggerReverseTrace = {
+                            keyboardController?.hide()
+                            val targetServer = selectedReverseServer ?: matchedServer
+                            if (targetServer != null) {
+                                controller.runReverseTraceroute(targetServer)
+                            } else {
+                                showReverseVaultPicker = true
+                            }
+                        },
+                        onPickReverseServer = {
+                            keyboardController?.hide()
+                            showReverseVaultPicker = true
+                        },
+                    )
+                }
+
                 if (uiState.generatedMarkdown.isNotBlank()) {
                     NetBenchMarkdownReportCard(
                         markdown = uiState.generatedMarkdown,
@@ -773,6 +850,28 @@ fun NetBenchQuickBottomSheet(
             },
             onDismiss = { showVaultHostPicker = false },
             onNavigateToVault = onNavigateToVault,
+        )
+    }
+
+    if (showReverseVaultPicker && !uiState.isRunningReverseTrace) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                showReverseVaultPicker = false
+                controller.runReverseTraceroute(server)
+            },
+            onDismiss = { showReverseVaultPicker = false },
+            onNavigateToVault = onNavigateToVault,
+        )
+    }
+
+    uiState.pendingReverseTraceHostKeyMismatch?.let { mismatch ->
+        ReverseTraceHostKeyMismatchDialog(
+            mismatch = mismatch,
+            onTrustAndContinue = controller::confirmTrustReverseTraceHostKey,
+            onDismiss = controller::dismissReverseTraceHostKeyMismatch,
         )
     }
 

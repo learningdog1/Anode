@@ -1,4 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Anode</string>
+
+    <!-- App Shortcuts (R12) -->
+    <string name="shortcut_check_in_short">一键签到</string>
+    <string name="shortcut_check_in_long">一键完成今日 NodeSeek 签到</string>
+    <string name="shortcut_check_in_disabled">快捷签到暂不可用</string>
+
+    <string name="shortcut_lite_ssh_short">轻量 SSH</string>
+    <string name="shortcut_lite_ssh_long">打开轻量 SSH 终端与测机</string>
+    <string name="shortcut_lite_ssh_disabled">轻量 SSH 暂不可用</string>
+
+    <string name="shortcut_copy_otp_short">复制验证码</string>
+    <string name="shortcut_copy_otp_long">复制 Seek 邮箱最新验证码</string>
+    <string name="shortcut_copy_otp_disabled">复制验证码暂不可用</string>
+
+    <!-- Jetpack Glance AppWidgets (R12) -->
+    <string name="widget_server_status_name">服务器状态与续费</string>
+    <string name="widget_server_status_description">查看探针在线台数、主力机月流量条与最近一台临期 VPS 续费倒计时</string>
+
+    <string name="widget_daily_pulse_name">每日签到与雷达脉冲</string>
+    <string name="widget_daily_pulse_description">桌面一键签到、查看雷达未读命中与 Seek 邮箱最新验证码</string>
 </resources>

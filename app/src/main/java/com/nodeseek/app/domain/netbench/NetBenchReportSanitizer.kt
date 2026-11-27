@@ -1,5 +1,6 @@
 package com.nodeseek.app.domain.netbench
 
+import com.nodeseek.app.domain.ssh.IpMarkdownStructuralScanner
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import java.io.EOFException
 import java.io.InterruptedIOException
@@ -429,6 +430,44 @@ data class SanitizedIperf3Presentation(
         get() = intervals.filter { !it.omitted }
 }
 
+data class SanitizedTracerouteHopPresentation(
+    val hopNumber: Int,
+    val displayIp: String,
+    val displayHostname: String?,
+    val asn: String?,
+    val locationSummary: String?,
+    val sent: Int,
+    val received: Int,
+    val lossPercent: Double,
+    val avgMs: Double?,
+    val maxMs: Double?,
+    val jitterMdevMs: Double?,
+    val backboneTags: List<BackboneRouteTag>,
+    val lossClassification: HopLossClassification,
+    val isPrivateOrCgnat: Boolean,
+    val isTargetReached: Boolean,
+)
+
+data class SanitizedTraceroutePresentation(
+    val direction: TracerouteDirection,
+    val targetDisplay: String,
+    val sourceLabel: String,
+    val toolName: String,
+    val hops: List<SanitizedTracerouteHopPresentation>,
+    val reachedTarget: Boolean,
+    val totalHops: Int,
+    val terminalAvgMs: Double?,
+    val peakHopLossPercent: Double,
+    val peakLossHopNumber: Int?,
+    val hasRealPacketLoss: Boolean,
+    val hasIntermediateRateLimitOnly: Boolean,
+    val dominantBackboneTags: List<BackboneRouteTag>,
+    val routeSignature: String,
+    val isPeakHourWindow: Boolean,
+    val timeWindowLabel: String,
+    val publicErrorMessage: String?,
+)
+
 /**
  * Unified, privacy-sanitized presentation model consumed by BOTH [NetBenchMarkdownFormatter]
  * and [com.nodeseek.app.ui.netbench.AndroidNetBenchCardImageGenerator].
@@ -452,6 +491,8 @@ data class SanitizedNetBenchReport(
     val httpProbe: SanitizedHttpProbePresentation?,
     val iperfDownload: SanitizedIperf3Presentation?,
     val iperfUpload: SanitizedIperf3Presentation?,
+    val forwardTraceroute: SanitizedTraceroutePresentation? = null,
+    val reverseTraceroute: SanitizedTraceroutePresentation? = null,
 ) {
     val hasAnyResult: Boolean
         get() = icmpPing != null ||
@@ -459,7 +500,9 @@ data class SanitizedNetBenchReport(
             httpProbe != null ||
             ipIntelligence != null ||
             iperfDownload != null ||
-            iperfUpload != null
+            iperfUpload != null ||
+            forwardTraceroute != null ||
+            reverseTraceroute != null
 }
 
 /**
@@ -489,7 +532,10 @@ object NetBenchReportSanitizer {
         val primaryTargetIp: String?,
         val targetIpReplacementPairs: List<Pair<String, String>>,
         val targetPtrPatterns: List<Pair<String, String>>,
+        val clientPtrPatterns: List<Pair<String, String>>,
         val clientSensitiveTokens: List<String>,
+        val clientIpv4Ints: Set<Int>,
+        val clientIpv6Keys: Set<String>,
         val portsToScrub: Set<Int>,
         val portRegexes: List<Pair<Int, Regex>>,
     )
@@ -520,6 +566,8 @@ object NetBenchReportSanitizer {
         val httpProbe = report.httpLatencyResult?.let { buildSanitizedHttpProbe(it, maskTargetIp, ctx) }
         val iperfDl = report.iperfDownloadResult?.let { buildSanitizedIperf(it, report, target, maskTargetIp, ctx) }
         val iperfUl = report.iperfUploadResult?.let { buildSanitizedIperf(it, report, target, maskTargetIp, ctx) }
+        val forwardTrace = report.forwardTraceroute?.let { buildSanitizedTraceroute(it, maskTargetIp, ctx) }
+        val reverseTrace = report.reverseTraceroute?.let { buildSanitizedTraceroute(it, maskTargetIp, ctx) }
 
         return SanitizedNetBenchReport(
             maskTargetIp = maskTargetIp,
@@ -533,6 +581,8 @@ object NetBenchReportSanitizer {
             httpProbe = httpProbe,
             iperfDownload = iperfDl,
             iperfUpload = iperfUl,
+            forwardTraceroute = forwardTrace,
+            reverseTraceroute = reverseTrace,
         )
     }
 
@@ -759,7 +809,9 @@ object NetBenchReportSanitizer {
         ctx: SanitizationContext,
     ): SanitizedIpIntelPresentation {
         val rawIp = intel.ip.trim()
-        val displayIp = if (maskTargetIp) {
+        val displayIp = if (matchesClientIpSemantically(rawIp, ctx)) {
+            "[已隐藏本机IP]"
+        } else if (maskTargetIp) {
             NetBenchTargetParser.maskTargetIpLastSegment(rawIp)
         } else {
             scrubClientTokensOnly(rawIp, ctx)
@@ -1034,6 +1086,93 @@ object NetBenchReportSanitizer {
         return "target host"
     }
 
+    private fun buildSanitizedTraceroute(
+        summary: TracerouteSummary,
+        maskTargetIp: Boolean,
+        ctx: SanitizationContext,
+    ): SanitizedTraceroutePresentation {
+        val targetDisp = if (summary.direction == TracerouteDirection.REVERSE) {
+            "[已隐藏本机IP]"
+        } else {
+            val raw = summary.targetIp.ifBlank { summary.targetInput }
+            if (maskTargetIp && raw.isNotBlank()) {
+                NetBenchTargetParser.maskTargetIpLastSegment(raw)
+            } else {
+                scrubClientTokensOnly(raw, ctx)
+            }
+        }
+        val safeSource = scrubWithContext(sanitizeInline(summary.sourceLabel), ctx, maskTargetIp)
+        val safeSignature = scrubWithContext(sanitizeInline(summary.routeSignature), ctx, maskTargetIp)
+        val safeTimeWindow = scrubWithContext(sanitizeInline(summary.timeWindowLabel), ctx, maskTargetIp)
+        val safeError = summary.errorMessage?.takeIf { it.isNotBlank() }?.let { rawErr ->
+            scrubWithContext(sanitizeInline(rawErr), ctx, maskTargetIp)
+        }
+
+        val sanitizedHops = summary.hops.map { hop ->
+            val rawIp = hop.ip?.trim().orEmpty()
+            val dispIp = when {
+                rawIp.isEmpty() -> "*"
+                matchesClientIpSemantically(rawIp, ctx) -> "[已隐藏本机IP]"
+                else -> {
+                    val clientScrubbed = scrubClientTokensOnly(rawIp, ctx)
+                    if (clientScrubbed != rawIp) {
+                        clientScrubbed
+                    } else if (maskTargetIp) {
+                        NetBenchTargetParser.maskTargetIpLastSegment(rawIp)
+                    } else {
+                        rawIp
+                    }
+                }
+            }
+            val safeHost = hop.hostname?.trim()?.takeIf { it.isNotEmpty() }?.let { host ->
+                sanitizeHostnameInternal(host, ctx, maskTargetIp).takeIf { it.isNotEmpty() }
+            }
+            val safeAsn = hop.asn?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                scrubWithContext(sanitizeInline(it), ctx, maskTargetIp)
+            }
+            val safeLoc = hop.locationSummary?.takeIf { it.isNotBlank() }?.let {
+                scrubWithContext(sanitizeInline(it), ctx, maskTargetIp)
+            }
+            SanitizedTracerouteHopPresentation(
+                hopNumber = hop.hopNumber,
+                displayIp = dispIp,
+                displayHostname = safeHost,
+                asn = safeAsn,
+                locationSummary = safeLoc,
+                sent = hop.sent,
+                received = hop.received,
+                lossPercent = hop.lossPercent,
+                avgMs = hop.avgMs,
+                maxMs = hop.maxMs,
+                jitterMdevMs = hop.jitterMdevMs,
+                backboneTags = hop.backboneTags,
+                lossClassification = hop.lossClassification,
+                isPrivateOrCgnat = hop.isPrivateOrCgnat,
+                isTargetReached = hop.isTargetReached,
+            )
+        }
+
+        return SanitizedTraceroutePresentation(
+            direction = summary.direction,
+            targetDisplay = targetDisp,
+            sourceLabel = safeSource,
+            toolName = summary.toolName,
+            hops = sanitizedHops,
+            reachedTarget = summary.reachedTarget,
+            totalHops = summary.totalHops,
+            terminalAvgMs = summary.terminalAvgMs,
+            peakHopLossPercent = summary.peakHopLossPercent,
+            peakLossHopNumber = summary.peakLossHopNumber,
+            hasRealPacketLoss = summary.hasRealPacketLoss,
+            hasIntermediateRateLimitOnly = summary.hasIntermediateRateLimitOnly,
+            dominantBackboneTags = summary.dominantBackboneTags,
+            routeSignature = safeSignature,
+            isPeakHourWindow = summary.isPeakHourWindow,
+            timeWindowLabel = safeTimeWindow,
+            publicErrorMessage = safeError,
+        )
+    }
+
     // ── Context Construction & Multi-Layer Scrubbing ─────────────────────────────────────────
 
     private fun buildContext(report: NetBenchReport): SanitizationContext {
@@ -1101,21 +1240,93 @@ object NetBenchReportSanitizer {
             .sortedByDescending { it.key.length }
             .map { it.key to it.value }
 
-        // Client egress sensitive tokens (never scrub if identical to an unmasked target IP)
+        // Client egress sensitive tokens & semantic IP representations (never scrub if identical to an unmasked target IP)
         val targetFormsLower = ipFormsMap.keys.map { it.lowercase() }.toSet() +
             ipFormsMap.values.map { it.lowercase() }.toSet() +
             setOf(report.targetInput.trim().lowercase())
+        val targetIpv4Ints = HashSet<Int>()
+        val targetIpv6Keys = HashSet<String>()
+        for (targetIp in rawTargetIps) {
+            val clean = targetIp.trim().removePrefix("[").removeSuffix("]").substringBefore('%')
+            BackboneRouteTagger.parseIpv4ToIntOrNull(clean)?.let(targetIpv4Ints::add)
+            NetBenchTargetParser.parseIpv6Hextets(clean)?.let { hextets ->
+                targetIpv6Keys.add(canonicalIpv6Key(hextets))
+                unwrapIpv4MappedInt(hextets)?.let(targetIpv4Ints::add)
+            }
+        }
+
+        val clientIpv4Ints = LinkedHashSet<Int>()
+        val clientIpv6Keys = LinkedHashSet<String>()
+        val rawClientIps = LinkedHashSet<String>()
+        fun collectClientSemanticIp(raw: String?) {
+            val clean = raw?.trim()?.removePrefix("[")?.removeSuffix("]")?.substringBefore('%')?.takeIf { it.isNotEmpty() }
+                ?: return
+            var added = false
+            BackboneRouteTagger.parseIpv4ToIntOrNull(clean)?.let { v4 ->
+                if (v4 !in targetIpv4Ints) {
+                    clientIpv4Ints.add(v4)
+                    added = true
+                }
+            }
+            NetBenchTargetParser.parseIpv6Hextets(clean)?.let { hextets ->
+                val key = canonicalIpv6Key(hextets)
+                if (key !in targetIpv6Keys) {
+                    clientIpv6Keys.add(key)
+                    added = true
+                }
+                unwrapIpv4MappedInt(hextets)?.let { v4 ->
+                    if (v4 !in targetIpv4Ints) {
+                        clientIpv4Ints.add(v4)
+                        added = true
+                    }
+                }
+            }
+            if (added) {
+                rawClientIps.add(clean)
+            }
+        }
+        collectClientSemanticIp(report.clientNetwork?.rawIp)
+        collectClientSemanticIp(report.proxyNetwork?.rawIp)
+        collectClientSemanticIp(report.reverseTraceroute?.targetIp)
+
+        val clientPtrMap = LinkedHashMap<String, String>()
+        for (rawClientIp in rawClientIps) {
+            val v4Octets = NetBenchTargetParser.parseIpv4Octets(rawClientIp)
+            if (v4Octets != null) {
+                val (a, b, c, d) = v4Octets
+                clientPtrMap["$d.$c.$b.$a.in-addr.arpa"] = "[已隐藏本机IP].in-addr.arpa"
+                clientPtrMap["$a-$b-$c-$d"] = "[已隐藏本机IP]"
+                clientPtrMap["$d-$c-$b-$a"] = "[已隐藏本机IP]"
+                val zpA = a.toString().padStart(3, '0')
+                val zpB = b.toString().padStart(3, '0')
+                val zpC = c.toString().padStart(3, '0')
+                val zpD = d.toString().padStart(3, '0')
+                clientPtrMap["$zpA-$zpB-$zpC-$zpD"] = "[已隐藏本机IP]"
+                clientPtrMap["$zpD-$zpC-$zpB-$zpA"] = "[已隐藏本机IP]"
+                clientPtrMap["$d.$c.$b.$a."] = "[已隐藏本机IP]."
+            }
+            val v6Hextets = NetBenchTargetParser.parseIpv6Hextets(rawClientIp)
+            if (v6Hextets != null) {
+                clientPtrMap[v6Hextets.joinToString("-") { it.toString(16) }] = "[已隐藏本机IP]"
+                clientPtrMap[v6Hextets.joinToString("-") { it.toString(16).padStart(4, '0') }] = "[已隐藏本机IP]"
+                val reversedNibbles = v6Hextets
+                    .joinToString("") { it.toString(16).padStart(4, '0') }
+                    .reversed()
+                    .toCharArray()
+                    .joinToString(".")
+                clientPtrMap["$reversedNibbles.ip6.arpa"] = "[已隐藏本机IP].ip6.arpa"
+            }
+        }
+        val sortedClientPtrPairs = clientPtrMap.entries
+            .sortedByDescending { it.key.length }
+            .map { it.key to it.value }
+
         val rawClientCandidates = buildSet {
-            report.clientNetwork?.rawIp?.trim()?.let { raw ->
-                add(raw)
-                addAll(NetBenchTargetParser.allCanonicalIpForms(raw))
-            }
-            report.proxyNetwork?.rawIp?.trim()?.let { raw ->
-                add(raw)
-                addAll(NetBenchTargetParser.allCanonicalIpForms(raw))
-            }
             report.clientNetwork?.maskedIp?.trim()?.let(::add)
             report.proxyNetwork?.maskedIp?.trim()?.let(::add)
+            report.reverseTraceroute?.targetIp?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+                NetBenchTargetParser.maskClientIpForDisplay(raw)?.let(::add)
+            }
         }
         val clientTokens = rawClientCandidates
             .filter { token ->
@@ -1145,7 +1356,10 @@ object NetBenchReportSanitizer {
             primaryTargetIp = rawTargetIps.firstOrNull(),
             targetIpReplacementPairs = sortedIpPairs,
             targetPtrPatterns = sortedPtrPairs,
+            clientPtrPatterns = sortedClientPtrPairs,
             clientSensitiveTokens = clientTokens,
+            clientIpv4Ints = clientIpv4Ints,
+            clientIpv6Keys = clientIpv6Keys,
             portsToScrub = ports,
             portRegexes = portRegexes,
         )
@@ -1162,14 +1376,270 @@ object NetBenchReportSanitizer {
     }
 
     private fun scrubClientTokensOnly(raw: String, ctx: SanitizationContext): String {
-        if (raw.isEmpty() || ctx.clientSensitiveTokens.isEmpty()) return raw
-        var out = raw
+        if (raw.isEmpty()) return raw
+        if (
+            ctx.clientIpv4Ints.isEmpty() &&
+            ctx.clientIpv6Keys.isEmpty() &&
+            ctx.clientSensitiveTokens.isEmpty() &&
+            ctx.clientPtrPatterns.isEmpty()
+        ) {
+            return raw
+        }
+
+        val clientTokensLower = if (ctx.clientSensitiveTokens.isEmpty()) {
+            emptySet()
+        } else {
+            ctx.clientSensitiveTokens.mapTo(HashSet(ctx.clientSensitiveTokens.size * 2)) { it.lowercase() }
+        }
+
+        var out = IpMarkdownStructuralScanner.scanAndTransform(
+            text = raw,
+            skipAnsiSgr = true,
+            onMaskedIpToken = if (clientTokensLower.isEmpty()) {
+                null
+            } else {
+                IpMarkdownStructuralScanner.MaskedIpTokenHandler { text, start, end ->
+                    if (text.substring(start, end).lowercase() in clientTokensLower) {
+                        "[已隐藏本机IP]"
+                    } else {
+                        null
+                    }
+                }
+            },
+            onRawIpv4 = if (ctx.clientIpv4Ints.isEmpty()) {
+                null
+            } else {
+                IpMarkdownStructuralScanner.RawIpv4Handler { text, start, end, result ->
+                    if (IpMarkdownStructuralScanner.isStrictIpv4Range(text, start, end)) {
+                        val v4Int = BackboneRouteTagger.parseIpv4ToIntOrNull(text.substring(start, end))
+                        if (v4Int != null && v4Int in ctx.clientIpv4Ints) {
+                            result.replacement = "[已隐藏本机IP]"
+                            result.nextPrevPlainChar = ']'
+                        }
+                    }
+                }
+            },
+            onRawIpv6 = if (ctx.clientIpv6Keys.isEmpty() && ctx.clientIpv4Ints.isEmpty()) {
+                null
+            } else {
+                IpMarkdownStructuralScanner.RawIpv6Handler { text, start, n, totalOpen, result ->
+                    val v6End = resolveValidIpv6TokenEnd(text, start, n, totalOpen)
+                    if (v6End > start) {
+                        val hextets = NetBenchTargetParser.parseIpv6Hextets(text.substring(start, v6End))
+                        val matched = hextets != null && (
+                            canonicalIpv6Key(hextets) in ctx.clientIpv6Keys ||
+                                (unwrapIpv4MappedInt(hextets)?.let { it in ctx.clientIpv4Ints } == true)
+                            )
+                        if (matched) {
+                            result.replacement = "[已隐藏本机IP]"
+                            result.nextPrevPlainChar = ']'
+                        }
+                        result.endIndex = v6End
+                    } else {
+                        if (IpMarkdownStructuralScanner.scanHexColonRunSkipEnd(text, start, n) - start > 1) {
+                            result.skipRunOnMiss = true
+                        }
+                    }
+                }
+            },
+        )
+
+        // Scrub client PTR / reverse-DNS / dash-encoded / arpa patterns regardless of maskTargetIp
+        for ((ptrPattern, maskedPtr) in ctx.clientPtrPatterns) {
+            if (out.contains(ptrPattern, ignoreCase = true)) {
+                out = replaceClientPtrWithBoundary(out, ptrPattern, maskedPtr)
+            }
+        }
+
+        // Fallback only for any synthetic non-IP client tokens not representable as IP/masked-IP tokens
         for (token in ctx.clientSensitiveTokens) {
-            if (out.contains(token, ignoreCase = true)) {
-                out = out.replace(token, "[已隐藏本机IP]", ignoreCase = true)
+            if (!looksLikeIpOrMaskedIpToken(token) && out.contains(token, ignoreCase = true)) {
+                out = replaceTokenWithBoundary(
+                    text = out,
+                    token = token,
+                    replacement = "[已隐藏本机IP]",
+                )
             }
         }
         return out
+    }
+
+    private fun replaceClientPtrWithBoundary(
+        text: String,
+        pattern: String,
+        replacement: String,
+    ): String {
+        if (pattern.isEmpty() || text.length < pattern.length) return text
+        var idx = text.indexOf(pattern, startIndex = 0, ignoreCase = true)
+        if (idx < 0) return text
+
+        val isHexDashPtr = '-' in pattern && pattern.any { it in 'a'..'f' || it in 'A'..'F' }
+        val isArpaPtr = pattern.endsWith(".in-addr.arpa", ignoreCase = true) ||
+            pattern.endsWith(".ip6.arpa", ignoreCase = true)
+        val sb = StringBuilder(text.length)
+        var cursor = 0
+        while (idx >= 0) {
+            val end = idx + pattern.length
+            val prevBlocked = idx > 0 && run {
+                val prev = text[idx - 1]
+                if (isHexDashPtr) IpMarkdownStructuralScanner.isHexChar(prev) else prev.isDigit()
+            }
+            val nextBlocked = end < text.length && run {
+                val next = text[end]
+                when {
+                    isArpaPtr -> next.isLetterOrDigit() || next == '_'
+                    isHexDashPtr -> IpMarkdownStructuralScanner.isHexChar(next)
+                    else -> next.isDigit()
+                }
+            }
+            if (!prevBlocked && !nextBlocked) {
+                if (idx > cursor) sb.append(text, cursor, idx)
+                sb.append(replacement)
+                cursor = end
+            } else {
+                if (end > cursor) sb.append(text, cursor, end)
+                cursor = end
+            }
+            idx = text.indexOf(pattern, startIndex = end, ignoreCase = true)
+        }
+        if (cursor < text.length) sb.append(text, cursor, text.length)
+        return sb.toString()
+    }
+
+    private fun looksLikeIpOrMaskedIpToken(token: String): Boolean {
+        for (ch in token) {
+            if (!IpMarkdownStructuralScanner.isHexChar(ch) && ch != '.' && ch != ':' && ch != '*') {
+                return false
+            }
+        }
+        return token.any { it == '.' || it == ':' }
+    }
+
+    private fun matchesClientIpSemantically(ipCandidate: String, ctx: SanitizationContext): Boolean {
+        if (ctx.clientIpv4Ints.isEmpty() && ctx.clientIpv6Keys.isEmpty()) return false
+        val clean = ipCandidate.trim().removePrefix("[").removeSuffix("]").substringBefore('%')
+        if (clean.isEmpty()) return false
+        BackboneRouteTagger.parseIpv4ToIntOrNull(clean)?.let { v4 ->
+            if (v4 in ctx.clientIpv4Ints) return true
+        }
+        NetBenchTargetParser.parseIpv6Hextets(clean)?.let { hextets ->
+            if (canonicalIpv6Key(hextets) in ctx.clientIpv6Keys) return true
+            unwrapIpv4MappedInt(hextets)?.let { mappedV4 ->
+                if (mappedV4 in ctx.clientIpv4Ints) return true
+            }
+        }
+        return false
+    }
+
+    private fun replaceTokenWithBoundary(
+        text: String,
+        token: String,
+        replacement: String,
+    ): String {
+        if (token.isEmpty() || text.length < token.length) return text
+        var idx = text.indexOf(token, startIndex = 0, ignoreCase = true)
+        if (idx < 0) return text
+
+        val sb = StringBuilder(text.length)
+        var cursor = 0
+        while (idx >= 0) {
+            val end = idx + token.length
+            val prevBlocked = idx > 0 && (text[idx - 1].isLetterOrDigit() || text[idx - 1] == '_')
+            val nextBlocked = end < text.length && (text[end].isLetterOrDigit() || text[end] == '_')
+            if (!prevBlocked && !nextBlocked) {
+                if (idx > cursor) sb.append(text, cursor, idx)
+                sb.append(replacement)
+                cursor = end
+            } else {
+                if (end > cursor) sb.append(text, cursor, end)
+                cursor = end
+            }
+            idx = text.indexOf(token, startIndex = end, ignoreCase = true)
+        }
+        if (cursor < text.length) sb.append(text, cursor, text.length)
+        return sb.toString()
+    }
+
+    private fun replaceTargetIpWithBoundary(
+        text: String,
+        targetForm: String,
+        maskedForm: String,
+    ): String {
+        if (targetForm.isEmpty() || text.length < targetForm.length) return text
+        var idx = text.indexOf(targetForm, startIndex = 0, ignoreCase = true)
+        if (idx < 0) return text
+
+        val isIpv6 = ':' in targetForm
+        val isDoubleColonTerminatedV6 = isIpv6 && targetForm.endsWith("::")
+        val sb = StringBuilder(text.length)
+        var cursor = 0
+        while (idx >= 0) {
+            val end = idx + targetForm.length
+            val prevBlocked = if (idx > 0) {
+                val prev = text[idx - 1]
+                if (isIpv6) {
+                    IpMarkdownStructuralScanner.isHexChar(prev) ||
+                        (prev == ':' && !IpMarkdownStructuralScanner.isLabelColonBoundary(text, idx))
+                } else {
+                    prev in '0'..'9' ||
+                        (prev == '.' && idx >= 2 && text[idx - 2] in '0'..'9')
+                }
+            } else {
+                false
+            }
+            val nextBlocked = if (end < text.length) {
+                val next = text[end]
+                if (isIpv6) {
+                    IpMarkdownStructuralScanner.isHexChar(next) ||
+                        (next == ':' && !isShortMarkdownStarAfterColon(text, end)) ||
+                        (
+                            isDoubleColonTerminatedV6 &&
+                                IpMarkdownStructuralScanner.peekNextNonSgrChar(text, end, text.length) == '*'
+                            )
+                } else {
+                    next in '0'..'9' ||
+                        (next == '.' && end + 1 < text.length && text[end + 1] in '0'..'9')
+                }
+            } else {
+                false
+            }
+            if (!prevBlocked && !nextBlocked) {
+                if (idx > cursor) sb.append(text, cursor, idx)
+                sb.append(maskedForm)
+                cursor = end
+            } else {
+                if (end > cursor) sb.append(text, cursor, end)
+                cursor = end
+            }
+            idx = text.indexOf(targetForm, startIndex = end, ignoreCase = true)
+        }
+        if (cursor < text.length) sb.append(text, cursor, text.length)
+        return sb.toString()
+    }
+
+    private fun isShortMarkdownStarAfterColon(text: String, colonIdx: Int): Boolean {
+        val nextIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, colonIdx + 1, text.length)
+        if (nextIdx >= text.length || text[nextIdx] != '*') return false
+        var starEnd = nextIdx + 1
+        while (starEnd < text.length && text[starEnd] == '*') {
+            starEnd++
+        }
+        return (starEnd - nextIdx) in 1..3
+    }
+
+    private fun canonicalIpv6Key(hextets: IntArray): String =
+        hextets.joinToString(":") { it.toString(16).padStart(4, '0') }
+
+    private fun unwrapIpv4MappedInt(hextets: IntArray): Int? {
+        if (hextets.size != 8) return null
+        val isV4Mapped = hextets[0] == 0 &&
+            hextets[1] == 0 &&
+            hextets[2] == 0 &&
+            hextets[3] == 0 &&
+            hextets[4] == 0 &&
+            hextets[5] == 0xFFFF
+        if (!isV4Mapped) return null
+        return (hextets[6] shl 16) or hextets[7]
     }
 
     private fun scrubWithContext(
@@ -1184,7 +1654,7 @@ object NetBenchReportSanitizer {
         // 1. Replace all known target IPv4/IPv6 forms with canonical last-segment masks
         for ((targetForm, maskedForm) in ctx.targetIpReplacementPairs) {
             if (out.contains(targetForm, ignoreCase = true)) {
-                out = out.replace(targetForm, maskedForm, ignoreCase = true)
+                out = replaceTargetIpWithBoundary(out, targetForm, maskedForm)
             }
         }
 
@@ -1220,17 +1690,7 @@ object NetBenchReportSanitizer {
         }
 
         // 4. Defense-in-depth: run IpPrivacyMasker + exhaustive IPv4/IPv6 literal scanner
-        // Protect "::****" suffixes with an alphabetic boundary sentinel ('Z') so IpPrivacyMasker
-        // does not re-mask the "prefix::" portion into "prefix:*:*****".
-        val sentinel = "::ZZZZ_NB_MASKED_V6"
-        val hadMaskedV6 = out.contains("::****")
-        if (hadMaskedV6) {
-            out = out.replace("::****", sentinel)
-        }
         out = IpPrivacyMasker.mask(out, knownServerHost = ctx.primaryTargetIp)
-        if (hadMaskedV6) {
-            out = out.replace(sentinel, "::****")
-        }
         out = maskAnyRemainingIpLiterals(out)
         return out
     }
@@ -1240,109 +1700,178 @@ object NetBenchReportSanitizer {
      * (including private, loopback, link-local, or uncompressed forms not covered above).
      * Idempotent on already-masked tokens (`*`).
      */
-    internal fun maskAnyRemainingIpLiterals(text: String): String {
-        val n = text.length
-        if (n < 2) return text
-
-        var out: StringBuilder? = null
-        var flushCursor = 0
-        var prevChar = '\u0000'
-        var i = 0
-
-        while (i < n) {
-            val ch = text[i]
-
-            // 1. Check IPv4 candidate `d.d.d.d`
-            if (ch in '0'..'9' && !isIpv4BoundaryBlocked(prevChar)) {
-                val v4End = tryScanIpv4End(text, i, n)
-                if (v4End > i) {
-                    val nextChar = if (v4End < n) text[v4End] else '\u0000'
-                    if (!isIpv4BoundaryBlocked(nextChar)) {
-                        val candidate = text.substring(i, v4End)
-                        if (isStrictIpv4Token(candidate)) {
-                            val masked = NetBenchTargetParser.maskTargetIpLastSegment(candidate)
-                            val sb = out ?: StringBuilder(n).also { out = it }
-                            if (i > flushCursor) sb.append(text, flushCursor, i)
-                            sb.append(masked)
-                            flushCursor = v4End
-                            prevChar = '*'
-                            i = v4End
-                            continue
-                        }
+    internal fun maskAnyRemainingIpLiterals(text: String): String =
+        IpMarkdownStructuralScanner.scanAndTransform(
+            text = text,
+            skipAnsiSgr = true,
+            onMaskedIpToken = null,
+            onRawIpv4 = { s, start, end, result ->
+                if (IpMarkdownStructuralScanner.isStrictIpv4Range(s, start, end)) {
+                    result.replacement = NetBenchTargetParser.maskTargetIpLastSegment(s.substring(start, end))
+                    result.nextPrevPlainChar = '*'
+                }
+            },
+            onRawIpv6 = { s, start, n, totalOpen, result ->
+                val v6End = resolveValidIpv6TokenEnd(s, start, n, totalOpen)
+                if (v6End > start) {
+                    result.replacement = NetBenchTargetParser.maskTargetIpLastSegment(s.substring(start, v6End))
+                    result.nextPrevPlainChar = '*'
+                    result.endIndex = v6End
+                } else {
+                    if (IpMarkdownStructuralScanner.scanHexColonRunSkipEnd(s, start, n) - start > 1) {
+                        result.skipRunOnMiss = true
                     }
                 }
-            }
+            },
+        )
 
-            // 2. Check IPv6 candidate (including IPv4-mapped `::ffff:a.b.c.d`)
-            if ((isHexChar(ch) || ch == ':') && !isIpv6BoundaryBlocked(prevChar)) {
-                var v6End = scanIpv6OrMappedEnd(text, i, n)
-                while (v6End > i && text[v6End - 1] == '.') {
-                    v6End--
-                }
-                val tokenLen = v6End - i
-                if (tokenLen in 2..45) {
-                    val nextChar = if (v6End < n) text[v6End] else '\u0000'
-                    if (!isIpv6BoundaryBlocked(nextChar) && countColons(text, i, v6End) >= 2) {
-                        val candidate = text.substring(i, v6End)
-                        if (NetBenchTargetParser.isIpv6Literal(candidate)) {
-                            val masked = NetBenchTargetParser.maskTargetIpLastSegment(candidate)
-                            val sb = out ?: StringBuilder(n).also { out = it }
-                            if (i > flushCursor) sb.append(text, flushCursor, i)
-                            sb.append(masked)
-                            flushCursor = v6End
-                            prevChar = '*'
-                            i = v6End
-                            continue
-                        }
-                    }
-                }
-            }
+    private fun resolveValidIpv6TokenEnd(
+        text: String,
+        start: Int,
+        n: Int,
+        totalOpen: Int,
+    ): Int {
+        val rawEnd = scanIpv6OrMappedEnd(text, start, n)
+        if (rawEnd - start < 2) return -1
 
-            prevChar = ch
-            i++
+        fun tryCandidate(endIdx: Int): Int {
+            if (endIdx - start !in 2..45) return -1
+            if (countColons(text, start, endIdx) < 2) return -1
+            if (!isAcceptableIpv6End(text, start, endIdx, n, totalOpen)) return -1
+            val candidate = text.substring(start, endIdx)
+            return if (NetBenchTargetParser.isIpv6Literal(candidate)) endIdx else -1
         }
 
-        val sb = out ?: return text
-        if (flushCursor < n) sb.append(text, flushCursor, n)
-        return sb.toString()
+        fun tryStripMappedPortSuffix(spanEnd: Int): Int {
+            if (spanEnd - start < 5) return -1
+            var lastDot = -1
+            var lastColon = -1
+            for (k in spanEnd - 1 downTo start) {
+                val c = text[k]
+                if (lastColon < 0 && c == ':') lastColon = k
+                if (lastDot < 0 && c == '.') {
+                    lastDot = k
+                    break
+                }
+            }
+            if (lastDot <= start || lastColon <= lastDot) return -1
+            val portLen = spanEnd - (lastColon + 1)
+            if (portLen !in 1..5) return -1
+            var portValue = 0
+            for (k in lastColon + 1 until spanEnd) {
+                val c = text[k]
+                if (c !in '0'..'9') return -1
+                portValue = portValue * 10 + (c - '0')
+            }
+            if (portValue !in 0..65535) return -1
+            if (spanEnd < n) {
+                val next = IpMarkdownStructuralScanner.peekNextNonSgrCharForIpRightBoundary(text, spanEnd, n)
+                if (IpMarkdownStructuralScanner.isIpv6BoundaryBlocked(next)) return -1
+            }
+            if (lastColon - start !in 2..45) return -1
+            if (countColons(text, start, lastColon) < 2) return -1
+            val candidate = text.substring(start, lastColon)
+            return if (NetBenchTargetParser.isIpv6Literal(candidate)) lastColon else -1
+        }
+
+        var trimmedEnd = rawEnd
+        while (trimmedEnd > start && text[trimmedEnd - 1] == '.') {
+            trimmedEnd--
+        }
+        tryCandidate(trimmedEnd).let { if (it > start) return it }
+
+        if (trimmedEnd > start + 2 && text[trimmedEnd - 1] == ':' && text[trimmedEnd - 2] != ':') {
+            tryCandidate(trimmedEnd - 1).let { if (it > start) return it }
+            tryStripMappedPortSuffix(trimmedEnd - 1).let { if (it > start) return it }
+        } else {
+            tryStripMappedPortSuffix(trimmedEnd).let { if (it > start) return it }
+        }
+
+        // Backtrack across '.' boundaries (e.g. `<ipv6>.example`, `<ipv6>.com`, `<ipv6>.dead`,
+        // `::ffff:a.b.c.d.example`) when the full span failed boundary or IPv6 validation.
+        for (idx in trimmedEnd - 1 downTo start + 2) {
+            if (text[idx] == '.') {
+                if (idx + 1 < n && text[idx + 1] in '0'..'9') {
+                    continue
+                }
+                tryCandidate(idx).let { if (it > start) return it }
+                tryStripMappedPortSuffix(idx).let { if (it > start) return it }
+                if (idx > start + 2 && text[idx - 1] == ':' && text[idx - 2] != ':') {
+                    tryCandidate(idx - 1).let { if (it > start) return it }
+                }
+            }
+        }
+        return -1
     }
 
-    private fun isIpv4BoundaryBlocked(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'z' || ch in 'A'..'Z' || ch == '.' || ch == '*'
-
-    private fun isIpv6BoundaryBlocked(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'z' || ch in 'A'..'Z' || ch == ':' || ch == '*'
-
-    private fun isHexChar(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'f' || ch in 'A'..'F'
-
-    private fun tryScanIpv4End(text: String, start: Int, n: Int): Int {
-        var pos = start
-        for (octet in 0 until 4) {
-            if (octet > 0) {
-                if (pos >= n || text[pos] != '.') return -1
-                pos++
+    private fun isAcceptableIpv6End(
+        text: String,
+        start: Int,
+        endIdx: Int,
+        n: Int,
+        totalOpen: Int,
+    ): Boolean {
+        if (endIdx >= n) return true
+        val next = IpMarkdownStructuralScanner.peekNextNonSgrCharForIpRightBoundary(text, endIdx, n)
+        if (next == '\u0000') return true
+        if (next == '*' && text[endIdx - 1] == ':') {
+            val starStart = IpMarkdownStructuralScanner.skipSgrSequences(text, endIdx, n)
+            var starEnd = starStart
+            while (starEnd < n && text[starEnd] == '*') {
+                starEnd++
             }
-            val octStart = pos
-            while (pos < n && pos - octStart < 3 && text[pos] in '0'..'9') {
-                pos++
+            val starRunLen = starEnd - starStart
+            val afterStars = IpMarkdownStructuralScanner.peekNextNonSgrChar(text, starEnd, n)
+            val afterColonAfterStar = if (afterStars == ':') {
+                val colonIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, starEnd, n)
+                IpMarkdownStructuralScanner.peekNextNonSgrChar(text, colonIdx + 1, n)
+            } else {
+                '\u0000'
             }
-            if (pos == octStart) return -1
-            if (pos < n && text[pos] in '0'..'9') return -1
+            val isColonWildcardAfterStar = afterStars == ':' &&
+                afterColonAfterStar != '\u0000' &&
+                !afterColonAfterStar.isWhitespace()
+            return !isColonWildcardAfterStar &&
+                starRunLen in 1..3 &&
+                (totalOpen >= starRunLen || IpMarkdownStructuralScanner.isItalicOpeningAfterStar(afterStars))
         }
-        return pos
-    }
-
-    private fun isStrictIpv4Token(candidate: String): Boolean {
-        val parts = candidate.split('.')
-        if (parts.size != 4) return false
-        for (p in parts) {
-            if (p.isEmpty()) return false
-            if (p.length > 1 && p[0] == '0') return false
-            val v = p.toIntOrNull() ?: return false
-            if (v !in 0..255) return false
+        if (next == '.') {
+            val dots = countDots(text, start, endIdx)
+            val afterDotIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, endIdx + 1, n)
+            val afterDot = if (afterDotIdx < n) text[afterDotIdx] else '\u0000'
+            if (afterDot in '0'..'9') return false
+            if (afterDot == '*') {
+                if (dots in 1..2) return false
+                if (dots >= 3) {
+                    return IpMarkdownStructuralScanner.isRawIpv4RightBoundaryAllowed(
+                        text = text,
+                        ipv4End = endIdx,
+                        totalOpen = totalOpen,
+                        n = n,
+                        skipAnsiSgr = true,
+                    )
+                }
+            }
+            return true
         }
-        return true
+        if (!IpMarkdownStructuralScanner.isIpv6BoundaryBlocked(next)) return true
+        if (next == ':' && endIdx > start + 1 && text[endIdx - 1] != ':') {
+            val afterColonIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, endIdx + 1, n)
+            val afterColon = if (afterColonIdx < n) text[afterColonIdx] else '\u0000'
+            if (afterColon == '*') {
+                if (countDots(text, start, endIdx) > 0) return true
+                var starEnd = afterColonIdx + 1
+                while (starEnd < n && text[starEnd] == '*') {
+                    starEnd++
+                }
+                val starCount = starEnd - afterColonIdx
+                // Never split a valid `:****` masked suffix away from its IPv6 prefix
+                return starCount in 1..3 ||
+                    (starEnd < n && (text[starEnd].isLetterOrDigit() || text[starEnd] == '_'))
+            }
+            return !IpMarkdownStructuralScanner.isIpv6BoundaryBlocked(afterColon)
+        }
+        return false
     }
 
     private fun scanIpv6OrMappedEnd(text: String, start: Int, n: Int): Int {
@@ -1351,7 +1880,7 @@ object NetBenchReportSanitizer {
         var seenDoubleColonOrTwoColons = 0
         while (pos < limit) {
             val ch = text[pos]
-            if (isHexChar(ch)) {
+            if (IpMarkdownStructuralScanner.isHexChar(ch)) {
                 pos++
             } else if (ch == ':') {
                 seenDoubleColonOrTwoColons++
@@ -1369,6 +1898,14 @@ object NetBenchReportSanitizer {
         var count = 0
         for (idx in start until end) {
             if (text[idx] == ':') count++
+        }
+        return count
+    }
+
+    private fun countDots(text: String, start: Int, end: Int): Int {
+        var count = 0
+        for (idx in start until end) {
+            if (text[idx] == '.') count++
         }
         return count
     }

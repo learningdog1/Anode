@@ -2,9 +2,14 @@ package com.nodeseek.app.domain.fleet
 
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.FeePayer
+import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import java.math.BigDecimal
+import java.net.IDN
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 /**
@@ -136,7 +141,19 @@ data class FleetRefreshSummary(
 )
 
 /**
- * Persistent VPS asset ledger record tracking specs, billing cycle, expiry, probe binding, and notes.
+ * Discriminator between VPS server assets and Domain / TLS certificate assets in the Fleet ledger.
+ */
+enum class FleetAssetType(
+    val label: String,
+    val shortLabel: String,
+) {
+    VPS("VPS 小鸡", "小鸡"),
+    DOMAIN_CERT("域名·证书", "域名"),
+}
+
+/**
+ * Persistent asset ledger record tracking VPS servers or Domain/TLS assets, billing cycle,
+ * expiry, probe/RDAP/TLS bindings, and notes.
  */
 data class VpsAssetRecord(
     val id: String,
@@ -163,7 +180,38 @@ data class VpsAssetRecord(
     val tags: List<String> = emptyList(),
     val autoRenew: Boolean = false,
     val billingAnchorDay: Int? = null,
+    // ── R8 Domain / TLS Certificate extensions (100% backwards-compatible defaults) ──
+    val assetType: FleetAssetType = FleetAssetType.VPS,
+    val domainName: String? = null,
+    val registrarName: String = "",
+    val domainCreatedIso: String? = null,
+    val rdapSyncedAtEpochMillis: Long? = null,
+    val rdapStatusTags: List<String> = emptyList(),
+    val tlsHost: String? = null,
+    val tlsPort: Int = DEFAULT_TLS_PORT,
+    val tlsExpiresAtEpochMillis: Long? = null,
+    val tlsIssuer: String = "",
+    val tlsSubject: String = "",
+    val tlsCheckedAtEpochMillis: Long? = null,
+    val tlsCheckError: String? = null,
 ) {
+    val isDomainAsset: Boolean
+        get() = assetType == FleetAssetType.DOMAIN_CERT
+
+    val effectiveTlsHost: String?
+        get() = tlsHost?.trim()?.takeIf { it.isNotEmpty() }
+            ?: domainName?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun tlsDaysRemaining(
+        nowEpochMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = VALUATION_ZONE_ID,
+    ): Long? {
+        val expiresAt = tlsExpiresAtEpochMillis ?: return null
+        val today = Instant.ofEpochMilli(nowEpochMillis).atZone(zoneId).toLocalDate()
+        val expiryDate = Instant.ofEpochMilli(expiresAt).atZone(zoneId).toLocalDate()
+        return ChronoUnit.DAYS.between(today, expiryDate)
+    }
+
     val parsedRenewalAmount: BigDecimal?
         get() = renewalAmount.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }
 
@@ -188,10 +236,44 @@ data class VpsAssetRecord(
 
     companion object {
         const val DEFAULT_REMIND_DAYS_BEFORE_EXPIRY = 7
+        const val DEFAULT_TLS_PORT = 443
         const val ROUTE_TAG_DISPLAY_SEPARATOR = " · "
         private const val MAX_TAG_LENGTH = 32
         private val CONTROL_WHITESPACE_REGEX = Regex("""[\r\n\t]+""")
         private val LEGACY_TAG_SPLIT_REGEX = Regex("""[,，、/|·;；]+""")
+        private val DOMAIN_LABEL_REGEX = Regex("""^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$""")
+
+        fun normalizeDomainName(raw: String?): String? {
+            val trimmed = raw?.trim().orEmpty()
+            if (trimmed.isEmpty()) return null
+            var candidate = trimmed
+            val schemeIdx = candidate.indexOf("://")
+            if (schemeIdx >= 0) {
+                candidate = candidate.substring(schemeIdx + 3)
+            }
+            val atIdx = candidate.indexOf('@')
+            if (atIdx >= 0 && candidate.substring(0, atIdx).none { it == '/' || it == '?' || it == '#' }) {
+                candidate = candidate.substring(atIdx + 1)
+            }
+            val slashIdx = candidate.indexOfAny(charArrayOf('/', '?', '#'))
+            if (slashIdx >= 0) {
+                candidate = candidate.substring(0, slashIdx)
+            }
+            candidate = candidate.substringBefore(':').trim().trimEnd('.')
+            if (candidate.isEmpty() || candidate.length > 253) return null
+            val ascii = runCatching { IDN.toASCII(candidate, IDN.ALLOW_UNASSIGNED) }
+                .getOrNull()
+                ?.trim()
+                ?.trimEnd('.')
+                ?.lowercase(Locale.ROOT)
+                ?: return null
+            if (ascii.isEmpty() || ascii.length > 253 || !ascii.contains('.')) return null
+            val labels = ascii.split('.')
+            if (labels.size < 2) return null
+            if (labels.any { !DOMAIN_LABEL_REGEX.matches(it) }) return null
+            if (labels.last().all { it.isDigit() }) return null
+            return ascii
+        }
 
         val DEFAULT_TAG_PRESETS: List<String> = listOf(
             "CN2 GIA",
@@ -311,7 +393,7 @@ data class UpcomingRenewalItem(
 }
 
 /**
- * Portfolio-level KPI summary across all registered VPS assets and synced probe nodes.
+ * Portfolio-level KPI summary across all registered VPS + Domain/Cert assets and synced probe nodes.
  */
 data class FleetPortfolioSummary(
     val totalMachineCount: Int = 0,
@@ -324,6 +406,14 @@ data class FleetPortfolioSummary(
     val dueSoonRenewalCount: Int = 0,
     val dueRenewals: List<UpcomingRenewalItem> = emptyList(),
     val expiredRenewalCount: Int = 0,
+    // ── R8 VPS vs Domain/Cert breakdowns (combined totals remain in totalMonthlyCostCny / totalAnnualizedCostCny) ──
+    val vpsCount: Int = totalMachineCount,
+    val domainCount: Int = 0,
+    val totalAssetCount: Int = totalMachineCount + domainCount,
+    val vpsMonthlyCostCny: BigDecimal = BigDecimal.ZERO.setScale(2),
+    val vpsAnnualizedCostCny: BigDecimal = BigDecimal.ZERO.setScale(2),
+    val domainMonthlyCostCny: BigDecimal = BigDecimal.ZERO.setScale(2),
+    val domainAnnualizedCostCny: BigDecimal = BigDecimal.ZERO.setScale(2),
 )
 
 /**

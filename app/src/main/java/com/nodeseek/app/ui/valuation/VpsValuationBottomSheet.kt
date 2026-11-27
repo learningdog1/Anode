@@ -73,9 +73,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -98,12 +100,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nodeseek.app.data.valuation.CurrencyRateQuote
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.DealSpreadStatus
 import com.nodeseek.app.domain.valuation.FeePayer
 import com.nodeseek.app.domain.valuation.FxRateSource
+import com.nodeseek.app.domain.valuation.MarketSearchStatus
 import com.nodeseek.app.domain.valuation.MiddlemanFeeMode
 import com.nodeseek.app.domain.valuation.NaturalCycleSpan
+import com.nodeseek.app.domain.valuation.NoOpTradeMarketReferenceRepository
+import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.ValuationMarkdownStyle
 import com.nodeseek.app.domain.valuation.ValuationMode
@@ -129,6 +137,8 @@ import com.nodeseek.app.ui.theme.pulseBouncyClickable
 import com.nodeseek.app.ui.theme.pulseCard
 import com.nodeseek.app.ui.theme.pulseHeroCard
 import com.nodeseek.app.ui.theme.withTabularNumbers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -222,6 +232,11 @@ fun VpsValuationBottomSheet(
     initialAskingPriceText: String = "50.00",
     initialPushFeeText: String = "0",
     initialMiddlemanEnabled: Boolean = false,
+    marketReferenceRepository: TradeMarketReferenceRepository = if (LocalInspectionMode.current) {
+        NoOpTradeMarketReferenceRepository
+    } else {
+        LocalAppContainer.current.tradeMarketReferenceRepository
+    },
 ) {
     val context = LocalContext.current
     val isInspection = LocalInspectionMode.current
@@ -256,6 +271,101 @@ fun VpsValuationBottomSheet(
 
     var machineLabel by rememberSaveable(initialMachineLabel) {
         mutableStateOf(initialMachineLabel.take(120))
+    }
+    var marketQueryOverride by rememberSaveable(initialMachineLabel) { mutableStateOf<String?>(null) }
+    val derivedMarketQuery = remember(machineLabel) {
+        val trimmed = machineLabel.trim()
+        if (trimmed.isEmpty()) {
+            ""
+        } else {
+            TradeMarketPremiumAnalyzer.extractSuggestedQuery(trimmed).ifBlank { trimmed }
+        }
+    }
+    val rawMarketQueryInput = marketQueryOverride ?: derivedMarketQuery
+    val effectiveMarketQuery = remember(rawMarketQueryInput) {
+        rawMarketQueryInput.trim()
+    }
+    val latestMarketQuery by rememberUpdatedState(effectiveMarketQuery)
+    var activeMarketSearchJob by remember { mutableStateOf<Job?>(null) }
+    val autoRemoteSearchedQueries = remember(marketReferenceRepository) { mutableSetOf<String>() }
+    var marketRefState by remember { mutableStateOf(TradeMarketReferenceState(query = effectiveMarketQuery)) }
+    var marketCooldownSec by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(effectiveMarketQuery, marketReferenceRepository, isInspection) {
+        if (isInspection) return@LaunchedEffect
+        activeMarketSearchJob?.cancel()
+        activeMarketSearchJob = null
+        val querySnapshot = effectiveMarketQuery
+        if (querySnapshot.isBlank()) {
+            marketRefState = TradeMarketReferenceState(query = "")
+            return@LaunchedEffect
+        }
+        delay(250L)
+        val localResult = try {
+            marketReferenceRepository.analyzeLocal(querySnapshot)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            TradeMarketReferenceState(
+                query = querySnapshot,
+                searchStatus = MarketSearchStatus.FAILED,
+                statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "本地参考分析失败",
+            )
+        }
+        if (latestMarketQuery != querySnapshot) return@LaunchedEffect
+        marketRefState = localResult
+
+        val tokens = TradeMarketPremiumAnalyzer.tokenizeQuery(querySnapshot)
+        val normalizedKey = tokens.joinToString(" ").ifBlank { querySnapshot.lowercase(Locale.ROOT) }
+        val localSampleCount = localResult.distribution?.sampleCount ?: 0
+        val shouldAutoRemote = localSampleCount == 0 &&
+            !localResult.hasRemoteResults &&
+            localResult.cooldownRemainingSeconds <= 0 &&
+            localResult.searchStatus == MarketSearchStatus.IDLE &&
+            querySnapshot.length >= 2 &&
+            tokens.isNotEmpty() &&
+            autoRemoteSearchedQueries.add(normalizedKey)
+
+        if (shouldAutoRemote) {
+            delay(400L)
+            if (latestMarketQuery != querySnapshot) return@LaunchedEffect
+            marketRefState = localResult.copy(
+                query = querySnapshot,
+                searchStatus = MarketSearchStatus.LOADING,
+                statusMessage = null,
+            )
+            val remoteResult = try {
+                marketReferenceRepository.searchRemoteAndMerge(querySnapshot)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                localResult.copy(
+                    query = querySnapshot,
+                    searchStatus = MarketSearchStatus.FAILED,
+                    statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
+                )
+            }
+            if (latestMarketQuery == querySnapshot) {
+                marketRefState = remoteResult
+            }
+        }
+    }
+
+    LaunchedEffect(marketRefState.cooldownUntilEpochMillis) {
+        val until = marketRefState.cooldownUntilEpochMillis
+        if (until <= 0L) {
+            marketCooldownSec = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val remMs = until - System.currentTimeMillis()
+            if (remMs <= 0L) {
+                marketCooldownSec = 0
+                break
+            }
+            marketCooldownSec = ((remMs + 999L) / 1000L).toInt()
+            delay(1_000L)
+        }
     }
     var currencyName by rememberSaveable(initialCurrency) { mutableStateOf(initialCurrency.name) }
     val currency = remember(currencyName) { ValuationCurrency.valueOf(currencyName) }
@@ -445,7 +555,14 @@ fun VpsValuationBottomSheet(
                 ) {
                     PulseTextField(
                         value = machineLabel,
-                        onValueChange = { if (it.length <= 120) machineLabel = it },
+                        onValueChange = {
+                            if (it.length <= 120) {
+                                machineLabel = it
+                                if (marketQueryOverride.isNullOrBlank()) {
+                                    marketQueryOverride = null
+                                }
+                            }
+                        },
                         label = "套餐 / 机型名称（选填）",
                         placeholder = "例如：RackNerd 2C2G DC02",
                         singleLine = true,
@@ -492,6 +609,49 @@ fun VpsValuationBottomSheet(
                         )
                     }
                 }
+
+                // Local-First Same-Model Market Premium Reference (R10)
+                MarketPremiumSection(
+                    activeQuery = rawMarketQueryInput,
+                    referenceState = marketRefState,
+                    cooldownRemainingSeconds = marketCooldownSec,
+                    onQueryChange = { next ->
+                        marketQueryOverride = next.take(120)
+                    },
+                    onSearchRemote = {
+                        val queryToSearch = effectiveMarketQuery
+                        if (queryToSearch.isBlank()) return@MarketPremiumSection
+                        val tokens = TradeMarketPremiumAnalyzer.tokenizeQuery(queryToSearch)
+                        val normalizedKey = tokens.joinToString(" ").ifBlank { queryToSearch.lowercase(Locale.ROOT) }
+                        autoRemoteSearchedQueries.add(normalizedKey)
+                        activeMarketSearchJob?.cancel()
+                        val preservedDist = marketRefState.distribution?.takeIf {
+                            marketRefState.query.equals(queryToSearch, ignoreCase = true)
+                        }
+                        marketRefState = marketRefState.copy(
+                            query = queryToSearch,
+                            distribution = preservedDist,
+                            searchStatus = MarketSearchStatus.LOADING,
+                            statusMessage = null,
+                        )
+                        activeMarketSearchJob = coroutineScope.launch {
+                            val result = try {
+                                marketReferenceRepository.searchRemoteAndMerge(queryToSearch)
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (t: Throwable) {
+                                marketRefState.copy(
+                                    query = queryToSearch,
+                                    searchStatus = MarketSearchStatus.FAILED,
+                                    statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
+                                )
+                            }
+                            if (latestMarketQuery == queryToSearch) {
+                                marketRefState = result
+                            }
+                        }
+                    },
+                )
 
                 // Billing Cycle Card
                 ValuationFormSectionCard(

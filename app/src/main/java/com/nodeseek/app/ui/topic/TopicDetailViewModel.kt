@@ -6,33 +6,56 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.carpool.CarpoolStatusUpdater
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.FloorAuthor
 import com.nodeseek.app.domain.model.FloorComment
+import com.nodeseek.app.domain.model.PollDetail
 import com.nodeseek.app.domain.model.ReactionType
 import com.nodeseek.app.domain.model.ReadHistoryEntry
+import com.nodeseek.app.domain.model.StardustTipTarget
 import com.nodeseek.app.domain.model.TopicAccessException
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.radar.RadarRepository
+import com.nodeseek.app.domain.radar.TrackedTopic
+import com.nodeseek.app.domain.repository.PollAndStardustRepository
+import com.nodeseek.app.domain.trade.TradePrivacyOptions
+import com.nodeseek.app.domain.trade.TradePrivacySanitizer
+import com.nodeseek.app.domain.trade.TradeTitleFormatter
+import com.nodeseek.app.domain.trust.TrustRiskEvaluator
+import com.nodeseek.app.domain.valuation.MarketSearchStatus
+import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.ui.components.NoOpNsAppWidgetController
+import com.nodeseek.app.ui.components.NsAppWidgetController
+import com.nodeseek.app.ui.components.PollCardUiState
+import com.nodeseek.app.ui.components.StardustCardUiState
+import com.nodeseek.app.ui.composer.ImagePrivacyBitmapCodec
+import com.nodeseek.app.ui.composer.MosaicSupportStatus
+import com.nodeseek.app.ui.composer.PendingComposerImage
+import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 @Immutable
 sealed interface TopicAccessUiError {
@@ -92,6 +115,7 @@ data class ReplyComposerUiState(
     val isUploadingImage: Boolean = false,
     val showStickerPicker: Boolean = false,
     val showApiKeyDialog: Boolean = false,
+    val pendingPrivacyImage: PendingComposerImage? = null,
 ) {
     val isEditMode: Boolean
         get() = editingComment != null
@@ -143,8 +167,11 @@ data class TopicDetailUiState(
     val pendingPaidAction: PendingTopicPaidAction? = null,
     val showFloorJumpSheet: Boolean = false,
     val replyComposer: ReplyComposerUiState = ReplyComposerUiState(),
+    val stardustTipDialog: StardustTipDialogUiState? = null,
     val isTrackingReplies: Boolean = false,
     val trackedBaselineFloor: Int = -1,
+    val isMutatingTopic: Boolean = false,
+    val marketReference: TradeMarketReferenceState? = null,
 ) {
     val canEditTopic: Boolean
         get() = session != null && pageData != null && session.uid == pageData.author.uid
@@ -184,6 +211,9 @@ private data class InternalReaderState(
     val pendingPaidAction: PendingTopicPaidAction? = null,
     val showFloorJumpSheet: Boolean = false,
     val replyComposer: ReplyComposerUiState = ReplyComposerUiState(),
+    val stardustTipDialog: StardustTipDialogUiState? = null,
+    val isMutatingTopic: Boolean = false,
+    val marketReference: TradeMarketReferenceState? = null,
 )
 
 private data class PendingUploadPayload(
@@ -198,11 +228,14 @@ class TopicDetailViewModel(
     private val initialFloor: Int = 0,
     private val titleHint: String = "",
     private val radarRepository: RadarRepository? = null,
+    private val pollAndStardustRepositoryOverride: PollAndStardustRepository? = null,
+    private val tradeMarketReferenceRepository: TradeMarketReferenceRepository? = null,
 ) : ViewModel() {
 
     private val initialStartPage = if (initialFloor > 0) TopicDetailPage.pageForFloor(initialFloor) else 1
 
-    private val internalState = MutableStateFlow(
+    private val stateLock = Any()
+    private val _internalState = MutableStateFlow(
         InternalReaderState(
             currentPage = initialStartPage,
             loadedStartPage = initialStartPage,
@@ -211,6 +244,20 @@ class TopicDetailViewModel(
             highestVisitedFloor = initialFloor.coerceAtLeast(0),
         )
     )
+    private val internalState = SyncedInternalState()
+
+    private inner class SyncedInternalState {
+        val value: InternalReaderState
+            get() = _internalState.value
+
+        fun update(transform: (InternalReaderState) -> InternalReaderState) {
+            synchronized(stateLock) {
+                val next = transform(_internalState.value)
+                _internalState.value = next
+                _uiState.value = buildUiState(state = next)
+            }
+        }
+    }
 
     private val _visibleFloor = MutableStateFlow(initialFloor.coerceAtLeast(0))
     val visibleFloor: StateFlow<Int> = _visibleFloor.asStateFlow()
@@ -226,23 +273,263 @@ class TopicDetailViewModel(
     private var highlightClearJob: Job? = null
     private var pageLoadJob: Job? = null
     private var appendNextPageJob: Job? = null
+    private val isSubmittingReplyGuard = AtomicBoolean(false)
+    private val submitReplySeq = AtomicLong(0L)
+    private val activeTailSyncSeq = AtomicLong(0L)
     private var prependPreviousPageJob: Job? = null
     private var userResolveJob: Job? = null
+    private var marketRefJob: Job? = null
+    private var marketRefRequestSeq: Long = 0L
+    private var lastAnalyzedMarketSignature: String? = null
+    private var hasUserCustomMarketQuery: Boolean = false
+    private val autoRemoteTriggeredMarketQueries: MutableSet<String> = mutableSetOf()
     private var pageWindowGeneration: Long = 0L
     private var pendingImageUpload: PendingUploadPayload? = null
     private var lastHandledRefreshTrigger: Long = 0L
+    private val pollEpoch = AtomicLong(0L)
+    private val pollSessionLock = Any()
+    private var lastObservedPollSessionUid: Long? = container.sessionRepository.sessionState.value?.uid
+    private val pollLoadJobs = ConcurrentHashMap<Long, Job>()
+    private val pollCardStates = ConcurrentHashMap<Long, MutableStateFlow<PollCardUiState>>()
+    private val stardustCardStates = ConcurrentHashMap<String, MutableStateFlow<StardustCardUiState>>()
 
-    val uiState: StateFlow<TopicDetailUiState> = combine(
-        internalState,
-        container.sessionRepository.sessionState,
-        container.settingsRepository.settings,
-        container.bookmarkAndHistoryRepository.observeBookmarkedIds(),
-        radarRepository?.observeTrackedTopic(topicId) ?: flowOf(null),
-    ) { state, session, settings, localBookmarkedIds, trackedTopic ->
+    val nsAppWidgetController: NsAppWidgetController = object : NsAppWidgetController {
+        override val currentViewerUid: Long?
+            get() = container.sessionRepository.sessionState.value?.uid
+
+        override fun pollStateFor(voteId: Long): StateFlow<PollCardUiState> =
+            pollStateFlow(voteId).asStateFlow()
+
+        override fun stardustStateFor(widgetKey: String): StateFlow<StardustCardUiState> =
+            stardustStateFlow(widgetKey).asStateFlow()
+
+        override fun ensureVoteLoaded(voteId: Long) {
+            loadVoteInternal(voteId = voteId, force = false)
+        }
+
+        override fun reloadVote(voteId: Long) {
+            loadVoteInternal(voteId = voteId, force = true)
+        }
+
+        override fun togglePollOption(voteId: Long, optionId: Long, isMultiple: Boolean) {
+            synchronized(pollSessionLock) {
+                val flow = pollStateFlow(voteId)
+                val current = flow.value
+                val poll = current.poll ?: return
+                if (current.isSubmitting || poll.hasCurrentUserVoted || poll.isLocked) return
+                val nextSelected = if (isMultiple) {
+                    if (optionId in current.selectedOptionIds) {
+                        current.selectedOptionIds - optionId
+                    } else {
+                        current.selectedOptionIds + optionId
+                    }
+                } else {
+                    if (optionId in current.selectedOptionIds) emptySet() else setOf(optionId)
+                }
+                flow.value = current.copy(selectedOptionIds = nextSelected, errorMessage = null)
+            }
+        }
+
+        override fun submitVote(voteId: Long) {
+            if (!ensureAuthenticatedForAction()) return
+            val flow = pollStateFlow(voteId)
+            var epochAtSubmit = 0L
+            var chosenIds: List<Long>? = null
+            synchronized(pollSessionLock) {
+                epochAtSubmit = pollEpoch.get()
+                val current = flow.value
+                if (!current.isSubmitting && current.selectedOptionIds.isNotEmpty()) {
+                    chosenIds = current.selectedOptionIds.toList()
+                    flow.value = current.copy(isSubmitting = true, errorMessage = null)
+                }
+            }
+            val idsToCast = chosenIds ?: return
+            viewModelScope.launch {
+                try {
+                    resolvePollAndStardustRepo().castVote(voteId = voteId, voteItemIds = idsToCast).fold(
+                        onSuccess = { updated ->
+                            val applied = synchronized(pollSessionLock) {
+                                if (pollEpoch.get() == epochAtSubmit) {
+                                    flow.value = flow.value.copy(
+                                        isSubmitting = false,
+                                        poll = updated,
+                                        selectedOptionIds = emptySet(),
+                                        errorMessage = null,
+                                    )
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (applied) {
+                                _events.trySend(TopicDetailUiEvent.ShowMessage("投票已提交"))
+                            }
+                        },
+                        onFailure = { err ->
+                            val applied = synchronized(pollSessionLock) {
+                                if (pollEpoch.get() == epochAtSubmit) {
+                                    flow.value = flow.value.copy(
+                                        isSubmitting = false,
+                                        errorMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "提交投票失败",
+                                    )
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (applied) {
+                                handleActionFailure(err, "提交投票失败")
+                            }
+                        },
+                    )
+                } finally {
+                    synchronized(pollSessionLock) {
+                        if (pollEpoch.get() == epochAtSubmit && flow.value.isSubmitting) {
+                            flow.value = flow.value.copy(isSubmitting = false)
+                        }
+                    }
+                }
+            }
+        }
+
+        override fun lockVote(voteId: Long) {
+            if (!ensureAuthenticatedForAction()) return
+            val flow = pollStateFlow(voteId)
+            var epochAtSubmit = 0L
+            var existingPollSnapshot: PollDetail? = null
+            synchronized(pollSessionLock) {
+                epochAtSubmit = pollEpoch.get()
+                val current = flow.value
+                val existingPoll = current.poll
+                val viewerUid = container.sessionRepository.sessionState.value?.uid
+                if (existingPoll != null &&
+                    viewerUid != null &&
+                    viewerUid == existingPoll.creatorUid &&
+                    !existingPoll.isLocked &&
+                    !current.isLocking
+                ) {
+                    existingPollSnapshot = existingPoll
+                    flow.value = current.copy(isLocking = true, errorMessage = null)
+                }
+            }
+            val existingPoll = existingPollSnapshot ?: return
+            viewModelScope.launch {
+                try {
+                    resolvePollAndStardustRepo().lockVote(voteId).fold(
+                        onSuccess = { updated ->
+                            val applied = synchronized(pollSessionLock) {
+                                if (pollEpoch.get() == epochAtSubmit) {
+                                    val merged = if (updated.options.isEmpty() && existingPoll.options.isNotEmpty()) {
+                                        existingPoll.copy(isLocked = true)
+                                    } else {
+                                        updated
+                                    }
+                                    flow.value = flow.value.copy(
+                                        isLocking = false,
+                                        poll = merged,
+                                        selectedOptionIds = emptySet(),
+                                        errorMessage = null,
+                                    )
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (applied) {
+                                _events.trySend(TopicDetailUiEvent.ShowMessage("投票已锁定"))
+                            }
+                        },
+                        onFailure = { err ->
+                            val applied = synchronized(pollSessionLock) {
+                                if (pollEpoch.get() == epochAtSubmit) {
+                                    flow.value = flow.value.copy(
+                                        isLocking = false,
+                                        errorMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "锁定投票失败",
+                                    )
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (applied) {
+                                handleActionFailure(err, "锁定投票失败")
+                            }
+                        },
+                    )
+                } finally {
+                    synchronized(pollSessionLock) {
+                        if (pollEpoch.get() == epochAtSubmit && flow.value.isLocking) {
+                            flow.value = flow.value.copy(isLocking = false)
+                        }
+                    }
+                }
+            }
+        }
+
+        override fun openStardustTip(target: StardustTipTarget) {
+            this@TopicDetailViewModel.openStardustTip(target)
+        }
+    }
+
+    private var stardustPrepareSeq: Long = 0L
+    private var stardustPrepareJob: Job? = null
+    private val cachedBookmarkedIds = MutableStateFlow(
+        (container.bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value ?: emptySet()
+    )
+    private val cachedTrackedTopic = MutableStateFlow<TrackedTopic?>(
+        (radarRepository?.observeTrackedTopic(topicId) as? StateFlow<TrackedTopic?>)?.value
+    )
+
+    private data class DerivedTopicSnapshot(
+        val pageData: TopicDetailPage?,
+        val openingFloor: FloorComment?,
+        val totalPages: Int,
+        val estimatedTotalFloors: Int,
+        val canEditTopic: Boolean,
+    )
+
+    private fun deriveTopicSnapshot(
+        state: InternalReaderState = internalState.value,
+        session: AccountSession? = container.sessionRepository.sessionState.value,
+    ): DerivedTopicSnapshot {
         val pageData = state.pagesCache[state.currentPage]
             ?: state.pagesCache[state.loadedStartPage]
             ?: state.pagesCache.values.firstOrNull()
         val openingFloor = pageData?.openingFloor ?: state.cachedOpeningFloor
+        val totalPages = maxOf(
+            pageData?.totalPages ?: 1,
+            state.pagesCache.values.maxOfOrNull { it.totalPages } ?: 1,
+        )
+        val estimatedTotalFloors = resolveTotalFloors(state.pagesCache.values, totalPages)
+        val canEditTopic = session != null && pageData != null && session.uid == pageData.author.uid
+        return DerivedTopicSnapshot(
+            pageData = pageData,
+            openingFloor = openingFloor,
+            totalPages = totalPages,
+            estimatedTotalFloors = estimatedTotalFloors,
+            canEditTopic = canEditTopic,
+        )
+    }
+
+    private fun resolveIsBookmarked(
+        state: InternalReaderState,
+        pageData: TopicDetailPage?,
+        localBookmarkedIds: Set<Long> = cachedBookmarkedIds.value,
+    ): Boolean {
+        val baseBookmarked = localBookmarkedIds.contains(topicId) || (pageData?.isBookmarked == true)
+        return state.optimisticBookmarked ?: baseBookmarked
+    }
+
+    private fun buildUiState(
+        state: InternalReaderState = _internalState.value,
+        session: AccountSession? = container.sessionRepository.sessionState.value,
+        settings: AppSettings = container.settingsRepository.settings.value,
+        localBookmarkedIds: Set<Long> = cachedBookmarkedIds.value,
+        trackedTopic: TrackedTopic? = cachedTrackedTopic.value,
+    ): TopicDetailUiState {
+        val derived = deriveTopicSnapshot(state = state, session = session)
+        val pageData = derived.pageData
+        val openingFloor = derived.openingFloor
         val windowStart = state.loadedStartPage.coerceAtLeast(1)
         val windowEnd = state.loadedEndPage.coerceAtLeast(windowStart)
         val seenKeys = HashSet<Long>()
@@ -272,17 +559,17 @@ class TopicDetailViewModel(
             filteredReplies
         }
 
-        val baseBookmarked = localBookmarkedIds.contains(topicId) || (pageData?.isBookmarked == true)
-        val isBookmarked = state.optimisticBookmarked ?: baseBookmarked
+        val isBookmarked = resolveIsBookmarked(
+            state = state,
+            pageData = pageData,
+            localBookmarkedIds = localBookmarkedIds,
+        )
         val effectiveBookmarkCount = ((pageData?.bookmarkCount ?: 0) + state.bookmarkCountDelta).coerceAtLeast(0)
 
-        val totalPages = maxOf(
-            pageData?.totalPages ?: 1,
-            state.pagesCache.values.maxOfOrNull { it.totalPages } ?: 1,
-        )
-        val estimatedTotalFloors = resolveTotalFloors(state.pagesCache.values, totalPages)
+        val totalPages = derived.totalPages
+        val estimatedTotalFloors = derived.estimatedTotalFloors
 
-        TopicDetailUiState(
+        return TopicDetailUiState(
             topicId = topicId,
             titleHint = titleHint,
             session = session,
@@ -313,23 +600,49 @@ class TopicDetailViewModel(
             pendingPaidAction = state.pendingPaidAction,
             showFloorJumpSheet = state.showFloorJumpSheet,
             replyComposer = state.replyComposer,
+            stardustTipDialog = state.stardustTipDialog,
             isTrackingReplies = trackedTopic?.isActive == true,
             trackedBaselineFloor = trackedTopic?.lastKnownFloor ?: -1,
+            isMutatingTopic = state.isMutatingTopic,
+            marketReference = state.marketReference,
         )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = TopicDetailUiState(
-            topicId = topicId,
-            titleHint = titleHint,
-            currentPage = initialStartPage,
-            loadedStartPage = initialStartPage,
-            loadedEndPage = initialStartPage,
-            currentVisibleFloor = initialFloor.coerceAtLeast(0),
-        ),
-    )
+    }
+
+    private val _uiState = MutableStateFlow(buildUiState())
+    val uiState: StateFlow<TopicDetailUiState> = _uiState.asStateFlow()
+
+    private fun refreshUiState() {
+        synchronized(stateLock) {
+            _uiState.value = buildUiState()
+        }
+    }
 
     init {
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.observeBookmarkedIds().collect { ids ->
+                cachedBookmarkedIds.value = ids
+                refreshUiState()
+            }
+        }
+        if (radarRepository != null) {
+            viewModelScope.launch {
+                radarRepository.observeTrackedTopic(topicId).collect { tracked ->
+                    cachedTrackedTopic.value = tracked
+                    refreshUiState()
+                }
+            }
+        }
+        viewModelScope.launch {
+            container.sessionRepository.sessionState.collect {
+                refreshUiState()
+                syncPollSessionChangeIfNeeded()
+            }
+        }
+        viewModelScope.launch {
+            container.settingsRepository.settings.collect {
+                refreshUiState()
+            }
+        }
         restoreReplyDraft()
         val startPage = if (initialFloor > 0) TopicDetailPage.pageForFloor(initialFloor) else 1
         loadPage(
@@ -406,6 +719,7 @@ class TopicDetailViewModel(
                     )
                 }
                 refreshOfflineSnapshotIfBookmarked(page1)
+                maybeAnalyzeLocalMarketReference(page1)
             }
         }
     }
@@ -691,18 +1005,20 @@ class TopicDetailViewModel(
 
     fun toggleReplyTracking() {
         val repo = radarRepository ?: return
-        val snapshot = uiState.value
+        val state = internalState.value
+        val snapshot = deriveTopicSnapshot(state)
         val pageData = snapshot.pageData
         val totalPages = snapshot.totalPages.coerceAtLeast(1)
+        val isTrackingReplies = cachedTrackedTopic.value?.isActive == true
 
         viewModelScope.launch {
-            if (snapshot.isTrackingReplies) {
+            if (isTrackingReplies) {
                 repo.untrackTopic(topicId)
                 _events.trySend(TopicDetailUiEvent.ShowMessage("已关闭此帖的新回复追踪"))
                 return@launch
             }
 
-            val onTailPage = snapshot.currentPage >= totalPages &&
+            val onTailPage = state.currentPage >= totalPages &&
                 pageData != null &&
                 !pageData.isOfflineSnapshot
             val currentMaxFloor = if (onTailPage) {
@@ -713,7 +1029,7 @@ class TopicDetailViewModel(
 
             repo.trackTopic(
                 topicId = topicId,
-                title = pageData?.title ?: snapshot.titleHint.ifBlank { "主题 #$topicId" },
+                title = pageData?.title ?: titleHint.ifBlank { "主题 #$topicId" },
                 categorySlug = pageData?.categorySlug.orEmpty(),
                 categoryName = pageData?.categoryName.orEmpty(),
                 authorName = pageData?.author?.username.orEmpty(),
@@ -841,6 +1157,7 @@ class TopicDetailViewModel(
                 includeBlocked = includeBlocked,
             )
             if (generation != pageWindowGeneration) return@launch
+            syncPollSessionChangeIfNeeded()
 
             result.fold(
                 onSuccess = { detail ->
@@ -921,6 +1238,7 @@ class TopicDetailViewModel(
                     // Keep offline bookmark snapshot fresh if already bookmarked locally
                     refreshOfflineSnapshotIfBookmarked(loadedPage)
                     notifyTailPageSeenIfNeeded(loadedPage)
+                    maybeAnalyzeLocalMarketReference(loadedPage)
                 },
                 onFailure = { error ->
                     val classified = classifyError(error)
@@ -954,6 +1272,7 @@ class TopicDetailViewModel(
                         _events.trySend(
                             TopicDetailUiEvent.ShowMessage("网络不可用，已为您加载本地离线收藏快照")
                         )
+                        maybeAnalyzeLocalMarketReference(markedOffline, allowAutoRemote = false)
                     } else {
                         internalState.update { state ->
                             state.copy(
@@ -1045,7 +1364,8 @@ class TopicDetailViewModel(
     }
 
     private suspend fun refreshOfflineSnapshotIfBookmarked(detail: TopicDetailPage) {
-        val isCurrentlyBookmarked = uiState.value.isBookmarked
+        val state = internalState.value
+        val isCurrentlyBookmarked = resolveIsBookmarked(state, deriveTopicSnapshot(state).pageData)
         if (!isCurrentlyBookmarked || detail.isOfflineSnapshot) return
         // Only persist Page 1 with a valid opening floor so subpage loads never overwrite the offline OP snapshot
         if (detail.currentPage != 1) return
@@ -1077,9 +1397,9 @@ class TopicDetailViewModel(
     }
 
     fun toggleBookmark() {
-        val currentUi = uiState.value
-        val page = currentUi.pageData ?: return
-        val targetBookmarked = !currentUi.isBookmarked
+        val state = internalState.value
+        val page = deriveTopicSnapshot(state).pageData ?: return
+        val targetBookmarked = !resolveIsBookmarked(state, page)
         val deltaAdjustment = if (targetBookmarked) 1 else -1
 
         internalState.update { state ->
@@ -1269,7 +1589,7 @@ class TopicDetailViewModel(
             _events.trySend(TopicDetailUiEvent.ShowMessage("回复正在同步楼层信息，请稍后再试"))
             return
         }
-        if (!uiState.value.isViewerTopicAuthor || comment.floorNumber <= 0) return
+        if (!deriveTopicSnapshot().canEditTopic || comment.floorNumber <= 0) return
         if (internalState.value.busyCommentIds.contains(comment.commentId)) return
 
         if (comment.isPinned) {
@@ -1415,7 +1735,7 @@ class TopicDetailViewModel(
 
     fun openReplySheet(quoteComment: FloorComment? = null) {
         if (!ensureAuthenticatedForAction()) return
-        val page = uiState.value.pageData
+        val page = deriveTopicSnapshot().pageData
         if (page?.isLocked == true) {
             _events.trySend(TopicDetailUiEvent.ShowMessage("该主题已锁定，无法发布新回复"))
             return
@@ -1604,7 +1924,7 @@ class TopicDetailViewModel(
                     draftKey = draftKey,
                     accountUid = uid,
                     markdownContent = markdown,
-                    categorySlug = uiState.value.pageData?.categorySlug ?: "daily",
+                    categorySlug = deriveTopicSnapshot().pageData?.categorySlug ?: "daily",
                     updatedAtMillis = System.currentTimeMillis(),
                 )
             )
@@ -1613,196 +1933,272 @@ class TopicDetailViewModel(
 
     override fun onCleared() {
         flushReplyDraftNow()
+        val jobsToCancel = synchronized(pollSessionLock) {
+            pollEpoch.incrementAndGet()
+            val jobs = pollLoadJobs.values.toList()
+            pollLoadJobs.clear()
+            jobs
+        }
+        jobsToCancel.forEach { it.cancel() }
         super.onCleared()
     }
 
     fun submitReply() {
         if (!ensureAuthenticatedForAction()) return
-        val composer = internalState.value.replyComposer
-        val content = composer.draftMarkdown.trim()
-        if (content.isEmpty()) {
+        val precheck = internalState.value.replyComposer
+        if (precheck.draftMarkdown.trim().isEmpty()) {
             _events.trySend(TopicDetailUiEvent.ShowMessage("请输入回复内容"))
             return
         }
-        if (composer.isSubmitting) return
+        if (precheck.isSubmitting || !isSubmittingReplyGuard.compareAndSet(false, true)) return
+        val mySeq = submitReplySeq.incrementAndGet()
 
-        viewModelScope.launch {
+        var launched = false
+        try {
+            var submittedContent = ""
+            var editingCommentSnapshot: FloorComment? = null
+            var canProceed = false
+            internalState.update { state ->
+                val cur = state.replyComposer
+                val trimmed = cur.draftMarkdown.trim()
+                if (cur.isSubmitting || trimmed.isEmpty()) {
+                    state
+                } else {
+                    canProceed = true
+                    submittedContent = trimmed
+                    editingCommentSnapshot = cur.editingComment
+                    state.copy(replyComposer = cur.copy(isSubmitting = true))
+                }
+            }
+            if (!canProceed) return
+
             saveDraftJob?.cancel()
             pendingDraftSave = null
-            internalState.update { state ->
-                state.copy(replyComposer = state.replyComposer.copy(isSubmitting = true))
-            }
 
-            val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
-            val editingComment = composer.editingComment
+            val content = submittedContent
+            val editingComment = editingCommentSnapshot
 
-            val result = if (editingComment != null) {
-                container.forumRepository.editReply(
-                    commentId = editingComment.commentId,
-                    markdownContent = content,
-                )
-            } else {
-                container.forumRepository.postReply(
-                    topicId = topicId,
-                    markdownContent = content,
-                )
-            }
+            viewModelScope.launch {
+                try {
+                    val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
 
-            result.fold(
-                onSuccess = {
-                    val draftKey = if (editingComment != null) {
-                        EditorDraft.editReplyKey(editingComment.commentId)
-                    } else {
-                        EditorDraft.replyKey(topicId)
-                    }
-                    runCatching { container.draftRepository.deleteDraft(uid, draftKey) }
-
-                    internalState.update { state ->
-                        state.copy(
-                            replyComposer = ReplyComposerUiState(isSheetOpen = false),
-                        )
-                    }
-
-                    if (editingComment != null) {
-                        val targetEditPage = internalState.value.pagesCache.entries
-                            .firstOrNull { (_, page) -> page.replies.any { it.commentId == editingComment.commentId } }
-                            ?.key
-                            ?: internalState.value.currentPage
-                        updateCommentAcrossCaches(editingComment.commentId) {
-                            it.copy(markdownBody = content)
-                        }
-                        _events.trySend(TopicDetailUiEvent.ShowMessage("回复修改已保存"))
-                        syncEditedReplyPage(
-                            targetPage = targetEditPage,
+                    val result = if (editingComment != null) {
+                        container.forumRepository.editReply(
                             commentId = editingComment.commentId,
-                            expectedMarkdown = content,
-                            preEditMarkdown = editingComment.markdownBody,
+                            markdownContent = content,
                         )
-                        restoreReplyDraft()
                     } else {
-                        _events.trySend(TopicDetailUiEvent.ShowMessage("回复已发布"))
-                        val session = container.sessionRepository.sessionState.value
-                        val snapshotState = internalState.value
-                        val snapshotUi = uiState.value
-                        val basePage = snapshotUi.pageData
-                            ?: snapshotState.pagesCache.values.firstOrNull { !it.isOfflineSnapshot }
-                        val currentTotalPages = snapshotUi.totalPages.coerceAtLeast(1)
-                        val maxCachedFloor = snapshotState.pagesCache.values
-                            .flatMap { it.replies }
-                            .maxOfOrNull { it.floorNumber }
-                            ?: 0
-                        val nextFloor = maxOf(snapshotUi.estimatedTotalFloors, maxCachedFloor) + 1
-                        val expectedTailPage = maxOf(
-                            currentTotalPages,
-                            TopicDetailPage.pageForFloor(nextFloor),
+                        container.forumRepository.postReply(
+                            topicId = topicId,
+                            markdownContent = content,
                         )
-                        val previousReplyIds = snapshotState.pagesCache
-                            .values
-                            .flatMap { it.replies }
-                            .mapNotNull { it.commentId.takeIf { id -> id > 0L } }
-                            .toSet()
-                        val isViewerOp = basePage?.author?.uid != null && basePage.author.uid == uid
+                    }
 
-                        val optimisticComment = FloorComment(
-                            commentId = -(System.nanoTime().coerceAtLeast(1L)),
-                            floorNumber = nextFloor,
-                            author = FloorAuthor(
-                                uid = uid,
-                                username = session?.username?.ifBlank { null } ?: "我",
-                                avatarUrl = session?.avatarUrl.orEmpty(),
-                                isTopicAuthor = isViewerOp,
-                                level = session?.level,
-                            ),
-                            createdAtIso = "刚刚",
-                            markdownBody = content,
-                        )
-
-                        val hadExistingTailPage = snapshotState.pagesCache.containsKey(expectedTailPage) &&
-                            snapshotState.pagesCache[expectedTailPage]?.isOfflineSnapshot != true
-
-                        _visibleFloor.value = nextFloor
-                        highestVisitedFloorState = maxOf(highestVisitedFloorState, nextFloor)
-
-                        internalState.update { state ->
-                            val cleanedPages = state.pagesCache.mapValues { (_, page) ->
-                                val stripped = page.replies.filter { it.commentId > 0L }
-                                val bumpTotalPages = maxOf(page.totalPages, expectedTailPage)
-                                if (stripped.size != page.replies.size || bumpTotalPages != page.totalPages) {
-                                    page.copy(replies = stripped, totalPages = bumpTotalPages)
-                                } else {
-                                    page
-                                }
-                            }
-                            val existingTail = cleanedPages[expectedTailPage]?.takeIf { !it.isOfflineSnapshot }
-                            val updatedTail = when {
-                                existingTail != null -> existingTail.copy(
-                                    totalPages = maxOf(existingTail.totalPages, expectedTailPage),
-                                    replies = existingTail.replies + optimisticComment,
-                                )
-                                basePage != null -> basePage.copy(
-                                    currentPage = expectedTailPage,
-                                    totalPages = expectedTailPage,
-                                    openingFloor = if (expectedTailPage == 1) {
-                                        state.cachedOpeningFloor ?: basePage.openingFloor
-                                    } else {
-                                        null
-                                    },
-                                    replies = listOf(optimisticComment),
-                                    isOfflineSnapshot = false,
-                                )
-                                else -> null
-                            }
-                            val nextPagesCache = if (updatedTail != null) {
-                                cleanedPages + (expectedTailPage to updatedTail)
+                    result.fold(
+                        onSuccess = {
+                            val draftKey = if (editingComment != null) {
+                                EditorDraft.editReplyKey(editingComment.commentId)
                             } else {
-                                cleanedPages
+                                EditorDraft.replyKey(topicId)
                             }
-                            val contiguous = expectedTailPage <= state.loadedEndPage + 1
-                            state.copy(
-                                isPageSwitching = true,
-                                currentPage = expectedTailPage,
-                                loadedStartPage = if (contiguous) state.loadedStartPage else expectedTailPage,
-                                loadedEndPage = if (contiguous) {
-                                    maxOf(state.loadedEndPage, expectedTailPage)
-                                } else {
-                                    expectedTailPage
-                                },
-                                pagesCache = nextPagesCache,
-                                opOnly = if (isViewerOp) state.opOnly else false,
-                                isOpExpandedOnSubPage = false,
-                                currentVisibleFloor = nextFloor,
-                                highestVisitedFloor = maxOf(state.highestVisitedFloor, nextFloor),
-                                pendingScrollFloor = nextFloor,
-                            )
-                        }
+                            runCatching { container.draftRepository.deleteDraft(uid, draftKey) }
 
-                        runCatching {
-                            radarRepository?.onTopicFloorSeen(
-                                topicId = topicId,
-                                maxSeenFloor = nextFloor,
-                                totalPages = expectedTailPage,
-                            )
-                        }
+                            internalState.update { state ->
+                                state.copy(
+                                    replyComposer = ReplyComposerUiState(isSheetOpen = false),
+                                )
+                            }
+                            if (submitReplySeq.get() == mySeq) {
+                                isSubmittingReplyGuard.set(false)
+                            }
 
-                        syncTailPageAfterPostReply(
-                            expectedPage = expectedTailPage,
-                            hadExistingTargetPage = hadExistingTailPage,
-                            optimisticComment = optimisticComment,
-                            previousReplyIds = previousReplyIds,
-                            sessionUid = uid,
-                        )
-                    }
-                },
-                onFailure = { err ->
-                    internalState.update { state ->
-                        state.copy(replyComposer = state.replyComposer.copy(isSubmitting = false))
-                    }
-                    handleActionFailure(
-                        err,
-                        fallbackMessage = if (editingComment != null) "修改回复失败" else "发送回复失败",
+                            if (editingComment != null) {
+                                val targetEditPage = internalState.value.pagesCache.entries
+                                    .firstOrNull { (_, page) -> page.replies.any { it.commentId == editingComment.commentId } }
+                                    ?.key
+                                    ?: internalState.value.currentPage
+                                updateCommentAcrossCaches(editingComment.commentId) {
+                                    it.copy(markdownBody = content)
+                                }
+                                _events.trySend(TopicDetailUiEvent.ShowMessage("回复修改已保存"))
+                                val editWindowGen = pageWindowGeneration
+                                syncEditedReplyPage(
+                                    targetPage = targetEditPage,
+                                    commentId = editingComment.commentId,
+                                    expectedMarkdown = content,
+                                    preEditMarkdown = editingComment.markdownBody,
+                                    expectedSeq = mySeq,
+                                    expectedWindowGen = editWindowGen,
+                                )
+                                restoreReplyDraft()
+                            } else {
+                                _events.trySend(TopicDetailUiEvent.ShowMessage("回复已发布"))
+                                val session = container.sessionRepository.sessionState.value
+                                val snapshotState = internalState.value
+                                val snapshotDerived = deriveTopicSnapshot(state = snapshotState, session = session)
+                                val basePage = snapshotDerived.pageData
+                                    ?: snapshotState.pagesCache.values.firstOrNull { !it.isOfflineSnapshot }
+                                val currentTotalPages = snapshotDerived.totalPages.coerceAtLeast(1)
+                                val maxCachedFloor = snapshotState.pagesCache.values
+                                    .flatMap { it.replies }
+                                    .maxOfOrNull { it.floorNumber }
+                                    ?: 0
+                                val nextFloor = maxOf(snapshotDerived.estimatedTotalFloors, maxCachedFloor) + 1
+                                val expectedTailPage = maxOf(
+                                    currentTotalPages,
+                                    TopicDetailPage.pageForFloor(nextFloor),
+                                )
+                                val previousReplyIds = snapshotState.pagesCache
+                                    .values
+                                    .flatMap { it.replies }
+                                    .mapNotNull { it.commentId.takeIf { id -> id > 0L } }
+                                    .toSet()
+                                val isViewerOp = basePage?.author?.uid != null && basePage.author.uid == uid
+
+                                val optimisticComment = FloorComment(
+                                    commentId = -(System.nanoTime().coerceAtLeast(1L)),
+                                    floorNumber = nextFloor,
+                                    author = FloorAuthor(
+                                        uid = uid,
+                                        username = session?.username?.ifBlank { null } ?: "我",
+                                        avatarUrl = session?.avatarUrl.orEmpty(),
+                                        isTopicAuthor = isViewerOp,
+                                        level = session?.level,
+                                    ),
+                                    createdAtIso = "刚刚",
+                                    markdownBody = content,
+                                )
+
+                                val hadExistingTailPage = snapshotState.pagesCache.containsKey(expectedTailPage) &&
+                                    snapshotState.pagesCache[expectedTailPage]?.isOfflineSnapshot != true
+
+                                val tailSyncWindowGen = pageWindowGeneration
+                                activeTailSyncSeq.set(mySeq)
+                                _visibleFloor.value = nextFloor
+                                highestVisitedFloorState = maxOf(highestVisitedFloorState, nextFloor)
+
+                                internalState.update { state ->
+                                    val cleanedPages = state.pagesCache.mapValues { (_, page) ->
+                                        val stripped = page.replies.filter { it.commentId > 0L }
+                                        val bumpTotalPages = maxOf(page.totalPages, expectedTailPage)
+                                        if (stripped.size != page.replies.size || bumpTotalPages != page.totalPages) {
+                                            page.copy(replies = stripped, totalPages = bumpTotalPages)
+                                        } else {
+                                            page
+                                        }
+                                    }
+                                    val existingTail = cleanedPages[expectedTailPage]?.takeIf { !it.isOfflineSnapshot }
+                                    val updatedTail = when {
+                                        existingTail != null -> existingTail.copy(
+                                            totalPages = maxOf(existingTail.totalPages, expectedTailPage),
+                                            replies = existingTail.replies + optimisticComment,
+                                        )
+                                        basePage != null -> basePage.copy(
+                                            currentPage = expectedTailPage,
+                                            totalPages = expectedTailPage,
+                                            openingFloor = if (expectedTailPage == 1) {
+                                                state.cachedOpeningFloor ?: basePage.openingFloor
+                                            } else {
+                                                null
+                                            },
+                                            replies = listOf(optimisticComment),
+                                            isOfflineSnapshot = false,
+                                        )
+                                        else -> null
+                                    }
+                                    val nextPagesCache = if (updatedTail != null) {
+                                        cleanedPages + (expectedTailPage to updatedTail)
+                                    } else {
+                                        cleanedPages
+                                    }
+                                    val contiguous = expectedTailPage <= state.loadedEndPage + 1
+                                    state.copy(
+                                        isPageSwitching = true,
+                                        currentPage = expectedTailPage,
+                                        loadedStartPage = if (contiguous) state.loadedStartPage else expectedTailPage,
+                                        loadedEndPage = if (contiguous) {
+                                            maxOf(state.loadedEndPage, expectedTailPage)
+                                        } else {
+                                            expectedTailPage
+                                        },
+                                        pagesCache = nextPagesCache,
+                                        opOnly = if (isViewerOp) state.opOnly else false,
+                                        isOpExpandedOnSubPage = false,
+                                        currentVisibleFloor = nextFloor,
+                                        highestVisitedFloor = maxOf(state.highestVisitedFloor, nextFloor),
+                                        pendingScrollFloor = nextFloor,
+                                    )
+                                }
+
+                                runCatching {
+                                    radarRepository?.onTopicFloorSeen(
+                                        topicId = topicId,
+                                        maxSeenFloor = nextFloor,
+                                        totalPages = expectedTailPage,
+                                    )
+                                }
+
+                                syncTailPageAfterPostReply(
+                                    expectedPage = expectedTailPage,
+                                    hadExistingTargetPage = hadExistingTailPage,
+                                    optimisticComment = optimisticComment,
+                                    previousReplyIds = previousReplyIds,
+                                    sessionUid = uid,
+                                    expectedSeq = mySeq,
+                                    expectedWindowGen = tailSyncWindowGen,
+                                )
+                            }
+                        },
+                        onFailure = { err ->
+                            internalState.update { state ->
+                                state.copy(replyComposer = state.replyComposer.copy(isSubmitting = false))
+                            }
+                            handleActionFailure(
+                                err,
+                                fallbackMessage = if (editingComment != null) "修改回复失败" else "发送回复失败",
+                            )
+                        },
                     )
-                },
-            )
+                } finally {
+                    if (submitReplySeq.get() == mySeq) {
+                        isSubmittingReplyGuard.set(false)
+                        internalState.update { state ->
+                            if (state.replyComposer.isSubmitting) {
+                                state.copy(replyComposer = state.replyComposer.copy(isSubmitting = false))
+                            } else {
+                                state
+                            }
+                        }
+                    }
+                }
+            }
+            launched = true
+        } finally {
+            if (!launched && submitReplySeq.get() == mySeq) {
+                isSubmittingReplyGuard.set(false)
+                internalState.update { state ->
+                    if (state.replyComposer.isSubmitting) {
+                        state.copy(replyComposer = state.replyComposer.copy(isSubmitting = false))
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isTailSyncCurrent(expectedSeq: Long, expectedWindowGen: Long): Boolean =
+        submitReplySeq.get() == expectedSeq && pageWindowGeneration == expectedWindowGen
+
+    private fun clearPageSwitchingIfSuperseded(expectedSeq: Long, expectedWindowGen: Long) {
+        if (pageWindowGeneration == expectedWindowGen && activeTailSyncSeq.compareAndSet(expectedSeq, 0L)) {
+            internalState.update { state ->
+                if (state.isPageSwitching && pageWindowGeneration == expectedWindowGen && activeTailSyncSeq.get() == 0L) {
+                    state.copy(isPageSwitching = false)
+                } else {
+                    state
+                }
+            }
         }
     }
 
@@ -1811,7 +2207,10 @@ class TopicDetailViewModel(
         commentId: Long,
         expectedMarkdown: String,
         preEditMarkdown: String,
+        expectedSeq: Long,
+        expectedWindowGen: Long,
     ) {
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) return
         val safePage = targetPage.coerceAtLeast(1)
         val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
         var detail = container.forumRepository.getTopicDetail(
@@ -1819,6 +2218,7 @@ class TopicDetailViewModel(
             page = safePage,
             includeBlocked = includeBlocked,
         ).getOrNull() ?: return
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) return
 
         val fetchedBeforeRetry = detail.replies.firstOrNull { it.commentId == commentId }
         if (fetchedBeforeRetry != null &&
@@ -1826,6 +2226,7 @@ class TopicDetailViewModel(
             preEditMarkdown.trim() != expectedMarkdown.trim()
         ) {
             delay(450)
+            if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) return
             container.forumRepository.getTopicDetail(
                 topicId = topicId,
                 page = safePage,
@@ -1834,6 +2235,7 @@ class TopicDetailViewModel(
                 detail = retried
             }
         }
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) return
 
         internalState.update { state ->
             val updatedOpening = detail.openingFloor ?: state.cachedOpeningFloor
@@ -1870,7 +2272,13 @@ class TopicDetailViewModel(
         optimisticComment: FloorComment,
         previousReplyIds: Set<Long>,
         sessionUid: Long,
+        expectedSeq: Long,
+        expectedWindowGen: Long,
     ) {
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+            clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+            return
+        }
         val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
         val firstResult = container.forumRepository.getTopicDetail(
             topicId = topicId,
@@ -1879,7 +2287,16 @@ class TopicDetailViewModel(
         )
         var detail = firstResult.getOrNull()
         if (detail == null) {
-            internalState.update { it.copy(isPageSwitching = false) }
+            if (isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+                activeTailSyncSeq.compareAndSet(expectedSeq, 0L)
+                internalState.update { it.copy(isPageSwitching = false) }
+            } else {
+                clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+            }
+            return
+        }
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+            clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
             return
         }
 
@@ -1892,11 +2309,19 @@ class TopicDetailViewModel(
             ).getOrNull()?.let { redirected ->
                 detail = redirected
             }
+            if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+                clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+                return
+            }
         }
 
         var matchedReply = findPostedReply(detail!!, previousReplyIds, sessionUid, optimisticComment)
         if (matchedReply == null) {
             delay(480)
+            if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+                clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+                return
+            }
             val targetRetryPage = detail!!.totalPages.coerceAtLeast(detail!!.currentPage).coerceAtLeast(1)
             container.forumRepository.getTopicDetail(
                 topicId = topicId,
@@ -1906,6 +2331,10 @@ class TopicDetailViewModel(
                 detail = retried
                 val nextTotal = retried.totalPages.coerceAtLeast(1)
                 if (nextTotal > retried.currentPage) {
+                    if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+                        clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+                        return
+                    }
                     container.forumRepository.getTopicDetail(
                         topicId = topicId,
                         page = nextTotal,
@@ -1917,6 +2346,12 @@ class TopicDetailViewModel(
                 matchedReply = findPostedReply(detail!!, previousReplyIds, sessionUid, optimisticComment)
             }
         }
+
+        if (!isTailSyncCurrent(expectedSeq, expectedWindowGen)) {
+            clearPageSwitchingIfSuperseded(expectedSeq, expectedWindowGen)
+            return
+        }
+        activeTailSyncSeq.compareAndSet(expectedSeq, 0L)
 
         val committedDetail = detail!!
         val committedPage = committedDetail.currentPage
@@ -2050,7 +2485,7 @@ class TopicDetailViewModel(
             }
             return
         }
-        performReplyImageUpload(bytes = bytes, mimeType = mimeType, fileName = fileName)
+        routeReplyImageThroughPrivacyEditor(bytes = bytes, mimeType = mimeType, fileName = fileName)
     }
 
     fun dismissApiKeyDialog() {
@@ -2074,12 +2509,101 @@ class TopicDetailViewModel(
             val pending = pendingImageUpload
             pendingImageUpload = null
             if (pending != null) {
-                performReplyImageUpload(
+                routeReplyImageThroughPrivacyEditor(
                     bytes = pending.bytes,
                     mimeType = pending.mimeType,
                     fileName = pending.fileName,
                 )
             }
+        }
+    }
+
+    private fun routeReplyImageThroughPrivacyEditor(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String?,
+    ) {
+        when (val support = ImagePrivacyBitmapCodec.inspectMosaicSupport(bytes, mimeType, fileName)) {
+            is MosaicSupportStatus.SupportedStatic -> {
+                internalState.update { state ->
+                    state.copy(
+                        replyComposer = state.replyComposer.copy(
+                            pendingPrivacyImage = PendingComposerImage(
+                                bytes = bytes,
+                                mimeType = mimeType,
+                                fileName = fileName,
+                            ),
+                        ),
+                    )
+                }
+            }
+            is MosaicSupportStatus.UnsupportedAnimatedOrVector -> {
+                _events.trySend(TopicDetailUiEvent.ShowMessage(support.reason))
+                performReplyImageUpload(bytes = bytes, mimeType = mimeType, fileName = fileName)
+            }
+            is MosaicSupportStatus.Unreadable -> {
+                _events.trySend(TopicDetailUiEvent.ShowMessage(support.reason))
+                performReplyImageUpload(bytes = bytes, mimeType = mimeType, fileName = fileName)
+            }
+        }
+    }
+
+    fun confirmReplyPrivacyImageUpload(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String?,
+    ) {
+        internalState.update { state ->
+            state.copy(replyComposer = state.replyComposer.copy(pendingPrivacyImage = null))
+        }
+        performReplyImageUpload(bytes = bytes, mimeType = mimeType, fileName = fileName)
+    }
+
+    fun skipReplyPrivacyEditAndUpload() {
+        val pending = internalState.value.replyComposer.pendingPrivacyImage ?: return
+        internalState.update { state ->
+            state.copy(replyComposer = state.replyComposer.copy(pendingPrivacyImage = null))
+        }
+        performReplyImageUpload(
+            bytes = pending.bytes,
+            mimeType = pending.mimeType,
+            fileName = pending.fileName,
+        )
+    }
+
+    fun dismissReplyPrivacyEditor() {
+        internalState.update { state ->
+            state.copy(replyComposer = state.replyComposer.copy(pendingPrivacyImage = null))
+        }
+    }
+
+    // ── R16 Part 1 Magazine Long-Image Share ─────────────────────────────────
+
+    val imageFetchClient: okhttp3.OkHttpClient?
+        get() = runCatching { container.coilOkHttpClient }.getOrNull()
+
+    suspend fun resolveOpeningFloorForShare(): FloorComment? {
+        val current = deriveTopicSnapshot().openingFloor
+        if (current != null) return current
+        val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
+        val fetched = container.forumRepository.getTopicDetail(
+            topicId = topicId,
+            page = 1,
+            includeBlocked = includeBlocked,
+        )
+        return fetched.getOrNull()?.let { page1 ->
+            val freshOpening = page1.openingFloor
+            if (freshOpening != null) {
+                internalState.update { state ->
+                    val updatedCache = state.pagesCache.toMutableMap()
+                    updatedCache[1] = page1
+                    state.copy(
+                        pagesCache = updatedCache,
+                        cachedOpeningFloor = freshOpening,
+                    )
+                }
+            }
+            freshOpening
         }
     }
 
@@ -2135,6 +2659,830 @@ class TopicDetailViewModel(
                     )
                 },
             )
+        }
+    }
+
+    private fun resolvePollAndStardustRepo(): PollAndStardustRepository =
+        pollAndStardustRepositoryOverride ?: container.pollAndStardustRepository
+
+    private fun pollStateFlow(voteId: Long): MutableStateFlow<PollCardUiState> =
+        pollCardStates.computeIfAbsent(voteId) { MutableStateFlow(PollCardUiState()) }
+
+    private fun stardustStateFlow(widgetKey: String): MutableStateFlow<StardustCardUiState> =
+        stardustCardStates.computeIfAbsent(widgetKey) { MutableStateFlow(StardustCardUiState()) }
+
+    private data class PollReloadDispatchPlan(
+        val jobsToCancel: List<Job> = emptyList(),
+        val jobsToStart: List<Job> = emptyList(),
+    ) {
+        fun executeOutsideLock() {
+            jobsToCancel.forEach { it.cancel() }
+            jobsToStart.forEach { it.start() }
+        }
+    }
+
+    private fun syncPollSessionChangeIfNeeded() {
+        val plan = synchronized(pollSessionLock) {
+            val currentUid = container.sessionRepository.sessionState.value?.uid
+            if (currentUid != lastObservedPollSessionUid) {
+                lastObservedPollSessionUid = currentUid
+                invalidateAndReloadPollStatesForSessionChangeLocked()
+            } else {
+                PollReloadDispatchPlan()
+            }
+        }
+        plan.executeOutsideLock()
+    }
+
+    private fun invalidateAndReloadPollStatesForSessionChangeLocked(): PollReloadDispatchPlan {
+        val nextEpoch = pollEpoch.incrementAndGet()
+        val jobsToCancel = pollLoadJobs.values.toList()
+        pollLoadJobs.clear()
+
+        val jobsToStart = mutableListOf<Job>()
+        for ((voteId, flow) in pollCardStates) {
+            val prev = flow.value
+            if (prev.poll != null || prev.isLoading) {
+                flow.value = PollCardUiState(isLoading = true)
+                val job = createPollLoadJobLocked(
+                    voteId = voteId,
+                    flow = flow,
+                    epochAtLoad = nextEpoch,
+                )
+                pollLoadJobs[voteId] = job
+                jobsToStart += job
+            } else {
+                flow.value = PollCardUiState()
+            }
+        }
+        return PollReloadDispatchPlan(
+            jobsToCancel = jobsToCancel,
+            jobsToStart = jobsToStart,
+        )
+    }
+
+    private fun loadVoteInternal(voteId: Long, force: Boolean) {
+        val plan = synchronized(pollSessionLock) {
+            val jobsToCancel = mutableListOf<Job>()
+            val jobsToStart = mutableListOf<Job>()
+            val currentUid = container.sessionRepository.sessionState.value?.uid
+            if (currentUid != lastObservedPollSessionUid) {
+                lastObservedPollSessionUid = currentUid
+                val invalidationPlan = invalidateAndReloadPollStatesForSessionChangeLocked()
+                jobsToCancel += invalidationPlan.jobsToCancel
+                jobsToStart += invalidationPlan.jobsToStart
+            }
+
+            val flow = pollStateFlow(voteId)
+            val current = flow.value
+            val shouldStart = if (force) {
+                !current.isLoading
+            } else {
+                current.poll == null && !current.isLoading
+            }
+            if (shouldStart) {
+                pollLoadJobs.remove(voteId)?.let { jobsToCancel += it }
+                flow.value = current.copy(isLoading = true, errorMessage = null)
+                val epochAtLoad = pollEpoch.get()
+                val job = createPollLoadJobLocked(
+                    voteId = voteId,
+                    flow = flow,
+                    epochAtLoad = epochAtLoad,
+                )
+                pollLoadJobs[voteId] = job
+                jobsToStart += job
+            }
+            PollReloadDispatchPlan(
+                jobsToCancel = jobsToCancel,
+                jobsToStart = jobsToStart,
+            )
+        }
+        plan.executeOutsideLock()
+    }
+
+    private fun createPollLoadJobLocked(
+        voteId: Long,
+        flow: MutableStateFlow<PollCardUiState>,
+        epochAtLoad: Long,
+    ): Job {
+        lateinit var createdJob: Job
+        createdJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                resolvePollAndStardustRepo().getVote(voteId).fold(
+                    onSuccess = { detail ->
+                        val plan = synchronized(pollSessionLock) {
+                            val currentUid = container.sessionRepository.sessionState.value?.uid
+                            if (currentUid != lastObservedPollSessionUid) {
+                                lastObservedPollSessionUid = currentUid
+                                invalidateAndReloadPollStatesForSessionChangeLocked()
+                            } else if (pollEpoch.get() == epochAtLoad && pollLoadJobs[voteId] === createdJob) {
+                                flow.value = flow.value.copy(
+                                    isLoading = false,
+                                    poll = detail,
+                                    errorMessage = null,
+                                )
+                                PollReloadDispatchPlan()
+                            } else {
+                                PollReloadDispatchPlan()
+                            }
+                        }
+                        plan.executeOutsideLock()
+                    },
+                    onFailure = { err ->
+                        val plan = synchronized(pollSessionLock) {
+                            val currentUid = container.sessionRepository.sessionState.value?.uid
+                            if (currentUid != lastObservedPollSessionUid) {
+                                lastObservedPollSessionUid = currentUid
+                                invalidateAndReloadPollStatesForSessionChangeLocked()
+                            } else if (pollEpoch.get() == epochAtLoad && pollLoadJobs[voteId] === createdJob) {
+                                flow.value = flow.value.copy(
+                                    isLoading = false,
+                                    errorMessage = err.message?.takeIf { m -> m.isNotBlank() } ?: "加载投票失败",
+                                )
+                                PollReloadDispatchPlan()
+                            } else {
+                                PollReloadDispatchPlan()
+                            }
+                        }
+                        plan.executeOutsideLock()
+                    },
+                )
+            } finally {
+                synchronized(pollSessionLock) {
+                    if (pollLoadJobs[voteId] === createdJob) {
+                        pollLoadJobs.remove(voteId, createdJob)
+                        if (pollEpoch.get() == epochAtLoad && flow.value.isLoading) {
+                            flow.value = flow.value.copy(isLoading = false)
+                        }
+                    }
+                }
+            }
+        }
+        return createdJob
+    }
+
+    fun openStardustTipForComment(comment: FloorComment) {
+        if (comment.author.uid <= 0L) return
+        openStardustTip(
+            StardustTipTarget(
+                receiverUid = comment.author.uid,
+                receiverNameHint = comment.author.username,
+                refId = topicId.coerceAtLeast(0L),
+            ),
+        )
+    }
+
+    fun openStardustTip(target: StardustTipTarget) {
+        if (!ensureAuthenticatedForAction()) return
+        val viewerUid = container.sessionRepository.sessionState.value?.uid
+        if (viewerUid != null && viewerUid == target.receiverUid) {
+            _events.trySend(TopicDetailUiEvent.ShowMessage("不能给自己投喂星尘"))
+            return
+        }
+        val seq = ++stardustPrepareSeq
+        stardustPrepareJob?.cancel()
+        internalState.update {
+            it.copy(
+                stardustTipDialog = StardustTipDialogUiState(
+                    target = target,
+                    isPreparing = true,
+                    resolvedReceiverName = target.receiverNameHint,
+                    amountInput = (target.suggestedAmount ?: 10).toString(),
+                ),
+            )
+        }
+        prepareStardustTipInternal(target.receiverUid, seq)
+    }
+
+    fun retryStardustPrepare() {
+        val dialog = internalState.value.stardustTipDialog ?: return
+        val seq = ++stardustPrepareSeq
+        stardustPrepareJob?.cancel()
+        internalState.update {
+            it.copy(
+                stardustTipDialog = dialog.copy(
+                    isPreparing = true,
+                    prepareError = null,
+                ),
+            )
+        }
+        prepareStardustTipInternal(dialog.target.receiverUid, seq)
+    }
+
+    private fun prepareStardustTipInternal(receiverUid: Long, seq: Long) {
+        stardustPrepareJob = viewModelScope.launch {
+            resolvePollAndStardustRepo().prepareStardustTransfer(receiverUid).fold(
+                onSuccess = { preview ->
+                    if (seq != stardustPrepareSeq) return@fold
+                    internalState.update { state ->
+                        val dialog = state.stardustTipDialog ?: return@update state
+                        if (dialog.target.receiverUid != receiverUid) return@update state
+                        state.copy(
+                            stardustTipDialog = dialog.copy(
+                                isPreparing = false,
+                                resolvedReceiverName = preview.receiverName,
+                                prepareError = null,
+                            ),
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    if (seq != stardustPrepareSeq) return@fold
+                    internalState.update { state ->
+                        val dialog = state.stardustTipDialog ?: return@update state
+                        if (dialog.target.receiverUid != receiverUid) return@update state
+                        state.copy(
+                            stardustTipDialog = dialog.copy(
+                                isPreparing = false,
+                                prepareError = err.message?.takeIf { m -> m.isNotBlank() } ?: "核验接收者失败",
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun updateStardustTipAmount(rawInput: String) {
+        internalState.update { state ->
+            val dialog = state.stardustTipDialog ?: return@update state
+            state.copy(
+                stardustTipDialog = dialog.copy(
+                    amountInput = rawInput.filter(Char::isDigit).take(6),
+                    sendError = null,
+                ),
+            )
+        }
+    }
+
+    fun dismissStardustTipDialog() {
+        stardustPrepareSeq++
+        stardustPrepareJob?.cancel()
+        stardustPrepareJob = null
+        internalState.update { it.copy(stardustTipDialog = null) }
+    }
+
+    fun submitStardustTip() {
+        if (!ensureAuthenticatedForAction()) return
+        val session = container.sessionRepository.sessionState.value
+        var validatedDialog: StardustTipDialogUiState? = null
+        var validatedAmount = 0
+
+        internalState.update { state ->
+            val dialog = state.stardustTipDialog ?: return@update state
+            if (dialog.isPreparing || dialog.isSending) return@update state
+
+            val amount = dialog.amountInput.trim().toIntOrNull()
+            if (amount == null || amount <= 0) {
+                return@update state.copy(
+                    stardustTipDialog = dialog.copy(sendError = "请输入大于 0 的星尘数量"),
+                )
+            }
+            if (session != null && session.uid == dialog.target.receiverUid) {
+                return@update state.copy(
+                    stardustTipDialog = dialog.copy(sendError = "不能给自己投喂星尘"),
+                )
+            }
+            if (session != null && amount > session.stardust) {
+                return@update state.copy(
+                    stardustTipDialog = dialog.copy(sendError = "星尘余额不足（当前可用 ${session.stardust}）"),
+                )
+            }
+
+            validatedDialog = dialog
+            validatedAmount = amount
+            state.copy(stardustTipDialog = dialog.copy(isSending = true, sendError = null))
+        }
+
+        val dialog = validatedDialog ?: return
+        val amount = validatedAmount
+
+        viewModelScope.launch {
+            try {
+                resolvePollAndStardustRepo().sendStardust(
+                    memberId = dialog.target.receiverUid,
+                    amount = amount,
+                    refId = dialog.target.refId,
+                ).fold(
+                    onSuccess = {
+                        val receiverName = dialog.resolvedReceiverName.ifBlank { "UID ${dialog.target.receiverUid}" }
+                        dialog.target.widgetKey?.let { key ->
+                            stardustStateFlow(key).value = StardustCardUiState(
+                                lastTippedAmount = amount,
+                                isTipped = true,
+                            )
+                        }
+                        internalState.update { it.copy(stardustTipDialog = null) }
+                        _events.trySend(TopicDetailUiEvent.ShowMessage("已向 $receiverName 投喂 $amount 星尘 ✨"))
+                        viewModelScope.launch {
+                            runCatching { container.sessionRepository.refreshSession() }
+                        }
+                    },
+                    onFailure = { err ->
+                        internalState.update { state ->
+                            val cur = state.stardustTipDialog ?: return@update state
+                            state.copy(
+                                stardustTipDialog = cur.copy(
+                                    isSending = false,
+                                    sendError = err.message?.takeIf { m -> m.isNotBlank() } ?: "投喂星尘失败",
+                                ),
+                            )
+                        }
+                        handleActionFailure(err, "投喂星尘失败")
+                    },
+                )
+            } finally {
+                internalState.update { state ->
+                    val cur = state.stardustTipDialog ?: return@update state
+                    if (cur.isSending) {
+                        state.copy(stardustTipDialog = cur.copy(isSending = false))
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    fun appendLuckyLinkToTopicOp(luckyMarkdown: String) {
+        if (!ensureAuthenticatedForAction()) return
+        val snapshot = deriveTopicSnapshot()
+        val pageData = snapshot.pageData ?: return
+        val opening = snapshot.openingFloor ?: return
+        if (!snapshot.canEditTopic) return
+        val cleanSnippet = luckyMarkdown.trim()
+        if (cleanSnippet.isEmpty()) return
+
+        val updatedMarkdown = if (opening.markdownBody.isBlank()) {
+            cleanSnippet
+        } else {
+            "${opening.markdownBody.trimEnd()}\n\n$cleanSnippet"
+        }
+
+        viewModelScope.launch {
+            container.forumRepository.editTopic(
+                topicId = topicId,
+                title = pageData.title,
+                markdownContent = updatedMarkdown,
+                requiredViewLevel = pageData.requiredViewLevel,
+            ).fold(
+                onSuccess = {
+                    _events.trySend(TopicDetailUiEvent.ShowMessage("抽奖链接已追加到主楼正文"))
+                    refreshCurrentPage()
+                },
+                onFailure = { err ->
+                    handleActionFailure(err, "更新主楼抽奖链接失败")
+                },
+            )
+        }
+    }
+
+    // ── R9 Trade Closure, R10 Market Reference & R11 Carpool Status ───────────
+
+    private fun isTradeCategory(page: TopicDetailPage): Boolean =
+        page.categorySlug.equals("trade", ignoreCase = true) || page.categoryName.trim() == "交易"
+
+    private fun isTradeTopicForMarketReference(
+        page: TopicDetailPage,
+        openingFloor: FloorComment? = page.openingFloor,
+    ): Boolean {
+        if (isTradeCategory(page)) return true
+        val slug = page.categorySlug.trim().lowercase(Locale.ROOT)
+        val name = page.categoryName.trim()
+        if (name.contains("交易")) return true
+
+        val hasExplicitCategory = slug.isNotEmpty() && slug != "all" && slug != "index" && slug != "unknown"
+        val hasExplicitCategoryName = name.isNotEmpty() && name != "全部"
+        if (hasExplicitCategory || hasExplicitCategoryName) {
+            return false
+        }
+
+        val title = page.title.trim().ifBlank { titleHint.trim() }
+        if (title.isEmpty()) return false
+        if (MARKET_REF_EXPOSURE_TITLE_REGEX.containsMatchIn(title)) return false
+
+        val summary = TopicSummary(
+            id = page.topicId,
+            title = title,
+            categorySlug = page.categorySlug,
+            categoryName = page.categoryName,
+            authorName = page.author.username,
+        )
+        if (TrustRiskEvaluator.isTradeTopic(summary)) return true
+        if (MARKET_REF_TRADE_TITLE_SIGNAL_REGEX.containsMatchIn(title)) return true
+
+        val body = openingFloor?.markdownBody?.trim().orEmpty()
+        if (body.isNotEmpty() && MARKET_REF_TRADE_BODY_SIGNAL_REGEX.containsMatchIn(body)) {
+            return true
+        }
+        return false
+    }
+
+    private fun isCarpoolCategory(page: TopicDetailPage): Boolean =
+        page.categorySlug.equals("carpool", ignoreCase = true) || page.categoryName.trim() == "拼车"
+
+    private suspend fun ensurePageOneForOpEdit(): Result<TopicDetailPage> {
+        val cachedPage1 = internalState.value.pagesCache[1]
+            ?.takeUnless { it.isOfflineSnapshot }
+            ?.takeIf { it.openingFloor != null }
+        if (cachedPage1 != null) {
+            return Result.success(cachedPage1)
+        }
+        val includeBlocked = container.settingsRepository.settings.value.includeBlockedTopics
+        val fetched = container.forumRepository.getTopicDetail(
+            topicId = topicId,
+            page = 1,
+            includeBlocked = includeBlocked,
+        )
+        return fetched.fold(
+            onSuccess = { page1 ->
+                val opening = page1.openingFloor
+                if (page1.isOfflineSnapshot || opening == null) {
+                    Result.failure(IllegalStateException("未能获取主楼正文，请刷新后重试"))
+                } else {
+                    internalState.update { state ->
+                        val updatedCache = state.pagesCache.toMutableMap()
+                        updatedCache[1] = page1
+                        val activePage = state.currentPage
+                        if (activePage > 1) {
+                            updatedCache[activePage]?.let { sub ->
+                                val resolvedAuthor = if (sub.author.uid > 0L) sub.author else page1.author
+                                updatedCache[activePage] = sub.copy(
+                                    title = page1.title.ifBlank { sub.title },
+                                    categorySlug = sub.categorySlug.ifBlank { page1.categorySlug },
+                                    categoryName = sub.categoryName.ifBlank { page1.categoryName },
+                                    author = resolvedAuthor,
+                                    requiredViewLevel = page1.requiredViewLevel,
+                                    openingFloor = opening,
+                                )
+                            }
+                        }
+                        state.copy(
+                            pagesCache = updatedCache,
+                            cachedOpeningFloor = opening,
+                        )
+                    }
+                    Result.success(page1)
+                }
+            },
+            onFailure = { err -> Result.failure(err) },
+        )
+    }
+
+    private fun applyOpEditToLocalState(newTitle: String, newMarkdownBody: String) {
+        internalState.update { state ->
+            val updatedCache = state.pagesCache.mapValues { (_, page) ->
+                page.copy(
+                    title = newTitle,
+                    openingFloor = page.openingFloor?.copy(markdownBody = newMarkdownBody),
+                )
+            }
+            val updatedOpening = state.cachedOpeningFloor?.copy(markdownBody = newMarkdownBody)
+            state.copy(
+                pagesCache = updatedCache,
+                cachedOpeningFloor = updatedOpening,
+                isMutatingTopic = false,
+            )
+        }
+    }
+
+    private fun clearMutatingTopic() {
+        internalState.update { state ->
+            if (state.isMutatingTopic) state.copy(isMutatingTopic = false) else state
+        }
+    }
+
+    fun closeTradeTopic(options: TradePrivacyOptions = TradePrivacyOptions()) {
+        if (!ensureAuthenticatedForAction()) return
+        val snapshot = deriveTopicSnapshot()
+        val pageData = snapshot.pageData ?: return
+        if (!snapshot.canEditTopic) return
+        if (!isTradeCategory(pageData)) return
+        if (internalState.value.isMutatingTopic) return
+
+        var launched = false
+        internalState.update { it.copy(isMutatingTopic = true) }
+        try {
+            viewModelScope.launch {
+                try {
+                    val page1Result = ensurePageOneForOpEdit()
+                    val page1 = page1Result.getOrElse { err ->
+                        clearMutatingTopic()
+                        handleActionFailure(err, "获取主楼正文失败，请刷新后重试")
+                        return@launch
+                    }
+                    val opening = page1.openingFloor
+                    if (opening == null) {
+                        clearMutatingTopic()
+                        _events.trySend(TopicDetailUiEvent.ShowMessage("未能获取主楼正文，无法执行结帖"))
+                        return@launch
+                    }
+
+                    val updatedTitle = TradeTitleFormatter.applySoldPrefix(page1.title)
+                    val sanitizeResult = TradePrivacySanitizer.sanitize(opening.markdownBody, options)
+
+                    container.forumRepository.editTopic(
+                        topicId = topicId,
+                        title = updatedTitle,
+                        markdownContent = sanitizeResult.sanitizedMarkdown,
+                        requiredViewLevel = page1.requiredViewLevel,
+                    ).fold(
+                        onSuccess = {
+                            applyOpEditToLocalState(updatedTitle, sanitizeResult.sanitizedMarkdown)
+                            val msg = if (sanitizeResult.redactionCount > 0) {
+                                "已标记 [已出]，并脱敏 ${sanitizeResult.redactionCount} 处敏感信息"
+                            } else {
+                                "已标记为 [已出]"
+                            }
+                            _events.trySend(TopicDetailUiEvent.ShowMessage(msg))
+                            refreshCurrentPage()
+                        },
+                        onFailure = { err ->
+                            clearMutatingTopic()
+                            handleActionFailure(err, "标记已出失败")
+                        },
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (err: Throwable) {
+                    clearMutatingTopic()
+                    handleActionFailure(err, "标记已出失败")
+                } finally {
+                    clearMutatingTopic()
+                }
+            }
+            launched = true
+        } finally {
+            if (!launched) {
+                clearMutatingTopic()
+            }
+        }
+    }
+
+    fun updateCarpoolStatus(
+        statusToken: String,
+        occupiedSeats: Int? = null,
+        totalSeats: Int? = null,
+        updateBody: Boolean = true,
+    ) {
+        if (!ensureAuthenticatedForAction()) return
+        val snapshot = deriveTopicSnapshot()
+        val pageData = snapshot.pageData ?: return
+        if (!snapshot.canEditTopic) return
+        if (!isCarpoolCategory(pageData)) return
+        val cleanToken = statusToken.trim()
+        if (cleanToken.isEmpty() || internalState.value.isMutatingTopic) return
+
+        var launched = false
+        internalState.update { it.copy(isMutatingTopic = true) }
+        try {
+            viewModelScope.launch {
+                try {
+                    val page1Result = ensurePageOneForOpEdit()
+                    val page1 = page1Result.getOrElse { err ->
+                        clearMutatingTopic()
+                        handleActionFailure(err, "获取主楼正文失败，请刷新后重试")
+                        return@launch
+                    }
+                    val opening = page1.openingFloor
+                    if (opening == null) {
+                        clearMutatingTopic()
+                        _events.trySend(TopicDetailUiEvent.ShowMessage("未能获取主楼正文，无法更新车位"))
+                        return@launch
+                    }
+
+                    val updatedTitle = CarpoolStatusUpdater.updateTitle(page1.title, cleanToken)
+                    val updatedBody = if (updateBody) {
+                        CarpoolStatusUpdater.updateMarkdownStatus(
+                            markdown = opening.markdownBody,
+                            newStatusToken = cleanToken,
+                            occupiedSeats = occupiedSeats,
+                            totalSeats = totalSeats,
+                        )
+                    } else {
+                        opening.markdownBody
+                    }
+
+                    container.forumRepository.editTopic(
+                        topicId = topicId,
+                        title = updatedTitle,
+                        markdownContent = updatedBody,
+                        requiredViewLevel = page1.requiredViewLevel,
+                    ).fold(
+                        onSuccess = {
+                            applyOpEditToLocalState(updatedTitle, updatedBody)
+                            _events.trySend(TopicDetailUiEvent.ShowMessage("拼车状态已更新为 [$cleanToken]"))
+                            refreshCurrentPage()
+                        },
+                        onFailure = { err ->
+                            clearMutatingTopic()
+                            handleActionFailure(err, "更新拼车状态失败")
+                        },
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (err: Throwable) {
+                    clearMutatingTopic()
+                    handleActionFailure(err, "更新拼车状态失败")
+                } finally {
+                    clearMutatingTopic()
+                }
+            }
+            launched = true
+        } finally {
+            if (!launched) {
+                clearMutatingTopic()
+            }
+        }
+    }
+
+    private fun normalizedMarketQueryKey(query: String): String {
+        val tokens = TradeMarketPremiumAnalyzer.tokenizeQuery(query)
+        return if (tokens.isNotEmpty()) tokens.joinToString(" ") else query.trim().lowercase(Locale.ROOT)
+    }
+
+    private fun maybeAnalyzeLocalMarketReference(
+        page: TopicDetailPage,
+        allowAutoRemote: Boolean = !page.isOfflineSnapshot,
+    ) {
+        val repo = tradeMarketReferenceRepository ?: return
+        val resolvedOpening = page.openingFloor ?: internalState.value.cachedOpeningFloor
+        if (!isTradeTopicForMarketReference(page, resolvedOpening)) return
+        if (hasUserCustomMarketQuery) return
+
+        val cleanTitle = page.title.trim().ifBlank { titleHint.trim() }
+        val openingBody = resolvedOpening?.markdownBody
+        val suggested = extractMarketQueryWithContext(
+            title = cleanTitle,
+            openingMarkdown = openingBody,
+        )
+
+        val hasOpeningBody = !openingBody.isNullOrBlank()
+        val signature = "$cleanTitle|$hasOpeningBody|$suggested"
+        if (signature == lastAnalyzedMarketSignature) return
+
+        val currentRef = internalState.value.marketReference
+        if (suggested.isBlank()) {
+            lastAnalyzedMarketSignature = signature
+            if (currentRef == null) {
+                internalState.update { cur ->
+                    if (cur.marketReference == null) {
+                        cur.copy(marketReference = TradeMarketReferenceState(query = ""))
+                    } else {
+                        cur
+                    }
+                }
+            }
+            return
+        }
+
+        val suggestedKey = normalizedMarketQueryKey(suggested)
+        val currentKey = currentRef?.query?.takeIf { it.isNotBlank() }?.let(::normalizedMarketQueryKey)
+        if (currentRef != null && currentKey == suggestedKey) {
+            if (currentRef.searchStatus == MarketSearchStatus.LOADING) {
+                lastAnalyzedMarketSignature = signature
+                return
+            }
+            val prevTitle = lastAnalyzedMarketSignature?.substringBefore('|')
+            if (currentRef.hasRemoteResults && cleanTitle == prevTitle) {
+                lastAnalyzedMarketSignature = signature
+                return
+            }
+        }
+
+        lastAnalyzedMarketSignature = signature
+        refreshLocalMarketReferenceInternal(
+            repo = repo,
+            query = suggested,
+            allowAutoRemote = allowAutoRemote,
+        )
+    }
+
+    fun refreshLocalMarketReference(customQuery: String? = null) {
+        val repo = tradeMarketReferenceRepository ?: return
+        val trimmedCustom = customQuery?.trim()?.takeIf { it.isNotEmpty() }
+        if (trimmedCustom != null) {
+            hasUserCustomMarketQuery = true
+        }
+        val snapshot = deriveTopicSnapshot()
+        val pageTitle = snapshot.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        val query = trimmedCustom
+            ?: internalState.value.marketReference?.query?.takeIf { it.isNotBlank() }
+            ?: extractMarketQueryWithContext(pageTitle, snapshot.openingFloor?.markdownBody)
+        if (query.isBlank()) return
+        refreshLocalMarketReferenceInternal(
+            repo = repo,
+            query = query,
+            allowAutoRemote = false,
+        )
+    }
+
+    private fun refreshLocalMarketReferenceInternal(
+        repo: TradeMarketReferenceRepository,
+        query: String,
+        allowAutoRemote: Boolean,
+    ) {
+        val seq = ++marketRefRequestSeq
+        marketRefJob?.cancel()
+        marketRefJob = viewModelScope.launch {
+            val localState = try {
+                repo.analyzeLocal(query)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                TradeMarketReferenceState(
+                    query = query,
+                    searchStatus = MarketSearchStatus.FAILED,
+                    statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "本地参考分析失败",
+                )
+            }
+            if (seq != marketRefRequestSeq) return@launch
+            internalState.update { it.copy(marketReference = localState) }
+
+            val peerSampleCount = localState.distribution?.observations?.count { it.topicId != topicId } ?: 0
+            val normalizedKey = normalizedMarketQueryKey(query)
+            val shouldAutoRemote = allowAutoRemote &&
+                !localState.hasRemoteResults &&
+                peerSampleCount == 0 &&
+                localState.cooldownRemainingSeconds <= 0 &&
+                localState.searchStatus == MarketSearchStatus.IDLE &&
+                TradeMarketPremiumAnalyzer.tokenizeQuery(query).isNotEmpty() &&
+                autoRemoteTriggeredMarketQueries.add(normalizedKey)
+
+            if (shouldAutoRemote) {
+                internalState.update { cur ->
+                    if (seq != marketRefRequestSeq) return@update cur
+                    val base = cur.marketReference ?: localState
+                    cur.copy(
+                        marketReference = base.copy(
+                            query = query,
+                            searchStatus = MarketSearchStatus.LOADING,
+                            statusMessage = null,
+                        ),
+                    )
+                }
+                val merged = try {
+                    repo.searchRemoteAndMerge(query)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    localState.copy(
+                        query = query,
+                        searchStatus = MarketSearchStatus.FAILED,
+                        statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
+                    )
+                }
+                if (seq != marketRefRequestSeq) return@launch
+                internalState.update { it.copy(marketReference = merged) }
+            }
+        }
+    }
+
+    fun searchTradeMarketReference(customQuery: String? = null) {
+        val repo = tradeMarketReferenceRepository ?: return
+        val trimmedCustom = customQuery?.trim()?.takeIf { it.isNotEmpty() }
+        if (trimmedCustom != null) {
+            hasUserCustomMarketQuery = true
+        }
+        val currentQuery = internalState.value.marketReference?.query.orEmpty()
+        val snapshot = deriveTopicSnapshot()
+        val pageTitle = snapshot.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        val query = trimmedCustom
+            ?: currentQuery.takeIf { it.isNotBlank() }
+            ?: extractMarketQueryWithContext(pageTitle, snapshot.openingFloor?.markdownBody)
+        if (query.isBlank()) return
+
+        val seq = ++marketRefRequestSeq
+        autoRemoteTriggeredMarketQueries.add(normalizedMarketQueryKey(query))
+        marketRefJob?.cancel()
+        marketRefJob = viewModelScope.launch {
+            internalState.update { cur ->
+                val base = cur.marketReference ?: TradeMarketReferenceState(query = query)
+                val sameQuery = base.query.equals(query, ignoreCase = true)
+                cur.copy(
+                    marketReference = base.copy(
+                        query = query,
+                        distribution = if (sameQuery) base.distribution else null,
+                        searchStatus = MarketSearchStatus.LOADING,
+                        statusMessage = null,
+                    ),
+                )
+            }
+            val merged = try {
+                repo.searchRemoteAndMerge(query)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val fallback = runCatching { repo.analyzeLocal(query) }
+                    .getOrDefault(internalState.value.marketReference ?: TradeMarketReferenceState(query = query))
+                fallback.copy(
+                    query = query,
+                    searchStatus = MarketSearchStatus.FAILED,
+                    statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
+                )
+            }
+            if (seq != marketRefRequestSeq) return@launch
+            internalState.update { it.copy(marketReference = merged) }
         }
     }
 
@@ -2247,6 +3595,19 @@ class TopicDetailViewModel(
     companion object {
         private val nonCancellableDraftScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+        private val MARKET_REF_EXPOSURE_TITLE_REGEX = Regex(
+            """^(?:[\[\【(（「『]\s*)?(?:曝光|挂人|避雷|维权|仲裁|被骗|骗子)""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val MARKET_REF_TRADE_TITLE_SIGNAL_REGEX = Regex(
+            """(?:溢价|折价|平出|原价出|原价转|剩余价值|剩价|残值|明盘|自刀|小刀|秒出|包\s*push|改邮|原邮|原油|带原油|带邮|出鸡|收鸡|出小鸡|收小鸡|出传家宝|\[(?:出|收|转|已出|已售|求购)]|【(?:出|收|转|已出|已售|求购)】)""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val MARKET_REF_TRADE_BODY_SIGNAL_REGEX = Regex(
+            """(?:剩余价值|净残值|溢价|折价|平出|原价出|明盘|包\s*push|不包\s*push|改邮|带原油|原邮出|原油出|出让挂牌价|过户定价|(?:到期[\s\S]{0,60}续费|续费[\s\S]{0,60}到期)[\s\S]{0,80}(?:明盘|剩余价值|溢价|折价|平出|包\s*push|push|改邮|原邮|出鸡|转让|自刀))""",
+            RegexOption.IGNORE_CASE,
+        )
+
         fun factory(
             container: AppContainer,
             topicId: Long,
@@ -2261,6 +3622,8 @@ class TopicDetailViewModel(
                     initialFloor = initialFloor,
                     titleHint = titleHint,
                     radarRepository = container.radarRepository,
+                    pollAndStardustRepositoryOverride = container.pollAndStardustRepository,
+                    tradeMarketReferenceRepository = container.tradeMarketReferenceRepository,
                 ) as T
             }
         }

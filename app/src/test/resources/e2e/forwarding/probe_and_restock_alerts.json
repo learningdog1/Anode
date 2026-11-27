@@ -1,0 +1,45 @@
+{
+  "nezhaOnlineServerPayload": {
+    "success": true,
+    "data": [
+      {
+        "id": 5,
+        "name": "SG-Edge",
+        "last_active": "__ONLINE_ISO__",
+        "host": {
+          "mem_total": 1073741824,
+          "country_code": "SG"
+        },
+        "state": {
+          "cpu": 12.5,
+          "mem_used": 268435456,
+          "uptime": 86400,
+          "net_in_transfer": 1073741824,
+          "net_out_transfer": 10737418240
+        }
+      }
+    ]
+  },
+  "nezhaOfflineHighTrafficServerPayload": {
+    "success": true,
+    "data": [
+      {
+        "id": 5,
+        "name": "SG-Edge",
+        "last_active": "__OFFLINE_ISO__",
+        "host": {
+          "mem_total": 1073741824,
+          "country_code": "SG"
+        },
+        "state": {
+          "cpu": 0.0,
+          "mem_used": 0,
+          "uptime": 0,
+          "net_in_transfer": 0,
+          "net_out_transfer": 96636764160
+        }
+      }
+    ]
+  },
+  "restockInStockHtml": "<html><body><h1>LAX Flash Cloud VPS</h1><button>Add to Cart</button><p>$12.00/yr</p></body></html>"
+}

@@ -49,10 +49,12 @@ import com.nodeseek.app.notifications.PulseNotificationDispatcher
 import com.nodeseek.app.ui.ssh.LiteSshSessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -289,6 +291,157 @@ class HubAuditRegressionTest {
         assertFalse("HubCollectionViewModel must not call getDailyProgress", dailyProgressCalled)
         assertFalse("HubCollectionViewModel must not call refreshUnreadCount", inboxUnreadCalled)
         collector.cancel()
+    }
+
+    @Test
+    fun `headless PulseHubViewModel and HubCollectionViewModel toggleHistoryBookmark remove existing local bookmarks without uiState collector`() = runTest(testDispatcher) {
+        val existingBookmark = BookmarkedTopic(
+            topicId = 555L,
+            summary = TopicSummary(
+                id = 555L,
+                title = "Already Bookmarked",
+                categorySlug = "tech",
+                categoryName = "技术",
+                authorName = "author",
+                isBookmarked = true,
+            ),
+            savedAtEpochMillis = 1000L,
+            isSyncedWithServer = false,
+        )
+        val savedBookmarks = MutableStateFlow(listOf(existingBookmark))
+        val fakeBookmarkRepo = BaseFakeBookmarkRepository(localBookmarks = savedBookmarks)
+        val container = HubTestAppContainer(
+            sessionRepository = BaseFakeSessionRepository(initialSession = null),
+            bookmarkAndHistoryRepository = fakeBookmarkRepo,
+        )
+
+        val entry = ReadHistoryEntry(
+            topicId = 555L,
+            title = "Already Bookmarked",
+            categorySlug = "tech",
+            categoryName = "技术",
+            authorName = "author",
+            visitedAtEpochMillis = 2000L,
+        )
+
+        // 1. PulseHubViewModel without uiState collector removes existing bookmark on toggle
+        val hubVm = PulseHubViewModel(container)
+        hubVm.toggleHistoryBookmark(entry)
+        advanceUntilIdle()
+        assertTrue("Headless toggleHistoryBookmark must remove existing bookmark", savedBookmarks.value.isEmpty())
+
+        // Toggling again adds it back
+        hubVm.toggleHistoryBookmark(entry)
+        advanceUntilIdle()
+        assertEquals(listOf(555L), savedBookmarks.value.map { it.topicId })
+
+        // 2. HubCollectionViewModel without uiState collector also removes existing bookmark on toggle
+        val collectionVm = HubCollectionViewModel(container)
+        collectionVm.toggleHistoryBookmark(entry)
+        advanceUntilIdle()
+        assertTrue("Headless HubCollectionViewModel toggleHistoryBookmark must remove existing bookmark", savedBookmarks.value.isEmpty())
+    }
+
+    @Test
+    fun `cold-start toggleHistoryBookmark waits for delayed cold Room Flow before assuming unbookmarked`() = runTest(testDispatcher) {
+        val existingBookmark = BookmarkedTopic(
+            topicId = 555L,
+            summary = TopicSummary(
+                id = 555L,
+                title = "Cold Room Bookmarked",
+                categorySlug = "tech",
+                categoryName = "技术",
+                authorName = "author",
+                isBookmarked = true,
+            ),
+            savedAtEpochMillis = 1000L,
+            isSyncedWithServer = false,
+        )
+        val entry555 = ReadHistoryEntry(
+            topicId = 555L,
+            title = "Cold Room Bookmarked",
+            categorySlug = "tech",
+            categoryName = "技术",
+            authorName = "author",
+            visitedAtEpochMillis = 2000L,
+        )
+        val entry666 = ReadHistoryEntry(
+            topicId = 666L,
+            title = "Cold Room Unbookmarked",
+            categorySlug = "tech",
+            categoryName = "技术",
+            authorName = "author",
+            visitedAtEpochMillis = 2500L,
+        )
+
+        class ColdRoomBookmarkRepository : BaseFakeBookmarkRepository() {
+            var stored: MutableMap<Long, BookmarkedTopic> = linkedMapOf(555L to existingBookmark)
+            val removedIds = mutableListOf<Long>()
+            val savedIds = mutableListOf<Long>()
+
+            // Cold delayed Flows (not StateFlow) to mirror Room's async initial query window
+            override fun observeLocalBookmarks(): Flow<List<BookmarkedTopic>> = flow {
+                delay(50L)
+                emit(stored.values.toList())
+            }
+
+            override fun observeBookmarkedIds(): Flow<Set<Long>> = flow {
+                delay(50L)
+                emit(stored.keys.toSet())
+            }
+
+            override suspend fun saveOfflineBookmark(
+                summary: TopicSummary,
+                detailSnapshot: TopicDetailPage?,
+                syncedWithServer: Boolean,
+            ) {
+                savedIds += summary.id
+                stored[summary.id] = BookmarkedTopic(
+                    topicId = summary.id,
+                    summary = summary,
+                    offlineDetailSnapshot = detailSnapshot,
+                    savedAtEpochMillis = 2000L,
+                    isSyncedWithServer = syncedWithServer,
+                )
+            }
+
+            override suspend fun removeLocalBookmark(topicId: Long) {
+                removedIds += topicId
+                stored.remove(topicId)
+            }
+        }
+
+        // 1. PulseHubViewModel cold start before init collectors emit
+        val hubRepo = ColdRoomBookmarkRepository()
+        val hubVm = PulseHubViewModel(
+            HubTestAppContainer(
+                sessionRepository = BaseFakeSessionRepository(initialSession = null),
+                bookmarkAndHistoryRepository = hubRepo,
+            ),
+        )
+        hubVm.toggleHistoryBookmark(entry555)
+        hubVm.toggleHistoryBookmark(entry666)
+        advanceUntilIdle()
+        assertEquals(listOf(555L), hubRepo.removedIds)
+        assertEquals(listOf(666L), hubRepo.savedIds)
+        assertFalse(hubRepo.stored.containsKey(555L))
+        assertTrue(hubRepo.stored.containsKey(666L))
+
+        // 2. HubCollectionViewModel cold start before init collectors emit
+        val colRepo = ColdRoomBookmarkRepository()
+        val collectionVm = HubCollectionViewModel(
+            HubTestAppContainer(
+                sessionRepository = BaseFakeSessionRepository(initialSession = null),
+                bookmarkAndHistoryRepository = colRepo,
+            ),
+        )
+        collectionVm.toggleHistoryBookmark(entry555)
+        collectionVm.toggleHistoryBookmark(entry666)
+        advanceUntilIdle()
+        assertEquals(listOf(555L), colRepo.removedIds)
+        assertEquals(listOf(666L), colRepo.savedIds)
+        assertFalse(colRepo.stored.containsKey(555L))
+        assertTrue(colRepo.stored.containsKey(666L))
     }
 }
 

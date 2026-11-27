@@ -126,6 +126,47 @@ class FeedDiskCache(
         }
     }
 
+    /**
+     * Loads cached snapshots on disk/memory for [categorySlug] (plus `"__all__"` home snapshots)
+     * across stored account UIDs (optionally restricted to [allowedUids]) and sort keys without
+     * performing any network requests.
+     */
+    suspend fun getSnapshotsForCategory(
+        categorySlug: String,
+        allowedUids: Set<Long>? = null,
+    ): List<CachedFeedSnapshot> {
+        val trimmed = categorySlug.trim()
+        val sanitizedSlug = trimmed.ifEmpty { "__all__" }.replace(Regex("""[^a-zA-Z0-9_-]"""), "_")
+
+        return withContext(Dispatchers.IO) {
+            diskMutex.withLock {
+                val files = cacheDir.listFiles { file ->
+                    file.isFile && file.name.endsWith(".json")
+                }.orEmpty()
+                for (file in files) {
+                    val key = file.name.removeSuffix(".json")
+                    val keyUid = extractUidFromCacheKey(key)
+                    if (allowedUids != null && (keyUid == null || keyUid !in allowedUids)) continue
+                    val keySlug = extractSlugFromCacheKey(key)
+                    if ((keySlug == sanitizedSlug || keySlug == "__all__") && !memoryMap.containsKey(key)) {
+                        decodeFileOrDelete(file)?.let { decoded ->
+                            memoryMap.putIfAbsent(key, decoded)
+                        }
+                    }
+                }
+            }
+            memoryMap.entries
+                .filter { (key, _) ->
+                    val keyUid = extractUidFromCacheKey(key)
+                    val uidMatches = allowedUids == null || (keyUid != null && keyUid in allowedUids)
+                    val keySlug = extractSlugFromCacheKey(key)
+                    uidMatches && (keySlug == sanitizedSlug || keySlug == "__all__")
+                }
+                .sortedByDescending { it.value.fetchedAtEpochMillis }
+                .map { it.value }
+        }
+    }
+
     fun put(
         accountUid: Long,
         categorySlug: String,
@@ -293,6 +334,33 @@ class FeedDiskCache(
 
     companion object {
         private const val MAX_ENTRY_BYTES = 512_000L
+        private val SORT_SUFFIXES: List<String> = FeedSort.entries
+            .map { "_${it.name}" }
+            .sortedByDescending { it.length }
+
+        internal fun extractUidFromCacheKey(key: String): Long? {
+            if (!key.startsWith('u')) return null
+            val firstUnderscore = key.indexOf('_')
+            if (firstUnderscore <= 1) return null
+            for (idx in 1 until firstUnderscore) {
+                if (key[idx] !in '0'..'9') return null
+            }
+            return key.substring(1, firstUnderscore).toLongOrNull()
+        }
+
+        internal fun extractSlugFromCacheKey(key: String): String? {
+            if (!key.startsWith('u')) return null
+            val firstUnderscore = key.indexOf('_')
+            if (firstUnderscore <= 1) return null
+            for (idx in 1 until firstUnderscore) {
+                if (key[idx] !in '0'..'9') return null
+            }
+            val withoutBlocked = key.removeSuffix("_blk")
+            val afterUid = withoutBlocked.substring(firstUnderscore + 1)
+            val sortSuffix = SORT_SUFFIXES.firstOrNull { afterUid.endsWith(it) } ?: return null
+            if (afterUid.length <= sortSuffix.length) return null
+            return afterUid.substring(0, afterUid.length - sortSuffix.length)
+        }
 
         internal fun buildCacheKey(
             accountUid: Long,

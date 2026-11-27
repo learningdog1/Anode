@@ -1,0 +1,47 @@
+{
+  "user": {
+    "member_id": 101,
+    "member_name": "alice101",
+    "coin": 1650,
+    "stardust": 42,
+    "nPost": 14,
+    "nComment": 88,
+    "rank": 4,
+    "roles": ["dev"],
+    "collectionCount": 9,
+    "telegram_id": "123456789",
+    "unViewedCount": {
+      "all": 3,
+      "reply": 1,
+      "at": 1,
+      "message": 1,
+      "system": 0
+    }
+  },
+  "enableCustomedStyle": 1,
+  "allCategory": [
+    { "key": "daily", "cn_text": "日常", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "tech", "cn_text": "技术", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "info", "cn_text": "情报", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "review", "cn_text": "测评", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "trade", "cn_text": "交易", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "carpool", "cn_text": "拼车", "customizable": 1, "showInIndex": 1, "adminOnly": 0 },
+    { "key": "expose", "cn_text": "曝光", "customizable": 0, "showInIndex": 0, "adminOnly": 0 },
+    { "key": "inside", "cn_text": "内版", "customizable": 0, "showInIndex": 0, "adminOnly": 1 }
+  ],
+  "rotateTopics": [
+    {
+      "postId": 123,
+      "titleText": "DMIT LAX.Pro.WEE 溢价 +80 出",
+      "category": "trade",
+      "categoryWord": "交易",
+      "op": { "uid": 101, "name": "alice101", "avatar": "/avatar/101.png" },
+      "views": 640,
+      "comments": 18,
+      "likeCount": 12,
+      "lastCommentDate": "2026-11-24T15:20:00Z",
+      "rank": 0,
+      "blocked": 0
+    }
+  ]
+}

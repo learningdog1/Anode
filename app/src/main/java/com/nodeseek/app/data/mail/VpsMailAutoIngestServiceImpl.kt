@@ -1,5 +1,6 @@
 package com.nodeseek.app.data.mail
 
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
@@ -271,11 +272,18 @@ class VpsMailAutoIngestServiceImpl(
                 )
 
                 val existingTags = existingAsset?.resolvedTags.orEmpty()
+                val resolvedAssetType = existingAsset?.assetType ?: parsed.assetType
+                val resolvedDomainName = parsed.domainName ?: existingAsset?.domainName
+                val resolvedRegistrarName = parsed.registrarName.ifBlank { existingAsset?.registrarName.orEmpty() }
+                val resolvedProviderName = parsed.providerName
+                    .ifBlank { resolvedRegistrarName }
+                    .ifBlank { existingAsset?.providerName.orEmpty() }
+
                 val assetToSave = VpsAssetRecord(
                     id = existingAsset?.id ?: idGenerator(),
                     nickname = existingAsset?.nickname?.takeIf { it.isNotBlank() }
                         ?: buildSuggestedNickname(parsed),
-                    providerName = parsed.providerName.ifBlank { existingAsset?.providerName.orEmpty() },
+                    providerName = resolvedProviderName,
                     specsSummary = parsed.specsSummary.ifBlank { existingAsset?.specsSummary.orEmpty() },
                     region = parsed.region.ifBlank { existingAsset?.region.orEmpty() },
                     routeTag = VpsAssetRecord.formatRouteTag(existingTags),
@@ -291,7 +299,7 @@ class VpsMailAutoIngestServiceImpl(
                     expiryDateIso = resolvedExpiryIso,
                     purchaseUrl = existingAsset?.purchaseUrl.orEmpty(),
                     panelManageUrl = parsed.panelUrl.ifBlank { existingAsset?.panelManageUrl.orEmpty() },
-                    linkedProbeKey = existingAsset?.linkedProbeKey,
+                    linkedProbeKey = if (resolvedAssetType == FleetAssetType.DOMAIN_CERT) null else existingAsset?.linkedProbeKey,
                     monthlyTrafficQuotaGb = parsed.monthlyTrafficQuotaGb
                         ?: existingAsset?.monthlyTrafficQuotaGb,
                     trafficResetDay = existingAsset?.trafficResetDay,
@@ -303,6 +311,20 @@ class VpsMailAutoIngestServiceImpl(
                     updatedAtEpochMillis = nowMillisProvider(),
                     tags = existingTags,
                     autoRenew = existingAsset?.autoRenew == true,
+                    billingAnchorDay = existingAsset?.billingAnchorDay,
+                    assetType = resolvedAssetType,
+                    domainName = resolvedDomainName,
+                    registrarName = resolvedRegistrarName,
+                    domainCreatedIso = existingAsset?.domainCreatedIso,
+                    rdapSyncedAtEpochMillis = existingAsset?.rdapSyncedAtEpochMillis,
+                    rdapStatusTags = existingAsset?.rdapStatusTags.orEmpty(),
+                    tlsHost = existingAsset?.tlsHost ?: resolvedDomainName,
+                    tlsPort = existingAsset?.tlsPort ?: VpsAssetRecord.DEFAULT_TLS_PORT,
+                    tlsExpiresAtEpochMillis = existingAsset?.tlsExpiresAtEpochMillis,
+                    tlsIssuer = existingAsset?.tlsIssuer.orEmpty(),
+                    tlsSubject = existingAsset?.tlsSubject.orEmpty(),
+                    tlsCheckedAtEpochMillis = existingAsset?.tlsCheckedAtEpochMillis,
+                    tlsCheckError = existingAsset?.tlsCheckError,
                 )
 
                 val savedAsset = fleetRepository.upsertAsset(assetToSave)
@@ -311,7 +333,7 @@ class VpsMailAutoIngestServiceImpl(
                 var sshCreated = false
                 var sshPreservedExisting = false
 
-                if (parsed.hasSshCredentials) {
+                if (!parsed.isDomainAsset && parsed.hasSshCredentials) {
                     val targetHost = parsed.primaryHost!!.trim()
                     val targetUser = parsed.sshUsername.trim()
                         .ifBlank { SshServerProfile.DEFAULT_SSH_USERNAME_FALLBACK }
@@ -524,6 +546,21 @@ class VpsMailAutoIngestServiceImpl(
     ): List<VpsAssetRecord> {
         if (assets.isEmpty()) return emptyList()
 
+        // 0. Domain / Registrar mail matching — strictly isolated to DOMAIN_CERT assets
+        if (parsed.isDomainAsset) {
+            val targetDomain = parsed.domainName?.let { VpsAssetRecord.normalizeDomainName(it) }
+                ?: return emptyList()
+            return assets.filter { asset ->
+                asset.isDomainAsset && (
+                    VpsAssetRecord.normalizeDomainName(asset.domainName) == targetDomain ||
+                        assetContainsHostname(asset, targetDomain)
+                    )
+            }
+        }
+
+        val vpsAssets = assets.filter { !it.isDomainAsset }
+        if (vpsAssets.isEmpty()) return emptyList()
+
         // 1. Exact IPv4 or IPv6 match
         val ipv4 = parsed.mainIpv4?.trim()?.takeIf { it.isNotEmpty() }
         val ipv6Canon = parsed.mainIpv6?.let { canonicalizeIpv6(it) }
@@ -537,7 +574,7 @@ class VpsMailAutoIngestServiceImpl(
                 .mapNotNull { it.cleanAlias.trim().takeIf(String::isNotEmpty)?.lowercase(Locale.ROOT) }
                 .toSet()
 
-            val byIp = assets.filter { asset ->
+            val byIp = vpsAssets.filter { asset ->
                 (ipv4 != null && assetContainsIpv4(asset, ipv4)) ||
                     (ipv6Canon != null && assetContainsIpv6(asset, ipv6Canon)) ||
                     (asset.nickname.trim().lowercase(Locale.ROOT) in sshAliasesMatchingIp)
@@ -548,7 +585,7 @@ class VpsMailAutoIngestServiceImpl(
         // 2. Hostname match
         val cleanHost = parsed.hostname.trim()
         if (cleanHost.length >= 4) {
-            val byHost = assets.filter { asset ->
+            val byHost = vpsAssets.filter { asset ->
                 assetContainsHostname(asset, cleanHost)
             }
             if (byHost.isNotEmpty()) return byHost
@@ -559,7 +596,7 @@ class VpsMailAutoIngestServiceImpl(
         val productNorm = normalizeIdentity(parsed.productName)
 
         if (providerNorm.isNotEmpty() && productNorm.length >= 3) {
-            val byProviderAndProduct = assets.filter { asset ->
+            val byProviderAndProduct = vpsAssets.filter { asset ->
                 providerMatches(asset, providerNorm) && productMatches(asset, productNorm, parsed.productName)
             }
             if (byProviderAndProduct.isNotEmpty()) return byProviderAndProduct
@@ -567,7 +604,7 @@ class VpsMailAutoIngestServiceImpl(
 
         // Fallback when user left providerName blank on the asset, but nickname matches distinct productName exactly
         if (productNorm.length >= 5) {
-            val byExactNickname = assets.filter { asset ->
+            val byExactNickname = vpsAssets.filter { asset ->
                 normalizeIdentity(asset.nickname) == productNorm
             }
             if (byExactNickname.size == 1) return byExactNickname
@@ -580,7 +617,7 @@ class VpsMailAutoIngestServiceImpl(
         parsed: ParsedVpsBillingMail,
         sshServers: List<SshServerProfile>,
     ): SshServerProfile? {
-        if (sshServers.isEmpty()) return null
+        if (parsed.isDomainAsset || sshServers.isEmpty()) return null
         val ipv4 = parsed.mainIpv4?.trim()?.takeIf { it.isNotEmpty() }
         val ipv6Canon = parsed.mainIpv6?.let { canonicalizeIpv6(it) }
         val hostname = parsed.hostname.trim().takeIf { it.isNotEmpty() }
@@ -630,7 +667,9 @@ class VpsMailAutoIngestServiceImpl(
 
     private fun assetContainsHostname(asset: VpsAssetRecord, hostname: String): Boolean {
         val pattern = Regex("""(?<![A-Za-z0-9.-])${Regex.escape(hostname)}(?![A-Za-z0-9.-])""", RegexOption.IGNORE_CASE)
-        return pattern.containsMatchIn(asset.nickname) ||
+        return (!asset.domainName.isNullOrBlank() && pattern.containsMatchIn(asset.domainName)) ||
+            (!asset.tlsHost.isNullOrBlank() && pattern.containsMatchIn(asset.tlsHost)) ||
+            pattern.containsMatchIn(asset.nickname) ||
             pattern.containsMatchIn(asset.notes) ||
             pattern.containsMatchIn(asset.autoRenewNote) ||
             pattern.containsMatchIn(asset.panelManageUrl)
@@ -834,10 +873,12 @@ class VpsMailAutoIngestServiceImpl(
         if (parsed.hasSshCredentials || parsed.sshPort != ParsedVpsBillingMail.DEFAULT_SSH_PORT) {
             existingManagedFields["SSH"] = "${parsed.sshUsername}@${parsed.primaryHost ?: "-"}:${parsed.sshPort}"
         }
+        parsed.domainName?.takeIf { it.isNotBlank() }?.let { existingManagedFields["Domain"] = it }
+        parsed.registrarName.takeIf { it.isNotBlank() }?.let { existingManagedFields["Registrar"] = it }
         parsed.productName.takeIf { it.isNotBlank() }?.let { existingManagedFields["套餐"] = it }
         parsed.invoiceNumber?.takeIf { it.isNotBlank() }?.let { existingManagedFields["账单"] = "#$it" }
 
-        val orderedKeys = listOf("IP", "IPv6", "Hostname", "SSH", "套餐", "账单")
+        val orderedKeys = listOf("Domain", "Registrar", "IP", "IPv6", "Hostname", "SSH", "套餐", "账单")
         val managedTokens = buildList {
             for (key in orderedKeys) {
                 existingManagedFields[key]?.let { value -> add("$key: $value") }
@@ -860,6 +901,12 @@ class VpsMailAutoIngestServiceImpl(
     }
 
     private fun buildSuggestedNickname(parsed: ParsedVpsBillingMail): String {
+        if (parsed.isDomainAsset) {
+            val domain = parsed.domainName?.trim().orEmpty()
+            if (domain.isNotEmpty()) return domain
+            val registrar = parsed.registrarName.ifBlank { parsed.providerName }.trim()
+            return if (registrar.isNotEmpty()) "$registrar 域名" else "新购域名"
+        }
         val provider = parsed.providerName.trim()
         val product = parsed.productName.trim()
         val host = parsed.hostname.trim()
@@ -989,6 +1036,7 @@ class VpsMailAutoIngestServiceImpl(
             parsed.providerName.lowercase(Locale.ROOT),
             parsed.invoiceNumber.orEmpty(),
             parsed.mainIpv4.orEmpty(),
+            parsed.domainName.orEmpty(),
             parsed.nextDueDateIso.orEmpty(),
             parsed.billingAmount.orEmpty(),
         ).joinToString("|")

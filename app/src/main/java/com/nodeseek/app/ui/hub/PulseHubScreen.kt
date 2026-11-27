@@ -45,6 +45,7 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.Restaurant
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -134,6 +135,7 @@ fun PulseHubScreen(
     onOpenRadar: (initialTab: Int) -> Unit = {},
     onOpenBookmarks: () -> Unit = {},
     onOpenReadHistory: () -> Unit = {},
+    onOpenInviteAndRulings: (initialTab: Int) -> Unit = {},
     onRequestWebViewAuth: (() -> Unit)? = null,
     contentBottomPadding: Dp = 104.dp,
     previewUiState: PulseHubUiState? = null,
@@ -157,6 +159,8 @@ fun PulseHubScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showInternalWebViewSheet by rememberSaveable { mutableStateOf(false) }
+    var activeLedgerTab by rememberSaveable { mutableStateOf<EconomyLedgerTab?>(null) }
+    var showAccountSwitcherSheet by rememberSaveable { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
@@ -254,6 +258,9 @@ fun PulseHubScreen(
                         PulseHubHeaderBar(
                             onOpenSettings = onOpenSettings,
                             hasAppUpdate = hasAppUpdate,
+                            savedAccountCount = uiState.accounts.size,
+                            isSwitchingAccount = uiState.isSwitchingAccount,
+                            onOpenAccountSwitcher = { showAccountSwitcherSheet = true },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .statusBarsPadding()
@@ -268,11 +275,19 @@ fun PulseHubScreen(
                                 SignedInRankHeroBentoCard(
                                     session = session,
                                     onClick = { onOpenUserProfile(session.uid, session.username) },
+                                    onOpenDrumsticksLedger = {
+                                        activeLedgerTab = EconomyLedgerTab.DRUMSTICKS
+                                    },
+                                    onOpenStardustLedger = {
+                                        activeLedgerTab = EconomyLedgerTab.STARDUST
+                                    },
                                 )
                             } else {
                                 SignedOutHeroBentoCard(
                                     onWebViewLogin = triggerWebViewLogin,
                                     onNativeCredentialLogin = viewModel::openNativeSignInDialog,
+                                    savedAccountCount = uiState.accounts.size,
+                                    onOpenAccountSwitcher = { showAccountSwitcherSheet = true },
                                 )
                             }
                         }
@@ -361,14 +376,80 @@ fun PulseHubScreen(
                             )
                         }
                     }
+
+                    // ── Group 3: 社区工具 ──
+                    item(key = "hub_community_tools_group") {
+                        PulseStaggeredEntrance(index = 4) {
+                            HubGroupedSection(
+                                title = "社区工具",
+                                rows = listOf(
+                                    HubMenuRowItem(
+                                        label = "邀请码购买与管理",
+                                        onClick = {
+                                            if (session != null) {
+                                                onOpenInviteAndRulings(0)
+                                            } else {
+                                                triggerWebViewLogin()
+                                            }
+                                        },
+                                    ),
+                                    HubMenuRowItem(
+                                        label = "小黑屋裁决公示",
+                                        onClick = { onOpenInviteAndRulings(1) },
+                                    ),
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 
+    val ledgerTab = activeLedgerTab
+    if (ledgerTab != null && session != null) {
+        CreditStardustLedgerSheet(
+            uid = session.uid,
+            currentCoins = session.drumsticks,
+            currentStardust = session.stardust,
+            initialTab = ledgerTab,
+            canAccessDrumsticks = true,
+            onDismiss = { activeLedgerTab = null },
+            onOpenUserProfile = onOpenUserProfile,
+            onOpenInviteAndRulings = onOpenInviteAndRulings,
+        )
+    }
+
+    if (showAccountSwitcherSheet) {
+        AccountSwitcherSheet(
+            accounts = uiState.accounts,
+            isSwitching = uiState.isSwitchingAccount,
+            onSwitchAccount = { targetUid ->
+                showAccountSwitcherSheet = false
+                viewModel.switchAccount(
+                    targetUid = targetUid,
+                    onChallengeRequired = triggerWebViewLogin,
+                )
+            },
+            onRemoveAccount = viewModel::removeSavedAccount,
+            onAddAccountWebView = {
+                showAccountSwitcherSheet = false
+                viewModel.beginAddAccountWithWebView(triggerWebViewLogin)
+            },
+            onAddAccountNative = {
+                showAccountSwitcherSheet = false
+                viewModel.beginAddAccountWithNativeSignIn()
+            },
+            onDismiss = { showAccountSwitcherSheet = false },
+        )
+    }
+
     if (showInternalWebViewSheet) {
         WebViewSessionSheet(
-            onDismiss = { showInternalWebViewSheet = false },
+            onDismiss = {
+                showInternalWebViewSheet = false
+                viewModel.cancelPendingAddAccountIfUnauthenticated()
+            },
             onSessionVerified = {
                 showInternalWebViewSheet = false
                 viewModel.onWebViewAuthCompleted()
@@ -380,12 +461,12 @@ fun PulseHubScreen(
     if (uiState.nativeSignIn.isVisible) {
         NativeCredentialSignInDialog(
             state = uiState.nativeSignIn,
-            onDismiss = viewModel::dismissNativeSignInDialog,
+            onDismiss = { viewModel.dismissNativeSignInDialog(cancelPendingAddAccount = true) },
             onSubmitCredentials = viewModel::submitCredentials,
             onSubmitOtp = viewModel::submitTwoFactorCode,
             onReturnToCredentials = viewModel::returnToCredentialsStep,
             onSwitchToWebView = {
-                viewModel.dismissNativeSignInDialog()
+                viewModel.dismissNativeSignInDialog(cancelPendingAddAccount = false)
                 triggerWebViewLogin()
             },
         )
@@ -397,7 +478,11 @@ private fun PulseHubHeaderBar(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
     hasAppUpdate: Boolean = false,
+    savedAccountCount: Int = 0,
+    isSwitchingAccount: Boolean = false,
+    onOpenAccountSwitcher: (() -> Unit)? = null,
 ) {
+    val ext = NodePulseThemeTokens.extendedColors
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
@@ -410,33 +495,80 @@ private fun PulseHubHeaderBar(
             maxLines = 1,
         )
 
-        Box(
-            modifier = Modifier.size(44.dp),
-            contentAlignment = Alignment.Center,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            IconButton(onClick = onOpenSettings) {
-                Icon(
-                    imageVector = Icons.Outlined.Settings,
-                    contentDescription = "打开设置",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(23.dp),
-                )
+            if (onOpenAccountSwitcher != null && (savedAccountCount > 0 || isSwitchingAccount)) {
+                Row(
+                    modifier = Modifier
+                        .height(34.dp)
+                        .clip(CircleShape)
+                        .background(ext.cardSurfaceElevated)
+                        .border(0.9.dp, ext.cardBorder, CircleShape)
+                        .pulseBouncyClickable(
+                            enabled = !isSwitchingAccount,
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.Button,
+                            onClickLabel = "切换账号",
+                            onClick = onOpenAccountSwitcher,
+                        )
+                        .padding(horizontal = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    if (isSwitchingAccount) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 1.8.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.SwapHoriz,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                    Text(
+                        text = if (savedAccountCount > 1) "切换 ($savedAccountCount)" else "切换账号",
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                    )
+                }
             }
 
-            if (hasAppUpdate) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 8.dp, end = 8.dp)
-                        .size(9.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error)
-                        .border(
-                            width = 1.5.dp,
-                            color = MaterialTheme.colorScheme.background,
-                            shape = CircleShape,
-                        ),
-                )
+            Box(
+                modifier = Modifier.size(44.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                IconButton(onClick = onOpenSettings) {
+                    Icon(
+                        imageVector = Icons.Outlined.Settings,
+                        contentDescription = "打开设置",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(23.dp),
+                    )
+                }
+
+                if (hasAppUpdate) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 8.dp, end = 8.dp)
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.error)
+                            .border(
+                                width = 1.5.dp,
+                                color = MaterialTheme.colorScheme.background,
+                                shape = CircleShape,
+                            ),
+                    )
+                }
             }
         }
     }
@@ -448,6 +580,8 @@ private fun SignedOutHeroBentoCard(
     onWebViewLogin: () -> Unit,
     onNativeCredentialLogin: () -> Unit,
     modifier: Modifier = Modifier,
+    savedAccountCount: Int = 0,
+    onOpenAccountSwitcher: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -663,6 +797,41 @@ private fun SignedOutHeroBentoCard(
                 )
             }
         }
+
+        if (savedAccountCount > 0 && onOpenAccountSwitcher != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp)
+                    .clip(CircleShape)
+                    .background(ext.cardSurfaceElevated)
+                    .border(1.dp, ext.cardBorder, CircleShape)
+                    .pulseBouncyClickable(
+                        pressedScale = NodePulseMotion.chipPressScale,
+                        role = Role.Button,
+                        onClick = onOpenAccountSwitcher,
+                    )
+                    .padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.SwapHoriz,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "从已保存的 $savedAccountCount 个账号中一键切换",
+                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 
@@ -710,6 +879,8 @@ private fun SignedInRankHeroBentoCard(
     session: AccountSession,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenDrumsticksLedger: (() -> Unit)? = null,
+    onOpenStardustLedger: (() -> Unit)? = null,
 ) {
     val isDark = NodePulseThemeTokens.isDark
     val rankSpec = NodePulseThemeTokens.rankSpec(session.level)
@@ -886,13 +1057,27 @@ private fun SignedInRankHeroBentoCard(
                 .padding(top = 2.dp),
         ) {
             listOf(
-                session.drumsticks.toString() to "鸡腿",
-                session.stardust.toString() to "星尘",
-                session.topicCount.toString() to "主题",
-                session.replyCount.toString() to "评论",
-            ).forEach { (value, label) ->
+                Triple(session.drumsticks.toString(), "鸡腿", onOpenDrumsticksLedger),
+                Triple(session.stardust.toString(), "星尘", onOpenStardustLedger),
+                Triple(session.topicCount.toString(), "主题", null),
+                Triple(session.replyCount.toString(), "评论", null),
+            ).forEach { (value, label, statClick) ->
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .then(
+                            if (statClick != null) {
+                                Modifier.clickable(
+                                    role = Role.Button,
+                                    onClickLabel = "查看${label}流水",
+                                    onClick = statClick,
+                                )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .padding(vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
@@ -905,10 +1090,10 @@ private fun SignedInRankHeroBentoCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = label,
+                        text = if (statClick != null) "$label ›" else label,
                         style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Normal,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = if (statClick != null) FontWeight.Medium else FontWeight.Normal,
+                        color = if (statClick != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                     )
                 }

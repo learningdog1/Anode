@@ -19,6 +19,7 @@ fun openNodeSeekOrExternalUrl(
     onOpenCurated: (() -> Unit)? = null,
     onOpenCheckIn: (() -> Unit)? = null,
     onOpenInbox: (() -> Unit)? = null,
+    onOpenLuckyDraw: ((NodePulseDeepLink.LuckyDraw) -> Unit)? = null,
 ) {
     val normalizedUrl = normalizeNodeSeekUrl(rawUrl)
     when (val parsed = DeepLinkParser.parseUrl(normalizedUrl)) {
@@ -67,6 +68,13 @@ fun openNodeSeekOrExternalUrl(
         NodePulseDeepLink.Inbox -> {
             if (onOpenInbox != null) {
                 onOpenInbox()
+            } else {
+                openSafeExternalUri(uriHandler, normalizedUrl)
+            }
+        }
+        is NodePulseDeepLink.LuckyDraw -> {
+            if (onOpenLuckyDraw != null) {
+                onOpenLuckyDraw(parsed)
             } else {
                 openSafeExternalUri(uriHandler, normalizedUrl)
             }

@@ -274,7 +274,19 @@ class PulseRadarViewModel(
     }
 
     fun triggerImmediateCheck() {
-        if (!uiState.value.pollingSettings.isEnabled) {
+        val stateFlowSettings = (radarRepository.pollingSettingsFlow as? StateFlow<RadarPollingSettings>)?.value
+        if (stateFlowSettings != null) {
+            dispatchImmediateCheckIfEnabled(stateFlowSettings.isEnabled)
+        } else {
+            viewModelScope.launch {
+                val settings = radarRepository.getPollingSettings()
+                dispatchImmediateCheckIfEnabled(settings.isEnabled)
+            }
+        }
+    }
+
+    private fun dispatchImmediateCheckIfEnabled(isEnabled: Boolean) {
+        if (!isEnabled) {
             _snackbarChannel.trySend("请先开启雷达监控总开关，再执行立即检查")
             return
         }

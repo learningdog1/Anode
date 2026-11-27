@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -66,6 +67,9 @@ data class ExploreUiState(
     val selectedSort: FeedSort = FeedSort.LATEST_REPLY,
     val categories: List<Category> = Category.DEFAULT_CATEGORIES,
     val pinnedCategorySlugs: Set<String> = AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS,
+    val homepageCategoryOrder: List<String> = emptyList(),
+    val isSyncingCategories: Boolean = false,
+    val isSavingCategories: Boolean = false,
     val orderedBoardTabs: List<Category> = listOf(Category(slug = "", name = "全部")),
     val slicesBySlug: Map<String, ExploreBoardSliceUiState> = emptyMap(),
     val pinnedTopics: List<TopicSummary> = emptyList(),
@@ -129,6 +133,8 @@ private data class FeedRawStreamState(
     val slices: Map<FeedSliceKey, BoardPageSlice> = emptyMap(),
     val snackbarMessage: String? = null,
     val isAwayDigestExpanded: Boolean = false,
+    val isSyncingCategories: Boolean = false,
+    val isSavingCategories: Boolean = false,
 ) {
     val activeKey: FeedSliceKey
         get() = FeedSliceKey(
@@ -169,13 +175,29 @@ class ExploreViewModel(
     private var lastPrefetchCompletedAtMs: Long = 0L
     private var lastObservedIncludeBlocked: Boolean? = null
     private var lastObservedPreferRss: Boolean? = null
+    private var lastSyncedHomepageUid: Long? = null
+    private var categorySyncJob: Job? = null
+    private var activeCategorySyncUid: Long? = null
+    private var categorySyncSeq: Long = 0L
 
-    private val categoriesFlow = forumRepository.observeCategories()
-        .map { list -> list.ifEmpty { Category.DEFAULT_CATEGORIES } }
-        .stateIn(viewModelScope, SharingStarted.Lazily, Category.DEFAULT_CATEGORIES)
+    private val cachedCategories = MutableStateFlow(
+        (forumRepository.observeCategories() as? StateFlow<List<Category>>)?.value
+            ?.ifEmpty { Category.DEFAULT_CATEGORIES }
+            ?: Category.DEFAULT_CATEGORIES,
+    )
 
-    private val bookmarkedIdsFlow = bookmarkAndHistoryRepository.observeBookmarkedIds()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+    @Volatile
+    private var hasReceivedCategories =
+        forumRepository.observeCategories() is StateFlow<*>
+
+    private val cachedBookmarkedIds = MutableStateFlow(
+        (bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+            ?: emptySet(),
+    )
+
+    @Volatile
+    private var hasReceivedBookmarkedIds =
+        bookmarkAndHistoryRepository.observeBookmarkedIds() is StateFlow<*>
 
     private val readStateMapFlow = _streamState
         .map { state ->
@@ -217,11 +239,11 @@ class ExploreViewModel(
 
     val uiState: StateFlow<ExploreUiState> = combine(
         _streamState,
-        categoriesFlow,
+        cachedCategories,
         settingsRepository.settings,
         sessionRepository.sessionState,
         combine(
-            bookmarkedIdsFlow,
+            cachedBookmarkedIds,
             readStateMapFlow,
             contentFilterRepository.config,
             awayDigestRepository.state,
@@ -238,6 +260,7 @@ class ExploreViewModel(
         val includeBlocked = settings.includeBlockedTopics
         val orderedTabs = buildOrderedTabs(
             categories = categories,
+            homepageCategoryOrder = settings.homepageCategoryOrder,
             pinnedCategorySlugs = settings.pinnedCategorySlugs,
             selectedCategorySlug = raw.selectedCategorySlug,
         )
@@ -344,6 +367,9 @@ class ExploreViewModel(
             selectedSort = activeSlice.sort,
             categories = categories,
             pinnedCategorySlugs = settings.pinnedCategorySlugs,
+            homepageCategoryOrder = settings.homepageCategoryOrder,
+            isSyncingCategories = raw.isSyncingCategories,
+            isSavingCategories = raw.isSavingCategories,
             orderedBoardTabs = orderedTabs,
             slicesBySlug = enrichedSlices,
             pinnedTopics = activeSlice.pinnedTopics,
@@ -367,6 +393,18 @@ class ExploreViewModel(
     }.stateIn(viewModelScope, SharingStarted.Lazily, ExploreUiState())
 
     init {
+        viewModelScope.launch {
+            forumRepository.observeCategories().collect { list ->
+                cachedCategories.value = list.ifEmpty { Category.DEFAULT_CATEGORIES }
+                hasReceivedCategories = true
+            }
+        }
+        viewModelScope.launch {
+            bookmarkAndHistoryRepository.observeBookmarkedIds().collect { ids ->
+                cachedBookmarkedIds.value = ids
+                hasReceivedBookmarkedIds = true
+            }
+        }
         awayDigestRepository.refreshCurrentSessionDigest(forceReload = false)
         val initialKey = _streamState.value.activeKey
         val diskCached = forumRepository.getCachedFeed(initialKey.categorySlug, initialKey.sort)
@@ -407,7 +445,7 @@ class ExploreViewModel(
 
         viewModelScope.launch {
             delay(2_500L)
-            if (categoriesFlow.value.size <= Category.DEFAULT_CATEGORIES.size &&
+            if (cachedCategories.value.size <= Category.DEFAULT_CATEGORIES.size &&
                 !sessionRepository.challengeRequired.value
             ) {
                 runCatching { forumRepository.refreshCategories(force = false) }
@@ -472,6 +510,26 @@ class ExploreViewModel(
                 }
         }
 
+        // Sync account homepage board preferences once per signed-in UID
+        viewModelScope.launch {
+            sessionRepository.sessionState
+                .map { it?.uid }
+                .distinctUntilChanged()
+                .collect { uid ->
+                    if (uid == null) {
+                        lastSyncedHomepageUid = null
+                        categorySyncSeq++
+                        categorySyncJob?.cancel()
+                        categorySyncJob = null
+                        activeCategorySyncUid = null
+                        _streamState.update { it.copy(isSyncingCategories = false) }
+                    } else if (uid != lastSyncedHomepageUid && !sessionRepository.challengeRequired.value) {
+                        lastSyncedHomepageUid = uid
+                        syncHomepageCategories(surfaceError = false)
+                    }
+                }
+        }
+
         // Reload active feed when user toggles blocked-topics or RSS-fallback preferences
         viewModelScope.launch {
             settingsRepository.settings.collect { settings ->
@@ -521,6 +579,184 @@ class ExploreViewModel(
         }
 
         ensureCategoryLoaded(normalized = currentSlug, nextSort = effectiveSort)
+    }
+
+    fun syncHomepageCategories(surfaceError: Boolean = false) {
+        val targetUid = sessionRepository.sessionState.value?.uid ?: return
+        if (_streamState.value.isSyncingCategories && activeCategorySyncUid == targetUid) {
+            return
+        }
+
+        val syncToken = ++categorySyncSeq
+        activeCategorySyncUid = targetUid
+        categorySyncJob?.cancel()
+        _streamState.update { it.copy(isSyncingCategories = true) }
+
+        val job = viewModelScope.launch {
+            try {
+                val result = forumRepository.syncHomepageCategories()
+                if (categorySyncSeq == syncToken && sessionRepository.sessionState.value?.uid == targetUid) {
+                    _streamState.update { state ->
+                        val errorMessage = if (surfaceError) {
+                            result.exceptionOrNull()?.message?.takeIf { it.isNotBlank() } ?: "同步版块配置失败"
+                        } else {
+                            null
+                        }
+                        state.copy(
+                            snackbarMessage = if (result.isFailure && errorMessage != null) errorMessage else state.snackbarMessage,
+                        )
+                    }
+                }
+            } finally {
+                if (categorySyncSeq == syncToken) {
+                    activeCategorySyncUid = null
+                    _streamState.update { it.copy(isSyncingCategories = false) }
+                }
+            }
+        }
+        job.invokeOnCompletion {
+            if (categorySyncSeq == syncToken) {
+                activeCategorySyncUid = null
+                _streamState.update { it.copy(isSyncingCategories = false) }
+            }
+        }
+        categorySyncJob = job
+    }
+
+    fun saveCategoryPreferences(orderedCategories: List<Category>) {
+        var started = false
+        _streamState.update { state ->
+            if (state.isSavingCategories) {
+                state
+            } else {
+                started = true
+                state.copy(isSavingCategories = true)
+            }
+        }
+        if (!started) return
+
+        val sanitized = orderedCategories
+            .filter { it.slug.isNotBlank() && !it.isAdminOnly }
+            .distinctBy { it.slug.trim() }
+        val activeSlug = _streamState.value.selectedCategorySlug.trim()
+        if (activeSlug.isNotBlank()) {
+            val activeCategory = sanitized.firstOrNull { it.slug.trim() == activeSlug }
+            if (activeCategory != null && !activeCategory.visibleOnHome) {
+                selectCategory("")
+            }
+        }
+
+        val isSignedIn = sessionRepository.sessionState.value != null
+        viewModelScope.launch {
+            try {
+                val result = forumRepository.saveHomepageCategories(
+                    orderedCategories = sanitized,
+                    syncToServer = isSignedIn,
+                )
+                _streamState.update { state ->
+                    val message = result.fold(
+                        onSuccess = {
+                            if (isSignedIn) "版块顺序已同步至账号" else "已保存版块顺序"
+                        },
+                        onFailure = { err ->
+                            val reason = err.message?.takeIf { it.isNotBlank() } ?: "请稍后重试"
+                            "已保存本机顺序，云端同步失败：$reason"
+                        },
+                    )
+                    state.copy(
+                        snackbarMessage = message,
+                    )
+                }
+            } finally {
+                _streamState.update { it.copy(isSavingCategories = false) }
+            }
+        }
+    }
+
+    private suspend fun currentCategories(): List<Category> {
+        val live = (forumRepository.observeCategories() as? StateFlow<List<Category>>)?.value
+        if (live != null) {
+            val resolved = live.ifEmpty { Category.DEFAULT_CATEGORIES }
+            cachedCategories.value = resolved
+            hasReceivedCategories = true
+            return resolved
+        }
+        if (!hasReceivedCategories) {
+            val emitted = forumRepository.observeCategories().firstOrNull()
+            if (emitted != null) {
+                val resolved = emitted.ifEmpty { Category.DEFAULT_CATEGORIES }
+                cachedCategories.value = resolved
+                hasReceivedCategories = true
+                return resolved
+            }
+        }
+        return cachedCategories.value
+    }
+
+    private suspend fun isTopicBookmarked(topic: TopicSummary): Boolean {
+        if (topic.isBookmarked) return true
+        if (topic.id in cachedBookmarkedIds.value) return true
+        val liveIds = (bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+        if (liveIds?.contains(topic.id) == true) return true
+        if (!hasReceivedBookmarkedIds) {
+            val emittedIds = bookmarkAndHistoryRepository.observeBookmarkedIds().firstOrNull()
+            if (emittedIds != null) {
+                cachedBookmarkedIds.value = emittedIds
+                hasReceivedBookmarkedIds = true
+                if (topic.id in emittedIds) return true
+            }
+        }
+        return bookmarkAndHistoryRepository.getOfflineBookmarkSnapshot(topic.id) != null
+    }
+
+    fun resetCategoryPreferences() {
+        var started = false
+        _streamState.update { state ->
+            if (state.isSavingCategories) {
+                state
+            } else {
+                started = true
+                state.copy(isSavingCategories = true)
+            }
+        }
+        if (!started) return
+
+        val targetUid = sessionRepository.sessionState.value?.uid ?: 0L
+        val isSignedIn = sessionRepository.sessionState.value != null
+
+        viewModelScope.launch {
+            try {
+                val restored = buildCustomizableCategoriesForReorder(
+                    categories = currentCategories(),
+                    homepageCategoryOrder = emptyList(),
+                    pinnedCategorySlugs = AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS,
+                ).map { it.copy(visibleOnHome = true) }
+
+                val result = forumRepository.saveHomepageCategories(
+                    orderedCategories = restored,
+                    syncToServer = isSignedIn,
+                )
+                val sameSession = (sessionRepository.sessionState.value?.uid ?: 0L) == targetUid
+                if (result.isSuccess && sameSession) {
+                    settingsRepository.setHomepageCategoryOrder(targetUid, emptyList())
+                    if (settingsRepository.settings.value.pinnedCategorySlugs != AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS) {
+                        settingsRepository.setPinnedCategorySlugs(AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS)
+                    }
+                }
+                _streamState.update { state ->
+                    val message = if (result.isSuccess) {
+                        "已恢复默认版块顺序"
+                    } else {
+                        "已恢复本机默认顺序，云端同步失败：${result.exceptionOrNull()?.message ?: "请稍后重试"}"
+                    }
+                    state.copy(
+                        snackbarMessage = message,
+                    )
+                }
+            } finally {
+                _streamState.update { it.copy(isSavingCategories = false) }
+            }
+        }
     }
 
     fun refresh(categorySlug: String = _streamState.value.selectedCategorySlug) {
@@ -594,7 +830,7 @@ class ExploreViewModel(
 
     fun toggleBookmark(topic: TopicSummary) {
         viewModelScope.launch {
-            val currentlyBookmarked = topic.id in bookmarkedIdsFlow.value || topic.isBookmarked
+            val currentlyBookmarked = isTopicBookmarked(topic)
             val targetBookmarked = !currentlyBookmarked
             val isSignedIn = sessionRepository.sessionState.value != null
 
@@ -604,8 +840,10 @@ class ExploreViewModel(
                     detailSnapshot = null,
                     syncedWithServer = false,
                 )
+                cachedBookmarkedIds.update { it + topic.id }
             } else {
                 bookmarkAndHistoryRepository.removeLocalBookmark(topic.id)
+                cachedBookmarkedIds.update { it - topic.id }
             }
 
             if (isSignedIn) {
@@ -676,55 +914,6 @@ class ExploreViewModel(
         }
     }
 
-    private fun buildOrderedTabs(
-        categories: List<Category>,
-        pinnedCategorySlugs: Set<String>,
-        selectedCategorySlug: String,
-    ): List<Category> {
-        val bySlug = categories.associateBy { it.slug }
-        val defaultBySlug = Category.DEFAULT_CATEGORIES.associateBy { it.slug }
-        val seen = HashSet<String>()
-        return buildList {
-            // 1. Always place "" ("全部") first
-            val allTab = bySlug[""] ?: defaultBySlug[""] ?: Category(slug = "", name = "全部")
-            if (seen.add(allTab.slug)) {
-                add(allTab)
-            }
-
-            // 2. Priority board tabs first (matching editorial reference when using default pinned set)
-            val prioritySlugs = if (pinnedCategorySlugs == AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS) {
-                DEFAULT_EXPLORE_CATEGORY_ORDER
-            } else {
-                pinnedCategorySlugs
-            }
-            prioritySlugs.forEach { rawSlug ->
-                val slug = rawSlug.trim()
-                if (slug.isNotBlank()) {
-                    val candidate = bySlug[slug] ?: defaultBySlug[slug] ?: Category(slug = slug, name = slug)
-                    if (!candidate.isAdminOnly && seen.add(slug)) {
-                        add(candidate)
-                    }
-                }
-            }
-
-            // 3. Append all remaining non-admin categories so every board stays reachable via strip & pager
-            categories.forEach { category ->
-                if (!category.isAdminOnly && category.slug.isNotBlank() && seen.add(category.slug)) {
-                    add(category)
-                }
-            }
-
-            // 4. Ensure an externally selected slug is never dropped
-            val normalizedSelected = selectedCategorySlug.trim()
-            if (normalizedSelected.isNotBlank() && seen.add(normalizedSelected)) {
-                add(
-                    bySlug[normalizedSelected]
-                        ?: defaultBySlug[normalizedSelected]
-                        ?: Category(slug = normalizedSelected, name = normalizedSelected),
-                )
-            }
-        }
-    }
 
     private fun ensureCategoryLoaded(normalized: String, nextSort: FeedSort) {
         val key = FeedSliceKey(normalized, nextSort)
@@ -818,7 +1007,8 @@ class ExploreViewModel(
             if (sessionRepository.challengeRequired.value) return@launch
 
             val orderedTabs = buildOrderedTabs(
-                categories = categoriesFlow.value,
+                categories = cachedCategories.value,
+                homepageCategoryOrder = settingsRepository.settings.value.homepageCategoryOrder,
                 pinnedCategorySlugs = settingsRepository.settings.value.pinnedCategorySlugs,
                 selectedCategorySlug = _streamState.value.selectedCategorySlug,
             )
@@ -1041,7 +1231,7 @@ class ExploreViewModel(
         private const val NEIGHBOR_PREFETCH_SETTLE_MS = 450L
         private const val MIN_PREFETCH_GAP_MS = 800L
         private const val MIN_PULL_REFRESH_SETTLE_MS = 120L
-        private val DEFAULT_EXPLORE_CATEGORY_ORDER = listOf(
+        internal val DEFAULT_EXPLORE_CATEGORY_ORDER = listOf(
             "tech",
             "review",
             "info",
@@ -1049,6 +1239,89 @@ class ExploreViewModel(
             "daily",
             "dev",
         )
+
+        internal fun buildOrderedTabs(
+            categories: List<Category>,
+            homepageCategoryOrder: List<String> = emptyList(),
+            pinnedCategorySlugs: Set<String> = AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS,
+            selectedCategorySlug: String = "",
+        ): List<Category> {
+            val bySlug = categories.associateBy { it.slug }
+            val defaultBySlug = Category.DEFAULT_CATEGORIES.associateBy { it.slug }
+            val seen = HashSet<String>()
+            return buildList {
+                // 1. Always place "" ("全部") first
+                val allTab = bySlug[""] ?: defaultBySlug[""] ?: Category(slug = "", name = "全部")
+                if (seen.add(allTab.slug)) {
+                    add(allTab)
+                }
+
+                // 2. Priority board tabs first (ordered homepageCategoryOrder -> custom pinned -> editorial defaults)
+                val prioritySlugs = when {
+                    homepageCategoryOrder.isNotEmpty() -> homepageCategoryOrder
+                    pinnedCategorySlugs != AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS -> pinnedCategorySlugs.toList()
+                    else -> DEFAULT_EXPLORE_CATEGORY_ORDER
+                }
+                prioritySlugs.forEach { rawSlug ->
+                    val slug = rawSlug.trim()
+                    if (slug.isNotBlank()) {
+                        val candidate = bySlug[slug] ?: defaultBySlug[slug] ?: return@forEach
+                        if (!candidate.isAdminOnly && candidate.visibleOnHome && seen.add(slug)) {
+                            add(candidate)
+                        }
+                    }
+                }
+
+                // 3. Append all remaining visible non-admin categories
+                categories.forEach { category ->
+                    if (!category.isAdminOnly && category.visibleOnHome && category.slug.isNotBlank() && seen.add(category.slug)) {
+                        add(category)
+                    }
+                }
+
+                // 4. Keep externally selected slug reachable while active even if hidden
+                val normalizedSelected = selectedCategorySlug.trim()
+                if (normalizedSelected.isNotBlank() && seen.add(normalizedSelected)) {
+                    add(
+                        bySlug[normalizedSelected]
+                            ?: defaultBySlug[normalizedSelected]
+                            ?: Category(slug = normalizedSelected, name = normalizedSelected),
+                    )
+                }
+            }
+        }
+
+        internal fun buildCustomizableCategoriesForReorder(
+            categories: List<Category>,
+            homepageCategoryOrder: List<String>,
+            pinnedCategorySlugs: Set<String>,
+        ): List<Category> {
+            val baseList = categories.ifEmpty { Category.DEFAULT_CATEGORIES }
+            val bySlug = baseList.associateBy { it.slug }
+            val defaultBySlug = Category.DEFAULT_CATEGORIES.associateBy { it.slug }
+            val seen = HashSet<String>()
+            val prioritySlugs = when {
+                homepageCategoryOrder.isNotEmpty() -> homepageCategoryOrder
+                pinnedCategorySlugs != AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS -> pinnedCategorySlugs.toList()
+                else -> DEFAULT_EXPLORE_CATEGORY_ORDER
+            }
+            return buildList {
+                prioritySlugs.forEach { rawSlug ->
+                    val slug = rawSlug.trim()
+                    if (slug.isNotBlank()) {
+                        val candidate = bySlug[slug] ?: defaultBySlug[slug]
+                        if (candidate != null && !candidate.isAdminOnly && seen.add(slug)) {
+                            add(candidate)
+                        }
+                    }
+                }
+                baseList.forEach { category ->
+                    if (!category.isAdminOnly && category.slug.isNotBlank() && seen.add(category.slug)) {
+                        add(category)
+                    }
+                }
+            }
+        }
 
         fun factory(
             container: AppContainer,

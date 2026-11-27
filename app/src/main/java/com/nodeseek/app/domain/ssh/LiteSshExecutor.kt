@@ -87,6 +87,9 @@ class LiteSshExecutor @JvmOverloads constructor(
     private val processingDispatcher: CoroutineDispatcher? = null,
     private val maxLineChars: Int = AnsiStreamSanitizer.DEFAULT_MAX_LINE_CHARS,
 ) {
+    internal val sftpTransport: SshSftpTransport?
+        get() = transport as? SshSftpTransport
+
     fun runCommand(
         request: SshConnectionRequest,
         command: String,

@@ -5,11 +5,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nodeseek.app.di.AppContainer
+import com.nodeseek.app.domain.activity.DrandLuckyEngine
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
 import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.EditorDraft
 import com.nodeseek.app.domain.model.TopicAccessException
+import com.nodeseek.app.domain.model.formatVoteWidgetMarkdown
+import com.nodeseek.app.domain.repository.PollAndStardustRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,6 +28,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class ComposerModeTab(val label: String) {
     WRITE("编辑"),
@@ -70,7 +75,10 @@ sealed interface PendingComposerCoinConfirm {
 
 sealed interface TopicComposerUiEvent {
     data class ShowMessage(val message: String) : TopicComposerUiEvent
-    data class PublishedSuccess(val editedTopicId: Long?) : TopicComposerUiEvent
+    data class PublishedSuccess(
+        val editedTopicId: Long?,
+        val createdTopicId: Long? = null,
+    ) : TopicComposerUiEvent
     data class RequestWebViewAuth(val url: String) : TopicComposerUiEvent
     data class InsertUploadedMarkdown(val snippet: String) : TopicComposerUiEvent
 }
@@ -99,9 +107,16 @@ data class TopicComposerUiState(
     val showBoardSheet: Boolean = false,
     val showPermissionSheet: Boolean = false,
     val showStickerSheet: Boolean = false,
+    val showPollSheet: Boolean = false,
+    val isCreatingPoll: Boolean = false,
+    val pollCreateError: String? = null,
+    val pendingLuckyDrawSpec: LuckyDrawSpec? = null,
     val showApiKeyDialog: Boolean = false,
+    val pendingPrivacyImage: PendingComposerImage? = null,
     val pendingCoinConfirm: PendingComposerCoinConfirm? = null,
 ) {
+    val showPrivacyEditorSheet: Boolean
+        get() = pendingPrivacyImage != null
     val isEditMode: Boolean
         get() = editTopicId != null
 
@@ -138,11 +153,23 @@ private data class InternalComposerState(
     val showBoardSheet: Boolean = false,
     val showPermissionSheet: Boolean = false,
     val showStickerSheet: Boolean = false,
+    val showPollSheet: Boolean = false,
+    val isCreatingPoll: Boolean = false,
+    val pollCreateError: String? = null,
+    val pendingLuckyDrawSpec: LuckyDrawSpec? = null,
     val showApiKeyDialog: Boolean = false,
+    val pendingPrivacyImage: PendingComposerImage? = null,
     val pendingCoinConfirm: PendingComposerCoinConfirm? = null,
-)
+) {
+    fun isInsideBoardSelected(): Boolean =
+        selectedCategorySlug.equals("inside", ignoreCase = true)
 
-private data class PendingComposerImage(
+    fun willIncurPrivateUpgradeFee(isEditMode: Boolean): Boolean =
+        isEditMode && originalRequiredViewLevel != 255 && requiredViewLevel == 255
+}
+
+@Immutable
+data class PendingComposerImage(
     val bytes: ByteArray,
     val mimeType: String,
     val fileName: String? = null,
@@ -155,6 +182,7 @@ class TopicComposerViewModel(
     private val initialTitle: String = "",
     private val initialMarkdown: String = "",
     private val prefillKey: String = "",
+    private val pollAndStardustRepositoryOverride: PollAndStardustRepository? = null,
 ) : ViewModel() {
 
     private val sanitizedInitialCategory = initialCategorySlug
@@ -184,20 +212,42 @@ class TopicComposerViewModel(
     @Volatile
     private var hasPendingDraftFlush: Boolean = false
     private var pendingImage: PendingComposerImage? = null
+    private val isSubmittingGuard = AtomicBoolean(false)
+    private val isCreatingPollGuard = AtomicBoolean(false)
+    private val cachedCategories = MutableStateFlow(
+        (container.forumRepository.observeCategories() as? StateFlow<List<Category>>)?.value.orEmpty()
+    )
+
+    private fun currentRawCategories(): List<Category> =
+        cachedCategories.value.ifEmpty { Category.DEFAULT_CATEGORIES }
+
+    private fun isAdminOnlyCategorySlug(slug: String): Boolean {
+        val normalized = slug.trim()
+        if (normalized.isEmpty()) return false
+        return currentRawCategories().firstOrNull {
+            it.slug.equals(normalized, ignoreCase = true)
+        }?.isAdminOnly == true
+    }
 
     val uiState: StateFlow<TopicComposerUiState> = combine(
         internalState,
         container.sessionRepository.sessionState,
         container.settingsRepository.settings,
-        container.forumRepository.observeCategories(),
+        cachedCategories,
     ) { state, session, settings, observedCategories ->
         val rawCats = observedCategories.ifEmpty { Category.DEFAULT_CATEGORIES }
         // Exclude synthetic "all" ("") and exclude adminOnly categories from New Topic picker
         val selectableBoards = rawCats.filter { cat ->
             cat.slug.isNotBlank() && !cat.isAdminOnly
         }
-        val activeCategory = rawCats.firstOrNull {
-            it.slug.equals(state.selectedCategorySlug, ignoreCase = true)
+        val activeCategory = if (editTopicId != null) {
+            rawCats.firstOrNull {
+                it.slug.equals(state.selectedCategorySlug, ignoreCase = true)
+            }
+        } else {
+            selectableBoards.firstOrNull {
+                it.slug.equals(state.selectedCategorySlug, ignoreCase = true)
+            }
         } ?: selectableBoards.firstOrNull { it.slug == "daily" } ?: selectableBoards.firstOrNull()
 
         val effectiveSlug = if (editTopicId != null) {
@@ -233,7 +283,12 @@ class TopicComposerViewModel(
             showBoardSheet = state.showBoardSheet,
             showPermissionSheet = state.showPermissionSheet,
             showStickerSheet = state.showStickerSheet,
+            showPollSheet = state.showPollSheet,
+            isCreatingPoll = state.isCreatingPoll,
+            pollCreateError = state.pollCreateError,
+            pendingLuckyDrawSpec = state.pendingLuckyDrawSpec,
             showApiKeyDialog = state.showApiKeyDialog,
+            pendingPrivacyImage = state.pendingPrivacyImage,
             pendingCoinConfirm = state.pendingCoinConfirm,
         )
     }.stateIn(
@@ -249,6 +304,11 @@ class TopicComposerViewModel(
     )
 
     init {
+        viewModelScope.launch {
+            container.forumRepository.observeCategories().collect { categories ->
+                cachedCategories.value = categories
+            }
+        }
         viewModelScope.launch {
             runCatching { container.forumRepository.refreshCategories(force = false) }
         }
@@ -388,10 +448,7 @@ class TopicComposerViewModel(
         val normalized = slug.trim().lowercase()
         if (normalized.isEmpty()) return
 
-        val board = uiState.value.availableBoards.firstOrNull {
-            it.slug.equals(normalized, ignoreCase = true)
-        }
-        if (board?.isAdminOnly == true) return
+        if (isAdminOnlyCategorySlug(normalized)) return
 
         internalState.update {
             it.copy(
@@ -535,8 +592,8 @@ class TopicComposerViewModel(
             return
         }
 
-        val state = uiState.value
-        if (state.isSubmitting || state.hasPublished) return
+        val state = internalState.value
+        if (state.isSubmitting || state.hasPublished || isSubmittingGuard.get()) return
         if (state.title.trim().isEmpty()) {
             _events.trySend(TopicComposerUiEvent.ShowMessage("请输入帖子标题"))
             return
@@ -548,7 +605,12 @@ class TopicComposerViewModel(
 
         // Check coin fees before executing network write:
         // 1. Editing an existing non-private topic into Private (`requiredViewLevel = 255`) costs 10 coins.
-        if (state.willIncurPrivateUpgradeFee) {
+        val isEditMode = editTopicId != null
+        if (!isEditMode && isAdminOnlyCategorySlug(state.selectedCategorySlug)) {
+            _events.trySend(TopicComposerUiEvent.ShowMessage("该版块仅限管理员发帖"))
+            return
+        }
+        if (state.willIncurPrivateUpgradeFee(isEditMode)) {
             internalState.update {
                 it.copy(pendingCoinConfirm = PendingComposerCoinConfirm.EditChangeToPrivate)
             }
@@ -556,7 +618,7 @@ class TopicComposerViewModel(
         }
 
         // 2. Creating a new topic in `inside` (`内版`) costs 5 coins.
-        if (!state.isEditMode && state.isInsideBoardSelected) {
+        if (!isEditMode && state.isInsideBoardSelected()) {
             internalState.update {
                 it.copy(pendingCoinConfirm = PendingComposerCoinConfirm.NewInsideBoardTopic)
             }
@@ -571,69 +633,231 @@ class TopicComposerViewModel(
     }
 
     fun confirmCoinSpendAndPublish() {
+        val state = internalState.value
+        if (state.isSubmitting || state.hasPublished || isSubmittingGuard.get()) return
         internalState.update { it.copy(pendingCoinConfirm = null) }
         executePublishOrEdit()
     }
 
     private fun executePublishOrEdit() {
-        val state = uiState.value
-        if (state.isSubmitting || state.hasPublished) return
-        val trimmedTitle = state.title.trim()
-        val trimmedMarkdown = state.markdownContent.trim()
+        val precheck = internalState.value
+        if (precheck.isSubmitting || precheck.hasPublished) return
+        if (!isSubmittingGuard.compareAndSet(false, true)) return
 
-        viewModelScope.launch {
+        var launched = false
+        try {
+            val state = internalState.value
+            if (state.isSubmitting || state.hasPublished) return
+            val trimmedTitle = state.title.trim()
+            val trimmedMarkdown = state.markdownContent.trim()
+            if (trimmedTitle.isEmpty() || trimmedMarkdown.isEmpty()) return
+            if (editTopicId == null && isAdminOnlyCategorySlug(state.selectedCategorySlug)) {
+                _events.trySend(TopicComposerUiEvent.ShowMessage("该版块仅限管理员发帖"))
+                return
+            }
+
             draftSaveJob?.cancel()
             hasPendingDraftFlush = false
             internalState.update { it.copy(isSubmitting = true) }
 
-            val result = if (editTopicId != null) {
-                // Protocol rule (#8): editTopic does NOT send/change category!
-                container.forumRepository.editTopic(
-                    topicId = editTopicId,
-                    title = trimmedTitle,
-                    markdownContent = trimmedMarkdown,
-                    requiredViewLevel = state.requiredViewLevel,
-                )
-            } else {
-                container.forumRepository.createTopic(
-                    categorySlug = state.selectedCategorySlug,
-                    title = trimmedTitle,
-                    markdownContent = trimmedMarkdown,
-                    requiredViewLevel = state.requiredViewLevel,
-                )
+            viewModelScope.launch {
+                try {
+                    if (editTopicId != null) {
+                        // Protocol rule (#8): editTopic does NOT send/change category!
+                        val result = container.forumRepository.editTopic(
+                            topicId = editTopicId,
+                            title = trimmedTitle,
+                            markdownContent = trimmedMarkdown,
+                            requiredViewLevel = state.requiredViewLevel,
+                        )
+                        result.fold(
+                            onSuccess = {
+                                val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
+                                runCatching { container.draftRepository.deleteDraft(uid, draftKey()) }
+
+                                internalState.update {
+                                    it.copy(
+                                        isSubmitting = false,
+                                        hasPublished = true,
+                                        hasRestoredDraft = false,
+                                    )
+                                }
+                                _events.trySend(TopicComposerUiEvent.ShowMessage("主题修改已保存"))
+                                _events.trySend(TopicComposerUiEvent.PublishedSuccess(editTopicId))
+                            },
+                            onFailure = { error ->
+                                internalState.update { it.copy(isSubmitting = false) }
+                                if (!maybeEmitAuthRequest(error)) {
+                                    _events.trySend(
+                                        TopicComposerUiEvent.ShowMessage(
+                                            error.message?.takeIf { it.isNotBlank() } ?: "保存主题失败"
+                                        )
+                                    )
+                                }
+                            },
+                        )
+                    } else {
+                        val result = container.forumRepository.createTopicWithResult(
+                            categorySlug = state.selectedCategorySlug,
+                            title = trimmedTitle,
+                            markdownContent = trimmedMarkdown,
+                            requiredViewLevel = state.requiredViewLevel,
+                        )
+                        result.fold(
+                            onSuccess = { createdTopicId ->
+                                val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
+                                runCatching { container.draftRepository.deleteDraft(uid, draftKey()) }
+
+                                val pendingLucky = state.pendingLuckyDrawSpec
+                                var luckyAppended = false
+                                if (pendingLucky != null && createdTopicId != null && createdTopicId > 0L) {
+                                    val finalSpec = pendingLucky.copy(postId = createdTopicId)
+                                    val luckyUrl = DrandLuckyEngine.buildLuckyUrl(finalSpec)
+                                    val updatedMd = "$trimmedMarkdown\n\n[🎲 参与官方抽奖]($luckyUrl)"
+                                    luckyAppended = container.forumRepository.editTopic(
+                                        topicId = createdTopicId,
+                                        title = trimmedTitle,
+                                        markdownContent = updatedMd,
+                                        requiredViewLevel = state.requiredViewLevel,
+                                    ).isSuccess
+                                }
+
+                                internalState.update {
+                                    it.copy(
+                                        isSubmitting = false,
+                                        hasPublished = true,
+                                        hasRestoredDraft = false,
+                                    )
+                                }
+                                val successMsg = when {
+                                    pendingLucky != null && luckyAppended -> "新主题已发布，已自动附带 /lucky 抽奖链接"
+                                    pendingLucky != null -> "新主题已发布，可在帖子右上角「生成 / 管理抽奖」补全链接"
+                                    else -> "新主题已成功发布"
+                                }
+                                _events.trySend(TopicComposerUiEvent.ShowMessage(successMsg))
+                                _events.trySend(
+                                    TopicComposerUiEvent.PublishedSuccess(
+                                        editedTopicId = null,
+                                        createdTopicId = createdTopicId,
+                                    ),
+                                )
+                            },
+                            onFailure = { error ->
+                                internalState.update { it.copy(isSubmitting = false) }
+                                if (!maybeEmitAuthRequest(error)) {
+                                    _events.trySend(
+                                        TopicComposerUiEvent.ShowMessage(
+                                            error.message?.takeIf { it.isNotBlank() } ?: "发布主题失败"
+                                        )
+                                    )
+                                }
+                            },
+                        )
+                    }
+                } finally {
+                    isSubmittingGuard.set(false)
+                    internalState.update { cur ->
+                        if (cur.isSubmitting) cur.copy(isSubmitting = false) else cur
+                    }
+                }
             }
+            launched = true
+        } finally {
+            if (!launched) {
+                isSubmittingGuard.set(false)
+                internalState.update { cur ->
+                    if (cur.isSubmitting) cur.copy(isSubmitting = false) else cur
+                }
+            }
+        }
+    }
 
-            result.fold(
-                onSuccess = {
-                    val uid = container.sessionRepository.sessionState.value?.uid ?: 0L
-                    runCatching { container.draftRepository.deleteDraft(uid, draftKey()) }
+    // ── Poll & Stardust Widget Creation ───────────────────────────────────────
 
-                    internalState.update {
-                        it.copy(
-                            isSubmitting = false,
-                            hasPublished = true,
-                            hasRestoredDraft = false,
-                        )
-                    }
-                    _events.trySend(
-                        TopicComposerUiEvent.ShowMessage(
-                            if (editTopicId != null) "主题修改已保存" else "新主题已成功发布"
-                        )
-                    )
-                    _events.trySend(TopicComposerUiEvent.PublishedSuccess(editTopicId))
-                },
-                onFailure = { error ->
-                    internalState.update { it.copy(isSubmitting = false) }
-                    if (!maybeEmitAuthRequest(error)) {
-                        _events.trySend(
-                            TopicComposerUiEvent.ShowMessage(
-                                error.message?.takeIf { it.isNotBlank() }
-                                    ?: if (editTopicId != null) "保存主题失败" else "发布主题失败"
-                            )
-                        )
-                    }
-                },
+    fun setPollSheetVisible(visible: Boolean) {
+        internalState.update {
+            it.copy(
+                showPollSheet = visible,
+                pollCreateError = if (!visible) null else it.pollCreateError,
             )
+        }
+    }
+
+    fun setPendingLuckyDrawSpec(spec: LuckyDrawSpec?) {
+        internalState.update { it.copy(pendingLuckyDrawSpec = spec) }
+        if (spec != null) {
+            _events.trySend(
+                TopicComposerUiEvent.ShowMessage("已保存抽奖配置，发帖后将自动生成 /lucky 链接"),
+            )
+        }
+    }
+
+    fun createPollAndInsert(
+        title: String,
+        multiple: Boolean,
+        isPublic: Boolean,
+        options: List<String>,
+    ) {
+        val session = container.sessionRepository.sessionState.value
+        if (session == null) {
+            _events.trySend(TopicComposerUiEvent.ShowMessage("请先登录 NodeSeek 账号"))
+            _events.trySend(TopicComposerUiEvent.RequestWebViewAuth("https://www.nodeseek.com/signIn.html"))
+            return
+        }
+        if (internalState.value.isCreatingPoll || !isCreatingPollGuard.compareAndSet(false, true)) return
+
+        var launched = false
+        try {
+            internalState.update { it.copy(isCreatingPoll = true, pollCreateError = null) }
+            viewModelScope.launch {
+                try {
+                    val repo = pollAndStardustRepositoryOverride ?: container.pollAndStardustRepository
+                    repo.createVote(
+                        title = title,
+                        multiple = multiple,
+                        isPublic = isPublic,
+                        options = options,
+                    ).fold(
+                        onSuccess = { createdPoll ->
+                            val snippet = formatVoteWidgetMarkdown(
+                                voteId = createdPoll.id,
+                                title = createdPoll.title.ifBlank { title },
+                            )
+                            internalState.update {
+                                it.copy(
+                                    isCreatingPoll = false,
+                                    showPollSheet = false,
+                                    pollCreateError = null,
+                                )
+                            }
+                            _events.trySend(TopicComposerUiEvent.InsertUploadedMarkdown("\n$snippet\n"))
+                            _events.trySend(TopicComposerUiEvent.ShowMessage("投票已创建并插入正文"))
+                        },
+                        onFailure = { err ->
+                            internalState.update {
+                                it.copy(
+                                    isCreatingPoll = false,
+                                    pollCreateError = err.message?.takeIf { m -> m.isNotBlank() } ?: "创建投票失败",
+                                )
+                            }
+                            maybeEmitAuthRequest(err)
+                        },
+                    )
+                } finally {
+                    isCreatingPollGuard.set(false)
+                    internalState.update { cur ->
+                        if (cur.isCreatingPoll) cur.copy(isCreatingPoll = false) else cur
+                    }
+                }
+            }
+            launched = true
+        } finally {
+            if (!launched) {
+                isCreatingPollGuard.set(false)
+                internalState.update { cur ->
+                    if (cur.isCreatingPoll) cur.copy(isCreatingPoll = false) else cur
+                }
+            }
         }
     }
 
@@ -654,11 +878,15 @@ class TopicComposerViewModel(
             internalState.update { it.copy(showApiKeyDialog = true) }
             return
         }
-        uploadSelectedImage(bytes = bytes, mimeType = mimeType, fileName = fileName)
+        routeImageThroughPrivacyEditor(bytes = bytes, mimeType = mimeType, fileName = fileName)
     }
 
     fun reportPhotoReadError(message: String) {
         _events.trySend(TopicComposerUiEvent.ShowMessage(message))
+    }
+
+    fun openApiKeyDialog() {
+        internalState.update { it.copy(showApiKeyDialog = true) }
     }
 
     fun dismissApiKeyDialog() {
@@ -678,13 +906,64 @@ class TopicComposerViewModel(
             val queued = pendingImage
             pendingImage = null
             if (queued != null) {
-                uploadSelectedImage(
+                routeImageThroughPrivacyEditor(
                     bytes = queued.bytes,
                     mimeType = queued.mimeType,
                     fileName = queued.fileName,
                 )
             }
         }
+    }
+
+    private fun routeImageThroughPrivacyEditor(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String?,
+    ) {
+        when (val support = ImagePrivacyBitmapCodec.inspectMosaicSupport(bytes, mimeType, fileName)) {
+            is MosaicSupportStatus.SupportedStatic -> {
+                internalState.update {
+                    it.copy(
+                        pendingPrivacyImage = PendingComposerImage(
+                            bytes = bytes,
+                            mimeType = mimeType,
+                            fileName = fileName,
+                        ),
+                    )
+                }
+            }
+            is MosaicSupportStatus.UnsupportedAnimatedOrVector -> {
+                _events.trySend(TopicComposerUiEvent.ShowMessage(support.reason))
+                uploadSelectedImage(bytes = bytes, mimeType = mimeType, fileName = fileName)
+            }
+            is MosaicSupportStatus.Unreadable -> {
+                _events.trySend(TopicComposerUiEvent.ShowMessage(support.reason))
+                uploadSelectedImage(bytes = bytes, mimeType = mimeType, fileName = fileName)
+            }
+        }
+    }
+
+    fun confirmPrivacyImageUpload(
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String?,
+    ) {
+        internalState.update { it.copy(pendingPrivacyImage = null) }
+        uploadSelectedImage(bytes = bytes, mimeType = mimeType, fileName = fileName)
+    }
+
+    fun skipPrivacyEditAndUpload() {
+        val pending = internalState.value.pendingPrivacyImage ?: return
+        internalState.update { it.copy(pendingPrivacyImage = null) }
+        uploadSelectedImage(
+            bytes = pending.bytes,
+            mimeType = pending.mimeType,
+            fileName = pending.fileName,
+        )
+    }
+
+    fun dismissPrivacyEditor() {
+        internalState.update { it.copy(pendingPrivacyImage = null) }
     }
 
     private fun uploadSelectedImage(
@@ -758,6 +1037,7 @@ class TopicComposerViewModel(
                     initialTitle = initialTitle,
                     initialMarkdown = initialMarkdown,
                     prefillKey = prefillKey,
+                    pollAndStardustRepositoryOverride = container.pollAndStardustRepository,
                 ) as T
             }
         }

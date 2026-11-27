@@ -25,14 +25,17 @@ import com.nodeseek.app.domain.repository.UserRepository
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -196,6 +199,58 @@ class BoardsViewModelTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun `toggleBookmark_headlessWithoutUiStateCollector_removesExistingBookmarkFromStateFlowAndDelayedColdFlow`() = runTest(testDispatcher) {
+        // 1. StateFlow-backed bookmark repo with zero uiState collectors
+        val stateFlowRepo = FakeBoardsBookmarkRepository(initialBookmarked = setOf(777L))
+        val vmStateFlow = BoardsViewModel(
+            forumRepository = FakeBoardsForumRepository(),
+            userRepository = FakeBoardsUserRepository(),
+            sessionRepository = FakeBoardsSessionRepository(),
+            bookmarkAndHistoryRepository = stateFlowRepo,
+            settingsRepository = FakeSettingsRepository(),
+            contentFilterRepository = FakeBoardsFilterRepository(),
+        )
+        vmStateFlow.toggleBookmark(topic(777L).copy(isBookmarked = false))
+        advanceUntilIdle()
+        assertEquals(emptyList<Long>(), stateFlowRepo.savedIds)
+        assertEquals(listOf(777L), stateFlowRepo.removedIds)
+
+        // 2. Delayed cold Room Flow (zero uiState collectors, toggled before 50ms initial emission)
+        val savedColdIds = mutableListOf<Long>()
+        val removedColdIds = mutableListOf<Long>()
+        val delayedColdRepo = object : BookmarkAndHistoryRepository by FakeBoardsBookmarkRepository() {
+            override fun observeBookmarkedIds(): Flow<Set<Long>> = flow {
+                delay(50L)
+                emit(setOf(888L))
+            }
+
+            override suspend fun saveOfflineBookmark(
+                summary: TopicSummary,
+                detailSnapshot: TopicDetailPage?,
+                syncedWithServer: Boolean,
+            ) {
+                savedColdIds += summary.id
+            }
+
+            override suspend fun removeLocalBookmark(topicId: Long) {
+                removedColdIds += topicId
+            }
+        }
+        val vmColdFlow = BoardsViewModel(
+            forumRepository = FakeBoardsForumRepository(),
+            userRepository = FakeBoardsUserRepository(),
+            sessionRepository = FakeBoardsSessionRepository(),
+            bookmarkAndHistoryRepository = delayedColdRepo,
+            settingsRepository = FakeSettingsRepository(),
+            contentFilterRepository = FakeBoardsFilterRepository(),
+        )
+        vmColdFlow.toggleBookmark(topic(888L).copy(isBookmarked = false))
+        advanceUntilIdle()
+        assertEquals(emptyList<Long>(), savedColdIds)
+        assertEquals(listOf(888L), removedColdIds)
+    }
+
     private class FakeBoardsForumRepository(
         private val searchHandler: suspend (String, String, FeedSort, Int) -> Result<FeedPageResult> = { _, _, _, _ ->
             Result.success(FeedPageResult(topics = emptyList(), currentPage = 1, hasNextPage = false))
@@ -301,6 +356,8 @@ class BoardsViewModelTest {
         private val remoteFailure: Throwable? = null,
     ) : BookmarkAndHistoryRepository {
         private val ids = MutableStateFlow(initialBookmarked)
+        val savedIds = mutableListOf<Long>()
+        val removedIds = mutableListOf<Long>()
         override suspend fun getServerBookmarks(page: Int): Result<Pair<List<TopicSummary>, Boolean>> =
             Result.success(emptyList<TopicSummary>() to false)
 
@@ -314,10 +371,12 @@ class BoardsViewModelTest {
             detailSnapshot: TopicDetailPage?,
             syncedWithServer: Boolean,
         ) {
+            savedIds += summary.id
             ids.value = ids.value + summary.id
         }
 
         override suspend fun removeLocalBookmark(topicId: Long) {
+            removedIds += topicId
             ids.value = ids.value - topicId
         }
 

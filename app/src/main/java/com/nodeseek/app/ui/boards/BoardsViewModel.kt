@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -129,8 +130,14 @@ class BoardsViewModel(
         .map { list -> list.ifEmpty { Category.DEFAULT_CATEGORIES } }
         .stateIn(viewModelScope, SharingStarted.Lazily, Category.DEFAULT_CATEGORIES)
 
-    private val bookmarkedIdsFlow = bookmarkAndHistoryRepository.observeBookmarkedIds()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+    private val cachedBookmarkedIds = MutableStateFlow(
+        (bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+            ?: emptySet(),
+    )
+
+    @Volatile
+    private var hasReceivedBookmarkedIds =
+        bookmarkAndHistoryRepository.observeBookmarkedIds() is StateFlow<*>
 
     private val readStateMapFlow = _state
         .map { s -> s.rawSearchTopics.mapTo(HashSet()) { it.id } }
@@ -148,7 +155,7 @@ class BoardsViewModel(
         settingsRepository.recentSearchQueries,
         combine(
             sessionRepository.sessionState,
-            bookmarkedIdsFlow,
+            cachedBookmarkedIds,
             readStateMapFlow,
             contentFilterRepository.config,
         ) { session, bookmarks, reads, filterConfig ->
@@ -190,6 +197,12 @@ class BoardsViewModel(
     }.stateIn(viewModelScope, SharingStarted.Lazily, BoardsUiState())
 
     init {
+        viewModelScope.launch {
+            bookmarkAndHistoryRepository.observeBookmarkedIds().collect { ids ->
+                cachedBookmarkedIds.value = ids
+                hasReceivedBookmarkedIds = true
+            }
+        }
         viewModelScope.launch {
             runCatching { forumRepository.refreshCategories(force = false) }
         }
@@ -288,9 +301,25 @@ class BoardsViewModel(
         viewModelScope.launch { settingsRepository.clearRecentSearchQueries() }
     }
 
+    private suspend fun isTopicBookmarked(topic: TopicSummary): Boolean {
+        if (topic.isBookmarked) return true
+        if (topic.id in cachedBookmarkedIds.value) return true
+        val liveIds = (bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+        if (liveIds?.contains(topic.id) == true) return true
+        if (!hasReceivedBookmarkedIds) {
+            val emittedIds = bookmarkAndHistoryRepository.observeBookmarkedIds().firstOrNull()
+            if (emittedIds != null) {
+                cachedBookmarkedIds.value = emittedIds
+                hasReceivedBookmarkedIds = true
+                if (topic.id in emittedIds) return true
+            }
+        }
+        return bookmarkAndHistoryRepository.getOfflineBookmarkSnapshot(topic.id) != null
+    }
+
     fun toggleBookmark(topic: TopicSummary) {
         viewModelScope.launch {
-            val currentlyBookmarked = topic.id in bookmarkedIdsFlow.value || topic.isBookmarked
+            val currentlyBookmarked = isTopicBookmarked(topic)
             val targetBookmarked = !currentlyBookmarked
             val isSignedIn = sessionRepository.sessionState.value != null
             if (targetBookmarked) {
@@ -299,8 +328,10 @@ class BoardsViewModel(
                     detailSnapshot = null,
                     syncedWithServer = false,
                 )
+                cachedBookmarkedIds.update { it + topic.id }
             } else {
                 bookmarkAndHistoryRepository.removeLocalBookmark(topic.id)
+                cachedBookmarkedIds.update { it - topic.id }
             }
             if (isSignedIn) {
                 bookmarkAndHistoryRepository.setTopicBookmarked(topic.id, targetBookmarked)

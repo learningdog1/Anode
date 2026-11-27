@@ -3,6 +3,9 @@ package com.nodeseek.app.ui.ssh
 import androidx.compose.runtime.Stable
 import com.nodeseek.app.data.fleet.ProbePanelTerminalTransport
 import com.nodeseek.app.data.fleet.ProbeVaultSyncClient
+import com.nodeseek.app.domain.baseline.BaselineDiffEngine
+import com.nodeseek.app.domain.baseline.BaselineSnapshotExtractor
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
 import com.nodeseek.app.domain.radar.InAppMessageKind
 import com.nodeseek.app.domain.radar.InAppMessagePopup
@@ -14,6 +17,7 @@ import com.nodeseek.app.domain.ssh.Iperf3StartProbeResult
 import com.nodeseek.app.domain.ssh.Iperf3StopOutcome
 import com.nodeseek.app.domain.ssh.LiteSshExecutionEvent
 import com.nodeseek.app.domain.ssh.LiteSshExecutor
+import com.nodeseek.app.domain.ssh.NodeQualityReportFormatter
 import com.nodeseek.app.domain.ssh.SanitizedBufferSnapshot
 import com.nodeseek.app.domain.ssh.SshAutoRespondConfig
 import com.nodeseek.app.domain.ssh.SshConnectionMode
@@ -26,6 +30,7 @@ import com.nodeseek.app.domain.ssh.SshJumpHostConnectionException
 import com.nodeseek.app.domain.ssh.SshJumpHostCycleException
 import com.nodeseek.app.domain.ssh.SshJumpHostResolver
 import com.nodeseek.app.domain.ssh.SshLiveProgressStatus
+import com.nodeseek.app.domain.ssh.SshOneShotCommandResult
 import com.nodeseek.app.domain.ssh.SshPresetCatalog
 import com.nodeseek.app.domain.ssh.SshPresetCategory
 import com.nodeseek.app.domain.ssh.SshPresetFilter
@@ -37,18 +42,27 @@ import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshSftpClient
+import com.nodeseek.app.domain.ssh.SshSftpEntry
+import com.nodeseek.app.domain.ssh.SshSftpException
+import com.nodeseek.app.domain.ssh.SshSftpQuickShortcut
+import com.nodeseek.app.domain.ssh.SshSftpTransport
 import com.nodeseek.app.domain.ssh.SshStageDetector
 import com.nodeseek.app.domain.ssh.SshStdinCallbackContext
 import com.nodeseek.app.domain.ssh.SshStdinWriter
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.domain.ssh.SshVaultRepository
+import com.nodeseek.app.data.ssh.JschSftpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -61,9 +75,14 @@ import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
+import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 /**
@@ -93,6 +112,8 @@ class LiteSshSessionManager(
     private val probeSyncClientOverride: ProbeVaultSyncClient? = null,
     private val panelTerminalExecutorOverride: LiteSshExecutor? = null,
     private val baseHttpClient: OkHttpClient? = null,
+    private val sftpTransportOverride: SshSftpTransport? = null,
+    benchmarkBaselineRepository: BenchmarkBaselineRepository? = null,
 ) {
     private val _consoleStreamState = MutableStateFlow(SshConsoleStreamState())
     val consoleStreamState: StateFlow<SshConsoleStreamState> = _consoleStreamState.asStateFlow()
@@ -120,6 +141,10 @@ class LiteSshSessionManager(
     private var attachedFleetRepository: FleetRepository? = null
     private var fleetPanelsObserveJob: Job? = null
     private var probeSyncJob: Job? = null
+    private val baselineAttachLock = Any()
+    @Volatile
+    private var attachedBaselineRepository: BenchmarkBaselineRepository? = null
+    private var baselinesObserveJob: Job? = null
     @Volatile
     private var defaultProbeSyncClient: ProbeVaultSyncClient? = null
     @Volatile
@@ -128,6 +153,22 @@ class LiteSshSessionManager(
     private var executionJob: Job? = null
     private var iperf3ServiceJob: Job? = null
     private var iperf3ServiceGeneration: Long = 0L
+    private enum class SftpOpKind { NONE, CONNECT, LIST_DIR, OPERATING }
+
+    @Volatile
+    private var sftpOpJob: Job? = null
+    @Volatile
+    private var sftpGeneration: Long = 0L
+    @Volatile
+    private var sftpActiveOpKind: SftpOpKind = SftpOpKind.NONE
+    private var sftpActiveSaveGeneration: Long = 0L
+    private val sftpLifecycleMutex = Mutex()
+    private data class ActiveSftpHandle(
+        val serverId: String,
+        val client: SshSftpClient,
+    )
+    @Volatile
+    private var activeSftpHandle: ActiveSftpHandle? = null
     private var elapsedTickerJob: Job? = null
     private var lastForegroundNotifyMillis: Long = 0L
     private var lastForegroundStatusLine: String = ""
@@ -202,6 +243,47 @@ class LiteSshSessionManager(
         }
         if (fleetRepository != null) {
             attachFleetIntegration(fleetRepository)
+        }
+        if (benchmarkBaselineRepository != null) {
+            attachBaselineRepository(benchmarkBaselineRepository)
+        }
+    }
+
+    fun attachBaselineRepository(repository: BenchmarkBaselineRepository) {
+        synchronized(baselineAttachLock) {
+            if (attachedBaselineRepository === repository) return
+            attachedBaselineRepository = repository
+            baselinesObserveJob?.cancel()
+            baselinesObserveJob = externalScope.launch {
+                runCatching { repository.ensureLoaded() }
+                repository.baselinesFlow.collect { baselines ->
+                    _uiState.update { state ->
+                        val updatedDiff = if (state.showBaselineCompareSheet) {
+                            val selected = baselines.firstOrNull { it.id == state.selectedBaselineIdForCompare }
+                                ?: state.matchingBaselines.firstOrNull()
+                                ?: baselines.firstOrNull()
+                            val runs = state.exportableRuns
+                            if (selected != null && runs.isNotEmpty()) {
+                                val currentSnap = BaselineSnapshotExtractor.fromSshRuns(
+                                    runs = runs,
+                                    id = "current_ssh",
+                                    label = "当前实测",
+                                    capturedAtEpochMillis = clock(),
+                                )
+                                BaselineDiffEngine.compare(selected, currentSnap)
+                            } else {
+                                state.activeBaselineDiff
+                            }
+                        } else {
+                            state.activeBaselineDiff
+                        }
+                        state.copy(
+                            savedBaselines = baselines,
+                            activeBaselineDiff = updatedDiff,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -747,7 +829,13 @@ class LiteSshSessionManager(
             // Retry with strict verification (allowHostKeyMismatchOverride = false): the exact
             // user-approved fingerprint has just been persisted into the vault, so only that key
             // will succeed and a swapped third key during retry is still rejected.
-            if (prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
+            if (prompt.isSftpRetry) {
+                connectSftpInternal(
+                    server = refreshed,
+                    allowHostKeyMismatchOverride = false,
+                    mismatchOverrideServerId = null,
+                )
+            } else if (prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
                 executeIperf3ServiceCommand(
                     server = refreshed,
                     preset = prompt.preset,
@@ -775,6 +863,18 @@ class LiteSshSessionManager(
 
     fun dismissHostKeyMismatch() {
         val prompt = _uiState.value.pendingHostKeyMismatch
+        if (prompt != null && prompt.isSftpRetry) {
+            _uiState.update {
+                it.copy(
+                    pendingHostKeyMismatch = null,
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnecting = false,
+                        errorMessage = "已因主机密钥变更取消 SFTP 连接",
+                    ),
+                )
+            }
+            return
+        }
         if (prompt != null && prompt.preset.id in IPERF3_SERVICE_PRESET_IDS) {
             // iperf3 service utility runs are isolated from the benchmark console state.
             _uiState.update {
@@ -1579,10 +1679,1191 @@ class LiteSshSessionManager(
         executionJob?.cancel()
         elapsedTickerJob?.cancel()
         iperf3ServiceJob?.cancel()
+        sftpOpJob?.cancel()
+        runCatching { activeSftpHandle?.client?.close() }
+        activeSftpHandle = null
         fleetPanelsObserveJob?.cancel()
         probeSyncJob?.cancel()
+        baselinesObserveJob?.cancel()
         stdinWriteChannel.close()
         externalScope.cancel()
+    }
+
+    // ── Purchase Baseline & Before-vs-After Comparison (R7) ───────────────────
+
+    fun openSaveBaselineDialog() {
+        if (_uiState.value.exportableRuns.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "请先运行至少一次测评脚本后再保存基线") }
+            return
+        }
+        _uiState.update { it.copy(showSaveBaselineDialog = true) }
+    }
+
+    fun dismissSaveBaselineDialog() {
+        _uiState.update { it.copy(showSaveBaselineDialog = false) }
+    }
+
+    fun saveCurrentAsBaseline(
+        label: String = "",
+        notes: String = "",
+    ) {
+        val repo = attachedBaselineRepository ?: return
+        val runs = _uiState.value.exportableRuns
+        if (runs.isEmpty()) return
+        val snapshot = BaselineSnapshotExtractor.fromSshRuns(
+            runs = runs,
+            id = idGenerator(),
+            label = label.trim().ifBlank { null },
+            capturedAtEpochMillis = clock(),
+        ).copy(notes = notes.trim())
+        _uiState.update { it.copy(showSaveBaselineDialog = false) }
+        externalScope.launch {
+            val saved = repo.saveBaseline(snapshot)
+            _uiState.update { it.copy(statusMessage = "已保存购入基线「${saved.label}」") }
+        }
+    }
+
+    fun openBaselineCompareSheet(baselineId: String? = null) {
+        val state = _uiState.value
+        val runs = state.exportableRuns
+        if (runs.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "请先运行至少一次测评脚本后再对比基线") }
+            return
+        }
+        val all = attachedBaselineRepository?.baselinesFlow?.value ?: state.savedBaselines
+        val matching = state.matchingBaselines
+        val chosen = baselineId?.let { id -> all.firstOrNull { it.id == id } }
+            ?: matching.firstOrNull()
+            ?: all.firstOrNull()
+        if (chosen == null) {
+            _uiState.update { it.copy(statusMessage = "暂无已保存的购入基线") }
+            return
+        }
+        val currentSnap = BaselineSnapshotExtractor.fromSshRuns(
+            runs = runs,
+            id = "current_ssh",
+            label = "当前实测",
+            capturedAtEpochMillis = clock(),
+        )
+        val diff = BaselineDiffEngine.compare(chosen, currentSnap)
+        _uiState.update {
+            it.copy(
+                savedBaselines = all,
+                selectedBaselineIdForCompare = chosen.id,
+                activeBaselineDiff = diff,
+                showBaselineCompareSheet = true,
+            )
+        }
+    }
+
+    fun dismissBaselineCompareSheet() {
+        _uiState.update { it.copy(showBaselineCompareSheet = false) }
+    }
+
+    fun selectBaselineForComparison(baselineId: String) {
+        val state = _uiState.value
+        val chosen = state.savedBaselines.firstOrNull { it.id == baselineId } ?: return
+        val runs = state.exportableRuns
+        if (runs.isEmpty()) return
+        val currentSnap = BaselineSnapshotExtractor.fromSshRuns(
+            runs = runs,
+            id = "current_ssh",
+            label = "当前实测",
+            capturedAtEpochMillis = clock(),
+        )
+        val diff = BaselineDiffEngine.compare(chosen, currentSnap)
+        _uiState.update {
+            it.copy(
+                selectedBaselineIdForCompare = chosen.id,
+                activeBaselineDiff = diff,
+            )
+        }
+    }
+
+    fun deleteBaseline(baselineId: String) {
+        val repo = attachedBaselineRepository ?: return
+        externalScope.launch {
+            repo.deleteBaseline(baselineId)
+            val remaining = repo.baselinesFlow.value
+            val state = _uiState.value
+            val nextSelected = state.matchingBaselines.firstOrNull { it.id in remaining.map { r -> r.id } }
+                ?: remaining.firstOrNull()
+            val runs = state.exportableRuns
+            val nextDiff = if (nextSelected != null && runs.isNotEmpty()) {
+                val currentSnap = BaselineSnapshotExtractor.fromSshRuns(
+                    runs = runs,
+                    id = "current_ssh",
+                    label = "当前实测",
+                    capturedAtEpochMillis = clock(),
+                )
+                BaselineDiffEngine.compare(nextSelected, currentSnap)
+            } else {
+                null
+            }
+            _uiState.update {
+                it.copy(
+                    savedBaselines = remaining,
+                    selectedBaselineIdForCompare = nextSelected?.id,
+                    activeBaselineDiff = nextDiff,
+                    showBaselineCompareSheet = if (remaining.isEmpty()) false else it.showBaselineCompareSheet,
+                    statusMessage = "已删除购入基线",
+                )
+            }
+        }
+    }
+
+    /**
+     * Executes an isolated one-shot remote command on [profile] (supporting both `DIRECT_SSH` with
+     * ProxyJump/TOFU and `PANEL_TERMINAL` via [resolvePanelTerminalExecutor]) without disturbing
+     * `isRunning`, `consoleStreamState`, `sessionRuns`, `recentRuns`, or `foregroundServiceController`.
+     */
+    suspend fun runOneShotCommand(
+        profile: SshServerProfile,
+        command: String,
+        autoRespondPrompts: Boolean = false,
+        allowHostKeyMismatchOverride: Boolean = false,
+        mismatchOverrideServerId: String? = null,
+        connectionModeOverride: SshConnectionMode? = null,
+        timeoutMillis: Long = DEFAULT_ONESHOT_COMMAND_TIMEOUT_MILLIS,
+    ): Result<SshOneShotCommandResult> {
+        val startedAt = clock()
+        return try {
+            val effectiveMode = connectionModeOverride ?: profile.effectiveConnectionMode
+            val selectedExecutor = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) {
+                resolvePanelTerminalExecutor()
+                    ?: return Result.failure(
+                        IllegalStateException("探针终端执行器未就绪，请先在「我的服务器」配置探针面板或切换为「直连 SSH」"),
+                    )
+            } else {
+                executor
+            }
+            val request = SshJumpHostResolver.buildConnectionRequest(
+                vaultRepository = vaultRepository,
+                server = profile,
+                allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                mismatchOverrideServerId = mismatchOverrideServerId,
+                connectionModeOverride = effectiveMode,
+            )
+
+            suspend fun collectExecution(): SshOneShotCommandResult {
+                var exitCode: Int? = null
+                var latestOutput = ""
+                selectedExecutor.runCommand(
+                    request = request,
+                    command = command,
+                    autoRespondConfig = SshAutoRespondConfig(enabled = autoRespondPrompts),
+                ).collect { event ->
+                    when (event) {
+                        is LiteSshExecutionEvent.HostKeyChecked -> {
+                            val checkedServerId = event.serverId ?: profile.id
+                            when (val verification = event.verification) {
+                                is HostKeyVerificationResult.FirstUseTrust,
+                                is HostKeyVerificationResult.KeyChangedWarning,
+                                -> vaultRepository.updateHostKeyFingerprint(
+                                    serverId = checkedServerId,
+                                    fingerprintSha256 = verification.hostKey.fingerprintSha256,
+                                    algorithm = verification.hostKey.algorithm,
+                                )
+                                is HostKeyVerificationResult.Trusted -> Unit
+                            }
+                        }
+                        LiteSshExecutionEvent.Connected -> {
+                            vaultRepository.markServerConnected(profile.id, clock())
+                        }
+                        is LiteSshExecutionEvent.OutputUpdated -> {
+                            latestOutput = event.sanitizedAnsiOutput
+                        }
+                        is LiteSshExecutionEvent.Completed -> {
+                            exitCode = event.exitCode
+                            latestOutput = event.sanitizedAnsiOutput
+                        }
+                        LiteSshExecutionEvent.Connecting,
+                        is LiteSshExecutionEvent.AutoResponded,
+                        -> Unit
+                    }
+                }
+                val duration = (clock() - startedAt).coerceAtLeast(0L)
+                val plain = NodeQualityReportFormatter.stripAnsiSgrFast(latestOutput)
+                    .replace(ANSI_ESCAPE_REGEX, "")
+                return SshOneShotCommandResult(
+                    serverId = profile.id,
+                    serverAlias = profile.displayName,
+                    serverHost = profile.host,
+                    command = command,
+                    sanitizedAnsiOutput = latestOutput,
+                    plainOutput = plain,
+                    exitCode = exitCode ?: 0,
+                    durationMillis = duration,
+                    connectionMode = effectiveMode,
+                )
+            }
+
+            val result = if (timeoutMillis > 0L) {
+                withTimeout(timeoutMillis) { collectExecution() }
+            } else {
+                collectExecution()
+            }
+            Result.success(result)
+        } catch (tce: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            Result.failure(tce)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    // ── R6: Lite SFTP File Drawer & Config Editor ─────────────────────────────────────────────
+
+    private fun resolveSftpTransport(): SshSftpTransport? =
+        sftpTransportOverride ?: executor.sftpTransport
+
+    fun openSftpDrawer(serverId: String? = null) {
+        val state = _uiState.value
+        val server = serverId?.let { id -> state.servers.firstOrNull { it.id == id } }
+            ?: state.selectedServer
+        if (server == null) {
+            _uiState.update { it.copy(showServerEditor = true, statusMessage = "请先添加一台 VPS 主机") }
+            return
+        }
+        if (state.selectedServerId != server.id) {
+            _uiState.update { it.copy(selectedServerId = server.id) }
+        }
+        if (!server.canDirectSsh) {
+            ++sftpGeneration
+            sftpActiveOpKind = SftpOpKind.NONE
+            sftpOpJob?.cancel()
+            sftpOpJob = null
+            closeSftpHandleAsync()
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = SshSftpDrawerState(
+                        isOpen = true,
+                        serverId = server.id,
+                        serverAlias = server.displayName,
+                        serverHost = server.host,
+                        needsDirectSshCredentials = true,
+                        isConnecting = false,
+                        isConnected = false,
+                        errorMessage = null,
+                    ),
+                )
+            }
+            return
+        }
+        val existingHandle = activeSftpHandle
+        if (existingHandle != null && existingHandle.serverId == server.id && existingHandle.client.isConnected) {
+            val currentPath = _uiState.value.sftpDrawer.currentPath.ifBlank { existingHandle.client.homeDirectory }
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isOpen = true,
+                        serverId = server.id,
+                        serverAlias = server.displayName,
+                        serverHost = server.host,
+                        needsDirectSshCredentials = false,
+                        isConnecting = false,
+                        isConnected = true,
+                        errorMessage = null,
+                    ),
+                )
+            }
+            sftpListDir(currentPath)
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                sftpDrawer = SshSftpDrawerState(
+                    isOpen = true,
+                    serverId = server.id,
+                    serverAlias = server.displayName,
+                    serverHost = server.host,
+                    needsDirectSshCredentials = false,
+                    isConnecting = true,
+                    isConnected = false,
+                    currentPath = "/",
+                    homePath = "/",
+                ),
+            )
+        }
+        connectSftpInternal(
+            server = server,
+            allowHostKeyMismatchOverride = false,
+            mismatchOverrideServerId = null,
+        )
+    }
+
+    private fun connectSftpInternal(
+        server: SshServerProfile,
+        allowHostKeyMismatchOverride: Boolean,
+        mismatchOverrideServerId: String?,
+    ) {
+        val transport = resolveSftpTransport()
+        if (transport == null) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnecting = false,
+                        isConnected = false,
+                        errorMessage = "当前传输层不支持 SFTP 会话",
+                    ),
+                )
+            }
+            return
+        }
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.CONNECT
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isOpen = true,
+                    serverId = server.id,
+                    serverAlias = server.displayName,
+                    serverHost = server.host,
+                    needsDirectSshCredentials = false,
+                    isConnecting = true,
+                    isConnected = false,
+                    errorMessage = null,
+                ),
+            )
+        }
+
+        fun isCurrentSftpConnectTarget(): Boolean {
+            val drawer = _uiState.value.sftpDrawer
+            return sftpGeneration == generation &&
+                drawer.isOpen &&
+                drawer.serverId == server.id &&
+                !drawer.needsDirectSshCredentials
+        }
+
+        val job = externalScope.launch {
+            var newClient: SshSftpClient? = null
+            try {
+                if (!isCurrentSftpConnectTarget()) return@launch
+                val request = SshJumpHostResolver.buildConnectionRequest(
+                    vaultRepository = vaultRepository,
+                    server = server,
+                    allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+                    mismatchOverrideServerId = mismatchOverrideServerId,
+                    connectionModeOverride = SshConnectionMode.DIRECT_SSH,
+                )
+                val observedHostKeys = ArrayList<Pair<HostKeyVerificationResult, String?>>()
+                val client = sftpLifecycleMutex.withLock {
+                    if (!isCurrentSftpConnectTarget()) return@launch
+                    activeSftpHandle?.let { old ->
+                        activeSftpHandle = null
+                        runCatching { old.client.close() }
+                    }
+                    transport.openSftpSession(request) { verification, checkedId ->
+                        observedHostKeys += verification to checkedId
+                    }.also { opened ->
+                        newClient = opened
+                    }
+                }
+                if (!isCurrentSftpConnectTarget()) {
+                    runCatching { client.close() }
+                    newClient = null
+                    return@launch
+                }
+                for ((verification, checkedId) in observedHostKeys) {
+                    val targetId = checkedId ?: server.id
+                    when (verification) {
+                        is HostKeyVerificationResult.FirstUseTrust,
+                        is HostKeyVerificationResult.KeyChangedWarning,
+                        -> vaultRepository.updateHostKeyFingerprint(
+                            serverId = targetId,
+                            fingerprintSha256 = verification.hostKey.fingerprintSha256,
+                            algorithm = verification.hostKey.algorithm,
+                        )
+                        is HostKeyVerificationResult.Trusted -> Unit
+                    }
+                }
+                vaultRepository.markServerConnected(server.id, clock())
+
+                val home = client.homeDirectory.ifBlank { "/" }
+                val entries = client.listDir(home)
+
+                var committed = false
+                sftpLifecycleMutex.withLock {
+                    if (isCurrentSftpConnectTarget()) {
+                        activeSftpHandle = ActiveSftpHandle(serverId = server.id, client = client)
+                        newClient = null
+                        committed = true
+                    } else {
+                        runCatching { client.close() }
+                        newClient = null
+                    }
+                }
+                if (!committed) return@launch
+
+                var uiUpdated = false
+                _uiState.update { state ->
+                    val drawer = state.sftpDrawer
+                    val accepted = sftpGeneration == generation &&
+                        drawer.isOpen &&
+                        drawer.serverId == server.id &&
+                        !drawer.needsDirectSshCredentials
+                    uiUpdated = accepted
+                    if (!accepted) {
+                        state
+                    } else {
+                        state.copy(
+                            sftpDrawer = drawer.copy(
+                                isConnecting = false,
+                                isConnected = true,
+                                isLoadingDir = false,
+                                homePath = home,
+                                currentPath = home,
+                                entries = entries,
+                                errorMessage = null,
+                            ),
+                        )
+                    }
+                }
+                if (!uiUpdated) {
+                    sftpLifecycleMutex.withLock {
+                        val current = activeSftpHandle
+                        if (current != null && current.client === client) {
+                            activeSftpHandle = null
+                            runCatching { client.close() }
+                        }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                runCatching { newClient?.close() }
+                throw ce
+            } catch (mismatch: SshHostKeyMismatchException) {
+                runCatching { newClient?.close() }
+                if (!isCurrentSftpConnectTarget()) return@launch
+                val resolvedMismatchServerId = mismatch.serverId ?: server.id
+                val resolvedMismatchAlias = mismatch.serverAlias
+                    ?: _uiState.value.servers.firstOrNull { it.id == resolvedMismatchServerId }?.displayName
+                    ?: server.displayName
+                val dummyPreset = SshScriptPreset(
+                    id = PRESET_ID_SFTP_SESSION,
+                    name = "SFTP 文件连接",
+                    tabTitle = "SFTP",
+                    category = SshPresetCategory.DIAGNOSTIC,
+                    description = "SFTP 文件浏览器与配置编辑",
+                    estimatedDurationLabel = "实时",
+                    commandTemplate = "",
+                )
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isConnecting = false,
+                            isConnected = false,
+                            errorMessage = "检测到主机密钥变更，已阻断 SFTP 连接",
+                        ),
+                        pendingHostKeyMismatch = PendingHostKeyMismatchPrompt(
+                            serverId = server.id,
+                            serverAlias = resolvedMismatchAlias,
+                            preset = dummyPreset,
+                            command = "",
+                            expectedFingerprint = mismatch.expectedFingerprint,
+                            actualHostKey = mismatch.actualHostKey,
+                            mismatchServerId = resolvedMismatchServerId,
+                            isSftpRetry = true,
+                        ),
+                    )
+                }
+            } catch (t: Throwable) {
+                runCatching { newClient?.close() }
+                if (!isCurrentSftpConnectTarget()) return@launch
+                val msg = formatSftpError(t, "SFTP 连接失败")
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isConnecting = false,
+                            isConnected = false,
+                            isLoadingDir = false,
+                            errorMessage = msg,
+                        ),
+                    )
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun dismissSftpDrawer() {
+        ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.NONE
+        sftpOpJob?.cancel()
+        sftpOpJob = null
+        closeSftpHandleAsync()
+        _uiState.update { it.copy(sftpDrawer = SshSftpDrawerState()) }
+    }
+
+    private fun closeSftpHandleAsync() {
+        val prev = activeSftpHandle
+        activeSftpHandle = null
+        if (prev != null) {
+            externalScope.launch(Dispatchers.IO) {
+                sftpLifecycleMutex.withLock {
+                    runCatching { prev.client.close() }
+                }
+            }
+        }
+    }
+
+    fun sftpRefreshCurrentDir() {
+        val currentPath = _uiState.value.sftpDrawer.currentPath.ifBlank { "." }
+        sftpListDir(currentPath)
+    }
+
+    fun sftpNavigateUp() {
+        val current = _uiState.value.sftpDrawer.currentPath
+        val parent = JschSftpClient.parentDirectory(current)
+        if (parent != current || current == "/") {
+            sftpListDir(parent)
+        }
+    }
+
+    fun sftpListDir(path: String) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.LIST_DIR
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = true,
+                    isOperating = false,
+                    openFile = it.sftpDrawer.openFile?.copy(isSaving = false),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                val targetPath = JschSftpClient.normalizeRemoteDirPath(path, handle.client.homeDirectory)
+                val entries = handle.client.listDir(targetPath)
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isLoadingDir = false,
+                            currentPath = targetPath,
+                            entries = entries,
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isLoadingDir = false,
+                            isConnected = handle.client.isConnected,
+                            errorMessage = formatSftpError(t, "读取目录失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally) {
+                    _uiState.update { state ->
+                        if (state.sftpDrawer.isLoadingDir &&
+                            (sftpGeneration == generation || sftpActiveOpKind != SftpOpKind.LIST_DIR)
+                        ) {
+                            state.copy(sftpDrawer = state.sftpDrawer.copy(isLoadingDir = false))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpOpenQuickShortcut(shortcut: SshSftpQuickShortcut) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        val currentDir = _uiState.value.sftpDrawer.currentPath.ifBlank { handle.client.homeDirectory }
+        val resolvedPath = if (shortcut.path.startsWith("/")) {
+            shortcut.path
+        } else {
+            JschSftpClient.joinRemotePath(currentDir, shortcut.path)
+        }
+        if (shortcut.isDirectory) {
+            sftpListDir(resolvedPath)
+        } else {
+            sftpOpenFile(remotePath = resolvedPath, preferEditMode = shortcut.preferEditMode)
+        }
+    }
+
+    fun sftpOpenFile(
+        remotePath: String,
+        preferEditMode: Boolean = false,
+    ) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.OPERATING
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = false,
+                    isOperating = true,
+                    openFile = it.sftpDrawer.openFile?.copy(isSaving = false),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                val maxBytes = if (preferEditMode) {
+                    SshSftpClient.MAX_EDITABLE_BYTES
+                } else {
+                    SshSftpClient.DEFAULT_PREVIEW_MAX_BYTES
+                }
+                val content = handle.client.readTextPreview(
+                    remotePath = remotePath,
+                    maxBytes = maxBytes,
+                    tailIfLarger = !preferEditMode,
+                )
+                if (sftpGeneration != generation) return@launch
+                val fileName = content.remotePath.substringAfterLast('/').ifBlank { content.remotePath }
+                val enterEdit = preferEditMode && content.canEdit
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            openFile = SshSftpOpenFileState(
+                                remotePath = content.remotePath,
+                                fileName = fileName,
+                                originalText = content.text,
+                                editedText = content.text,
+                                totalBytes = content.totalBytes,
+                                isTruncatedFromHead = content.isTruncatedFromHead,
+                                isBinaryDetected = content.isBinaryDetected,
+                                canEdit = content.canEdit,
+                                isEditMode = enterEdit,
+                            ),
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            isConnected = handle.client.isConnected,
+                            errorMessage = formatSftpError(t, "打开文件失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally && sftpGeneration == generation) {
+                    _uiState.update { state ->
+                        if (state.sftpDrawer.isOperating) {
+                            state.copy(sftpDrawer = state.sftpDrawer.copy(isOperating = false))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpEnterEditMode() {
+        _uiState.update { state ->
+            val file = state.sftpDrawer.openFile ?: return@update state
+            if (!file.canEdit) return@update state
+            state.copy(
+                sftpDrawer = state.sftpDrawer.copy(
+                    openFile = file.copy(isEditMode = true),
+                ),
+            )
+        }
+    }
+
+    fun sftpUpdateEditorContent(text: String) {
+        _uiState.update { state ->
+            val file = state.sftpDrawer.openFile ?: return@update state
+            state.copy(
+                sftpDrawer = state.sftpDrawer.copy(
+                    openFile = file.copy(editedText = text),
+                ),
+            )
+        }
+    }
+
+    fun sftpSaveFileWithBak() {
+        val handle = activeSftpHandle
+        val openFile = _uiState.value.sftpDrawer.openFile
+        if (handle == null || !handle.client.isConnected || openFile == null) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        errorMessage = "当前没有可保存的打开文件或 SFTP 已断开",
+                    ),
+                )
+            }
+            return
+        }
+        if (!openFile.canEdit) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        errorMessage = "该文件为二进制或截断预览文件，不可直接覆写保存",
+                    ),
+                )
+            }
+            return
+        }
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.OPERATING
+        sftpActiveSaveGeneration = generation
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = false,
+                    isOperating = true,
+                    openFile = openFile.copy(isSaving = true),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                val payload = openFile.editedText.toByteArray(StandardCharsets.UTF_8)
+                val result = handle.client.writeWithBakBackup(
+                    remotePath = openFile.remotePath,
+                    content = payload,
+                    createBackupIfExists = true,
+                )
+                val parentDir = JschSftpClient.parentDirectory(openFile.remotePath)
+                val refreshedEntries = if (parentDir == _uiState.value.sftpDrawer.currentPath) {
+                    runCatching { handle.client.listDir(parentDir) }.getOrNull()
+                } else {
+                    null
+                }
+                if (sftpGeneration != generation) return@launch
+                val backupNotice = if (result.backupCreated && result.backupPath != null) {
+                    "已保存 ${openFile.fileName}，原配置已自动备份至 ${result.backupPath}"
+                } else {
+                    "已保存新文件 ${openFile.fileName}"
+                }
+                _uiState.update { state ->
+                    val currentFile = state.sftpDrawer.openFile
+                    state.copy(
+                        statusMessage = backupNotice,
+                        sftpDrawer = state.sftpDrawer.copy(
+                            isOperating = false,
+                            entries = refreshedEntries ?: state.sftpDrawer.entries,
+                            lastBackupBanner = backupNotice,
+                            openFile = currentFile?.copy(
+                                originalText = openFile.editedText,
+                                editedText = openFile.editedText,
+                                totalBytes = result.bytesWritten,
+                                isSaving = false,
+                            ),
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update { state ->
+                    state.copy(
+                        sftpDrawer = state.sftpDrawer.copy(
+                            isOperating = false,
+                            openFile = state.sftpDrawer.openFile?.copy(isSaving = false),
+                            errorMessage = formatSftpError(t, "保存配置文件失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally) {
+                    _uiState.update { state ->
+                        val currentOpenFile = state.sftpDrawer.openFile
+                        val resetOpenFile = if (currentOpenFile != null &&
+                            currentOpenFile.isSaving &&
+                            sftpActiveSaveGeneration == generation
+                        ) {
+                            currentOpenFile.copy(isSaving = false)
+                        } else {
+                            null
+                        }
+                        val shouldResetOperating = state.sftpDrawer.isOperating &&
+                            (sftpGeneration == generation || sftpActiveOpKind != SftpOpKind.OPERATING)
+                        if (resetOpenFile == null && !shouldResetOperating) {
+                            state
+                        } else {
+                            state.copy(
+                                sftpDrawer = state.sftpDrawer.copy(
+                                    isOperating = if (shouldResetOperating) false else state.sftpDrawer.isOperating,
+                                    openFile = resetOpenFile ?: currentOpenFile,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpUploadStream(
+        fileName: String,
+        inputStream: InputStream,
+    ) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            runCatching { inputStream.close() }
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        val cleanName = fileName.trim()
+            .replace('/', '_')
+            .replace('\\', '_')
+            .takeIf { it.isNotEmpty() && it != "." && it != ".." }
+        if (cleanName == null) {
+            runCatching { inputStream.close() }
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(errorMessage = "上传文件名无效"),
+                )
+            }
+            return
+        }
+        val currentDir = _uiState.value.sftpDrawer.currentPath.ifBlank { handle.client.homeDirectory }
+        val targetPath = JschSftpClient.joinRemotePath(currentDir, cleanName)
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.OPERATING
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = false,
+                    isOperating = true,
+                    openFile = it.sftpDrawer.openFile?.copy(isSaving = false),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                val uploadedBytes = inputStream.use { stream ->
+                    handle.client.uploadStream(
+                        remotePath = targetPath,
+                        inputStream = stream,
+                        overwrite = true,
+                    )
+                }
+                val refreshed = runCatching { handle.client.listDir(currentDir) }.getOrNull()
+                if (sftpGeneration != generation) return@launch
+                val msg = "已上传 $cleanName (${formatByteSizeCompact(uploadedBytes)}) 至 $currentDir"
+                _uiState.update {
+                    it.copy(
+                        statusMessage = msg,
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            entries = refreshed ?: it.sftpDrawer.entries,
+                            lastBackupBanner = msg,
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            isConnected = handle.client.isConnected,
+                            errorMessage = formatSftpError(t, "上传文件失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally && sftpGeneration == generation) {
+                    _uiState.update { state ->
+                        if (state.sftpDrawer.isOperating) {
+                            state.copy(sftpDrawer = state.sftpDrawer.copy(isOperating = false))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            }
+        }
+        job.invokeOnCompletion { throwable ->
+            if (throwable != null) {
+                runCatching { inputStream.close() }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpCreateDirectory(folderName: String) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        val cleanName = folderName.trim().trim('/')
+        if (cleanName.isEmpty() || cleanName == "." || cleanName == ".." || cleanName.contains('/')) {
+            _uiState.update {
+                it.copy(sftpDrawer = it.sftpDrawer.copy(errorMessage = "目录名称无效"))
+            }
+            return
+        }
+        val currentDir = _uiState.value.sftpDrawer.currentPath.ifBlank { handle.client.homeDirectory }
+        val targetPath = JschSftpClient.joinRemotePath(currentDir, cleanName)
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.OPERATING
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = false,
+                    isOperating = true,
+                    openFile = it.sftpDrawer.openFile?.copy(isSaving = false),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                handle.client.mkdir(targetPath)
+                val refreshed = handle.client.listDir(currentDir)
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        statusMessage = "已新建目录 $cleanName",
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            entries = refreshed,
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            errorMessage = formatSftpError(t, "创建目录失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally && sftpGeneration == generation) {
+                    _uiState.update { state ->
+                        if (state.sftpDrawer.isOperating) {
+                            state.copy(sftpDrawer = state.sftpDrawer.copy(isOperating = false))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpDeleteEntry(entry: SshSftpEntry) {
+        val handle = activeSftpHandle
+        if (handle == null || !handle.client.isConnected) {
+            _uiState.update {
+                it.copy(
+                    sftpDrawer = it.sftpDrawer.copy(
+                        isConnected = false,
+                        errorMessage = "SFTP 连接已断开，请重新连接",
+                    ),
+                )
+            }
+            return
+        }
+        val currentDir = _uiState.value.sftpDrawer.currentPath.ifBlank { handle.client.homeDirectory }
+        sftpOpJob?.cancel()
+        val generation = ++sftpGeneration
+        sftpActiveOpKind = SftpOpKind.OPERATING
+        _uiState.update {
+            it.copy(
+                sftpDrawer = it.sftpDrawer.copy(
+                    isLoadingDir = false,
+                    isOperating = true,
+                    openFile = it.sftpDrawer.openFile?.copy(isSaving = false),
+                    errorMessage = null,
+                ),
+            )
+        }
+        val job = externalScope.launch {
+            var completedNormally = false
+            try {
+                handle.client.delete(entry.fullPath, isDirectory = entry.isDirectory)
+                val refreshed = handle.client.listDir(currentDir)
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        statusMessage = "已删除 ${entry.name}",
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            entries = refreshed,
+                            openFile = it.sftpDrawer.openFile?.takeUnless { f -> f.remotePath == entry.fullPath },
+                            errorMessage = null,
+                        ),
+                    )
+                }
+                completedNormally = true
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                if (sftpGeneration != generation) return@launch
+                _uiState.update {
+                    it.copy(
+                        sftpDrawer = it.sftpDrawer.copy(
+                            isOperating = false,
+                            errorMessage = formatSftpError(t, "删除失败"),
+                        ),
+                    )
+                }
+                completedNormally = true
+            } finally {
+                if (!completedNormally && sftpGeneration == generation) {
+                    _uiState.update { state ->
+                        if (state.sftpDrawer.isOperating) {
+                            state.copy(sftpDrawer = state.sftpDrawer.copy(isOperating = false))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            }
+        }
+        if (sftpGeneration == generation && job.isActive) {
+            sftpOpJob = job
+        }
+    }
+
+    fun sftpCloseFileViewer() {
+        _uiState.update {
+            it.copy(sftpDrawer = it.sftpDrawer.copy(openFile = null, errorMessage = null))
+        }
+    }
+
+    fun sftpClearError() {
+        _uiState.update {
+            it.copy(sftpDrawer = it.sftpDrawer.copy(errorMessage = null))
+        }
+    }
+
+    fun sftpReportError(message: String) {
+        val trimmed = message.trim()
+        if (trimmed.isEmpty()) return
+        _uiState.update {
+            it.copy(sftpDrawer = it.sftpDrawer.copy(errorMessage = trimmed))
+        }
+    }
+
+    private fun formatSftpError(t: Throwable, fallbackPrefix: String): String {
+        if (t is SshSftpException) {
+            return t.message ?: fallbackPrefix
+        }
+        return "$fallbackPrefix：${formatFriendlySshError(t)}"
+    }
+
+    private fun formatByteSizeCompact(bytes: Long): String = when {
+        bytes < 1024L -> "$bytes B"
+        bytes < 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> String.format(java.util.Locale.US, "%.2f MB", bytes / (1024.0 * 1024.0))
     }
 
     private fun resolvePanelTerminalExecutor(): LiteSshExecutor? =
@@ -2141,6 +3422,8 @@ class LiteSshSessionManager(
 
     companion object {
         const val PRESET_ID_INTERACTIVE_TERMINAL: String = "__interactive_terminal__"
+        const val PRESET_ID_SFTP_SESSION: String = "__sftp_session__"
+        const val DEFAULT_ONESHOT_COMMAND_TIMEOUT_MILLIS: Long = 45_000L
         private const val ELAPSED_TICK_MS: Long = 500L
         private const val FOREGROUND_NOTIF_UPDATE_INTERVAL_MS: Long = 2_000L
         private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")

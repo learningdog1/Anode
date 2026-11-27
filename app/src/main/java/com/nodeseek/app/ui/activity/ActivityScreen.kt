@@ -56,7 +56,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
+import android.widget.Toast
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +70,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -78,10 +81,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.activity.PreviewForumWatchActivityRepository
+import com.nodeseek.app.di.LocalAppContainer
 import com.nodeseek.app.domain.activity.ActivityCounts
 import com.nodeseek.app.domain.activity.ActivityRepository
 import com.nodeseek.app.domain.activity.ActivityTimeStatus
 import com.nodeseek.app.domain.activity.ForumWatchActivityItem
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.theme.NodePulseMotion
@@ -126,6 +131,8 @@ fun ActivityScreen(
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+    var activeLuckyDrawSpec by remember { mutableStateOf<LuckyDrawSpec?>(null) }
 
     var localFallbackNotifEnabled by rememberSaveable(notificationsEnabled) {
         mutableStateOf(notificationsEnabled)
@@ -154,6 +161,9 @@ fun ActivityScreen(
                     onOpenTopic = onOpenTopic,
                     onOpenUser = onOpenUser,
                     onOpenCategory = onOpenCategory,
+                    onOpenLuckyDraw = { deepLink ->
+                        activeLuckyDrawSpec = deepLink.toSpec()
+                    },
                 )
             }
         }
@@ -357,6 +367,36 @@ fun ActivityScreen(
                 handleOpenActivityPrimaryTarget(target)
             },
             onOpenUrl = openAnyUrl,
+        )
+    }
+
+    activeLuckyDrawSpec?.let { luckySpec ->
+        val appContainer = LocalAppContainer.current
+        val viewerSession by appContainer.sessionRepository.sessionState.collectAsStateWithLifecycle()
+        LuckyDrawSheet(
+            spec = luckySpec,
+            initialMode = LuckyDrawSheetMode.VERIFY,
+            allowGeneratorMode = false,
+            isViewerTopicAuthor = false,
+            viewerUid = viewerSession?.uid,
+            luckyDrawRepository = appContainer.luckyDrawRepository,
+            forumRepository = appContainer.forumRepository,
+            onDismiss = { activeLuckyDrawSpec = null },
+            onFeedbackMessage = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
+            onOpenTopicFloor = onOpenTopic?.let { open ->
+                { topicId, floor ->
+                    activeLuckyDrawSpec = null
+                    open(topicId, floor, "")
+                }
+            },
+            onOpenUser = onOpenUser?.let { open ->
+                { uid, username ->
+                    activeLuckyDrawSpec = null
+                    open(uid, username)
+                }
+            },
         )
     }
 }

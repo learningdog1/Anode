@@ -7,6 +7,7 @@ import com.nodeseek.app.domain.backup.toBackupDto
 import com.nodeseek.app.domain.fleet.AssetRenewalResult
 import com.nodeseek.app.domain.fleet.FleetAlertEvaluator
 import com.nodeseek.app.domain.fleet.FleetAlertTrackerState
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetMonitorCheckReport
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
@@ -135,6 +136,19 @@ private data class StoredVpsAssetRecord(
     val billingAnchorDay: Int? = null,
     val createdAtEpochMillis: Long = 0L,
     val updatedAtEpochMillis: Long = 0L,
+    val assetType: String = FleetAssetType.VPS.name,
+    val domainName: String? = null,
+    val registrarName: String = "",
+    val domainCreatedIso: String? = null,
+    val rdapSyncedAtEpochMillis: Long? = null,
+    val rdapStatusTags: List<String> = emptyList(),
+    val tlsHost: String? = null,
+    val tlsPort: Int = VpsAssetRecord.DEFAULT_TLS_PORT,
+    val tlsExpiresAtEpochMillis: Long? = null,
+    val tlsIssuer: String = "",
+    val tlsSubject: String = "",
+    val tlsCheckedAtEpochMillis: Long? = null,
+    val tlsCheckError: String? = null,
 )
 
 @Serializable
@@ -622,10 +636,17 @@ class FleetRepositoryImpl(
                     expiryChanged -> null
                     else -> existing?.billingAnchorDay?.takeIf { it in 1..31 }
                 }
+                val normalizedDomain = VpsAssetRecord.normalizeDomainName(asset.domainName)
+                val normalizedTlsHost = VpsAssetRecord.normalizeDomainName(asset.tlsHost) ?: normalizedDomain
+                val cleanRegistrar = asset.registrarName.trim()
+                val cleanProvider = asset.providerName.trim().ifBlank { cleanRegistrar }
+                val defaultEmptyName = if (asset.isDomainAsset) "未命名域名" else "未命名 VPS"
                 val normalized = asset.copy(
                     id = cleanId,
-                    nickname = asset.nickname.trim().ifBlank { asset.providerName.trim().ifBlank { "未命名 VPS" } },
-                    providerName = asset.providerName.trim(),
+                    nickname = asset.nickname.trim().ifBlank {
+                        normalizedDomain ?: cleanProvider.ifBlank { defaultEmptyName }
+                    },
+                    providerName = cleanProvider,
                     specsSummary = asset.specsSummary.trim(),
                     region = asset.region.trim(),
                     routeTag = normalizedRouteTag,
@@ -634,7 +655,7 @@ class FleetRepositoryImpl(
                     expiryDateIso = normalizedExpiryIso,
                     purchaseUrl = asset.purchaseUrl.trim(),
                     panelManageUrl = asset.panelManageUrl.trim(),
-                    linkedProbeKey = asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() },
+                    linkedProbeKey = if (asset.isDomainAsset) null else asset.linkedProbeKey?.trim()?.takeIf { it.isNotEmpty() },
                     trafficResetDay = asset.trafficResetDay?.coerceIn(1, 31),
                     remindDaysBeforeExpiry = asset.remindDaysBeforeExpiry.coerceIn(0, 365),
                     autoRenew = asset.autoRenew,
@@ -645,6 +666,15 @@ class FleetRepositoryImpl(
                         ?: asset.createdAtEpochMillis.takeIf { it > 0L }
                         ?: now,
                     updatedAtEpochMillis = now,
+                    domainName = normalizedDomain,
+                    registrarName = cleanRegistrar,
+                    domainCreatedIso = asset.domainCreatedIso?.trim()?.takeIf { it.isNotEmpty() },
+                    rdapStatusTags = asset.rdapStatusTags.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+                    tlsHost = normalizedTlsHost,
+                    tlsPort = asset.tlsPort.coerceIn(1, 65535),
+                    tlsIssuer = asset.tlsIssuer.trim(),
+                    tlsSubject = asset.tlsSubject.trim(),
+                    tlsCheckError = asset.tlsCheckError?.trim()?.takeIf { it.isNotEmpty() },
                 )
 
                 val updatedAssets = cachedPayload.assets
@@ -1158,6 +1188,19 @@ class FleetRepositoryImpl(
             billingAnchorDay = billingAnchorDay?.takeIf { it in 1..31 },
             createdAtEpochMillis = createdAtEpochMillis,
             updatedAtEpochMillis = updatedAtEpochMillis,
+            assetType = assetType.name,
+            domainName = domainName,
+            registrarName = registrarName,
+            domainCreatedIso = domainCreatedIso,
+            rdapSyncedAtEpochMillis = rdapSyncedAtEpochMillis,
+            rdapStatusTags = rdapStatusTags,
+            tlsHost = tlsHost,
+            tlsPort = tlsPort,
+            tlsExpiresAtEpochMillis = tlsExpiresAtEpochMillis,
+            tlsIssuer = tlsIssuer,
+            tlsSubject = tlsSubject,
+            tlsCheckedAtEpochMillis = tlsCheckedAtEpochMillis,
+            tlsCheckError = tlsCheckError,
         )
     }
 
@@ -1192,6 +1235,20 @@ class FleetRepositoryImpl(
             tags = migratedTags,
             autoRenew = autoRenew,
             billingAnchorDay = billingAnchorDay?.takeIf { it in 1..31 },
+            assetType = runCatching { FleetAssetType.valueOf(assetType.trim().uppercase()) }
+                .getOrDefault(FleetAssetType.VPS),
+            domainName = domainName?.let { VpsAssetRecord.normalizeDomainName(it) ?: it.trim() },
+            registrarName = registrarName,
+            domainCreatedIso = domainCreatedIso,
+            rdapSyncedAtEpochMillis = rdapSyncedAtEpochMillis,
+            rdapStatusTags = rdapStatusTags,
+            tlsHost = tlsHost,
+            tlsPort = tlsPort.coerceIn(1, 65535),
+            tlsExpiresAtEpochMillis = tlsExpiresAtEpochMillis,
+            tlsIssuer = tlsIssuer,
+            tlsSubject = tlsSubject,
+            tlsCheckedAtEpochMillis = tlsCheckedAtEpochMillis,
+            tlsCheckError = tlsCheckError,
         )
     }
 

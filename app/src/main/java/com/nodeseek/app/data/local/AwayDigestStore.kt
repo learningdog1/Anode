@@ -34,6 +34,8 @@ interface AwayDigestStore {
 
     fun getCachedTopicMeta(topicId: Long): CachedTopicDrumstickMeta?
     fun putCachedTopicMeta(meta: CachedTopicDrumstickMeta)
+
+    fun clearForAccount(uid: Long) = Unit
 }
 
 /**
@@ -42,10 +44,15 @@ interface AwayDigestStore {
  */
 class SharedPreferencesAwayDigestStore(
     private val prefs: SharedPreferences,
+    private val accountUidProvider: () -> Long = { 0L },
 ) : AwayDigestStore {
 
-    constructor(context: Context) : this(
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+    constructor(
+        context: Context,
+        accountUidProvider: () -> Long = { 0L },
+    ) : this(
+        prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+        accountUidProvider = accountUidProvider,
     )
 
     private val lock = Any()
@@ -54,77 +61,99 @@ class SharedPreferencesAwayDigestStore(
         encodeDefaults = true
     }
 
-    private val metaCache = object : LinkedHashMap<Long, CachedTopicDrumstickMeta>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, CachedTopicDrumstickMeta>?): Boolean =
-            size > MAX_CACHED_TOPIC_META
-    }
-    private var metaHydrated = false
+    private val metaCachesByUid = HashMap<Long, LinkedHashMap<Long, CachedTopicDrumstickMeta>>()
+
+    private fun currentUid(): Long = accountUidProvider().coerceAtLeast(0L)
+
+    private fun scopedKey(baseKey: String, uid: Long = currentUid()): String =
+        if (uid == 0L) baseKey else "${baseKey}_u$uid"
 
     override fun getLastActiveTimestampMillis(): Long = synchronized(lock) {
-        prefs.getLong(KEY_LAST_ACTIVE_MILLIS, 0L)
+        prefs.getLong(scopedKey(KEY_LAST_ACTIVE_MILLIS), 0L)
     }
 
     override fun setLastActiveTimestampMillis(timestampMillis: Long) {
         synchronized(lock) {
-            prefs.edit().putLong(KEY_LAST_ACTIVE_MILLIS, timestampMillis).apply()
+            prefs.edit().putLong(scopedKey(KEY_LAST_ACTIVE_MILLIS), timestampMillis).apply()
         }
     }
 
     override fun wasAppClosed(): Boolean = synchronized(lock) {
-        prefs.getBoolean(KEY_WAS_APP_CLOSED, false)
+        prefs.getBoolean(scopedKey(KEY_WAS_APP_CLOSED), false)
     }
 
     override fun setAppClosed(closed: Boolean) {
         synchronized(lock) {
-            prefs.edit().putBoolean(KEY_WAS_APP_CLOSED, closed).apply()
+            prefs.edit().putBoolean(scopedKey(KEY_WAS_APP_CLOSED), closed).apply()
         }
     }
 
     override fun getActiveSession(): AwaySession? = synchronized(lock) {
-        val raw = prefs.getString(KEY_ACTIVE_SESSION_JSON, null)?.takeIf { it.isNotBlank() }
+        val raw = prefs.getString(scopedKey(KEY_ACTIVE_SESSION_JSON), null)?.takeIf { it.isNotBlank() }
             ?: return null
         runCatching { json.decodeFromString<AwaySession>(raw) }.getOrNull()
     }
 
     override fun setActiveSession(session: AwaySession?) {
         synchronized(lock) {
+            val key = scopedKey(KEY_ACTIVE_SESSION_JSON)
             val editor = prefs.edit()
             if (session == null) {
-                editor.remove(KEY_ACTIVE_SESSION_JSON)
+                editor.remove(key)
             } else {
-                editor.putString(KEY_ACTIVE_SESSION_JSON, json.encodeToString(session))
+                editor.putString(key, json.encodeToString(session))
             }
             editor.apply()
         }
     }
 
     override fun getCachedTopicMeta(topicId: Long): CachedTopicDrumstickMeta? = synchronized(lock) {
-        ensureMetaHydratedLocked()
-        metaCache[topicId]
+        val uid = currentUid()
+        ensureMetaCacheForUidLocked(uid)[topicId]
     }
 
     override fun putCachedTopicMeta(meta: CachedTopicDrumstickMeta) {
         synchronized(lock) {
-            ensureMetaHydratedLocked()
-            metaCache[meta.topicId] = meta
-            val snapshot = metaCache.values.toList()
+            val uid = currentUid()
+            val cache = ensureMetaCacheForUidLocked(uid)
+            cache[meta.topicId] = meta
+            val snapshot = cache.values.toList()
             prefs.edit()
-                .putString(KEY_TOPIC_META_LIST_JSON, json.encodeToString(snapshot))
+                .putString(scopedKey(KEY_TOPIC_META_LIST_JSON, uid), json.encodeToString(snapshot))
                 .apply()
         }
     }
 
-    private fun ensureMetaHydratedLocked() {
-        if (metaHydrated) return
-        metaHydrated = true
-        val raw = prefs.getString(KEY_TOPIC_META_LIST_JSON, null)?.takeIf { it.isNotBlank() } ?: return
-        val parsed = runCatching { json.decodeFromString<List<CachedTopicDrumstickMeta>>(raw) }.getOrNull()
-            ?: return
-        parsed.forEach { item ->
-            if (item.topicId > 0L) {
-                metaCache[item.topicId] = item
+    override fun clearForAccount(uid: Long) {
+        val targetUid = uid.coerceAtLeast(0L)
+        synchronized(lock) {
+            metaCachesByUid.remove(targetUid)
+            prefs.edit()
+                .remove(scopedKey(KEY_LAST_ACTIVE_MILLIS, targetUid))
+                .remove(scopedKey(KEY_WAS_APP_CLOSED, targetUid))
+                .remove(scopedKey(KEY_ACTIVE_SESSION_JSON, targetUid))
+                .remove(scopedKey(KEY_TOPIC_META_LIST_JSON, targetUid))
+                .apply()
+        }
+    }
+
+    private fun ensureMetaCacheForUidLocked(uid: Long): LinkedHashMap<Long, CachedTopicDrumstickMeta> {
+        metaCachesByUid[uid]?.let { return it }
+        val cache = object : LinkedHashMap<Long, CachedTopicDrumstickMeta>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, CachedTopicDrumstickMeta>?): Boolean =
+                size > MAX_CACHED_TOPIC_META
+        }
+        val raw = prefs.getString(scopedKey(KEY_TOPIC_META_LIST_JSON, uid), null)?.takeIf { it.isNotBlank() }
+        if (raw != null) {
+            val parsed = runCatching { json.decodeFromString<List<CachedTopicDrumstickMeta>>(raw) }.getOrNull()
+            parsed?.forEach { item ->
+                if (item.topicId > 0L) {
+                    cache[item.topicId] = item
+                }
             }
         }
+        metaCachesByUid[uid] = cache
+        return cache
     }
 
     companion object {
@@ -144,44 +173,76 @@ class InMemoryAwayDigestStore(
     initialLastActiveTimestampMillis: Long = 0L,
     initialSession: AwaySession? = null,
     initialWasAppClosed: Boolean = false,
+    private val accountUidProvider: () -> Long = { 0L },
 ) : AwayDigestStore {
     private val lock = Any()
-    private var lastActiveMillis: Long = initialLastActiveTimestampMillis
-    private var appClosed: Boolean = initialWasAppClosed
-    private var activeSession: AwaySession? = initialSession
-    private val metaMap = LinkedHashMap<Long, CachedTopicDrumstickMeta>()
+    private val initialUid = accountUidProvider().coerceAtLeast(0L)
+    private val lastActiveByUid = HashMap<Long, Long>().apply {
+        if (initialLastActiveTimestampMillis != 0L) put(initialUid, initialLastActiveTimestampMillis)
+    }
+    private val appClosedByUid = HashMap<Long, Boolean>().apply {
+        if (initialWasAppClosed) put(initialUid, true)
+    }
+    private val activeSessionByUid = HashMap<Long, AwaySession?>().apply {
+        if (initialSession != null) put(initialUid, initialSession)
+    }
+    private val metaByUid = HashMap<Long, LinkedHashMap<Long, CachedTopicDrumstickMeta>>()
 
-    override fun getLastActiveTimestampMillis(): Long = synchronized(lock) { lastActiveMillis }
+    private fun currentUid(): Long = accountUidProvider().coerceAtLeast(0L)
+
+    override fun getLastActiveTimestampMillis(): Long = synchronized(lock) {
+        lastActiveByUid[currentUid()] ?: 0L
+    }
 
     override fun setLastActiveTimestampMillis(timestampMillis: Long) {
         synchronized(lock) {
-            lastActiveMillis = timestampMillis
+            lastActiveByUid[currentUid()] = timestampMillis
         }
     }
 
-    override fun wasAppClosed(): Boolean = synchronized(lock) { appClosed }
+    override fun wasAppClosed(): Boolean = synchronized(lock) {
+        appClosedByUid[currentUid()] ?: false
+    }
 
     override fun setAppClosed(closed: Boolean) {
         synchronized(lock) {
-            appClosed = closed
+            appClosedByUid[currentUid()] = closed
         }
     }
 
-    override fun getActiveSession(): AwaySession? = synchronized(lock) { activeSession }
+    override fun getActiveSession(): AwaySession? = synchronized(lock) {
+        activeSessionByUid[currentUid()]
+    }
 
     override fun setActiveSession(session: AwaySession?) {
         synchronized(lock) {
-            activeSession = session
+            val uid = currentUid()
+            if (session == null) {
+                activeSessionByUid.remove(uid)
+            } else {
+                activeSessionByUid[uid] = session
+            }
         }
     }
 
     override fun getCachedTopicMeta(topicId: Long): CachedTopicDrumstickMeta? = synchronized(lock) {
-        metaMap[topicId]
+        metaByUid[currentUid()]?.get(topicId)
     }
 
     override fun putCachedTopicMeta(meta: CachedTopicDrumstickMeta) {
         synchronized(lock) {
-            metaMap[meta.topicId] = meta
+            val map = metaByUid.getOrPut(currentUid()) { LinkedHashMap() }
+            map[meta.topicId] = meta
+        }
+    }
+
+    override fun clearForAccount(uid: Long) {
+        val targetUid = uid.coerceAtLeast(0L)
+        synchronized(lock) {
+            lastActiveByUid.remove(targetUid)
+            appClosedByUid.remove(targetUid)
+            activeSessionByUid.remove(targetUid)
+            metaByUid.remove(targetUid)
         }
     }
 }

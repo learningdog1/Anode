@@ -13,9 +13,9 @@ package com.nodeseek.app.domain.ssh
  *   `8.8.8.8`, `8.8.4.4`, `9.9.9.9`) unless explicitly equal to [knownServerHost].
  *
  * Performance guarantee:
- * - Uses a single-pass, zero-regex scanner over [text] with lazy `StringBuilder` allocation so
- *   multi-megabyte ANSI benchmark transcripts with >150,000 SGR sequences complete in a few
- *   milliseconds without `Matcher`, `substring`, or `split` churn.
+ * - Uses [IpMarkdownStructuralScanner] (single-pass, zero-regex scanner with lazy `StringBuilder`
+ *   allocation) so multi-megabyte ANSI benchmark transcripts with >150,000 SGR sequences complete
+ *   in a few milliseconds without `Matcher`, `substring`, or `split` churn.
  */
 object IpPrivacyMasker {
     private val WELL_KNOWN_DNS_IPV4: Set<String> = setOf(
@@ -39,195 +39,151 @@ object IpPrivacyMasker {
         text: String,
         knownServerHost: String? = null,
     ): String {
-        val n = text.length
-        if (n < 2 || !hasAnyIpDelimiter(text)) return text
         val normalizedHost = knownServerHost?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-
-        var out: StringBuilder? = null
-        var flushCursor = 0
-        // Tracks the immediately preceding visible (non-SGR) character; '\u0000' right after start or SGR
-        var prevPlainChar = '\u0000'
-        var i = 0
-
-        while (i < n) {
-            val ch = text[i]
-
-            // 1. Skip ANSI SGR escape sequences `\u001B[[0-9;:]*m` in O(1) without splitting text
-            if (ch == '\u001B' && i + 1 < n && text[i + 1] == '[') {
-                val sgrEnd = findSgrEndIndex(text, i)
-                if (sgrEnd >= 0) {
-                    prevPlainChar = '\u0000'
-                    i = sgrEnd + 1
-                    continue
-                }
-            }
-
-            // 2. Try matching IPv4 token `d.d.d.d` when at a digit not preceded by `[A-Za-z0-9.]`
-            if (ch in '0'..'9' && !isIpv4BoundaryBlocked(prevPlainChar)) {
-                val ipv4End = tryScanIpv4End(text, i, n)
-                if (ipv4End > i) {
-                    val nextPlainChar = peekNextNonSgrChar(text, ipv4End, n)
-                    if (!isIpv4BoundaryBlocked(nextPlainChar)) {
-                        val maskedV4 = evaluateIpv4Candidate(text, i, ipv4End, normalizedHost)
-                        if (maskedV4 != null) {
-                            val sb = out ?: StringBuilder(n).also { out = it }
-                            if (i > flushCursor) {
-                                sb.append(text, flushCursor, i)
-                            }
-                            sb.append(maskedV4)
-                            flushCursor = ipv4End
-                            prevPlainChar = text[ipv4End - 1]
-                            i = ipv4End
-                            continue
-                        }
-                    }
-                }
-            }
-
-            // 3. Try matching IPv6 token `[0-9A-Fa-f:]{2,39}` (including IPv4-mapped/embedded IPv6
-            // like `::ffff:203.0.113.42`) when not preceded by `[A-Za-z0-9:]`
-            if ((isHexChar(ch) || ch == ':') && !isIpv6BoundaryBlocked(prevPlainChar)) {
-                val ipv6End = scanIpv6CandidateEnd(text, i, n)
-                val tokenLen = ipv6End - i
-
-                // 3a. Check IPv4-embedded IPv6 (e.g. `::ffff:203.0.113.42`, `0:0:0:0:0:ffff:203.0.113.42`)
-                if (ipv6End < n && text[ipv6End] == '.' && tokenLen >= 3) {
-                    val lastColon = findLastColon(text, i, ipv6End)
-                    if (lastColon >= i && lastColon + 1 < ipv6End) {
-                        val embeddedV4End = tryScanIpv4End(text, lastColon + 1, n)
-                        if (embeddedV4End > lastColon + 1) {
-                            val nextAfterV4 = peekNextNonSgrChar(text, embeddedV4End, n)
-                            if (!isIpv4BoundaryBlocked(nextAfterV4) &&
-                                isValidIpv6PrefixForEmbeddedIpv4(text, i, lastColon)
-                            ) {
-                                val fullLower = text.substring(i, embeddedV4End).lowercase()
-                                val isExplicitServerHost = normalizedHost != null && fullLower == normalizedHost
-                                val embeddedHostOverride = if (isExplicitServerHost) {
-                                    text.substring(lastColon + 1, embeddedV4End)
-                                } else {
-                                    normalizedHost
-                                }
-                                val maskedEmbeddedV4 = evaluateIpv4Candidate(
-                                    text = text,
-                                    start = lastColon + 1,
-                                    end = embeddedV4End,
-                                    normalizedHost = embeddedHostOverride,
-                                )
-                                if (maskedEmbeddedV4 != null) {
-                                    val sb = out ?: StringBuilder(n).also { out = it }
-                                    if (i > flushCursor) {
-                                        sb.append(text, flushCursor, i)
-                                    }
-                                    sb.append(text, i, lastColon + 1)
-                                    sb.append(maskedEmbeddedV4)
-                                    flushCursor = embeddedV4End
-                                }
-                                prevPlainChar = text[embeddedV4End - 1]
-                                i = embeddedV4End
-                                continue
-                            }
-                        }
-                    }
-                }
-
-                if (tokenLen in 2..39) {
-                    val nextPlainChar = peekNextNonSgrChar(text, ipv6End, n)
-                    if (!isIpv6BoundaryBlocked(nextPlainChar) && hasAtLeastTwoColons(text, i, ipv6End)) {
-                        val candidate = text.substring(i, ipv6End)
-                        if (isValidIpv6Address(candidate)) {
-                            val lower = candidate.lowercase()
-                            val isExplicitServerHost = normalizedHost != null && lower == normalizedHost
-                            if (isExplicitServerHost || !shouldPreserveIpv6(lower)) {
-                                val sb = out ?: StringBuilder(n).also { out = it }
-                                if (i > flushCursor) {
-                                    sb.append(text, flushCursor, i)
-                                }
-                                sb.append(maskIpv6Literal(candidate))
-                                flushCursor = ipv6End
-                                prevPlainChar = text[ipv6End - 1]
-                                i = ipv6End
-                                continue
-                            }
-                        }
-                    }
-                }
-                // Advance past non-matching hex/colon run if it cannot start an IPv4 internally
-                if (tokenLen > 1 && !containsDotNear(text, i, ipv6End, n)) {
-                    prevPlainChar = text[ipv6End - 1]
-                    i = ipv6End
-                    continue
-                }
-            }
-
-            // Treat a single unconsumed label colon (e.g. `IPv6:2a01:4f8::1`, `IP:2001:db8::1`,
-            // `addr:::ffff:203.0.113.42`) as a boundary separator rather than blocking IPv6 matching.
-            prevPlainChar = if (ch == ':' && prevPlainChar != ':') '\u0000' else ch
-            i++
-        }
-
-        val sb = out ?: return text
-        if (flushCursor < n) {
-            sb.append(text, flushCursor, n)
-        }
-        return sb.toString()
+        return IpMarkdownStructuralScanner.scanAndTransform(
+            text = text,
+            skipAnsiSgr = true,
+            onMaskedIpToken = null,
+            onRawIpv4 = { s, start, end, out ->
+                out.replacement = evaluateIpv4Candidate(s, start, end, normalizedHost)
+            },
+            onRawIpv6 = { s, start, n, totalOpen, out ->
+                evaluateIpv6Candidate(s, start, n, totalOpen, normalizedHost, out)
+            },
+        )
     }
 
-    private fun hasAnyIpDelimiter(text: String): Boolean {
-        for (i in text.indices) {
-            val ch = text[i]
-            if (ch == '.' || ch == ':') return true
+    private fun evaluateIpv6Candidate(
+        text: String,
+        start: Int,
+        n: Int,
+        totalOpen: Int,
+        normalizedHost: String?,
+        out: IpMarkdownStructuralScanner.TokenResult,
+    ) {
+        val ipv6End = IpMarkdownStructuralScanner.scanIpv6CandidateEnd(text, start, n, maxLen = 41)
+        val tokenLen = ipv6End - start
+
+        // Check IPv4-embedded IPv6 (e.g. `::ffff:203.0.113.42`, `0:0:0:0:0:ffff:203.0.113.42`)
+        if (ipv6End < n && text[ipv6End] == '.' && tokenLen >= 3) {
+            val lastColon = IpMarkdownStructuralScanner.findLastColon(text, start, ipv6End)
+            if (lastColon >= start && lastColon + 1 < ipv6End) {
+                val embeddedV4End = IpMarkdownStructuralScanner.tryScanIpv4End(text, lastColon + 1, n)
+                if (embeddedV4End > lastColon + 1 &&
+                    IpMarkdownStructuralScanner.isRawIpv4RightBoundaryAllowed(
+                        text = text,
+                        ipv4End = embeddedV4End,
+                        totalOpen = totalOpen,
+                        n = n,
+                        skipAnsiSgr = true,
+                    ) &&
+                    IpMarkdownStructuralScanner.isValidIpv6PrefixForEmbeddedIpv4(text, start, lastColon)
+                ) {
+                    val fullLower = text.substring(start, embeddedV4End).lowercase()
+                    val isExplicitServerHost = normalizedHost != null && fullLower == normalizedHost
+                    val embeddedHostOverride = if (isExplicitServerHost) {
+                        text.substring(lastColon + 1, embeddedV4End)
+                    } else {
+                        normalizedHost
+                    }
+                    val maskedEmbeddedV4 = evaluateIpv4Candidate(
+                        text = text,
+                        start = lastColon + 1,
+                        end = embeddedV4End,
+                        normalizedHost = embeddedHostOverride,
+                    )
+                    if (maskedEmbeddedV4 != null) {
+                        out.replacement = text.substring(start, lastColon + 1) + maskedEmbeddedV4
+                    }
+                    out.endIndex = embeddedV4End
+                    return
+                }
+            }
+        }
+
+        var effectiveEnd = ipv6End
+        var hasTrailingColonBeforeStar = false
+        if (effectiveEnd - start >= 3 &&
+            text[effectiveEnd - 1] == ':' &&
+            text[effectiveEnd - 2] != ':' &&
+            IpMarkdownStructuralScanner.peekNextNonSgrChar(text, effectiveEnd, n) == '*'
+        ) {
+            effectiveEnd -= 1
+            hasTrailingColonBeforeStar = true
+        }
+        val effectiveLen = effectiveEnd - start
+        if (effectiveLen in 2..39) {
+            val nextPlainChar = if (hasTrailingColonBeforeStar) {
+                '*'
+            } else {
+                IpMarkdownStructuralScanner.peekNextNonSgrCharForIpRightBoundary(text, effectiveEnd, n)
+            }
+            val dotFollowsDigitOrStar = if (!hasTrailingColonBeforeStar && nextPlainChar == '.') {
+                val afterDotIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, effectiveEnd + 1, n)
+                val afterDot = if (afterDotIdx < n) text[afterDotIdx] else '\u0000'
+                afterDot in '0'..'9' || (
+                    afterDot == '*' && (
+                        hasDotInRange(text, start, effectiveEnd) ||
+                            IpMarkdownStructuralScanner.peekNextNonSgrChar(text, afterDotIdx + 1, n) == '.'
+                        )
+                    )
+            } else {
+                false
+            }
+            val trailingStarAfterColon = if (!hasTrailingColonBeforeStar &&
+                nextPlainChar == '*' &&
+                text[effectiveEnd - 1] == ':'
+            ) {
+                val starStartIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, effectiveEnd, n)
+                var starEndIdx = starStartIdx
+                while (starEndIdx < n && text[starEndIdx] == '*') {
+                    starEndIdx++
+                }
+                val starRunLen = starEndIdx - starStartIdx
+                val afterStars = IpMarkdownStructuralScanner.peekNextNonSgrChar(text, starEndIdx, n)
+                val afterColonAfterStar = if (afterStars == ':') {
+                    val colonIdx = IpMarkdownStructuralScanner.skipSgrSequences(text, starEndIdx, n)
+                    IpMarkdownStructuralScanner.peekNextNonSgrChar(text, colonIdx + 1, n)
+                } else {
+                    '\u0000'
+                }
+                val isColonWildcardAfterStar = afterStars == ':' &&
+                    afterColonAfterStar != '\u0000' &&
+                    !afterColonAfterStar.isWhitespace()
+                isColonWildcardAfterStar ||
+                    !(starRunLen in 1..3 && (totalOpen >= starRunLen || IpMarkdownStructuralScanner.isItalicOpeningAfterStar(afterStars)))
+            } else {
+                false
+            }
+            if (!dotFollowsDigitOrStar &&
+                !trailingStarAfterColon &&
+                (hasTrailingColonBeforeStar || !IpMarkdownStructuralScanner.isIpv6BoundaryBlocked(nextPlainChar)) &&
+                IpMarkdownStructuralScanner.hasAtLeastTwoColons(text, start, effectiveEnd)
+            ) {
+                val candidate = text.substring(start, effectiveEnd)
+                if (isValidIpv6Address(candidate)) {
+                    val lower = candidate.lowercase()
+                    val isExplicitServerHost = normalizedHost != null && lower == normalizedHost
+                    if (isExplicitServerHost || !shouldPreserveIpv6(lower)) {
+                        out.replacement = maskIpv6Literal(candidate)
+                    }
+                    out.endIndex = effectiveEnd
+                    return
+                }
+            }
+        }
+
+        // Advance past non-matching hex/colon run safely without ever truncating mid-octet before '.'
+        if (IpMarkdownStructuralScanner.scanHexColonRunSkipEnd(text, start, n) - start > 1) {
+            out.skipRunOnMiss = true
+        }
+    }
+
+    private fun hasDotInRange(text: String, start: Int, end: Int): Boolean {
+        for (idx in start until end) {
+            if (text[idx] == '.') return true
         }
         return false
-    }
-
-    private fun findSgrEndIndex(text: String, escBracketIndex: Int): Int {
-        var i = escBracketIndex + 2
-        val limit = (escBracketIndex + 66).coerceAtMost(text.length)
-        while (i < limit) {
-            val ch = text[i]
-            if (ch == 'm') return i
-            if (ch !in '0'..'9' && ch != ';' && ch != ':') return -1
-            i++
-        }
-        return -1
-    }
-
-    private fun peekNextNonSgrChar(text: String, index: Int, length: Int): Char {
-        if (index >= length) return '\u0000'
-        if (text[index] == '\u001B' && index + 1 < length && text[index + 1] == '[') {
-            if (findSgrEndIndex(text, index) >= 0) {
-                return '\u0000'
-            }
-        }
-        return text[index]
-    }
-
-    private fun isIpv4BoundaryBlocked(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'z' || ch in 'A'..'Z' || ch == '.'
-
-    private fun isIpv6BoundaryBlocked(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'z' || ch in 'A'..'Z' || ch == ':'
-
-    private fun isHexChar(ch: Char): Boolean =
-        ch in '0'..'9' || ch in 'a'..'f' || ch in 'A'..'F'
-
-    private fun tryScanIpv4End(text: String, start: Int, n: Int): Int {
-        var pos = start
-        for (octet in 0 until 4) {
-            if (octet > 0) {
-                if (pos >= n || text[pos] != '.') return -1
-                pos++
-            }
-            val octStart = pos
-            while (pos < n && pos - octStart < 3 && text[pos] in '0'..'9') {
-                pos++
-            }
-            val octLen = pos - octStart
-            if (octLen == 0) return -1
-            // If 4th consecutive digit follows immediately, not a 1..3 digit octet
-            if (pos < n && text[pos] in '0'..'9') return -1
-        }
-        return pos
     }
 
     private fun evaluateIpv4Candidate(
@@ -240,7 +196,6 @@ object IpPrivacyMasker {
         var a = 0
         var b = 0
         var c = 0
-        var d = 0
         for (octetIdx in 0 until 4) {
             if (octetIdx > 0) pos++ // skip '.'
             val octStart = pos
@@ -257,7 +212,6 @@ object IpPrivacyMasker {
                 0 -> a = value
                 1 -> b = value
                 2 -> c = value
-                else -> d = value
             }
         }
         val literal = text.substring(start, end)
@@ -267,70 +221,6 @@ object IpPrivacyMasker {
         }
         return "$a.$b.*.*"
     }
-
-    private fun scanIpv6CandidateEnd(text: String, start: Int, n: Int): Int {
-        var pos = start
-        val limit = (start + 40).coerceAtMost(n)
-        while (pos < limit) {
-            val ch = text[pos]
-            if (!isHexChar(ch) && ch != ':') break
-            pos++
-        }
-        return pos
-    }
-
-    private fun hasAtLeastTwoColons(text: String, start: Int, end: Int): Boolean {
-        var colons = 0
-        for (idx in start until end) {
-            if (text[idx] == ':') {
-                colons++
-                if (colons >= 2) return true
-            }
-        }
-        return false
-    }
-
-    private fun findLastColon(text: String, start: Int, end: Int): Int {
-        for (idx in end - 1 downTo start) {
-            if (text[idx] == ':') return idx
-        }
-        return -1
-    }
-
-    /**
-     * Validates the 96-bit IPv6 prefix (ending at [lastColon], inclusive) preceding an embedded
-     * dotted-quad IPv4 address (RFC 4291), such as `::`, `::ffff:`, `64:ff9b::`, or
-     * `0:0:0:0:0:ffff:`.
-     */
-    private fun isValidIpv6PrefixForEmbeddedIpv4(text: String, start: Int, lastColon: Int): Boolean {
-        val prefixToken = text.substring(start, lastColon + 1)
-        if (prefixToken.length < 2 || prefixToken.contains(":::")) return false
-        if (prefixToken.endsWith("::")) {
-            val leftPart = prefixToken.substring(0, prefixToken.length - 2)
-            if (leftPart.contains("::")) return false
-            val leftGroups = countAndValidateHextetGroups(leftPart, 0, leftPart.length)
-            return leftGroups in 0..5
-        }
-        val withoutLastColon = prefixToken.substring(0, prefixToken.length - 1)
-        val doubleColonIndex = withoutLastColon.indexOf("::")
-        return if (doubleColonIndex >= 0) {
-            if (withoutLastColon.indexOf("::", startIndex = doubleColonIndex + 2) >= 0) return false
-            val leftGroups = countAndValidateHextetGroups(withoutLastColon, 0, doubleColonIndex)
-            if (leftGroups < 0) return false
-            val rightGroups = countAndValidateHextetGroups(
-                withoutLastColon,
-                doubleColonIndex + 2,
-                withoutLastColon.length,
-            )
-            if (rightGroups < 0) return false
-            (leftGroups + rightGroups) in 1..5
-        } else {
-            countAndValidateHextetGroups(withoutLastColon, 0, withoutLastColon.length) == 6
-        }
-    }
-
-    private fun containsDotNear(text: String, start: Int, end: Int, n: Int): Boolean =
-        end < n && text[end] == '.' && text[end - 1] in '0'..'9' && start < end
 
     private fun shouldPreserveIpv4(literal: String, a: Int, b: Int, c: Int): Boolean {
         if (literal in WELL_KNOWN_DNS_IPV4) return true
@@ -362,37 +252,22 @@ object IpPrivacyMasker {
         if (doubleColonIndex >= 0) {
             // At most one "::" allowed
             if (token.indexOf("::", startIndex = doubleColonIndex + 2) >= 0) return false
-            val leftGroups = countAndValidateHextetGroups(token, 0, doubleColonIndex)
+            val leftGroups = IpMarkdownStructuralScanner.countAndValidateHextetGroups(token, 0, doubleColonIndex)
             if (leftGroups < 0) return false
-            val rightGroups = countAndValidateHextetGroups(token, doubleColonIndex + 2, token.length)
+            val rightGroups = IpMarkdownStructuralScanner.countAndValidateHextetGroups(token, doubleColonIndex + 2, token.length)
             if (rightGroups < 0) return false
             val totalGroups = leftGroups + rightGroups
             return totalGroups in 1..7
         } else {
             // Uncompressed IPv6 must have exactly 8 colon-separated hex groups (excludes HH:MM:SS & MACs)
-            return countAndValidateHextetGroups(token, 0, token.length) == 8
+            return IpMarkdownStructuralScanner.countAndValidateHextetGroups(token, 0, token.length) == 8
         }
-    }
-
-    private fun countAndValidateHextetGroups(token: String, start: Int, end: Int): Int {
-        if (start == end) return 0
-        var groups = 0
-        var groupStart = start
-        for (idx in start..end) {
-            if (idx == end || token[idx] == ':') {
-                val len = idx - groupStart
-                if (len !in 1..4) return -1
-                for (k in groupStart until idx) {
-                    if (!isHexChar(token[k])) return -1
-                }
-                groups++
-                groupStart = idx + 1
-            }
-        }
-        return groups
     }
 
     private fun maskIpv6Literal(address: String): String {
+        if (address.startsWith("::")) {
+            return "0:0:*:*"
+        }
         var g1Start = -1
         var g1End = -1
         var g2Start = -1
@@ -415,8 +290,8 @@ object IpPrivacyMasker {
         }
         return when {
             g2Start >= 0 -> "${address.substring(g1Start, g1End)}:${address.substring(g2Start, g2End)}:*:*"
-            g1Start >= 0 -> "${address.substring(g1Start, g1End)}::*"
-            else -> "*:*"
+            g1Start >= 0 -> "${address.substring(g1Start, g1End)}:*:*"
+            else -> "0:0:*:*"
         }
     }
 }

@@ -34,6 +34,9 @@ interface BlockedUsersCache {
     suspend fun recordBlockedByName(username: String)
     suspend fun removeByUid(uid: Long)
     suspend fun clear() {}
+    suspend fun clearForUid(uid: Long) {
+        clear()
+    }
 }
 
 class DataStoreBlockedUsersCache(
@@ -135,10 +138,14 @@ class DataStoreBlockedUsersCache(
     }
 
     override suspend fun clear() {
-        val uid = currentUid()
+        clearForUid(currentUid())
+    }
+
+    override suspend fun clearForUid(uid: Long) {
+        val targetUid = uid.coerceAtLeast(0L)
         dataStore.edit { prefs ->
-            prefs.remove(keyForUid(uid))
-            if (uid == 0L) {
+            prefs.remove(keyForUid(targetUid))
+            if (targetUid == 0L) {
                 prefs.remove(KEY_LEGACY_BLOCKED_USERS_JSON)
             }
         }

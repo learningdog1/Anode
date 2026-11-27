@@ -51,3 +51,8 @@
 # OkHttp / Okio
 -dontwarn okhttp3.**
 -dontwarn okio.**
+
+# Jetpack Glance ActionCallback reflective instantiation
+-keep class * implements androidx.glance.appwidget.action.ActionCallback {
+    public <init>();
+}

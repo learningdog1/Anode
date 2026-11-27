@@ -214,3 +214,12 @@ class SeekMailException(
     val errorCode: String? = null,
     cause: Throwable? = null,
 ) : Exception(message, cause)
+
+@Serializable
+data class LatestSeekMailOtp(
+    val mailId: Long,
+    val code: String,
+    val sender: String,
+    val subject: String,
+    val receivedAt: String,
+)

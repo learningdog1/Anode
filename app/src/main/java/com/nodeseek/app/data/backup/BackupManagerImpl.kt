@@ -471,6 +471,7 @@ class BackupManagerImpl(
                     activityNotificationsEnabled = bundle.activity.monitorSettings.notificationsEnabled,
                     manualFxOverrideCount = bundle.valuation.manualFxOverridesToCny.size,
                     targetSyncAccount = currentSignedInTargetAccount(),
+                    baselineCount = bundle.benchmarkBaselines.size,
                 ),
             )
         } catch (ce: CancellationException) {
@@ -554,6 +555,7 @@ class BackupManagerImpl(
             var reachedOfficialTrade = false
             var reachedNetBench = false
             var reachedValuation = false
+            var reachedBaselines = false
 
             val radarResult = try {
                 // ── Core v1 stores ──
@@ -704,6 +706,15 @@ class BackupManagerImpl(
                     )
                 }
 
+                fullBackupStores.benchmarkBaselineRepository?.let { repo ->
+                    coroutineContext.ensureActive()
+                    reachedBaselines = true
+                    repo.restoreFromBackup(
+                        items = bundle.benchmarkBaselines,
+                        replaceExisting = replaceExisting,
+                    )
+                }
+
                 // Commit point: remove the rollback journal now that ALL local stores have succeeded.
                 withContext(NonCancellable) {
                     restoreJournalStore.clear()
@@ -730,6 +741,7 @@ class BackupManagerImpl(
                         rollbackOfficialTrade = reachedOfficialTrade,
                         rollbackNetBench = reachedNetBench,
                         rollbackValuation = reachedValuation,
+                        rollbackBaselines = reachedBaselines,
                         primaryError = t,
                     )
                 }
@@ -783,6 +795,7 @@ class BackupManagerImpl(
                     sellerNotesImported = bundle.trust.sellerNotes.size,
                     officialTradeApiKeyImported = bundle.trust.officialTradeApiKey.isNotBlank(),
                     manualFxOverridesImported = bundle.valuation.manualFxOverridesToCny.size,
+                    baselinesImported = bundle.benchmarkBaselines.size,
                 ),
             )
         }
@@ -965,6 +978,9 @@ class BackupManagerImpl(
         val manualFxOverrides = fullBackupStores.exchangeRateRepository
             ?.exportManualOverridesForBackup()
             .orEmpty()
+        val benchmarkBaselines = fullBackupStores.benchmarkBaselineRepository
+            ?.exportForBackup()
+            .orEmpty()
 
         return NodePulseFullBackupBundle(
             schemaVersion = NodePulseFullBackupBundle.CURRENT_SCHEMA_VERSION,
@@ -1006,6 +1022,7 @@ class BackupManagerImpl(
             valuation = ValuationBackupDto(
                 manualFxOverridesToCny = manualFxOverrides,
             ),
+            benchmarkBaselines = benchmarkBaselines,
         )
     }
 
@@ -1035,6 +1052,7 @@ class BackupManagerImpl(
         rollbackOfficialTrade: Boolean,
         rollbackNetBench: Boolean,
         rollbackValuation: Boolean,
+        rollbackBaselines: Boolean = false,
         primaryError: Throwable?,
     ): Boolean {
         val coreClean = rollbackCoreStoresOnlyLocked(
@@ -1170,6 +1188,18 @@ class BackupManagerImpl(
             }.onFailure { primaryError?.addSuppressed(it) }.isSuccess
         }
 
+        val baselineRepo = fullBackupStores.benchmarkBaselineRepository
+        val baselinesClean = if (!rollbackBaselines || baselineRepo == null) {
+            true
+        } else {
+            runCatching {
+                baselineRepo.restoreFromBackup(
+                    items = snapshot.benchmarkBaselines,
+                    replaceExisting = true,
+                )
+            }.onFailure { primaryError?.addSuppressed(it) }.isSuccess
+        }
+
         val allClean = coreClean &&
             fleetClean &&
             restockClean &&
@@ -1181,7 +1211,8 @@ class BackupManagerImpl(
             sellerTrustClean &&
             officialTradeClean &&
             netBenchClean &&
-            valuationClean
+            valuationClean &&
+            baselinesClean
 
         if (allClean) {
             runCatching { restoreJournalStore.clear() }
@@ -1378,6 +1409,7 @@ class BackupManagerImpl(
                         rollbackOfficialTrade = true,
                         rollbackNetBench = true,
                         rollbackValuation = true,
+                        rollbackBaselines = true,
                         primaryError = null,
                     )
                 } else {
@@ -1650,6 +1682,10 @@ class BackupManagerImpl(
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .toCollection(LinkedHashSet()),
+            homepageCategoryOrder = bundle.settings.homepageCategoryOrder
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct(),
             nodeImageApiKey = bundle.settings.nodeImageApiKey.trim(),
             seekMailApiKey = bundle.settings.seekMailApiKey.trim(),
             ignoredUpdateTag = bundle.settings.ignoredUpdateTag.trim(),

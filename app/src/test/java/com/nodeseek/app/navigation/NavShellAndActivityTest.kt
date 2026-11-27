@@ -42,4 +42,20 @@ class NavShellAndActivityTest {
         val decoded = Json.decodeFromString<ActivityRoute>(encoded)
         assertEquals(ActivityRoute, decoded)
     }
+
+    @Test
+    fun `invite and rulings route round trips with kotlinx serialization`() {
+        val route = InviteAndRulingsRoute(initialTab = 1)
+        val encoded = Json.encodeToString(route)
+        val decoded = Json.decodeFromString<InviteAndRulingsRoute>(encoded)
+        assertEquals(route, decoded)
+    }
+
+    @Test
+    fun `domain assets route round trips with kotlinx serialization`() {
+        val route = DomainAssetsRoute(highlightAssetId = "dom_42")
+        val encoded = Json.encodeToString(route)
+        val decoded = Json.decodeFromString<DomainAssetsRoute>(encoded)
+        assertEquals(route, decoded)
+    }
 }

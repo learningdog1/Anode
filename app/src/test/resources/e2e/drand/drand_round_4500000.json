@@ -1,0 +1,6 @@
+{
+  "round": 4500000,
+  "randomness": "a3b2c1d0e4f567890123456789abcdefa3b2c1d0e4f567890123456789abcdef",
+  "signature": "80ab1234cd5678ef90123456789abcdef0123456789abcdef0123456789abcdef",
+  "previous_signature": "91cd5678ef9012ab3456789abcdef0123456789abcdef0123456789abcdef0123"
+}

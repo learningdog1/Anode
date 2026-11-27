@@ -10,6 +10,8 @@ interface SettingsRepository {
     val settings: StateFlow<AppSettings>
     val recentSearchQueries: StateFlow<List<String>>
 
+    suspend fun awaitLoadedSettings(): AppSettings = settings.value
+
     suspend fun setThemeMode(mode: ThemeMode)
     suspend fun setPurePitchAmoled(enabled: Boolean)
     suspend fun setUseDynamicColor(enabled: Boolean)
@@ -17,6 +19,14 @@ interface SettingsRepository {
     suspend fun setHomeCardScale(scale: Float) {}
     suspend fun setPreferRandomCheckIn(preferRandom: Boolean)
     suspend fun setPinnedCategorySlugs(slugs: Set<String>)
+    suspend fun setHomepageCategoryOrder(slugs: List<String>) {}
+    suspend fun getHomepageCategoryOrder(accountUid: Long): List<String> =
+        settings.value.homepageCategoryOrder
+    suspend fun setHomepageCategoryOrder(accountUid: Long, slugs: List<String>) {
+        setHomepageCategoryOrder(slugs)
+    }
+    suspend fun setActiveHomepageCategoryAccountUid(accountUid: Long) {}
+    fun onActiveAccountChanged(accountUid: Long) {}
     suspend fun togglePinnedCategory(slug: String)
     suspend fun setIncludeBlockedTopics(include: Boolean)
     suspend fun setPreferRssFallback(preferRss: Boolean)

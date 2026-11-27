@@ -1272,6 +1272,95 @@ class AwayDigestFeatureTest {
         assertEquals(listOf(505L), recoveredState.items.map { it.topic.id })
     }
 
+    @Test
+    fun `SharedPreferencesAwayDigestStore isolates timestamps sessions and meta per uid and clears on sign-out`() = runTest {
+        val tempFile = java.nio.file.Files.createTempFile("away_digest_uid_isolation", ".txt").toFile()
+        tempFile.delete()
+        try {
+            var activeUid = 101L
+            val map = linkedMapOf<String, Any?>()
+            val prefs = java.lang.reflect.Proxy.newProxyInstance(
+                android.content.SharedPreferences::class.java.classLoader,
+                arrayOf(android.content.SharedPreferences::class.java),
+            ) { _, method, args ->
+                when (method.name) {
+                    "getLong" -> (map[args[0] as String] as? Long) ?: (args[1] as Long)
+                    "getBoolean" -> (map[args[0] as String] as? Boolean) ?: (args[1] as Boolean)
+                    "getString" -> (map[args[0] as String] as? String) ?: (args[1] as String?)
+                    "edit" -> java.lang.reflect.Proxy.newProxyInstance(
+                        android.content.SharedPreferences.Editor::class.java.classLoader,
+                        arrayOf(android.content.SharedPreferences.Editor::class.java),
+                    ) { proxy, edMethod, edArgs ->
+                        when (edMethod.name) {
+                            "putLong", "putBoolean", "putString" -> {
+                                map[edArgs[0] as String] = edArgs[1]
+                                proxy
+                            }
+                            "remove" -> {
+                                map.remove(edArgs[0] as String)
+                                proxy
+                            }
+                            "apply", "commit" -> if (edMethod.name == "commit") true else Unit
+                            else -> proxy
+                        }
+                    }
+                    else -> null
+                }
+            } as android.content.SharedPreferences
+
+            val store = com.nodeseek.app.data.local.SharedPreferencesAwayDigestStore(
+                prefs = prefs,
+                accountUidProvider = { activeUid },
+            )
+
+            // Account A (101L) records active timestamp, session, and cached topic meta
+            activeUid = 101L
+            store.setLastActiveTimestampMillis(1_700_000_000_000L)
+            store.setActiveSession(
+                AwaySession(
+                    sessionId = "alice_sess",
+                    awayStartMillis = 1_700_000_000_000L,
+                    reopenedAtMillis = 1_700_007_200_000L,
+                ),
+            )
+            store.putCachedTopicMeta(
+                com.nodeseek.app.data.local.CachedTopicDrumstickMeta(
+                    topicId = 777L,
+                    drumstickCount = 12,
+                ),
+            )
+
+            // Switching to Account B (202L) sees empty clean slate (zero cross-account leak)
+            activeUid = 202L
+            assertEquals(0L, store.getLastActiveTimestampMillis())
+            assertNull(store.getActiveSession())
+            assertNull(store.getCachedTopicMeta(777L))
+
+            // Account B sets its own state
+            store.setLastActiveTimestampMillis(1_800_000_000_000L)
+            store.setActiveSession(
+                AwaySession(
+                    sessionId = "bob_sess",
+                    awayStartMillis = 1_800_000_000_000L,
+                    reopenedAtMillis = 1_800_003_600_000L,
+                ),
+            )
+
+            // Clearing Account A leaves Account B untouched
+            store.clearForAccount(101L)
+            activeUid = 101L
+            assertEquals(0L, store.getLastActiveTimestampMillis())
+            assertNull(store.getActiveSession())
+            assertNull(store.getCachedTopicMeta(777L))
+
+            activeUid = 202L
+            assertEquals("bob_sess", store.getActiveSession()?.sessionId)
+            assertEquals(1_800_000_000_000L, store.getLastActiveTimestampMillis())
+        } finally {
+            tempFile.delete()
+        }
+    }
+
     private fun buildTopic(
         id: Long,
         title: String,

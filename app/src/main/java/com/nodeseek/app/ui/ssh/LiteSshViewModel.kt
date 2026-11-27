@@ -7,6 +7,11 @@ import androidx.lifecycle.ViewModelProvider
 import com.nodeseek.app.NodePulseApp
 import com.nodeseek.app.data.ssh.JSchSshTransport
 import com.nodeseek.app.data.ssh.SshServerVault
+import com.nodeseek.app.domain.baseline.BaselineDiffReport
+import com.nodeseek.app.domain.baseline.BaselineSnapshotExtractor
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository
+import com.nodeseek.app.domain.baseline.BenchmarkBaselineSnapshot
+import com.nodeseek.app.domain.baseline.NoOpBenchmarkBaselineRepository
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.HostKeyInfo
@@ -34,6 +39,7 @@ import com.nodeseek.app.domain.ssh.SshScriptPreset
 import com.nodeseek.app.domain.ssh.SshServerDraft
 import com.nodeseek.app.domain.ssh.SshServerGroupOption
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshSftpEntry
 import com.nodeseek.app.domain.ssh.SshVaultCatalogFilter
 import com.nodeseek.app.domain.ssh.SshVaultCollapseState
 import com.nodeseek.app.domain.ssh.SshVaultRepository
@@ -42,6 +48,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
+import java.io.InputStream
 import java.util.UUID
 
 /**
@@ -71,6 +78,43 @@ data class PendingHostKeyMismatchPrompt(
     /** Port of the isolated iperf3 service utility run that hit the mismatch (null for benchmark runs). */
     val iperf3Port: Int? = null,
     val iperf3AutoOpenFirewall: Boolean = false,
+    val isSftpRetry: Boolean = false,
+)
+
+@Immutable
+data class SshSftpOpenFileState(
+    val remotePath: String,
+    val fileName: String,
+    val originalText: String,
+    val editedText: String,
+    val totalBytes: Long = 0L,
+    val isTruncatedFromHead: Boolean = false,
+    val isBinaryDetected: Boolean = false,
+    val canEdit: Boolean = true,
+    val isEditMode: Boolean = false,
+    val isSaving: Boolean = false,
+) {
+    val isDirty: Boolean
+        get() = isEditMode && editedText != originalText
+}
+
+@Immutable
+data class SshSftpDrawerState(
+    val isOpen: Boolean = false,
+    val serverId: String? = null,
+    val serverAlias: String = "",
+    val serverHost: String = "",
+    val needsDirectSshCredentials: Boolean = false,
+    val isConnecting: Boolean = false,
+    val isConnected: Boolean = false,
+    val isLoadingDir: Boolean = false,
+    val isOperating: Boolean = false,
+    val currentPath: String = "/",
+    val homePath: String = "/",
+    val entries: List<SshSftpEntry> = emptyList(),
+    val openFile: SshSftpOpenFileState? = null,
+    val lastBackupBanner: String? = null,
+    val errorMessage: String? = null,
 )
 
 /**
@@ -190,7 +234,28 @@ data class LiteSshUiState(
     val probePanels: List<ProbePanelConfig> = emptyList(),
     val lastProbeSyncSummary: String? = null,
     val vaultLoadError: String? = null,
+    val sftpDrawer: SshSftpDrawerState = SshSftpDrawerState(),
+    val savedBaselines: List<BenchmarkBaselineSnapshot> = emptyList(),
+    val selectedBaselineIdForCompare: String? = null,
+    val activeBaselineDiff: BaselineDiffReport? = null,
+    val showSaveBaselineDialog: Boolean = false,
+    val showBaselineCompareSheet: Boolean = false,
 ) {
+    val matchingBaselines: List<BenchmarkBaselineSnapshot>
+        get() {
+            val server = selectedServer
+            val serverId = server?.id
+            val host = server?.host
+            if (serverId.isNullOrBlank() && host.isNullOrBlank()) return emptyList()
+            val hostKey = host?.takeIf { it.isNotBlank() }?.let {
+                BaselineSnapshotExtractor.normalizeTargetKey(hostOrIp = it)
+            }
+            return savedBaselines.filter { b ->
+                (serverId != null && b.serverId == serverId) ||
+                    (hostKey != null && b.targetKey == hostKey) ||
+                    (!host.isNullOrBlank() && (b.hostDisplay.equals(host, ignoreCase = true) || b.resolvedIp == host))
+            }
+        }
     val configuredProbePanelCount: Int
         get() = probePanels.count { it.enabled }
 
@@ -458,6 +523,7 @@ class LiteSshViewModel(
         clock: () -> Long = { System.currentTimeMillis() },
         idGenerator: () -> String = { UUID.randomUUID().toString() },
         enableElapsedTicker: Boolean = true,
+        benchmarkBaselineRepository: BenchmarkBaselineRepository = NoOpBenchmarkBaselineRepository,
     ) : this(
         sessionManager = LiteSshSessionManager(
             vaultRepository = vaultRepository,
@@ -467,6 +533,7 @@ class LiteSshViewModel(
             clock = clock,
             idGenerator = idGenerator,
             enableElapsedTicker = enableElapsedTicker,
+            benchmarkBaselineRepository = benchmarkBaselineRepository,
         ),
         ownsSessionManagerScope = true,
     )
@@ -582,6 +649,35 @@ class LiteSshViewModel(
     fun confirmInstallAndStartIperf3Server() = sessionManager.confirmInstallAndStartIperf3Server()
     fun dismissIperf3InstallPrompt() = sessionManager.dismissIperf3InstallPrompt()
 
+    fun openSftpDrawer(serverId: String? = null) = sessionManager.openSftpDrawer(serverId = serverId)
+    fun dismissSftpDrawer() = sessionManager.dismissSftpDrawer()
+    fun sftpRefreshCurrentDir() = sessionManager.sftpRefreshCurrentDir()
+    fun sftpListDir(path: String) = sessionManager.sftpListDir(path)
+    fun sftpNavigateUp() = sessionManager.sftpNavigateUp()
+    fun sftpOpenFile(remotePath: String, preferEditMode: Boolean = false) =
+        sessionManager.sftpOpenFile(remotePath = remotePath, preferEditMode = preferEditMode)
+    fun sftpOpenQuickShortcut(shortcut: com.nodeseek.app.domain.ssh.SshSftpQuickShortcut) =
+        sessionManager.sftpOpenQuickShortcut(shortcut)
+    fun sftpEnterEditMode() = sessionManager.sftpEnterEditMode()
+    fun sftpUpdateEditorContent(text: String) = sessionManager.sftpUpdateEditorContent(text)
+    fun sftpSaveFileWithBak() = sessionManager.sftpSaveFileWithBak()
+    fun sftpUploadStream(fileName: String, inputStream: InputStream) =
+        sessionManager.sftpUploadStream(fileName = fileName, inputStream = inputStream)
+    fun sftpCreateDirectory(folderName: String) = sessionManager.sftpCreateDirectory(folderName)
+    fun sftpDeleteEntry(entry: SshSftpEntry) = sessionManager.sftpDeleteEntry(entry)
+    fun sftpCloseFileViewer() = sessionManager.sftpCloseFileViewer()
+    fun sftpClearError() = sessionManager.sftpClearError()
+    fun sftpReportError(message: String) = sessionManager.sftpReportError(message)
+
+    fun openSaveBaselineDialog() = sessionManager.openSaveBaselineDialog()
+    fun dismissSaveBaselineDialog() = sessionManager.dismissSaveBaselineDialog()
+    fun saveCurrentAsBaseline(label: String = "", notes: String = "") =
+        sessionManager.saveCurrentAsBaseline(label = label, notes = notes)
+    fun openBaselineCompareSheet(baselineId: String? = null) = sessionManager.openBaselineCompareSheet(baselineId)
+    fun dismissBaselineCompareSheet() = sessionManager.dismissBaselineCompareSheet()
+    fun selectBaselineForComparison(baselineId: String) = sessionManager.selectBaselineForComparison(baselineId)
+    fun deleteBaseline(baselineId: String) = sessionManager.deleteBaseline(baselineId)
+
     override fun onCleared() {
         // Only cancel scope when constructed via standalone test convenience constructor;
         // production AppContainer sessionManager continues running in background!
@@ -598,6 +694,7 @@ class LiteSshViewModel(
             val sharedManager = container?.sshSessionManager
             if (sharedManager != null) {
                 sharedManager.attachFleetIntegration(fleetRepository = container.fleetRepository)
+                sharedManager.attachBaselineRepository(container.benchmarkBaselineRepository)
                 return factory(sessionManager = sharedManager)
             }
             val vault = SshServerVault.getDefault(appContext)

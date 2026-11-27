@@ -765,6 +765,8 @@ data class NetBenchReport(
     val iperfUploadResult: Iperf3Result? = null,
     val testedViaProxy: Boolean = false,
     val proxyNetwork: ClientNetworkInfo? = null,
+    val forwardTraceroute: TracerouteSummary? = null,
+    val reverseTraceroute: TracerouteSummary? = null,
 ) {
     val hasAnyResult: Boolean
         get() = icmpPingSummary != null ||
@@ -772,7 +774,9 @@ data class NetBenchReport(
             httpLatencyResult != null ||
             ipIntelligence != null ||
             iperfDownloadResult != null ||
-            iperfUploadResult != null
+            iperfUploadResult != null ||
+            forwardTraceroute != null ||
+            reverseTraceroute != null
 }
 
 /**

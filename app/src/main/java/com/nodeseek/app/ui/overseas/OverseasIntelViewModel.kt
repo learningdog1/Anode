@@ -185,9 +185,9 @@ class OverseasIntelViewModel(
     }
 
     fun loadNextPage() {
-        val state = uiState.value
-        if (state.searchQuery.isNotBlank()) return
-        if (state.syncStatus.isRefreshing || state.syncStatus.isLoadingMore || !state.syncStatus.hasMore) return
+        if (controls.value.searchQuery.isNotBlank()) return
+        val syncStatus = repository.snapshot.value.syncStatus
+        if (syncStatus.isRefreshing || syncStatus.isLoadingMore || !syncStatus.hasMore) return
         viewModelScope.launch {
             repository.loadNextPage()
                 .onFailure { err ->

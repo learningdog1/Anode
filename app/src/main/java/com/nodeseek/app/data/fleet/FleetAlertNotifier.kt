@@ -158,7 +158,7 @@ open class FleetAlertNotifier(
             .setContentIntent(
                 createOpenFleetPendingIntent(
                     requestCode = notificationId,
-                    targetTab = EXTRA_TAB_ASSETS,
+                    targetTab = resolveRenewalTargetTab(asset),
                     assetId = asset.id,
                 ),
             )
@@ -221,7 +221,9 @@ open class FleetAlertNotifier(
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) return false
         }
-        return NotificationManagerCompat.from(appContext).areNotificationsEnabled()
+        return runCatching {
+            NotificationManagerCompat.from(appContext).areNotificationsEnabled()
+        }.getOrDefault(false)
     }
 
     private fun notifySafely(notificationId: Int, notification: android.app.Notification) {
@@ -248,6 +250,10 @@ open class FleetAlertNotifier(
         const val EXTRA_ASSET_ID = "com.nodeseek.app.extra.ASSET_ID"
         const val EXTRA_TAB_PROBES = "probes"
         const val EXTRA_TAB_ASSETS = "assets"
+        const val EXTRA_TAB_DOMAINS = "domains"
+
+        internal fun resolveRenewalTargetTab(asset: VpsAssetRecord): String =
+            if (asset.isDomainAsset) EXTRA_TAB_DOMAINS else EXTRA_TAB_ASSETS
 
         private const val BASE_ID_OFFLINE = 60_000
         private const val BASE_ID_RECOVERY = 64_000
@@ -284,7 +290,8 @@ open class FleetAlertNotifier(
                 if (asset.autoRenew) {
                     append("\n已开启自动续费，到期后将自动按周期顺延，请注意核对扣款")
                 } else if (daysRemaining <= 0L) {
-                    append("\n如已完成续费，可进入资产账本点击「已续费」自动顺延到期日")
+                    val destinationLabel = if (asset.isDomainAsset) "域名资产" else "资产账本"
+                    append("\n如已完成续费，可进入${destinationLabel}点击「已续费」自动顺延到期日")
                 }
             }
             return Triple(title, summary, body)

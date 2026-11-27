@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicLong
 
 interface SessionSnapshotStore {
     fun load(): AccountSession?
@@ -88,11 +89,21 @@ class SessionRepositoryImpl(
     private val _authVerifiedEpoch = MutableStateFlow(0L)
     override val authVerifiedEpoch: StateFlow<Long> = _authVerifiedEpoch.asStateFlow()
 
+    private val sessionGenerationCounter = AtomicLong(0L)
+    private val sessionUpdateLock = Any()
+    private var lastNotifiedActiveUid: Long = (_sessionState.value?.uid ?: 0L).coerceAtLeast(0L)
+
     var unreadCountListener: ((Int) -> Unit)? = null
     var embeddedCategoriesListener: ((List<CategoryDto>, Long) -> Unit)? = null
+    var activeUidChangedListener: ((Long) -> Unit)? = null
     var onVerifiedCallback: (() -> Unit)? = null
     var onChallengeClearedOrAuthenticated: (() -> Unit)? = null
     var onSignedOutCallback: (() -> Unit)? = null
+    var onSignedOutWithUidCallback: ((Long) -> Unit)? = null
+
+    fun currentSessionGeneration(): Long = sessionGenerationCounter.get()
+
+    fun bumpSessionGeneration(): Long = sessionGenerationCounter.incrementAndGet()
 
     internal fun hasStoredSessionCookie(): Boolean =
         cookieBridge.hasSessionCookie() || cookieBridge.hasAnyAuthCookie()
@@ -101,16 +112,51 @@ class SessionRepositoryImpl(
         _authVerifiedEpoch.update { prev -> maxOf(prev + 1L, System.currentTimeMillis()) }
     }
 
-    fun onConfigPayloadObserved(config: ConfigPayloadDto) {
+    internal fun notifyAuthContextChanged() {
+        bumpAuthVerifiedEpoch()
+    }
+
+    private fun updateSessionAndNotifyUid(session: AccountSession?) {
+        synchronized(sessionUpdateLock) {
+            _sessionState.value = session
+            if (session != null && session.uid > 0L) {
+                sessionSnapshotStore?.save(session)
+            } else {
+                sessionSnapshotStore?.clear()
+            }
+            val newUid = (session?.uid ?: 0L).coerceAtLeast(0L)
+            if (newUid != lastNotifiedActiveUid) {
+                lastNotifiedActiveUid = newUid
+                activeUidChangedListener?.invoke(newUid)
+            }
+        }
+    }
+
+    internal fun applyOptimisticSwitchedSession(session: AccountSession) {
+        bumpSessionGeneration()
+        _challengeRequired.value = false
+        updateSessionAndNotifyUid(session)
+        unreadCountListener?.invoke(session.unreadNotificationCount)
+    }
+
+    internal fun enterGuestForAccountAddition() {
+        bumpSessionGeneration()
+        _challengeRequired.value = false
+        updateSessionAndNotifyUid(null)
+        unreadCountListener?.invoke(0)
+    }
+
+    fun onConfigPayloadObserved(
+        config: ConfigPayloadDto,
+        expectedGeneration: Long? = null,
+    ) {
+        if (expectedGeneration != null && expectedGeneration != sessionGenerationCounter.get()) {
+            return
+        }
         val wasChallengeActive = _challengeRequired.value
         _challengeRequired.value = false
         val session = config.user?.toDomainSession(config.enableCustomedStyle)
-        _sessionState.value = session
-        if (session != null && session.uid > 0L) {
-            sessionSnapshotStore?.save(session)
-        } else {
-            sessionSnapshotStore?.clear()
-        }
+        updateSessionAndNotifyUid(session)
         if (wasChallengeActive || session != null) {
             onChallengeClearedOrAuthenticated?.invoke()
         }
@@ -139,8 +185,9 @@ class SessionRepositoryImpl(
 
     override suspend fun refreshSession(): Result<AccountSession?> =
         runDomainCatching(onChallengeDetected = ::reportChallengeRequired) {
+            val expectedGeneration = currentSessionGeneration()
             val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
-            onConfigPayloadObserved(config)
+            onConfigPayloadObserved(config, expectedGeneration = expectedGeneration)
             _sessionState.value
         }
 
@@ -165,8 +212,9 @@ class SessionRepositoryImpl(
             cookieBridge.flush()
             onVerifiedCallback?.invoke()
             _challengeRequired.value = false
+            val gen = bumpSessionGeneration()
             val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
-            onConfigPayloadObserved(config)
+            onConfigPayloadObserved(config, expectedGeneration = gen)
             if (config.user == null) {
                 throw NodeSeekApiException("登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
             }
@@ -195,8 +243,9 @@ class SessionRepositoryImpl(
             cookieBridge.flush()
             onVerifiedCallback?.invoke()
             _challengeRequired.value = false
+            val gen = bumpSessionGeneration()
             val config = apiClientProvider().fetchSessionConfig(notifyObserver = false)
-            onConfigPayloadObserved(config)
+            onConfigPayloadObserved(config, expectedGeneration = gen)
             if (config.user == null) {
                 throw NodeSeekApiException("两步验证通过但登录状态未能同步生效，请重试或改用 WebView 官方网页登录。")
             }
@@ -204,6 +253,7 @@ class SessionRepositoryImpl(
         }
 
     override suspend fun onWebViewAuthCompleted(): Result<AccountSession?> {
+        bumpSessionGeneration()
         cookieBridge.flush()
         onVerifiedCallback?.invoke()
         _challengeRequired.value = false
@@ -266,10 +316,14 @@ class SessionRepositoryImpl(
     }
 
     private fun clearLocalSessionState() {
+        val signedOutUid = _sessionState.value?.uid ?: 0L
+        bumpSessionGeneration()
         _challengeRequired.value = false
-        _sessionState.value = null
-        sessionSnapshotStore?.clear()
+        updateSessionAndNotifyUid(null)
         unreadCountListener?.invoke(0)
+        if (signedOutUid > 0L) {
+            onSignedOutWithUidCallback?.invoke(signedOutUid)
+        }
         onSignedOutCallback?.invoke()
     }
 }

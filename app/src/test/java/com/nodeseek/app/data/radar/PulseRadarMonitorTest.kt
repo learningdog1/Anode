@@ -1777,6 +1777,78 @@ class PulseRadarMonitorTest {
         assertEquals(1, dispatcher.interactions.size)
         assertEquals(801L, dispatcher.interactions.single().itemId)
     }
+
+    @Test
+    fun `runPollCycle without start resets inbox Cloudflare backoff immediately on uid change and polls new account inbox`() = runTest {
+        radarRepository.updatePollingSettings {
+            it.copy(
+                keywordAlertsEnabled = false,
+                replyTrackingEnabled = false,
+                inboxPushEnabled = true,
+            )
+        }
+
+        var challengeInbox = true
+        var inboxCalls = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path.startsWith("/api/notification/") -> {
+                        inboxCalls++
+                        if (challengeInbox) {
+                            MockResponse()
+                                .setResponseCode(403)
+                                .addHeader("cf-mitigated", "challenge")
+                                .setBody("<html><title>Just a moment...</title></html>")
+                        } else {
+                            MockResponse()
+                                .setResponseCode(200)
+                                .setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                        }
+                    }
+                    else -> MockResponse().setResponseCode(200).setBody("""{"success":true,"data":[],"msgArray":[]}""")
+                }
+            }
+        }
+
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 1001L, username = "Alice"))
+        val monitor = createMonitor(this)
+        // Intentionally do NOT call monitor.start() (mirrors background worker / cold runPollCycle path)
+
+        // Account A hits 403 CF challenge on /api/notification/* -> enters 60s inbox backoff
+        val ranA1 = monitor.runPollCycle(manualTrigger = false)
+        assertTrue(ranA1)
+        val callsAfterA1 = inboxCalls
+        assertTrue(callsAfterA1 > 0)
+
+        // Still Account A 5s later -> skipped due to A's active inbox CF backoff
+        fakeClockMillis += 5_000L
+        val ranA2 = monitor.runPollCycle(manualTrigger = false)
+        assertFalse(ranA2)
+        assertEquals(callsAfterA1, inboxCalls)
+
+        // Switch to Account B without calling start(); 5s later (inside A's 60s window) B must reset backoff and poll inbox
+        challengeInbox = false
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 2002L, username = "Bob"))
+        fakeClockMillis += 5_000L
+        val ranB = monitor.runPollCycle(manualTrigger = false)
+        assertTrue("Expected runPollCycle(false) to run for Account B after uid change", ranB)
+        assertTrue("Expected B's inbox endpoints to be polled, calls=$inboxCalls vs $callsAfterA1", inboxCalls > callsAfterA1)
+
+        // Also verify runBackgroundPollPass() resets backoff on uid change without start()
+        challengeInbox = true
+        val bobChallengeOutcome = monitor.runBackgroundPollPass()
+        assertTrue(bobChallengeOutcome is RadarBackgroundPollOutcome.Completed)
+        val callsBeforeCharlie = inboxCalls
+
+        challengeInbox = false
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 3003L, username = "Charlie"))
+        fakeClockMillis += 5_000L
+        val charlieOutcome = monitor.runBackgroundPollPass()
+        assertTrue("Expected Completed for Charlie, got $charlieOutcome", charlieOutcome is RadarBackgroundPollOutcome.Completed)
+        assertTrue(inboxCalls > callsBeforeCharlie)
+    }
 }
 
 internal class RecordingNotificationDispatcher : PulseNotificationDispatcher(ContextWrapper(null)) {

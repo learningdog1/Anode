@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": [
+    { "floor_id": 1, "member_id": 201, "member_name": "charlie201" },
+    { "floor_id": 2, "member_id": 202, "member_name": "bob202" },
+    { "floor_id": 3, "member_id": 201, "member_name": "charlie201" },
+    { "floor_id": 4, "member_id": 101, "member_name": "alice101" },
+    { "floor_id": 5, "member_id": 205, "member_name": "dave205" },
+    { "floor_id": 6, "member_id": 206, "member_name": "eve206" }
+  ]
+}

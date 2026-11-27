@@ -1,6 +1,8 @@
 package com.nodeseek.app.navigation
 
 import android.net.Uri
+import com.nodeseek.app.domain.activity.DrandLuckyEngine
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -21,6 +23,24 @@ sealed interface NodePulseDeepLink {
     data class UserSpace(
         val uid: Long,
     ) : NodePulseDeepLink
+
+    data class LuckyDraw(
+        val luckyUrl: String,
+        val postId: Long,
+        val drawTimeEpochMillis: Long?,
+        val winnerCount: Int,
+        val firstFloor: Int,
+        val removeDuplicates: Boolean,
+    ) : NodePulseDeepLink {
+        fun toSpec(): LuckyDrawSpec = LuckyDrawSpec(
+            postId = postId,
+            drawTimeEpochMillis = drawTimeEpochMillis,
+            winnerCount = winnerCount,
+            firstFloor = firstFloor,
+            removeDuplicates = removeDuplicates,
+            rawUrl = luckyUrl,
+        )
+    }
 
     data object CuratedFeed : NodePulseDeepLink
 
@@ -51,6 +71,18 @@ object DeepLinkParser {
     fun parseUrl(rawUrl: String?, maxRedirectDepth: Int = 2): NodePulseDeepLink? {
         if (rawUrl.isNullOrBlank() || maxRedirectDepth < 0) return null
         val trimmed = rawUrl.trim()
+
+        DrandLuckyEngine.parseLuckyUrl(trimmed, maxRedirectDepth = maxRedirectDepth)?.let { spec ->
+            return NodePulseDeepLink.LuckyDraw(
+                luckyUrl = spec.rawUrl,
+                postId = spec.postId,
+                drawTimeEpochMillis = spec.drawTimeEpochMillis,
+                winnerCount = spec.winnerCount,
+                firstFloor = spec.firstFloor,
+                removeDuplicates = spec.removeDuplicates,
+            )
+        }
+
         val parsed = runCatching { URI(trimmed) }.getOrNull() ?: return null
 
         val scheme = parsed.scheme?.lowercase() ?: return null

@@ -43,6 +43,7 @@ data class AppSettingsBackupDto(
     val homeCardScale: Float = AppSettings.DEFAULT_HOME_CARD_SCALE,
     val preferRandomCheckIn: Boolean = false,
     val pinnedCategorySlugs: Set<String> = AppSettings.DEFAULT_PINNED_CATEGORY_SLUGS,
+    val homepageCategoryOrder: List<String> = emptyList(),
     val includeBlockedTopics: Boolean = false,
     val preferRssFallback: Boolean = false,
     val nodeImageApiKey: String = "",

@@ -152,6 +152,12 @@ interface SeekMailRepository {
         }
     }
 
+    /**
+     * Scans locally cached Seek Mail pages (without hitting the network) and returns the most
+     * recent non-deleted message containing a verification code, or `null` if unavailable.
+     */
+    suspend fun getCachedLatestOtp(): LatestSeekMailOtp? = null
+
     suspend fun clearCacheForCurrentKey() = clearCache()
 
     suspend fun clearCache()

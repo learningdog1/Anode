@@ -223,6 +223,27 @@ class AwayDigestRepositoryImpl(
                     }
                 }
         }
+
+        scope.launch {
+            sessionRepository.sessionState
+                .map { it?.uid ?: 0L }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect {
+                    synchronized(lifecycleLock) {
+                        scanJob?.cancel()
+                        scanJob = null
+                        loadedSessionId = null
+                        lastForegroundTransition = null
+                        pendingAppClosedReopen = store.wasAppClosed()
+                        val restored = store.getActiveSession()?.takeIf { isPersistedSessionFresh(it) }
+                        _rawState.value = InternalAwayDigestRawState(activeSession = restored)
+                        _state.value = AwayDigestState(
+                            activeSession = restored?.takeIf { settingsRepository.settings.value.awayDigestEnabled },
+                        )
+                    }
+                }
+        }
     }
 
     private fun onSettingsChanged(settings: AppSettings) {

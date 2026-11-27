@@ -36,12 +36,16 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +57,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -78,6 +83,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
 import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
@@ -86,6 +92,8 @@ import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseTextField
+import com.nodeseek.app.ui.components.SortSegmentItem
+import com.nodeseek.app.ui.components.SortSegmentedSwitcher
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -124,6 +132,14 @@ internal fun AssetEditorBottomSheet(
     existingTags: List<String> = emptyList(),
     initialTags: List<String>? = null,
     initialAutoRenew: Boolean? = null,
+    isLookingUpRdap: Boolean = false,
+    rdapLookupError: String? = null,
+    rdapSyncSummary: String? = null,
+    isCheckingTls: Boolean = false,
+    tlsCheckResultMessage: String? = null,
+    onLookupDomainRdap: (String) -> Unit = {},
+    onCheckTlsCertificate: (String, Int) -> Unit = { _, _ -> },
+    lockedAssetType: FleetAssetType? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.92f).dp
@@ -135,33 +151,104 @@ internal fun AssetEditorBottomSheet(
             restore = { it.toList() },
         )
     }
-    val draftKey = draft.editingId ?: "new:${draft.linkedProbeKey.orEmpty()}:${draft.purchaseUrl}"
-    var nickname by rememberSaveable(draftKey, draft) { mutableStateOf(draft.nickname) }
-    var providerName by rememberSaveable(draftKey, draft) { mutableStateOf(draft.providerName) }
-    var region by rememberSaveable(draftKey, draft) { mutableStateOf(draft.region) }
-    var selectedTags by rememberSaveable(draftKey, draft, initialTags, stateSaver = stringListSaver) {
+    val draftKey = draft.editingId ?: "new:${lockedAssetType?.name ?: draft.assetType.name}:${draft.linkedProbeKey.orEmpty()}:${draft.purchaseUrl}"
+    var assetType by rememberSaveable(draftKey) { mutableStateOf(lockedAssetType ?: draft.assetType) }
+    var domainName by rememberSaveable(draftKey) { mutableStateOf(draft.domainName) }
+    var registrarName by rememberSaveable(draftKey) { mutableStateOf(draft.registrarName) }
+    var domainCreatedIso by rememberSaveable(draftKey) { mutableStateOf(draft.domainCreatedIso) }
+    var rdapSyncedAtEpochMillis by rememberSaveable(draftKey) { mutableStateOf(draft.rdapSyncedAtEpochMillis) }
+    var rdapStatusTags by rememberSaveable(draftKey, stateSaver = stringListSaver) {
+        mutableStateOf(draft.rdapStatusTags)
+    }
+    var tlsHost by rememberSaveable(draftKey) { mutableStateOf(draft.tlsHost) }
+    var tlsPortText by rememberSaveable(draftKey) { mutableStateOf(draft.tlsPort) }
+    var tlsExpiresAtEpochMillis by rememberSaveable(draftKey) { mutableStateOf(draft.tlsExpiresAtEpochMillis) }
+    var tlsIssuer by rememberSaveable(draftKey) { mutableStateOf(draft.tlsIssuer) }
+    var tlsSubject by rememberSaveable(draftKey) { mutableStateOf(draft.tlsSubject) }
+    var tlsCheckedAtEpochMillis by rememberSaveable(draftKey) { mutableStateOf(draft.tlsCheckedAtEpochMillis) }
+    var tlsCheckError by rememberSaveable(draftKey) { mutableStateOf(draft.tlsCheckError) }
+    var lastAppliedRdapRevision by rememberSaveable(draftKey) { mutableIntStateOf(draft.rdapSyncRevision) }
+    var lastAppliedTlsRevision by rememberSaveable(draftKey) { mutableIntStateOf(draft.tlsCheckRevision) }
+    var previousSyncedDomain by rememberSaveable(draftKey) { mutableStateOf(draft.domainName.trim()) }
+
+    var nickname by rememberSaveable(draftKey) { mutableStateOf(draft.nickname) }
+    var providerName by rememberSaveable(draftKey) { mutableStateOf(draft.providerName) }
+    var region by rememberSaveable(draftKey) { mutableStateOf(draft.region) }
+    var selectedTags by rememberSaveable(draftKey, initialTags, stateSaver = stringListSaver) {
         mutableStateOf(
             VpsAssetRecord.normalizeTags(
                 initialTags ?: VpsAssetRecord.parseLegacyTags(draft.routeTag),
             ),
         )
     }
-    var customTagInput by rememberSaveable(draftKey, draft) { mutableStateOf("") }
-    var specsSummary by rememberSaveable(draftKey, draft) { mutableStateOf(draft.specsSummary) }
-    var renewalAmount by rememberSaveable(draftKey, draft) { mutableStateOf(draft.renewalAmount) }
-    var currency by rememberSaveable(draftKey, draft) { mutableStateOf(draft.currency) }
-    var cyclePreset by rememberSaveable(draftKey, draft) { mutableStateOf(draft.cyclePreset) }
-    var customCycleDays by rememberSaveable(draftKey, draft) { mutableStateOf(draft.customCycleDays) }
-    var expiryDateIso by rememberSaveable(draftKey, draft) { mutableStateOf(draft.expiryDateIso) }
-    var remindDays by rememberSaveable(draftKey, draft) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
-    var autoRenew by rememberSaveable(draftKey, draft, initialAutoRenew) { mutableStateOf(initialAutoRenew ?: false) }
-    var monthlyTrafficQuotaGb by rememberSaveable(draftKey, draft) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
-    var trafficResetDayText by rememberSaveable(draftKey, draft) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
-    var linkedProbeKey by rememberSaveable(draftKey, draft) { mutableStateOf(draft.linkedProbeKey) }
-    var purchaseUrl by rememberSaveable(draftKey, draft) { mutableStateOf(draft.purchaseUrl) }
-    var panelManageUrl by rememberSaveable(draftKey, draft) { mutableStateOf(draft.panelManageUrl) }
-    var autoRenewNote by rememberSaveable(draftKey, draft) { mutableStateOf(draft.autoRenewNote) }
-    var notes by rememberSaveable(draftKey, draft) { mutableStateOf(draft.notes) }
+    var customTagInput by rememberSaveable(draftKey) { mutableStateOf("") }
+    var specsSummary by rememberSaveable(draftKey) { mutableStateOf(draft.specsSummary) }
+    var renewalAmount by rememberSaveable(draftKey) { mutableStateOf(draft.renewalAmount) }
+    var currency by rememberSaveable(draftKey) { mutableStateOf(draft.currency) }
+    var cyclePreset by rememberSaveable(draftKey) { mutableStateOf(draft.cyclePreset) }
+    var customCycleDays by rememberSaveable(draftKey) { mutableStateOf(draft.customCycleDays) }
+    var expiryDateIso by rememberSaveable(draftKey) { mutableStateOf(draft.expiryDateIso) }
+    var remindDays by rememberSaveable(draftKey) { mutableIntStateOf(draft.remindDaysBeforeExpiry) }
+    var autoRenew by rememberSaveable(draftKey, initialAutoRenew) { mutableStateOf(initialAutoRenew ?: draft.autoRenew) }
+    var monthlyTrafficQuotaGb by rememberSaveable(draftKey) { mutableStateOf(draft.monthlyTrafficQuotaGb) }
+    var trafficResetDayText by rememberSaveable(draftKey) { mutableStateOf(draft.trafficResetDay?.toString().orEmpty()) }
+    var linkedProbeKey by rememberSaveable(draftKey) { mutableStateOf(draft.linkedProbeKey) }
+    var purchaseUrl by rememberSaveable(draftKey) { mutableStateOf(draft.purchaseUrl) }
+    var panelManageUrl by rememberSaveable(draftKey) { mutableStateOf(draft.panelManageUrl) }
+    var autoRenewNote by rememberSaveable(draftKey) { mutableStateOf(draft.autoRenewNote) }
+    var notes by rememberSaveable(draftKey) { mutableStateOf(draft.notes) }
+
+    LaunchedEffect(draft.rdapSyncedAtEpochMillis, draft.rdapSyncRevision) {
+        val syncedAt = draft.rdapSyncedAtEpochMillis
+        val shouldApply = (syncedAt != null && syncedAt != rdapSyncedAtEpochMillis) ||
+            draft.rdapSyncRevision != lastAppliedRdapRevision
+        if (shouldApply) {
+            lastAppliedRdapRevision = draft.rdapSyncRevision
+            rdapSyncedAtEpochMillis = syncedAt
+            val previousDomain = domainName.trim()
+            if (draft.domainName.isNotBlank()) domainName = draft.domainName
+            val isDomainChanged = previousSyncedDomain.isNotBlank() &&
+                draft.domainName.isNotBlank() &&
+                !previousSyncedDomain.equals(draft.domainName.trim(), ignoreCase = true)
+            if (draft.registrarName.isNotBlank() || isDomainChanged) {
+                registrarName = draft.registrarName
+                providerName = draft.registrarName
+            }
+            if ((nickname.isBlank() || (isDomainChanged && nickname.trim().equals(previousSyncedDomain, ignoreCase = true))) &&
+                draft.nickname.isNotBlank()
+            ) {
+                nickname = draft.nickname
+            }
+            if (draft.expiryDateIso.isNotBlank()) expiryDateIso = draft.expiryDateIso
+            domainCreatedIso = draft.domainCreatedIso
+            rdapStatusTags = draft.rdapStatusTags
+            tlsHost = resolveTlsHostAfterRdapSync(
+                currentTlsHost = tlsHost,
+                previousDomain = previousDomain,
+                previousSyncedDomain = previousSyncedDomain,
+                incomingRdapTlsHost = draft.domainName,
+            )
+            if (draft.domainName.isNotBlank()) {
+                previousSyncedDomain = draft.domainName.trim()
+            }
+        }
+    }
+
+    LaunchedEffect(draft.tlsCheckedAtEpochMillis, draft.tlsCheckError, draft.tlsCheckRevision) {
+        val checkedAt = draft.tlsCheckedAtEpochMillis
+        val shouldApply = (checkedAt != null && (checkedAt != tlsCheckedAtEpochMillis || tlsCheckError != draft.tlsCheckError)) ||
+            draft.tlsCheckRevision != lastAppliedTlsRevision
+        if (shouldApply) {
+            lastAppliedTlsRevision = draft.tlsCheckRevision
+            tlsCheckedAtEpochMillis = checkedAt
+            if (draft.tlsHost.isNotBlank()) tlsHost = draft.tlsHost
+            if (draft.tlsPort.isNotBlank()) tlsPortText = draft.tlsPort
+            tlsExpiresAtEpochMillis = draft.tlsExpiresAtEpochMillis
+            tlsIssuer = draft.tlsIssuer
+            tlsSubject = draft.tlsSubject
+            tlsCheckError = draft.tlsCheckError
+        }
+    }
 
     val candidateTags = remember(existingTags) {
         VpsAssetRecord.mergeTags(ROUTE_TAG_PRESETS, existingTags)
@@ -205,13 +292,35 @@ internal fun AssetEditorBottomSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = if (draft.editingId == null) "录入 VPS 资产" else "编辑 VPS 资产",
+                    text = when {
+                        draft.editingId == null && assetType == FleetAssetType.DOMAIN_CERT -> "录入域名 / 证书资产"
+                        draft.editingId != null && assetType == FleetAssetType.DOMAIN_CERT -> "编辑域名 / 证书资产"
+                        draft.editingId == null -> "录入 VPS 资产"
+                        else -> "编辑 VPS 资产"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "关闭")
                 }
+            }
+
+            if (lockedAssetType == null) {
+                SortSegmentedSwitcher(
+                    options = listOf(
+                        SortSegmentItem(FleetAssetType.VPS, "VPS 小鸡"),
+                        SortSegmentItem(FleetAssetType.DOMAIN_CERT, "域名·证书"),
+                    ),
+                    selectedValue = assetType,
+                    onSelect = { selectedType ->
+                        assetType = selectedType
+                        if (selectedType == FleetAssetType.DOMAIN_CERT) {
+                            linkedProbeKey = null
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
 
             Column(
@@ -221,49 +330,199 @@ internal fun AssetEditorBottomSheet(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                // 1. Machine Profile
-                PulseSectionHeader(title = "机器与线路信息", icon = Icons.Rounded.Memory)
-                PulseTextField(
-                    value = nickname,
-                    onValueChange = { nickname = it },
-                    label = "资产备注名称 *",
-                    placeholder = "例如：瓦工 HK85 主力鸡",
-                    singleLine = true,
-                    containerColor = ext.cardSurface,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
+                if (assetType == FleetAssetType.DOMAIN_CERT) {
+                    // 1A. Domain & TLS Certificate Profile
+                    PulseSectionHeader(title = "域名与 RDAP 注册商信息", icon = Icons.Rounded.Language)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PulseTextField(
+                            value = domainName,
+                            onValueChange = { incoming ->
+                                val (updatedDomain, updatedTlsHost) = syncDomainAndTlsHostOnEdit(
+                                    currentDomain = domainName,
+                                    currentTlsHost = tlsHost,
+                                    incomingDomain = incoming,
+                                )
+                                domainName = updatedDomain
+                                tlsHost = updatedTlsHost
+                            },
+                            label = "域名 *",
+                            placeholder = "例如：example.com",
+                            singleLine = true,
+                            containerColor = ext.cardSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        FilledTonalButton(
+                            onClick = { onLookupDomainRdap(domainName) },
+                            enabled = !isLookingUpRdap && domainName.isNotBlank(),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
+                        ) {
+                            if (isLookingUpRdap) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("RDAP 自动拉取", maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                    if (!rdapLookupError.isNullOrBlank()) {
+                        Text(
+                            text = rdapLookupError,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else if (!rdapSyncSummary.isNullOrBlank()) {
+                        Text(
+                            text = rdapSyncSummary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    } else if (rdapSyncedAtEpochMillis != null) {
+                        val syncedNote = buildString {
+                            append("RDAP 已同步")
+                            if (registrarName.isNotBlank()) append(" · $registrarName")
+                            if (!domainCreatedIso.isNullOrBlank()) append(" · 注册于 $domainCreatedIso")
+                            if (rdapStatusTags.isNotEmpty() && registrarName.isBlank()) {
+                                append(" · 状态 ${rdapStatusTags.first()}")
+                            }
+                        }
+                        Text(
+                            text = syncedNote,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     PulseTextField(
-                        value = providerName,
-                        onValueChange = { providerName = it },
-                        label = "商家名称",
-                        placeholder = "Bandwagon / DMIT",
+                        value = nickname,
+                        onValueChange = { nickname = it },
+                        label = "资产备注名称（默认域名）",
+                        placeholder = "例如：主站域名 / example.com",
                         singleLine = true,
                         containerColor = ext.cardSurface,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     PulseTextField(
-                        value = region,
-                        onValueChange = { region = it },
-                        label = "机房 / 地区",
-                        placeholder = "洛杉矶 / 东京 / 香港",
+                        value = registrarName,
+                        onValueChange = {
+                            registrarName = it
+                            providerName = it
+                        },
+                        label = "域名注册商",
+                        placeholder = "Porkbun / Cloudflare / Namecheap",
                         singleLine = true,
                         containerColor = ext.cardSurface,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    PulseSectionHeader(title = "HTTPS TLS 证书监测（选填）", icon = Icons.Rounded.Security)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PulseTextField(
+                            value = tlsHost,
+                            onValueChange = { tlsHost = it },
+                            label = "HTTPS 主机名",
+                            placeholder = domainName.ifBlank { "example.com" },
+                            singleLine = true,
+                            containerColor = ext.cardSurface,
+                            modifier = Modifier.weight(0.72f),
+                        )
+                        PulseTextField(
+                            value = tlsPortText,
+                            onValueChange = { tlsPortText = it.filter(Char::isDigit).take(5) },
+                            label = "端口",
+                            placeholder = "443",
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            containerColor = ext.cardSurface,
+                            modifier = Modifier.weight(0.28f),
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            val targetHost = tlsHost.ifBlank { domainName }
+                            val port = tlsPortText.toIntOrNull()?.coerceIn(1, 65535) ?: VpsAssetRecord.DEFAULT_TLS_PORT
+                            onCheckTlsCertificate(targetHost, port)
+                        },
+                        enabled = !isCheckingTls && (tlsHost.isNotBlank() || domainName.isNotBlank()),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (isCheckingTls) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在握手检测 TLS 证书...")
+                        } else {
+                            Text("检测 HTTPS 证书剩余天数")
+                        }
+                    }
+                    val tlsStatusText = tlsCheckResultMessage ?: tlsCheckError ?: tlsExpiresAtEpochMillis?.let { exp ->
+                        val days = java.time.temporal.ChronoUnit.DAYS.between(
+                            VpsValuationEngine.todayInShanghai(),
+                            Instant.ofEpochMilli(exp).atZone(com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID).toLocalDate(),
+                        )
+                        val issuerSuffix = if (tlsIssuer.isNotBlank()) " · $tlsIssuer" else ""
+                        if (days < 0L) "证书已过期 ${-days} 天$issuerSuffix" else "TLS 剩余 $days 天$issuerSuffix"
+                    }
+                    if (!tlsStatusText.isNullOrBlank()) {
+                        Text(
+                            text = tlsStatusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (!tlsCheckError.isNullOrBlank()) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                        )
+                    }
+                } else {
+                    // 1B. Machine Profile
+                    PulseSectionHeader(title = "机器与线路信息", icon = Icons.Rounded.Memory)
+                    PulseTextField(
+                        value = nickname,
+                        onValueChange = { nickname = it },
+                        label = "资产备注名称 *",
+                        placeholder = "例如：瓦工 HK85 主力鸡",
+                        singleLine = true,
+                        containerColor = ext.cardSurface,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PulseTextField(
+                            value = providerName,
+                            onValueChange = { providerName = it },
+                            label = "商家名称",
+                            placeholder = "Bandwagon / DMIT",
+                            singleLine = true,
+                            containerColor = ext.cardSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        PulseTextField(
+                            value = region,
+                            onValueChange = { region = it },
+                            label = "机房 / 地区",
+                            placeholder = "洛杉矶 / 东京 / 香港",
+                            singleLine = true,
+                            containerColor = ext.cardSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    PulseTextField(
+                        value = specsSummary,
+                        onValueChange = { specsSummary = it },
+                        label = "硬件配置摘要",
+                        placeholder = "1C / 1G / 20G NVMe / 1TB",
+                        singleLine = true,
+                        containerColor = ext.cardSurface,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                PulseTextField(
-                    value = specsSummary,
-                    onValueChange = { specsSummary = it },
-                    label = "硬件配置摘要",
-                    placeholder = "1C / 1G / 20G NVMe / 1TB",
-                    singleLine = true,
-                    containerColor = ext.cardSurface,
-                    modifier = Modifier.fillMaxWidth(),
-                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -526,8 +785,8 @@ internal fun AssetEditorBottomSheet(
 
                 PulseGradientDivider()
 
-                // 3. Bind to Probe Selector
-                if (availableProbes.isNotEmpty()) {
+                // 3. Bind to Probe Selector (VPS only)
+                if (assetType == FleetAssetType.VPS && availableProbes.isNotEmpty()) {
                     PulseSectionHeader(title = "关联探针节点（选填）", icon = Icons.Rounded.Dns)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -553,78 +812,85 @@ internal fun AssetEditorBottomSheet(
                 }
 
                 // 4. Optional Links & Notes
-                PulseSectionHeader(title = "配额、重置日与备注", icon = Icons.Rounded.Link)
-                PulseTextField(
-                    value = monthlyTrafficQuotaGb,
-                    onValueChange = { monthlyTrafficQuotaGb = sanitizeAssetDecimal(it) },
-                    label = "月流量配额 (GB，选填)",
-                    placeholder = "例如：1000",
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    containerColor = ext.cardSurface,
-                    modifier = Modifier.fillMaxWidth(),
+                PulseSectionHeader(
+                    title = if (assetType == FleetAssetType.DOMAIN_CERT) "链接与备注" else "配额、重置日与备注",
+                    icon = Icons.Rounded.Link,
                 )
+                if (assetType == FleetAssetType.VPS) {
+                    PulseTextField(
+                        value = monthlyTrafficQuotaGb,
+                        onValueChange = { monthlyTrafficQuotaGb = sanitizeAssetDecimal(it) },
+                        label = "月流量配额 (GB，选填)",
+                        placeholder = "例如：1000",
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        containerColor = ext.cardSurface,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
 
-                val expiryFallbackDay = remember(expiryDateIso) {
-                    FleetPortfolioCalculator.parseExpiryDate(expiryDateIso)?.dayOfMonth
-                }
-                val currentResetDayInt = trafficResetDayText.trim().toIntOrNull()
-                val resetDaySupportingText = when {
-                    currentResetDayInt != null && currentResetDayInt in 1..31 ->
-                        "流量重置日：每月 $currentResetDayInt 号（短月自动对齐月末，用于流量耗尽预测与 80% 预警）"
-                    expiryFallbackDay != null ->
-                        "未单独指定 · 默认跟随到期日（每月 $expiryFallbackDay 号）"
-                    else ->
-                        "未单独指定 · 默认每月 1 号"
-                }
-                PulseTextField(
-                    value = trafficResetDayText,
-                    onValueChange = { trafficResetDayText = it.filter(Char::isDigit).take(2) },
-                    label = "流量重置日：每月 X 号（1-31）",
-                    placeholder = expiryFallbackDay?.let { "留空默认每月 $it 号" } ?: "留空默认每月 1 号",
-                    supportingText = resetDaySupportingText,
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    containerColor = ext.cardSurface,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    TRAFFIC_RESET_DAY_PRESETS.forEach { (presetDay, label) ->
-                        val isSelected = if (presetDay == null) {
-                            trafficResetDayText.isBlank()
-                        } else {
-                            currentResetDayInt == presetDay
+                    val expiryFallbackDay = remember(expiryDateIso) {
+                        FleetPortfolioCalculator.parseExpiryDate(expiryDateIso)?.dayOfMonth
+                    }
+                    val currentResetDayInt = trafficResetDayText.trim().toIntOrNull()
+                    val resetDaySupportingText = when {
+                        currentResetDayInt != null && currentResetDayInt in 1..31 ->
+                            "流量重置日：每月 $currentResetDayInt 号（短月自动对齐月末，用于流量耗尽预测与 80% 预警）"
+                        expiryFallbackDay != null ->
+                            "未单独指定 · 默认跟随到期日（每月 $expiryFallbackDay 号）"
+                        else ->
+                            "未单独指定 · 默认每月 1 号"
+                    }
+                    PulseTextField(
+                        value = trafficResetDayText,
+                        onValueChange = { trafficResetDayText = it.filter(Char::isDigit).take(2) },
+                        label = "流量重置日：每月 X 号（1-31）",
+                        placeholder = expiryFallbackDay?.let { "留空默认每月 $it 号" } ?: "留空默认每月 1 号",
+                        supportingText = resetDaySupportingText,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        containerColor = ext.cardSurface,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        TRAFFIC_RESET_DAY_PRESETS.forEach { (presetDay, label) ->
+                            val isSelected = if (presetDay == null) {
+                                trafficResetDayText.isBlank()
+                            } else {
+                                currentResetDayInt == presetDay
+                            }
+                            FleetChoiceChip(
+                                label = label,
+                                selected = isSelected,
+                                onClick = {
+                                    trafficResetDayText = presetDay?.toString().orEmpty()
+                                },
+                            )
                         }
-                        FleetChoiceChip(
-                            label = label,
-                            selected = isSelected,
-                            onClick = {
-                                trafficResetDayText = presetDay?.toString().orEmpty()
-                            },
-                        )
                     }
                 }
                 PulseTextField(
                     value = purchaseUrl,
                     onValueChange = { purchaseUrl = it },
-                    label = "购买页 / 订单链接（选填）",
+                    label = if (assetType == FleetAssetType.DOMAIN_CERT) "注册商管理 / 续费链接（选填）" else "购买页 / 订单链接（选填）",
                     placeholder = "https://...",
                     singleLine = true,
                     containerColor = ext.cardSurface,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                PulseTextField(
-                    value = panelManageUrl,
-                    onValueChange = { panelManageUrl = it },
-                    label = "控制面板链接（选填）",
-                    placeholder = "https://...",
-                    singleLine = true,
-                    containerColor = ext.cardSurface,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (assetType == FleetAssetType.VPS) {
+                    PulseTextField(
+                        value = panelManageUrl,
+                        onValueChange = { panelManageUrl = it },
+                        label = "控制面板链接（选填）",
+                        placeholder = "https://...",
+                        singleLine = true,
+                        containerColor = ext.cardSurface,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 PulseTextField(
                     value = autoRenewNote,
                     onValueChange = { autoRenewNote = it },
@@ -686,8 +952,12 @@ internal fun AssetEditorBottomSheet(
                         val parsedResetDay = trimmedResetDay.takeIf { it.isNotEmpty() }?.toIntOrNull()
                         val hasInvalidResetDay = trimmedResetDay.isNotEmpty() &&
                             (parsedResetDay == null || parsedResetDay !in 1..31)
+                        val normalizedDomain = VpsAssetRecord.normalizeDomainName(domainName)
                         when {
-                            nickname.isBlank() && providerName.isBlank() -> {
+                            assetType == FleetAssetType.DOMAIN_CERT && normalizedDomain == null -> {
+                                validationError = "请填写有效的域名，例如 example.com"
+                            }
+                            assetType == FleetAssetType.VPS && nickname.isBlank() && providerName.isBlank() -> {
                                 validationError = "请填写资产备注名称或商家名称"
                             }
                             parsedAmount == null || parsedAmount.signum() <= 0 -> {
@@ -696,7 +966,7 @@ internal fun AssetEditorBottomSheet(
                             parsedDate == null -> {
                                 validationError = "到期日期格式须为 yyyy-MM-dd"
                             }
-                            hasInvalidResetDay -> {
+                            assetType == FleetAssetType.VPS && hasInvalidResetDay -> {
                                 validationError = "流量重置日须填写 1～31 之间的日期"
                             }
                             else -> {
@@ -709,13 +979,25 @@ internal fun AssetEditorBottomSheet(
                                 )
                                 selectedTags = finalTags
                                 customTagInput = ""
+                                val effectiveProvider = if (assetType == FleetAssetType.DOMAIN_CERT) {
+                                    registrarName.trim().ifBlank { providerName.trim() }
+                                } else {
+                                    providerName.trim()
+                                }
+                                val effectiveNickname = nickname.trim().ifBlank {
+                                    if (assetType == FleetAssetType.DOMAIN_CERT) {
+                                        normalizedDomain ?: effectiveProvider
+                                    } else {
+                                        effectiveProvider
+                                    }
+                                }
                                 onSave(
                                     VpsAssetRecord(
                                         id = draft.editingId ?: UUID.randomUUID().toString(),
-                                        nickname = nickname.trim().ifBlank { providerName.trim() },
-                                        providerName = providerName.trim(),
-                                        specsSummary = specsSummary.trim(),
-                                        region = region.trim(),
+                                        nickname = effectiveNickname,
+                                        providerName = effectiveProvider,
+                                        specsSummary = if (assetType == FleetAssetType.DOMAIN_CERT) "" else specsSummary.trim(),
+                                        region = if (assetType == FleetAssetType.DOMAIN_CERT) "" else region.trim(),
                                         routeTag = VpsAssetRecord.formatRouteTag(finalTags),
                                         renewalAmount = renewalAmount.trim(),
                                         currency = currency,
@@ -727,15 +1009,36 @@ internal fun AssetEditorBottomSheet(
                                         },
                                         expiryDateIso = DateTimeFormatter.ISO_LOCAL_DATE.format(parsedDate),
                                         purchaseUrl = purchaseUrl.trim(),
-                                        panelManageUrl = panelManageUrl.trim(),
-                                        linkedProbeKey = linkedProbeKey,
-                                        monthlyTrafficQuotaGb = monthlyTrafficQuotaGb.trim().toDoubleOrNull()?.takeIf { it > 0.0 },
-                                        trafficResetDay = parsedResetDay,
+                                        panelManageUrl = if (assetType == FleetAssetType.DOMAIN_CERT) "" else panelManageUrl.trim(),
+                                        linkedProbeKey = if (assetType == FleetAssetType.DOMAIN_CERT) null else linkedProbeKey,
+                                        monthlyTrafficQuotaGb = if (assetType == FleetAssetType.DOMAIN_CERT) {
+                                            null
+                                        } else {
+                                            monthlyTrafficQuotaGb.trim().toDoubleOrNull()?.takeIf { it > 0.0 }
+                                        },
+                                        trafficResetDay = if (assetType == FleetAssetType.DOMAIN_CERT) null else parsedResetDay,
                                         remindDaysBeforeExpiry = remindDays,
                                         autoRenewNote = autoRenewNote.trim(),
                                         notes = notes.trim(),
                                         tags = finalTags,
                                         autoRenew = autoRenew,
+                                        assetType = assetType,
+                                        domainName = if (assetType == FleetAssetType.DOMAIN_CERT) normalizedDomain else null,
+                                        registrarName = if (assetType == FleetAssetType.DOMAIN_CERT) registrarName.trim() else "",
+                                        domainCreatedIso = if (assetType == FleetAssetType.DOMAIN_CERT) domainCreatedIso else null,
+                                        rdapSyncedAtEpochMillis = if (assetType == FleetAssetType.DOMAIN_CERT) rdapSyncedAtEpochMillis else null,
+                                        rdapStatusTags = if (assetType == FleetAssetType.DOMAIN_CERT) rdapStatusTags else emptyList(),
+                                        tlsHost = if (assetType == FleetAssetType.DOMAIN_CERT) {
+                                            VpsAssetRecord.normalizeDomainName(tlsHost) ?: normalizedDomain
+                                        } else {
+                                            null
+                                        },
+                                        tlsPort = tlsPortText.toIntOrNull()?.coerceIn(1, 65535) ?: VpsAssetRecord.DEFAULT_TLS_PORT,
+                                        tlsExpiresAtEpochMillis = if (assetType == FleetAssetType.DOMAIN_CERT) tlsExpiresAtEpochMillis else null,
+                                        tlsIssuer = if (assetType == FleetAssetType.DOMAIN_CERT) tlsIssuer.trim() else "",
+                                        tlsSubject = if (assetType == FleetAssetType.DOMAIN_CERT) tlsSubject.trim() else "",
+                                        tlsCheckedAtEpochMillis = if (assetType == FleetAssetType.DOMAIN_CERT) tlsCheckedAtEpochMillis else null,
+                                        tlsCheckError = if (assetType == FleetAssetType.DOMAIN_CERT) tlsCheckError else null,
                                     ),
                                 )
                             }
@@ -750,6 +1053,7 @@ internal fun AssetEditorBottomSheet(
                     Text(
                         text = when {
                             draft.openSalePostAfterSave -> "保存并生成出售帖"
+                            draft.editingId == null && assetType == FleetAssetType.DOMAIN_CERT -> "保存域名资产"
                             draft.editingId == null -> "加入资产账本"
                             else -> "保存修改"
                         },
@@ -973,6 +1277,36 @@ internal fun toggleAssetTag(
     } else {
         VpsAssetRecord.mergeTags(selectedTags, listOf(clean))
     }
+}
+
+internal fun syncDomainAndTlsHostOnEdit(
+    currentDomain: String,
+    currentTlsHost: String,
+    incomingDomain: String,
+): Pair<String, String> {
+    val previousDomain = currentDomain.trim()
+    val updatedTlsHost = if (currentTlsHost.isBlank() || currentTlsHost.trim().equals(previousDomain, ignoreCase = true)) {
+        incomingDomain.trim()
+    } else {
+        currentTlsHost
+    }
+    return incomingDomain to updatedTlsHost
+}
+
+internal fun resolveTlsHostAfterRdapSync(
+    currentTlsHost: String,
+    previousDomain: String,
+    previousSyncedDomain: String,
+    incomingRdapTlsHost: String,
+): String {
+    val cleanIncoming = incomingRdapTlsHost.trim()
+    if (cleanIncoming.isBlank()) return currentTlsHost
+    val trimmedCurrent = currentTlsHost.trim()
+    val shouldSync = trimmedCurrent.isEmpty() ||
+        trimmedCurrent.equals(previousDomain.trim(), ignoreCase = true) ||
+        trimmedCurrent.equals(previousSyncedDomain.trim(), ignoreCase = true) ||
+        VpsAssetRecord.normalizeDomainName(trimmedCurrent) == null
+    return if (shouldSync) cleanIncoming else currentTlsHost
 }
 
 internal fun sanitizeAssetDecimal(raw: String): String {

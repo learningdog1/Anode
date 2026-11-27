@@ -1,6 +1,8 @@
 package com.nodeseek.app.domain.mail
 
 import androidx.compose.runtime.Immutable
+import com.nodeseek.app.domain.fleet.FleetAssetType
+import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import org.jsoup.Jsoup
@@ -37,10 +39,12 @@ data class VpsMailSummaryHint(
     val providerName: String = "",
     val primaryIp: String? = null,
     val formattedPrice: String? = null,
+    val domainName: String? = null,
 )
 
 /**
- * Structured VPS provisioning, renewal, or invoice telemetry parsed from plain-text and/or HTML mail.
+ * Structured VPS or Domain/Registrar provisioning, renewal, or invoice telemetry parsed from
+ * plain-text and/or HTML mail.
  */
 @Immutable
 data class ParsedVpsBillingMail(
@@ -62,7 +66,13 @@ data class ParsedVpsBillingMail(
     val monthlyTrafficQuotaGb: Double? = null,
     val region: String = "",
     val panelUrl: String = "",
+    val assetType: FleetAssetType = FleetAssetType.VPS,
+    val domainName: String? = null,
+    val registrarName: String = "",
 ) {
+    val isDomainAsset: Boolean
+        get() = assetType == FleetAssetType.DOMAIN_CERT
+
     val primaryHost: String?
         get() = mainIpv4
             ?.takeIf { it.isNotBlank() }
@@ -152,8 +162,10 @@ object VpsBillingMailParser {
             append("|this\\s+is\\s+a\\s+payment\\s+receipt\\s+for\\s+invoice")
             append("|invoice\\s+(?:#?\\s*[A-Za-z0-9-]+\\s+)?(?:has\\s+been\\s+)?paid")
             append("|receipt\\s+for\\s+your\\s+payment")
-            append("|service\\s+renewal\\s+confirmation|renewal\\s+confirmation|has\\s+been\\s+renewed\\s+successfully")
-            append("|续费成功|已成功续费|续费确认|账单已支付|账单支付成功|付款确认|支付成功|收款确认|订单已支付")
+            append("|(?:service|domain)\\s+renewal\\s+(?:confirmation|receipt)|renewal\\s+(?:confirmation|receipt)|has\\s+been\\s+renewed(?:\\s+successfully)?")
+            append("|auto-?renew(?:al|ed)?\\s+(?:confirmation|successful|complete|for\\s+domain)")
+            append("|domain\\s+(?:name\\s+)?renewed")
+            append("|续费成功|已成功续费|续费确认|账单已支付|账单支付成功|付款确认|支付成功|收款确认|订单已支付|域名续费成功|域名已续费")
             append(")")
         },
         option = RegexOption.IGNORE_CASE,
@@ -196,11 +208,30 @@ object VpsBillingMailParser {
         pattern = buildString {
             append("(?:")
             append("server|vps|kvm|cloud|instance|whmcs|solusvm|virtualizor|virtfusion|proxmox|root\\s*password")
-            append("|invoice|payment|receipt|renewal|expiring|overdue")
-            append("|开通|激活|续费|账单|支付成功|付款确认|收款确认|服务器|云主机|云服务器|轻量云|密码")
+            append("|domain|registrar|icann")
+            append("|invoice|payment|receipt|renewal|renewed|expiring|overdue")
+            append("|开通|激活|续费|账单|支付成功|付款确认|收款确认|服务器|云主机|云服务器|轻量云|密码|域名")
             append(")")
         },
         option = RegexOption.IGNORE_CASE,
+    )
+
+    private val DOMAIN_REGISTRAR_CONTEXT_REGEX = Regex(
+        pattern = buildString {
+            append("(?:")
+            append("domain\\s+(?:name\\s+)?(?:renewal|renewed|registration|expir(?:ation|ing|y)|transfer|invoice|receipt|billing)")
+            append("|(?:renewal|renewed|expir(?:ation|ing)|invoice|receipt)\\s+(?:for|of)\\s+(?:your\\s+)?domain")
+            append("|auto-?renew(?:al)?\\s+(?:for\\s+)?domain")
+            append("|domain\\s+registrar|cloudflare\\s+registrar|porkbun|namecheap|spaceship|dynadot|namesilo")
+            append("|域名(?:续费|到期|过期|注册|账单|转入|即将到期|续费成功|扣费|续费确认|续费提醒)")
+            append(")")
+        },
+        option = RegexOption.IGNORE_CASE,
+    )
+
+    private val NON_BILLING_REGISTRAR_NOISE_REGEX = Regex(
+        """(?:whois\s+(?:verification|contact|accuracy)|verify\s+your\s+contact|nameserver\s+(?:change|update)|dns\s+(?:propagation|record\s+updated)|workers|zero\s+trust|ssl\s+certificate\s+issued)""",
+        RegexOption.IGNORE_CASE,
     )
 
     private val PURE_OTP_SUBJECT_REGEX = Regex(
@@ -208,7 +239,31 @@ object VpsBillingMailParser {
         RegexOption.IGNORE_CASE,
     )
 
-    // ── Known Providers & Ignored Generic Domains ────────────────────────────
+    // ── Known Providers, Registrars & Ignored Generic Domains ────────────────
+
+    private val KNOWN_REGISTRAR_DOMAINS: Map<String, String> = mapOf(
+        "porkbun.com" to "Porkbun",
+        "porkbun.email" to "Porkbun",
+        "cloudflare.com" to "Cloudflare",
+        "namecheap.com" to "Namecheap",
+        "namecheaphosting.com" to "Namecheap",
+        "spaceship.com" to "Spaceship",
+        "dynadot.com" to "Dynadot",
+        "namesilo.com" to "NameSilo",
+        "gandi.net" to "Gandi",
+        "godaddy.com" to "GoDaddy",
+        "sav.com" to "Sav",
+        "aliyun.com" to "阿里云万网",
+        "alibabacloud.com" to "阿里云万网",
+        "hichina.com" to "阿里云万网",
+        "dnspod.cn" to "腾讯云 DNSPod",
+        "tencent.com" to "腾讯云 DNSPod",
+        "cloud.tencent.com" to "腾讯云 DNSPod",
+        "west.cn" to "西部数码",
+        "ename.com" to "易名",
+        "ename.cn" to "易名",
+        "name.com" to "Name.com",
+    )
 
     private val KNOWN_PROVIDER_DOMAINS: Map<String, String> = mapOf(
         "racknerd.com" to "RackNerd",
@@ -393,7 +448,7 @@ object VpsBillingMailParser {
     )
 
     private val EXPLICIT_EXPIRY_LINE_REGEX = Regex(
-        """(?:^|\n)\s*[•*\-]?\s*(?:next\s+due\s+date|new\s+(?:due|expiry|expiration)\s+date|expiry\s+date|expiration\s+date|service\s+(?:end|expiry)\s+date|valid\s+until|renewal\s+date|下次到期(?:日期|时间|日)?|下次(?:付款|账单)日期|新到期(?:日期|时间|日)?|到期(?:日期|时间|日)|有效期至|服务到期(?:时间|日)?)\s*[:：=\t]\s*([^\r\n]+)""",
+        """(?:^|\n)\s*[•*\-]?\s*(?:next\s+due\s+date|new\s+(?:due|expiry|expiration)\s+date|expiry(?:\s+date)?|expiration(?:\s+date)?|expires(?:\s+on)?|service\s+(?:end|expiry)\s+date|valid\s+until|renewal\s+date|下次到期(?:日期|时间|日)?|下次(?:付款|账单)日期|新到期(?:日期|时间|日)?|到期(?:日期|时间|日)|有效期至|服务到期(?:时间|日)?)\s*[:：=\t]\s*([^\r\n]+)""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -649,8 +704,11 @@ object VpsBillingMailParser {
         val isKnownProvider = KNOWN_PROVIDER_DOMAINS.keys.any { domain ->
             senderDomain == domain || senderDomain.endsWith(".$domain")
         }
+        val isKnownRegistrar = KNOWN_REGISTRAR_DOMAINS.keys.any { domain ->
+            senderDomain == domain || senderDomain.endsWith(".$domain")
+        }
         val combined = if (cleanSnippet.isEmpty()) cleanSubject else "$cleanSubject\n$cleanSnippet"
-        if (!isKnownProvider && !SUMMARY_HINT_QUICK_GATE_REGEX.containsMatchIn(combined)) {
+        if (!isKnownProvider && !isKnownRegistrar && !SUMMARY_HINT_QUICK_GATE_REGEX.containsMatchIn(combined)) {
             return null
         }
 
@@ -665,6 +723,7 @@ object VpsBillingMailParser {
                 body = cleanSnippet,
                 preferDayFirst = inferDayFirstPreference(cleanSubject, cleanSnippet, summary.fromAddress),
             ) != null
+        val extractedDomain = extractDomainName(cleanSubject, cleanSnippet, summary.fromAddress)
 
         val mailType = classifyMailType(
             subject = cleanSubject,
@@ -675,6 +734,7 @@ object VpsBillingMailParser {
             hasInvoiceNumber = invoiceNumber != null,
             hasBillingAmount = priceResult != null,
             hasPeriodRange = hasPeriodRange,
+            extractedDomain = extractedDomain,
         ) ?: return null
 
         val formattedPrice = priceResult?.let { (amount, currency) ->
@@ -692,6 +752,7 @@ object VpsBillingMailParser {
             providerName = providerName,
             primaryIp = mainIpv4,
             formattedPrice = formattedPrice,
+            domainName = extractedDomain,
         )
     }
 
@@ -764,6 +825,12 @@ object VpsBillingMailParser {
         val periodInfo = extractWhmcsLineItemInfo(primaryBody, preferDayFirst)
             ?: extractWhmcsLineItemInfo(secondaryBody, preferDayFirst)
 
+        val extractedDomain = extractDomainName(
+            subject = cleanSubject,
+            body = combinedBody,
+            fromAddress = fromAddress,
+        )
+
         val mailType = classifyMailType(
             subject = cleanSubject,
             body = combinedBody,
@@ -773,6 +840,7 @@ object VpsBillingMailParser {
             hasInvoiceNumber = invoiceNumber != null,
             hasBillingAmount = priceResult != null,
             hasPeriodRange = periodInfo != null,
+            extractedDomain = extractedDomain,
         ) ?: return null
 
         val explicitCycleLine = extractExplicitBillingCycleLine(primaryBody)
@@ -838,12 +906,34 @@ object VpsBillingMailParser {
         )
 
         val finalIpv4 = mainIpv4 ?: periodInfo?.inlineIpv4
+        val registrarBrand = resolveRegistrarBrand(fromAddress, cleanSubject, combinedBody)
+        val isDomainMail = isDomainRegistrarClassification(
+            subject = cleanSubject,
+            body = combinedBody,
+            fromAddress = fromAddress,
+            hasServerIp = finalIpv4 != null || mainIpv6 != null,
+            hasSshPassword = !sshPassword.isNullOrBlank(),
+            extractedDomain = extractedDomain,
+        )
+        val effectiveDomainName = if (isDomainMail) extractedDomain else null
+        val effectiveRegistrarName = if (isDomainMail) {
+            (registrarBrand ?: providerName).trim()
+        } else {
+            ""
+        }
+        val effectiveProviderName = providerName.ifBlank { effectiveRegistrarName }
+        val effectiveProductName = productName.ifBlank {
+            if (isDomainMail) effectiveDomainName.orEmpty() else ""
+        }
+        val effectiveHostname = hostname.ifBlank {
+            if (isDomainMail) effectiveDomainName.orEmpty() else ""
+        }
 
         return ParsedVpsBillingMail(
             mailType = mailType,
-            providerName = providerName,
-            productName = productName,
-            hostname = hostname,
+            providerName = effectiveProviderName,
+            productName = effectiveProductName,
+            hostname = effectiveHostname,
             mainIpv4 = finalIpv4,
             mainIpv6 = mainIpv6,
             sshPort = sshPort,
@@ -858,6 +948,9 @@ object VpsBillingMailParser {
             monthlyTrafficQuotaGb = trafficQuotaGb,
             region = region,
             panelUrl = panelUrl,
+            assetType = if (isDomainMail) FleetAssetType.DOMAIN_CERT else FleetAssetType.VPS,
+            domainName = effectiveDomainName,
+            registrarName = effectiveRegistrarName,
         )
     }
 
@@ -962,6 +1055,7 @@ object VpsBillingMailParser {
         hasInvoiceNumber: Boolean,
         hasBillingAmount: Boolean,
         hasPeriodRange: Boolean,
+        extractedDomain: String? = null,
     ): VpsMailType? {
         val combined = "$subject\n$body"
         if (PURE_OTP_SUBJECT_REGEX.containsMatchIn(subject) && !hasSshPassword && !hasInvoiceNumber) {
@@ -972,10 +1066,31 @@ object VpsBillingMailParser {
         val isKnownVpsProvider = KNOWN_PROVIDER_DOMAINS.keys.any { domain ->
             senderDomain == domain || senderDomain.endsWith(".$domain")
         }
+        val textWithoutExtractedDomain = if (extractedDomain != null) {
+            combined.replace(extractedDomain, " ", ignoreCase = true)
+        } else {
+            combined
+        }
         val hasVpsContext = isKnownVpsProvider ||
             hasServerIp ||
             hasSshPassword ||
-            VPS_DOMAIN_OR_BODY_CONTEXT_REGEX.containsMatchIn(combined)
+            VPS_DOMAIN_OR_BODY_CONTEXT_REGEX.containsMatchIn(textWithoutExtractedDomain)
+
+        val isDomainMail = isDomainRegistrarClassification(
+            subject = subject,
+            body = body,
+            fromAddress = fromAddress,
+            hasServerIp = hasServerIp,
+            hasSshPassword = hasSshPassword,
+            extractedDomain = extractedDomain,
+        )
+
+        // Guard against non-billing registrar notices (WHOIS verification, DNS propagation, Workers/Zero Trust alerts)
+        if (!hasVpsContext && NON_BILLING_REGISTRAR_NOISE_REGEX.containsMatchIn(combined) &&
+            !hasBillingAmount && !hasInvoiceNumber && !RENEWAL_STRONG_REGEX.containsMatchIn(combined)
+        ) {
+            return null
+        }
 
         // 1. Provisioning check
         val hasProvisioningSubject = PROVISIONING_SUBJECT_STRONG_REGEX.containsMatchIn(subject)
@@ -995,23 +1110,156 @@ object VpsBillingMailParser {
         val hasRenewalSubject = RENEWAL_STRONG_REGEX.containsMatchIn(subject)
         val hasRenewalBody = RENEWAL_STRONG_REGEX.containsMatchIn(body) || PAID_STATUS_LINE_REGEX.containsMatchIn(body)
         val hasExplicitUnpaidSubject = Regex(
-            """unpaid|overdue|payment\s+reminder|upcoming\s+renewal|renewal\s+reminder|未付|待付|逾期|续费提醒|即将到期""",
+            """unpaid|overdue|payment\s+reminder|upcoming\s+renewal|renewal\s+reminder|expiring\s+soon|expiration\s+notice|即将到期|续费提醒|未付|待付|逾期|到期提醒""",
             RegexOption.IGNORE_CASE,
         ).containsMatchIn(subject)
 
         if (!hasExplicitUnpaidSubject && (hasRenewalSubject || hasRenewalBody)) {
-            if (hasVpsContext || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount))) {
+            if (hasVpsContext || isDomainMail || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount))) {
                 return VpsMailType.RENEWAL
             }
         }
 
-        // 3. Unpaid / Generated Invoice check
+        // 3. Unpaid / Generated Invoice / Domain Expiration Reminder check
         val hasInvoiceSignal = UNPAID_INVOICE_SIGNAL_REGEX.containsMatchIn(combined) ||
-            (Regex("""\binvoice\s*#?\s*\d+|\b账单\s*#?\s*\d+""", RegexOption.IGNORE_CASE).containsMatchIn(subject))
-        if (hasInvoiceSignal && (hasVpsContext || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount)))) {
+            (Regex("""\binvoice\s*#?\s*\d+|\b账单\s*#?\s*\d+""", RegexOption.IGNORE_CASE).containsMatchIn(subject)) ||
+            (isDomainMail && Regex("""domain\s+(?:name\s+)?expir(?:ation|ing|y)|域名(?:即将)?到期""", RegexOption.IGNORE_CASE).containsMatchIn(combined))
+        if (hasInvoiceSignal && (hasVpsContext || isDomainMail || (hasPeriodRange && (hasInvoiceNumber || hasBillingAmount)))) {
             return VpsMailType.INVOICE
         }
 
+        return null
+    }
+
+    private fun isDomainRegistrarClassification(
+        subject: String,
+        body: String,
+        fromAddress: String,
+        hasServerIp: Boolean,
+        hasSshPassword: Boolean,
+        extractedDomain: String?,
+    ): Boolean {
+        if (hasServerIp || hasSshPassword) return false
+        val combined = "$subject\n$body"
+        val textWithoutExtractedDomain = if (extractedDomain != null) {
+            combined.replace(extractedDomain, " ", ignoreCase = true)
+        } else {
+            combined
+        }
+        if (VPS_DOMAIN_OR_BODY_CONTEXT_REGEX.containsMatchIn(textWithoutExtractedDomain)) return false
+
+        val senderDomain = fromAddress.substringAfter('@', "").lowercase(Locale.ROOT)
+        val isKnownRegistrar = KNOWN_REGISTRAR_DOMAINS.keys.any { domain ->
+            senderDomain == domain || senderDomain.endsWith(".$domain")
+        }
+        val hasDomainContext = DOMAIN_REGISTRAR_CONTEXT_REGEX.containsMatchIn(combined)
+        if (hasDomainContext) return true
+        // For multi-product cloud senders (Cloudflare, Aliyun, Tencent), require extracted domain + renewal/invoice keyword
+        val hasBillingKeyword = RENEWAL_STRONG_REGEX.containsMatchIn(combined) ||
+            UNPAID_INVOICE_SIGNAL_REGEX.containsMatchIn(combined) ||
+            PAID_STATUS_LINE_REGEX.containsMatchIn(combined)
+        return isKnownRegistrar && extractedDomain != null && hasBillingKeyword
+    }
+
+    private fun resolveRegistrarBrand(
+        fromAddress: String,
+        subject: String,
+        body: String,
+    ): String? {
+        val senderDomain = fromAddress.trim().substringAfter('@', "").lowercase(Locale.ROOT)
+        KNOWN_REGISTRAR_DOMAINS.entries
+            .firstOrNull { (k, _) -> senderDomain == k || senderDomain.endsWith(".$k") }
+            ?.value
+            ?.let { return it }
+
+        val combined = "$subject\n$body"
+        return when {
+            combined.contains("porkbun", ignoreCase = true) -> "Porkbun"
+            combined.contains("cloudflare", ignoreCase = true) -> "Cloudflare"
+            combined.contains("namecheap", ignoreCase = true) -> "Namecheap"
+            combined.contains("spaceship", ignoreCase = true) -> "Spaceship"
+            combined.contains("dynadot", ignoreCase = true) -> "Dynadot"
+            combined.contains("namesilo", ignoreCase = true) -> "NameSilo"
+            combined.contains("gandi", ignoreCase = true) -> "Gandi"
+            combined.contains("godaddy", ignoreCase = true) -> "GoDaddy"
+            combined.contains("阿里云") || combined.contains("万网") -> "阿里云万网"
+            combined.contains("腾讯云") || combined.contains("DNSPod", ignoreCase = true) -> "腾讯云 DNSPod"
+            combined.contains("西部数码") -> "西部数码"
+            else -> null
+        }
+    }
+
+    private val DOMAIN_LABELED_LINE_REGEX = Regex(
+        """(?:^|\n)\s*[•*\-]?\s*(?:domain(?:\s+name)?|registered\s+domain|域名|注册域名|续费域名)\s*[:：=\t]\s*([a-z0-9.-]+\.[a-z]{2,})""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val DOMAIN_CANDIDATE_REGEX = Regex(
+        """(?<![@/A-Za-z0-9_-])([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9-]{2,63})+)(?![A-Za-z0-9_-])""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val EXCLUDED_GENERIC_PREFIXES = setOf(
+        "www", "mail", "billing", "support", "dash", "portal", "my", "clients", "api", "cdn",
+    )
+
+    internal fun extractDomainName(
+        subject: String,
+        body: String,
+        fromAddress: String,
+    ): String? {
+        val senderDomain = fromAddress.substringAfter('@', "").lowercase(Locale.ROOT)
+        fun isAcceptable(rawCandidate: String): String? {
+            val normalized = VpsAssetRecord.normalizeDomainName(rawCandidate) ?: return null
+            if (senderDomain.isNotEmpty() && (normalized == senderDomain || senderDomain.endsWith(".$normalized"))) {
+                return null
+            }
+            if (KNOWN_REGISTRAR_DOMAINS.keys.any { normalized == it || normalized.endsWith(".$it") }) {
+                return null
+            }
+            if (KNOWN_PROVIDER_DOMAINS.keys.any { normalized == it || normalized.endsWith(".$it") }) {
+                return null
+            }
+            if (GENERIC_MAIL_DOMAINS.any { normalized == it || normalized.endsWith(".$it") }) {
+                return null
+            }
+            val firstLabel = normalized.substringBefore('.')
+            if (firstLabel in EXCLUDED_GENERIC_PREFIXES) return null
+            return normalized
+        }
+
+        // 1. Explicit labeled domain line (`Domain: example.com`, `域名: example.com`)
+        for (source in listOf(body, subject)) {
+            for (m in DOMAIN_LABELED_LINE_REGEX.findAll(source)) {
+                isAcceptable(m.groupValues[1])?.let { return it }
+            }
+        }
+
+        // 2. Subject contextual patterns ("Renewal for example.com", "example.com renewal", "域名 example.com 续费")
+        for (m in DOMAIN_CANDIDATE_REGEX.findAll(subject)) {
+            isAcceptable(m.groupValues[1])?.let { return it }
+        }
+
+        // 3. Body contextual patterns
+        val contextLineRegex = Regex(
+            """(?:renewal\s+for|renew(?:ed)?\s+(?:domain\s+)?|expir(?:ation|ing)\s+(?:for|of)\s+|域名\s*|domain\s+)([a-z0-9.-]+\.[a-z]{2,})""",
+            RegexOption.IGNORE_CASE,
+        )
+        for (m in contextLineRegex.findAll(body)) {
+            isAcceptable(m.groupValues[1])?.let { return it }
+        }
+
+        for (line in body.lines()) {
+            if (line.contains("http://", ignoreCase = true) || line.contains("https://", ignoreCase = true)) {
+                continue
+            }
+            if (line.contains("domain", ignoreCase = true) || line.contains("域名") ||
+                line.contains("renew", ignoreCase = true) || line.contains("续费") ||
+                line.contains("expir", ignoreCase = true) || line.contains("到期")
+            ) {
+                for (m in DOMAIN_CANDIDATE_REGEX.findAll(line)) {
+                    isAcceptable(m.groupValues[1])?.let { return it }
+                }
+            }
+        }
         return null
     }
 
@@ -1025,6 +1273,9 @@ object VpsBillingMailParser {
         val knownDomainBrand = KNOWN_PROVIDER_DOMAINS.entries
             .firstOrNull { (k, _) -> domain == k || domain.endsWith(".$k") }
             ?.value
+            ?: KNOWN_REGISTRAR_DOMAINS.entries
+                .firstOrNull { (k, _) -> domain == k || domain.endsWith(".$k") }
+                ?.value
 
         // 1. Bracket prefix in subject, e.g. "[RackNerd] New Server Information"
         SUBJECT_BRACKET_PROVIDER_REGEX.find(subject)?.let { m ->

@@ -16,6 +16,9 @@ import com.nodeseek.app.data.parser.ParsedFeedPageDto
 import com.nodeseek.app.data.parser.PostCommentDto
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.SuppressInAppPopupsElement
+import com.nodeseek.app.domain.alerts.AlertForwarder
+import com.nodeseek.app.domain.alerts.ForwardableAlertEvent
+import com.nodeseek.app.domain.alerts.NoOpAlertForwarder
 import com.nodeseek.app.domain.model.DirectMessageSummary
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.NotificationKind
@@ -176,6 +179,7 @@ class PulseRadarMonitor(
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val isUnmeteredNetwork: () -> Boolean = { defaultIsUnmeteredNetwork(appContext) },
     private val currentMinuteOfDay: () -> Int = { defaultCurrentMinuteOfDay() },
+    private val alertForwarder: AlertForwarder = NoOpAlertForwarder,
 ) : RadarMonitorController {
 
     private val _runtimeStatus = MutableStateFlow(RadarRuntimeStatus())
@@ -185,6 +189,7 @@ class PulseRadarMonitor(
     private val wakeSignal = Channel<Unit>(Channel.CONFLATED)
 
     private val lifecycleLock = Any()
+    private val backoffStateLock = Any()
     private val pollMutex = Mutex()
     private var isStarted: Boolean = false
     private var monitorJob: Job? = null
@@ -206,15 +211,32 @@ class PulseRadarMonitor(
     @Volatile
     private var consecutiveInboxCfFailures: Int = 0
 
-    private fun inboxBackoffUntilMillis(): Long =
-        maxOf(rateLimit429UntilEpochMillis, inboxCfBackoffUntilEpochMillis)
+    @Volatile
+    private var lastObservedSessionUid: Long? = sessionRepository.sessionState.value?.uid
 
-    private fun htmlBackoffUntilMillis(): Long =
+    private fun resetInboxBackoffOnUidChange(newUid: Long?) {
+        synchronized(backoffStateLock) {
+            if (newUid != lastObservedSessionUid) {
+                lastObservedSessionUid = newUid
+                inboxCfBackoffUntilEpochMillis = 0L
+                consecutiveInboxCfFailures = 0
+            }
+        }
+    }
+
+    private fun inboxBackoffUntilMillis(): Long = synchronized(backoffStateLock) {
+        maxOf(rateLimit429UntilEpochMillis, inboxCfBackoffUntilEpochMillis)
+    }
+
+    private fun htmlBackoffUntilMillis(): Long = synchronized(backoffStateLock) {
         maxOf(rateLimit429UntilEpochMillis, htmlCfBackoffUntilEpochMillis)
+    }
 
     private fun effectivePollBackoffUntilMillis(settings: RadarPollingSettings): Long {
+        val currentSession = sessionRepository.sessionState.value
+        resetInboxBackoffOnUidChange(currentSession?.uid)
         val hasHtmlPhase = settings.keywordAlertsEnabled || settings.replyTrackingEnabled
-        val hasSessionReadyForJsonInbox = (sessionRepository.sessionState.value?.uid ?: 0L) > 0L
+        val hasSessionReadyForJsonInbox = (currentSession?.uid ?: 0L) > 0L
         val inboxPhaseBackoff = if (hasSessionReadyForJsonInbox) {
             inboxBackoffUntilMillis()
         } else {
@@ -224,7 +246,7 @@ class PulseRadarMonitor(
             hasHtmlPhase && settings.inboxPushEnabled -> minOf(htmlBackoffUntilMillis(), inboxPhaseBackoff)
             hasHtmlPhase -> htmlBackoffUntilMillis()
             settings.inboxPushEnabled -> inboxPhaseBackoff
-            else -> rateLimit429UntilEpochMillis
+            else -> synchronized(backoffStateLock) { rateLimit429UntilEpochMillis }
         }
     }
 
@@ -246,7 +268,8 @@ class PulseRadarMonitor(
                 val sessionObserver = scope.launch(start = CoroutineStart.LAZY) {
                     sessionRepository.sessionState
                         .drop(1)
-                        .collect {
+                        .collect { session ->
+                            resetInboxBackoffOnUidChange(session?.uid)
                             wakeSignal.trySend(Unit)
                         }
                 }
@@ -447,6 +470,7 @@ class PulseRadarMonitor(
      */
     override suspend fun runBackgroundPollPass(): RadarBackgroundPollOutcome {
         return pollMutex.withLock {
+            resetInboxBackoffOnUidChange(sessionRepository.sessionState.value?.uid)
             val now = clockMillis()
             val settings = radarRepository.getPollingSettings()
             val hasAnyFeatureEnabled = settings.keywordAlertsEnabled ||
@@ -500,6 +524,7 @@ class PulseRadarMonitor(
      */
     internal suspend fun runPollCycle(manualTrigger: Boolean = false): Boolean {
         return pollMutex.withLock {
+            resetInboxBackoffOnUidChange(sessionRepository.sessionState.value?.uid)
             val now = clockMillis()
             val settings = radarRepository.getPollingSettings()
 
@@ -547,13 +572,17 @@ class PulseRadarMonitor(
         refreshSessionIfMissingForInbox: Boolean,
         bypassCfBackoff: Boolean = false,
     ): PollPassResult {
+        val pollSessionUid = sessionRepository.sessionState.value?.uid
+        resetInboxBackoffOnUidChange(pollSessionUid)
         _runtimeStatus.update {
             it.copy(isPollingNow = true, lastErrorSummary = null)
         }
 
         val pollStartMs = clockMillis()
-        val htmlAllowed = bypassCfBackoff || pollStartMs >= htmlCfBackoffUntilEpochMillis
-        val inboxAllowed = bypassCfBackoff || pollStartMs >= inboxCfBackoffUntilEpochMillis
+        val (htmlAllowed, inboxAllowed) = synchronized(backoffStateLock) {
+            (bypassCfBackoff || pollStartMs >= htmlCfBackoffUntilEpochMillis) to
+                (bypassCfBackoff || pollStartMs >= inboxCfBackoffUntilEpochMillis)
+        }
 
         var cycleError: String? = null
         var transientNetworkError: String? = null
@@ -680,30 +709,34 @@ class PulseRadarMonitor(
             }
         } finally {
             val finishedAt = clockMillis()
-            if (rateLimitRetrySeconds != null) {
-                val safeSeconds = rateLimitRetrySeconds!!.coerceIn(15L, 600L)
-                rateLimit429UntilEpochMillis = finishedAt + safeSeconds * 1000L
-                cycleError = "请求过于频繁，将在 ${safeSeconds}s 后恢复检查"
-            }
-            if (htmlCfBackoffNeeded) {
-                consecutiveHtmlCfFailures = (consecutiveHtmlCfFailures + 1).coerceAtMost(4)
-                val backoffSec = (60L * (1 shl (consecutiveHtmlCfFailures - 1))).coerceAtMost(600L)
-                htmlCfBackoffUntilEpochMillis = maxOf(htmlCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
-                if (cycleError == null) {
-                    cycleError = "需要网页安全验证，已暂缓网页轮询"
+            synchronized(backoffStateLock) {
+                rateLimitRetrySeconds?.let { retrySec ->
+                    val safeSeconds = retrySec.coerceIn(15L, 600L)
+                    rateLimit429UntilEpochMillis = finishedAt + safeSeconds * 1000L
+                    cycleError = "请求过于频繁，将在 ${safeSeconds}s 后恢复检查"
                 }
-            } else if (ranHtmlPhase && transientNetworkError == null) {
-                consecutiveHtmlCfFailures = 0
-            }
-            if (inboxCfBackoffNeeded) {
-                consecutiveInboxCfFailures = (consecutiveInboxCfFailures + 1).coerceAtMost(4)
-                val backoffSec = (60L * (1 shl (consecutiveInboxCfFailures - 1))).coerceAtMost(600L)
-                inboxCfBackoffUntilEpochMillis = maxOf(inboxCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
-                if (cycleError == null) {
-                    cycleError = "需要网页安全验证，已暂停收件箱轮询"
+                if (htmlCfBackoffNeeded) {
+                    consecutiveHtmlCfFailures = (consecutiveHtmlCfFailures + 1).coerceAtMost(4)
+                    val backoffSec = (60L * (1 shl (consecutiveHtmlCfFailures - 1))).coerceAtMost(600L)
+                    htmlCfBackoffUntilEpochMillis = maxOf(htmlCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
+                    if (cycleError == null) {
+                        cycleError = "需要网页安全验证，已暂缓网页轮询"
+                    }
+                } else if (ranHtmlPhase && transientNetworkError == null) {
+                    consecutiveHtmlCfFailures = 0
                 }
-            } else if (ranInboxPhase && transientNetworkError == null) {
-                consecutiveInboxCfFailures = 0
+                if (inboxCfBackoffNeeded) {
+                    if (sessionRepository.sessionState.value?.uid == pollSessionUid) {
+                        consecutiveInboxCfFailures = (consecutiveInboxCfFailures + 1).coerceAtMost(4)
+                        val backoffSec = (60L * (1 shl (consecutiveInboxCfFailures - 1))).coerceAtMost(600L)
+                        inboxCfBackoffUntilEpochMillis = maxOf(inboxCfBackoffUntilEpochMillis, finishedAt + backoffSec * 1000L)
+                        if (cycleError == null) {
+                            cycleError = "需要网页安全验证，已暂停收件箱轮询"
+                        }
+                    }
+                } else if (ranInboxPhase && transientNetworkError == null) {
+                    consecutiveInboxCfFailures = 0
+                }
             }
 
             val finalErrorSummary = cycleError ?: transientNetworkError
@@ -841,6 +874,24 @@ class PulseRadarMonitor(
             val inserted = radarRepository.recordAlertIfAbsent(record)
             if (inserted) {
                 insertedCount++
+                try {
+                    alertForwarder.forward(
+                        ForwardableAlertEvent.RadarKeywordHit(
+                            topicId = record.topicId,
+                            topicTitle = record.topicTitle,
+                            matchedKeyword = record.matchedKeyword,
+                            authorName = record.actorName,
+                            categoryName = record.categoryName,
+                            summarySnippet = record.summarySnippet,
+                            topicUrl = "https://www.nodeseek.com/post-${record.topicId}-1",
+                            occurredAtEpochMillis = record.createdAtEpochMillis,
+                        ),
+                    )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                    // External alert forwarding failures must not block radar monitoring.
+                }
             }
             if (inserted && !quietHoursActive && emittedCount < MAX_NOTIFICATIONS_PER_CYCLE) {
                 notificationDispatcher.postKeywordHitNotification(record)
@@ -1099,6 +1150,28 @@ class PulseRadarMonitor(
             unreadDelta = peerComments.size,
             checkedAtEpochMillis = now,
         )
+
+        if (inserted) {
+            try {
+                alertForwarder.forward(
+                    ForwardableAlertEvent.RadarTrackedReply(
+                        topicId = record.topicId,
+                        topicTitle = record.topicTitle,
+                        targetFloor = record.targetFloor,
+                        newReplyCount = peerComments.size,
+                        actorName = record.actorName,
+                        categoryName = record.categoryName,
+                        summarySnippet = record.summarySnippet,
+                        topicUrl = "https://www.nodeseek.com/post-${record.topicId}-${record.targetFloor}",
+                        occurredAtEpochMillis = record.createdAtEpochMillis,
+                    ),
+                )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                // External alert forwarding failures must not block radar monitoring.
+            }
+        }
 
         if (inserted && !quietHoursActive) {
             notificationDispatcher.postTrackedReplyNotification(

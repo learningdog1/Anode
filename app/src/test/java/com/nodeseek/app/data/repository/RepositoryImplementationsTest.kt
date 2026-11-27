@@ -13,11 +13,15 @@ import com.nodeseek.app.data.local.ReadHistoryEntity
 import com.nodeseek.app.data.local.SettingsRepositoryImpl
 import com.nodeseek.app.data.local.SettingsSecretCipher
 import com.nodeseek.app.data.network.NodeSeekApiClient
+import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.data.network.UserAgentProvider
 import com.nodeseek.app.data.network.WebViewCookieBridge
+import com.nodeseek.app.data.parser.CategoryDto
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
+import com.nodeseek.app.domain.model.AccountSession
 import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.AwayDigestTriggerMode
+import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedSort
 import com.nodeseek.app.domain.model.NotificationKind
 import com.nodeseek.app.domain.model.ReactionType
@@ -26,8 +30,10 @@ import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.model.TopicAccessException
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.SignInStepResult
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
@@ -36,12 +42,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import okhttp3.Cookie
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,6 +63,8 @@ import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class RepositoryImplementationsTest {
 
@@ -1056,6 +1068,643 @@ class RepositoryImplementationsTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `SettingsRepositoryImpl persists exact homepageCategoryOrder and round-trips through backup`() = runBlocking {
+        val tempDir = Files.createTempDirectory("settings_category_order_test").toFile()
+        val dataStoreFile = File(tempDir, "settings_order.preferences_pb")
+        val dsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dataStore = PreferenceDataStoreFactory.create(
+                scope = dsScope,
+                produceFile = { dataStoreFile },
+            )
+            val repo = SettingsRepositoryImpl(dataStore = dataStore, externalScope = repoScope)
+
+            // Reordered permutation of DEFAULT_PINNED_CATEGORY_SLUGS must preserve exact order
+            val customOrder = listOf("trade", "review", "daily", "info", "tech")
+            repo.setHomepageCategoryOrder(customOrder)
+            val updated = withTimeout(5_000L) {
+                repo.settings.first { it.homepageCategoryOrder == customOrder }
+            }
+            assertEquals(customOrder, updated.homepageCategoryOrder)
+
+            val exported = repo.exportSettingsForBackup(includeApiKeys = false)
+            assertEquals(customOrder, exported.homepageCategoryOrder)
+
+            // Empty list clears key
+            repo.setHomepageCategoryOrder(emptyList())
+            val cleared = withTimeout(5_000L) {
+                repo.settings.first { it.homepageCategoryOrder.isEmpty() }
+            }
+            assertTrue(cleared.homepageCategoryOrder.isEmpty())
+
+            // Restore with merge appends without losing order
+            repo.setHomepageCategoryOrder(listOf("dev", "tech"))
+            withTimeout(5_000L) { repo.settings.first { it.homepageCategoryOrder == listOf("dev", "tech") } }
+            repo.restoreSettingsFromBackup(
+                backup = exported,
+                merge = true,
+            )
+            val merged = withTimeout(5_000L) {
+                repo.settings.first { it.homepageCategoryOrder.size == 6 }
+            }
+            assertEquals(listOf("dev", "tech", "trade", "review", "daily", "info"), merged.homepageCategoryOrder)
+        } finally {
+            repoScope.cancel()
+            dsScope.cancel()
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `SettingsRepositoryImpl isolates homepageCategoryOrder per accountUid across switches and cold reload`() = runBlocking {
+        val tempDir = Files.createTempDirectory("settings_uid_isolation_test").toFile()
+        val dataStoreFile = File(tempDir, "settings_uid_isolation.preferences_pb")
+        val dsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope1 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoScope2 = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dataStore1 = PreferenceDataStoreFactory.create(
+                scope = dsScope,
+                produceFile = { dataStoreFile },
+            )
+            // Pre-seed legacy global key (must migrate only to guest 0L, never leak to signed-in UIDs)
+            dataStore1.edit { prefs ->
+                prefs[stringPreferencesKey("homepage_category_order")] = """["daily","info"]"""
+            }
+
+            val repo1 = SettingsRepositoryImpl(dataStore = dataStore1, externalScope = repoScope1)
+            val guestInitial = repo1.awaitLoadedSettings()
+            assertEquals(listOf("daily", "info"), guestInitial.homepageCategoryOrder)
+            assertEquals(listOf("daily", "info"), repo1.getHomepageCategoryOrder(0L))
+
+            // Switch to 101L: legacy guest order must not leak into 101L
+            repo1.onActiveAccountChanged(101L)
+            assertEquals(emptyList<String>(), repo1.settings.value.homepageCategoryOrder)
+            assertEquals(emptyList<String>(), repo1.getHomepageCategoryOrder(101L))
+
+            val order101 = listOf("tech", "trade", "review")
+            repo1.setHomepageCategoryOrder(101L, order101)
+            assertEquals(order101, repo1.settings.value.homepageCategoryOrder)
+            assertEquals(order101, repo1.getHomepageCategoryOrder(101L))
+
+            // Switch to 202L and set distinct order; 101L and 0L must stay untouched
+            repo1.setActiveHomepageCategoryAccountUid(202L)
+            assertEquals(emptyList<String>(), repo1.settings.value.homepageCategoryOrder)
+            val order202 = listOf("carpool", "daily")
+            repo1.setHomepageCategoryOrder(202L, order202)
+            assertEquals(order202, repo1.settings.value.homepageCategoryOrder)
+            assertEquals(order202, repo1.getHomepageCategoryOrder(202L))
+            assertEquals(order101, repo1.getHomepageCategoryOrder(101L))
+            assertEquals(listOf("daily", "info"), repo1.getHomepageCategoryOrder(0L))
+
+            // Writing to non-active 101L must not mutate active 202L projection
+            val updatedOrder101 = listOf("review", "tech")
+            repo1.setHomepageCategoryOrder(101L, updatedOrder101)
+            assertEquals(order202, repo1.settings.value.homepageCategoryOrder)
+
+            // Switch active UID back to 101L and cold-reload without SessionRepository
+            repo1.setActiveHomepageCategoryAccountUid(101L)
+            assertEquals(updatedOrder101, repo1.settings.value.homepageCategoryOrder)
+
+            repoScope1.cancel()
+            val repo2 = SettingsRepositoryImpl(dataStore = dataStore1, externalScope = repoScope2)
+            val reloaded = repo2.awaitLoadedSettings()
+            assertEquals(updatedOrder101, reloaded.homepageCategoryOrder)
+            assertEquals(updatedOrder101, repo2.getHomepageCategoryOrder(101L))
+            assertEquals(order202, repo2.getHomepageCategoryOrder(202L))
+            assertEquals(listOf("daily", "info"), repo2.getHomepageCategoryOrder(0L))
+        } finally {
+            repoScope1.cancel()
+            repoScope2.cancel()
+            dsScope.cancel()
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `ForumRepositoryImpl syncHomepageCategories, saveHomepageCategories, and refreshes preserve custom order and visibility`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true,"data":[{"category":"trade","showInIndex":true},{"category":"info","showInIndex":false}]}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true,"data":[{"key":"daily","cn_text":"日常","showInIndex":true},{"key":"trade","cn_text":"交易","showInIndex":true},{"key":"info","cn_text":"情报","showInIndex":true}]}"""),
+        )
+
+        val synced = forumRepository.syncHomepageCategories().getOrThrow()
+        assertFalse(synced.first { it.slug == "info" }.visibleOnHome)
+        assertTrue(synced.first { it.slug == "trade" }.visibleOnHome)
+
+        val customList = listOf(
+            com.nodeseek.app.domain.model.Category(slug = "trade", name = "交易", isCustomizable = true, visibleOnHome = true),
+            com.nodeseek.app.domain.model.Category(slug = "daily", name = "日常", isCustomizable = true, visibleOnHome = false),
+            com.nodeseek.app.domain.model.Category(slug = "info", name = "情报", isCustomizable = true, visibleOnHome = true),
+        )
+        forumRepository.saveHomepageCategories(customList, syncToServer = true).getOrThrow()
+        assertEquals(listOf("trade", "daily", "info"), settingsRepository.settings.value.homepageCategoryOrder)
+
+        // Local-only save skips network
+        forumRepository.saveHomepageCategories(
+            listOf(
+                com.nodeseek.app.domain.model.Category(slug = "info", name = "情报", isCustomizable = true, visibleOnHome = true),
+                com.nodeseek.app.domain.model.Category(slug = "trade", name = "交易", isCustomizable = true, visibleOnHome = true),
+                com.nodeseek.app.domain.model.Category(slug = "daily", name = "日常", isCustomizable = true, visibleOnHome = false),
+            ),
+            syncToServer = false,
+        ).getOrThrow()
+
+        // refreshCategories(force = true) must NOT clobber custom order or visibleOnHome=false on daily!
+        val afterRefresh = forumRepository.refreshCategories(force = true).getOrThrow()
+        assertEquals("", afterRefresh[0].slug)
+        assertEquals("info", afterRefresh[1].slug)
+        assertEquals("trade", afterRefresh[2].slug)
+        assertFalse(afterRefresh.first { it.slug == "daily" }.visibleOnHome)
+
+        val _getHomepage = server.takeRequest()
+        val postHomepage = server.takeRequest()
+        assertEquals("/api/homepage", postHomepage.path)
+        assertTrue(postHomepage.body.readUtf8().contains(""""category":"daily","showInIndex":false"""))
+        val listCategoriesReq = server.takeRequest()
+        assertEquals("/api/content/list-categories", listCategoriesReq.path)
+    }
+
+    @Test
+    fun `syncHomepageCategories propagates server order into settings and buildOrderedTabs even when Room is pre-seeded by onEmbeddedCategoriesObserved`() = runBlocking {
+        // 1. Simulate fresh login where temp-script seeds Room via onEmbeddedCategoriesObserved
+        // while settings.homepageCategoryOrder is still empty.
+        val configB64 = encodeConfig(
+            """{"user":{"member_id":101,"member_name":"Alice","coin":500},"allCategory":[{"key":"daily","cn_text":"日常"},{"key":"tech","cn_text":"技术"},{"key":"info","cn_text":"情报"},{"key":"review","cn_text":"测评"},{"key":"trade","cn_text":"交易"}]}""",
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$configB64</script></body></html>"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"success":true,"data":[{"category":"review","showInIndex":true},{"category":"trade","showInIndex":true},{"category":"info","showInIndex":false}]}"""),
+        )
+
+        sessionRepository.refreshSession().getOrThrow()
+        withTimeout(5_000L) {
+            while (categoryDao.getCategories(101L).isEmpty()) {
+                kotlinx.coroutines.delay(10L)
+            }
+        }
+        assertTrue(settingsRepository.settings.value.homepageCategoryOrder.isEmpty())
+
+        // 2. syncHomepageCategories must apply server order despite pre-seeded Room AND persist homepageCategoryOrder
+        val synced = forumRepository.syncHomepageCategories().getOrThrow()
+        assertEquals(listOf("", "review", "trade", "info", "daily", "tech"), synced.map { it.slug })
+        assertEquals(listOf("review", "trade", "info", "daily", "tech"), settingsRepository.settings.value.homepageCategoryOrder)
+
+        val tabs = com.nodeseek.app.ui.explore.ExploreViewModel.buildOrderedTabs(
+            categories = synced,
+            homepageCategoryOrder = settingsRepository.settings.value.homepageCategoryOrder,
+            pinnedCategorySlugs = settingsRepository.settings.value.pinnedCategorySlugs,
+        )
+        assertEquals(listOf("", "review", "trade", "daily", "tech"), tabs.map { it.slug })
+    }
+
+    @Test
+    fun `onEmbeddedCategoriesObserved cannot clobber syncHomepageCategories visibility under concurrent RMW interleaving`() = runBlocking {
+        val allCategoriesWithTradeTrue = listOf(
+            CategoryDto(key = "daily", cnText = "日常", customizable = true, showInIndex = true),
+            CategoryDto(key = "tech", cnText = "技术", customizable = true, showInIndex = true),
+            CategoryDto(key = "info", cnText = "情报", customizable = true, showInIndex = true),
+            CategoryDto(key = "review", cnText = "测评", customizable = true, showInIndex = true),
+            CategoryDto(key = "trade", cnText = "交易", customizable = true, showInIndex = true),
+            CategoryDto(key = "carpool", cnText = "拼车", customizable = true, showInIndex = true),
+        )
+        val homepageJson = """{"success":true,"data":[{"category":"carpool","showInIndex":true},{"category":"info","showInIndex":true},{"category":"daily","showInIndex":true},{"category":"trade","showInIndex":false}]}"""
+
+        // Direction A: onEmbeddedCategoriesObserved enters getCategories(202L) first while syncHomepageCategories is in-flight
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+        categoryDao.clearForAccount(202L)
+        settingsRepository.setHomepageCategoryOrder(emptyList())
+
+        val embeddedEnteredGet = CompletableDeferred<Unit>()
+        val releaseEmbeddedGet = CompletableDeferred<Unit>()
+        val homepageNetworkServed = CompletableDeferred<Unit>()
+        val pausingDao = object : CategoryDao by categoryDao {
+            override suspend fun getCategories(accountUid: Long): List<CategoryEntity> {
+                val rows = categoryDao.getCategories(accountUid)
+                if (accountUid == 202L && rows.isEmpty() && !embeddedEnteredGet.isCompleted) {
+                    embeddedEnteredGet.complete(Unit)
+                    releaseEmbeddedGet.await()
+                }
+                return rows
+            }
+        }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/homepage") == true) {
+                    homepageNetworkServed.complete(Unit)
+                    return MockResponse().setResponseCode(200).setBody(homepageJson)
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+        val bgScopeA = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val repoA = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            categoryDao = pausingDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = bgScopeA,
+        )
+        try {
+            repoA.onEmbeddedCategoriesObserved(allCategoriesWithTradeTrue, 202L)
+            withTimeout(5_000L) { embeddedEnteredGet.await() }
+
+            val syncJob = async(Dispatchers.IO) { repoA.syncHomepageCategories().getOrThrow() }
+            withTimeout(5_000L) { homepageNetworkServed.await() }
+            releaseEmbeddedGet.complete(Unit)
+
+            withTimeout(5_000L) {
+                syncJob.await()
+                bgScopeA.coroutineContext[Job]!!.children.toList().forEach { it.join() }
+            }
+
+            val catsA = categoryDao.getCategories(202L)
+            assertFalse("Direction A: trade must stay hidden", catsA.first { it.slug == "trade" }.visibleOnHome)
+            assertTrue("Direction A: daily must stay visible", catsA.first { it.slug == "daily" }.visibleOnHome)
+            assertEquals(listOf("", "carpool", "info", "daily", "trade"), catsA.take(5).map { it.slug })
+        } finally {
+            bgScopeA.cancel()
+        }
+
+        // Direction B: onEmbeddedCategoriesObserved is queued while syncHomepageCategories commits first, then embedded runs afterward
+        categoryDao.clearForAccount(202L)
+        settingsRepository.setHomepageCategoryOrder(emptyList())
+        val gateDispatcher = StandardTestDispatcher()
+        val bgScopeB = CoroutineScope(SupervisorJob() + gateDispatcher)
+        val repoB = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            categoryDao = categoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = bgScopeB,
+        )
+        try {
+            repoB.onEmbeddedCategoriesObserved(allCategoriesWithTradeTrue, 202L)
+            repoB.syncHomepageCategories().getOrThrow()
+            gateDispatcher.scheduler.advanceUntilIdle()
+            withTimeout(5_000L) {
+                bgScopeB.coroutineContext[Job]!!.children.toList().forEach { it.join() }
+            }
+
+            val catsB = categoryDao.getCategories(202L)
+            assertFalse("Direction B: trade must stay hidden", catsB.first { it.slug == "trade" }.visibleOnHome)
+            assertTrue("Direction B: daily must stay visible", catsB.first { it.slug == "daily" }.visibleOnHome)
+            assertEquals(listOf("", "carpool", "info", "daily", "trade"), catsB.take(5).map { it.slug })
+        } finally {
+            bgScopeB.cancel()
+        }
+    }
+
+    @Test
+    fun `stale pre-switch onEmbeddedCategoriesObserved and syncHomepageCategories do not mutate Room or settings after session switch`() = runBlocking {
+        // Part A: stale pre-switch onEmbeddedCategoriesObserved for 101L released after switch to 202L
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        val seeded101 = listOf(
+            Category(slug = "", name = "全部", isCustomizable = false, visibleOnHome = true).toEntityCompat(101L, 0),
+            Category(slug = "trade", name = "交易", isCustomizable = true, visibleOnHome = true).toEntityCompat(101L, 1),
+            Category(slug = "tech", name = "技术", isCustomizable = true, visibleOnHome = true).toEntityCompat(101L, 2),
+        )
+        categoryDao.replaceForAccount(101L, seeded101)
+        settingsRepository.setHomepageCategoryOrder(listOf("trade", "tech"))
+
+        val gateDispatcher = StandardTestDispatcher()
+        val bgScope = CoroutineScope(SupervisorJob() + gateDispatcher)
+        val gatedRepo = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            categoryDao = categoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = bgScope,
+        )
+        try {
+            gatedRepo.onEmbeddedCategoriesObserved(
+                listOf(
+                    CategoryDto(key = "daily", cnText = "日常", customizable = true, showInIndex = true),
+                    CategoryDto(key = "tech", cnText = "技术", customizable = true, showInIndex = true),
+                    CategoryDto(key = "trade", cnText = "交易", customizable = true, showInIndex = true),
+                ),
+                accountUid = 101L,
+            )
+
+            // Switch to 202L and clear global homepageCategoryOrder before queued 101L embedded task executes
+            sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+            settingsRepository.setHomepageCategoryOrder(emptyList())
+
+            gateDispatcher.scheduler.advanceUntilIdle()
+            withTimeout(5_000L) {
+                bgScope.coroutineContext[Job]!!.children.toList().forEach { it.join() }
+            }
+
+            assertEquals(listOf("", "trade", "tech"), categoryDao.getCategories(101L).map { it.slug })
+        } finally {
+            bgScope.cancel()
+        }
+
+        // Part B: in-flight syncHomepageCategories for 101L completes after session switches to 202L
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        settingsRepository.setHomepageCategoryOrder(emptyList())
+        val requestStarted = CountDownLatch(1)
+        val releaseResponse = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/homepage") == true) {
+                    requestStarted.countDown()
+                    releaseResponse.await(5, TimeUnit.SECONDS)
+                    return MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"category":"daily","showInIndex":true},{"category":"tech","showInIndex":true}]}""")
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        val syncDeferred = async(Dispatchers.IO) { forumRepository.syncHomepageCategories() }
+        assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+        settingsRepository.setHomepageCategoryOrder(listOf("carpool"))
+        releaseResponse.countDown()
+
+        val result = withTimeout(5_000L) { syncDeferred.await() }
+        assertTrue("Stale syncHomepageCategories must fail cleanly", result.isFailure)
+        assertTrue(result.exceptionOrNull() is NodeSeekApiException)
+        assertEquals(listOf("carpool"), settingsRepository.settings.value.homepageCategoryOrder)
+        assertEquals(listOf("", "trade", "tech"), categoryDao.getCategories(101L).map { it.slug })
+    }
+
+    @Test
+    fun `in-flight syncHomepageCategories does not overwrite newer local saveHomepageCategories`() = runBlocking {
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        categoryDao.clearForAccount(101L)
+        settingsRepository.setHomepageCategoryOrder(emptyList())
+
+        val requestStarted = CountDownLatch(1)
+        val releaseResponse = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/homepage") == true) {
+                    requestStarted.countDown()
+                    releaseResponse.await(5, TimeUnit.SECONDS)
+                    return MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"category":"trade","showInIndex":true},{"category":"tech","showInIndex":true}]}""")
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        val syncDeferred = async(Dispatchers.IO) { forumRepository.syncHomepageCategories() }
+        assertTrue(requestStarted.await(5, TimeUnit.SECONDS))
+
+        forumRepository.saveHomepageCategories(
+            orderedCategories = listOf(
+                Category(slug = "tech", name = "技术", isCustomizable = true, visibleOnHome = true),
+                Category(slug = "trade", name = "交易", isCustomizable = true, visibleOnHome = false),
+            ),
+            syncToServer = false,
+        ).getOrThrow()
+
+        releaseResponse.countDown()
+        val synced = withTimeout(5_000L) { syncDeferred.await().getOrThrow() }
+
+        val stored101 = categoryDao.getCategories(101L)
+        assertFalse(stored101.first { it.slug == "trade" }.visibleOnHome)
+        assertFalse(synced.first { it.slug == "trade" }.visibleOnHome)
+        assertEquals(listOf("tech", "trade"), settingsRepository.settings.value.homepageCategoryOrder)
+    }
+
+    @Test
+    fun `stress test concurrent onEmbeddedCategoriesObserved and syncHomepageCategories across 30 rounds never leaks trade visibility`() = runBlocking {
+        val configB64 = encodeConfig(
+            """{"user":{"member_id":202,"member_name":"Bob","coin":300},"allCategory":[{"key":"daily","cn_text":"日常","customizable":true,"showInIndex":1},{"key":"tech","cn_text":"技术","customizable":true,"showInIndex":1},{"key":"info","cn_text":"情报","customizable":true,"showInIndex":1},{"key":"review","cn_text":"测评","customizable":true,"showInIndex":1},{"key":"trade","cn_text":"交易","customizable":true,"showInIndex":1},{"key":"carpool","cn_text":"拼车","customizable":true,"showInIndex":1}]}""",
+        )
+        val feedHtml = """<html><body><div id="nsk-body"></div><script id="temp-script" type="application/json">$configB64</script></body></html>"""
+        val hpJson = """{"success":true,"data":[{"category":"carpool","showInIndex":true},{"category":"info","showInIndex":true},{"category":"daily","showInIndex":true},{"category":"trade","showInIndex":false}]}"""
+
+        val feedRequests = java.util.concurrent.atomic.AtomicInteger(0)
+        val homepageRequests = java.util.concurrent.atomic.AtomicInteger(0)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    path.startsWith("/api/homepage") -> {
+                        homepageRequests.incrementAndGet()
+                        MockResponse().setResponseCode(200).setBody(hpJson)
+                    }
+                    path.startsWith("/") -> {
+                        feedRequests.incrementAndGet()
+                        MockResponse().setResponseCode(200).setBody(feedHtml)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val stressClock = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        val stressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val stressRepo = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            categoryDao = categoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = stressScope,
+            clockMillis = { stressClock.get() },
+        )
+        sessionRepository.embeddedCategoriesListener = stressRepo::onEmbeddedCategoriesObserved
+        try {
+            repeat(30) { round ->
+                stressClock.addAndGet(10_000L)
+                sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+                categoryDao.clearForAccount(202L)
+                settingsRepository.setHomepageCategoryOrder(emptyList())
+
+                val feedJob = async(Dispatchers.IO) {
+                    stressRepo.getFeed(categorySlug = "", page = 1, forceRefresh = true).getOrThrow()
+                }
+                val syncJob = async(Dispatchers.IO) {
+                    stressRepo.syncHomepageCategories().getOrThrow()
+                }
+                withTimeout(5_000L) {
+                    feedJob.await()
+                    syncJob.await()
+                    stressScope.coroutineContext[Job]!!.children.toList().forEach { it.join() }
+                }
+
+                val cats202 = categoryDao.getCategories(202L)
+                assertFalse("Round $round leaked trade visibility", cats202.first { it.slug == "trade" }.visibleOnHome)
+                assertTrue("Round $round lost daily visibility", cats202.first { it.slug == "daily" }.visibleOnHome)
+            }
+            assertEquals(30, feedRequests.get())
+            assertEquals(30, homepageRequests.get())
+        } finally {
+            stressScope.cancel()
+        }
+    }
+
+    @Test
+    fun `saveHomepageCategories_midFlightSessionSwitch_abortsRemoteWrite`() = runBlocking {
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        val homepageRequests = java.util.concurrent.atomic.AtomicInteger(0)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/homepage") == true) {
+                    homepageRequests.incrementAndGet()
+                }
+                return MockResponse().setResponseCode(200).setBody("""{"success":true}""")
+            }
+        }
+
+        val switchingCategoryDao = object : CategoryDao by categoryDao {
+            override suspend fun replaceForAccount(accountUid: Long, categories: List<CategoryEntity>) {
+                categoryDao.replaceForAccount(accountUid, categories)
+                if (accountUid == 101L) {
+                    // Simulate mid-flight session switch right after local save and before remote /api/homepage call
+                    sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+                }
+            }
+        }
+        val guardedRepo = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepository,
+            settingsRepository = settingsRepository,
+            categoryDao = switchingCategoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+
+        val res = guardedRepo.saveHomepageCategories(
+            orderedCategories = listOf(
+                Category(slug = "tech", name = "技术", isCustomizable = true, visibleOnHome = true),
+            ),
+            syncToServer = true,
+        )
+        assertTrue(res.isFailure)
+        assertEquals(0, homepageRequests.get())
+    }
+
+    @Test
+    fun `refreshCategories_midFlightSessionSwitch_rejectsStaleResponse`() = runBlocking {
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        categoryDao.clearForAccount(101L)
+        categoryDao.clearForAccount(202L)
+
+        val reqStarted = CountDownLatch(1)
+        val releaseResp = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/content/list-categories") == true) {
+                    reqStarted.countDown()
+                    releaseResp.await(5, TimeUnit.SECONDS)
+                    return MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"key":"tech","cn_text":"技术"}]}""")
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        val refreshDeferred = async(Dispatchers.IO) { forumRepository.refreshCategories(force = true) }
+        assertTrue(reqStarted.await(5, TimeUnit.SECONDS))
+
+        sessionRepository.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+        releaseResp.countDown()
+
+        val result = withTimeout(5_000L) { refreshDeferred.await() }
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message?.contains("账号会话已切换") == true)
+        assertTrue(categoryDao.getCategories(101L).isEmpty())
+        assertTrue(categoryDao.getCategories(202L).isEmpty())
+    }
+
+    @Test
+    fun `refreshCategories_concurrentTwoUids_isolatesStorage`() = runBlocking {
+        val sessA = SessionRepositoryImpl(apiClientProvider = { apiClient }, cookieBridge = cookieBridge)
+        val sessB = SessionRepositoryImpl(apiClientProvider = { apiClient }, cookieBridge = cookieBridge)
+        sessA.applyOptimisticSwitchedSession(AccountSession(uid = 101L, username = "Alice"))
+        sessB.applyOptimisticSwitchedSession(AccountSession(uid = 202L, username = "Bob"))
+        categoryDao.clearForAccount(101L)
+        categoryDao.clearForAccount(202L)
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.startsWith("/api/content/list-categories") == true) {
+                    return MockResponse().setResponseCode(200)
+                        .setBody("""{"success":true,"data":[{"key":"tech","cn_text":"技术"},{"key":"trade","cn_text":"交易"}]}""")
+                }
+                return MockResponse().setResponseCode(404)
+            }
+        }
+
+        val repoA = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessA,
+            settingsRepository = settingsRepository,
+            categoryDao = categoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+        val repoB = ForumRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessB,
+            settingsRepository = settingsRepository,
+            categoryDao = categoryDao,
+            readHistoryDao = readHistoryDao,
+            bookmarkDao = bookmarkDao,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+
+        val dA = async(Dispatchers.IO) { repoA.refreshCategories(force = true) }
+        val dB = async(Dispatchers.IO) { repoB.refreshCategories(force = true) }
+        assertTrue(dA.await().isSuccess)
+        assertTrue(dB.await().isSuccess)
+        assertTrue(categoryDao.getCategories(101L).any { it.slug == "trade" })
+        assertTrue(categoryDao.getCategories(202L).any { it.slug == "trade" })
+        assertTrue(categoryDao.getCategories(0L).isEmpty())
+    }
+
+    private fun Category.toEntityCompat(accountUid: Long, sortOrder: Int): CategoryEntity =
+        CategoryEntity(
+            accountUid = accountUid,
+            slug = slug,
+            name = name,
+            description = description,
+            sortOrder = sortOrder,
+            isCustomizable = isCustomizable,
+            visibleOnHome = visibleOnHome,
+            isAdminOnly = isAdminOnly,
+            topicCoinCost = topicCoinCost,
+            supportsRss = supportsRss,
+            syncedAtEpochMillis = 1_000L,
+        )
 }
 
 // =========================================================================
@@ -1088,6 +1737,11 @@ internal class FakeSettingsRepository : SettingsRepository {
     }
     override suspend fun setPinnedCategorySlugs(slugs: Set<String>) {
         _settings.value = _settings.value.copy(pinnedCategorySlugs = slugs)
+    }
+    override suspend fun setHomepageCategoryOrder(slugs: List<String>) {
+        _settings.value = _settings.value.copy(
+            homepageCategoryOrder = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+        )
     }
     override suspend fun togglePinnedCategory(slug: String) = Unit
     override suspend fun setIncludeBlockedTopics(include: Boolean) {
@@ -1148,6 +1802,7 @@ internal class FakeSettingsRepository : SettingsRepository {
             homeCardScale = cur.homeCardScale,
             preferRandomCheckIn = cur.preferRandomCheckIn,
             pinnedCategorySlugs = cur.pinnedCategorySlugs,
+            homepageCategoryOrder = cur.homepageCategoryOrder,
             includeBlockedTopics = cur.includeBlockedTopics,
             preferRssFallback = cur.preferRssFallback,
             nodeImageApiKey = if (includeApiKeys) cur.nodeImageApiKey else "",
@@ -1178,6 +1833,11 @@ internal class FakeSettingsRepository : SettingsRepository {
         } else {
             backup.ignoredUpdateTag.trim()
         }
+        val resolvedOrder = if (merge && cur.homepageCategoryOrder.isNotEmpty()) {
+            (cur.homepageCategoryOrder + backup.homepageCategoryOrder.map { it.trim() }.filter { it.isNotEmpty() }).distinct()
+        } else {
+            backup.homepageCategoryOrder.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        }
         _settings.value = AppSettings(
             themeMode = backup.themeMode,
             purePitchAmoled = backup.purePitchAmoled,
@@ -1186,6 +1846,7 @@ internal class FakeSettingsRepository : SettingsRepository {
             homeCardScale = backup.homeCardScale.coerceIn(SettingsRepositoryImpl.MIN_HOME_CARD_SCALE, SettingsRepositoryImpl.MAX_HOME_CARD_SCALE),
             preferRandomCheckIn = backup.preferRandomCheckIn,
             pinnedCategorySlugs = backup.pinnedCategorySlugs.map { it.trim() }.filter { it.isNotEmpty() }.toCollection(LinkedHashSet()),
+            homepageCategoryOrder = resolvedOrder,
             includeBlockedTopics = backup.includeBlockedTopics,
             preferRssFallback = backup.preferRssFallback,
             nodeImageApiKey = nodeKey,
@@ -1223,16 +1884,26 @@ internal class FakeCategoryDao : CategoryDao {
         getCategories(accountUid).maxOfOrNull { it.syncedAtEpochMillis }
 
     override suspend fun upsertAll(entities: List<CategoryEntity>) {
-        val updated = state.value.toMutableList()
-        for (entity in entities) {
-            updated.removeAll { it.accountUid == entity.accountUid && it.slug == entity.slug }
-            updated.add(entity)
+        synchronized(this) {
+            val updated = state.value.toMutableList()
+            for (entity in entities) {
+                updated.removeAll { it.accountUid == entity.accountUid && it.slug == entity.slug }
+                updated.add(entity)
+            }
+            state.value = updated
         }
-        state.value = updated
     }
 
     override suspend fun clearForAccount(accountUid: Long) {
-        state.value = state.value.filterNot { it.accountUid == accountUid }
+        synchronized(this) {
+            state.value = state.value.filterNot { it.accountUid == accountUid }
+        }
+    }
+
+    override suspend fun replaceForAccount(accountUid: Long, categories: List<CategoryEntity>) {
+        synchronized(this) {
+            state.value = state.value.filterNot { it.accountUid == accountUid } + categories
+        }
     }
 }
 

@@ -168,6 +168,9 @@ import coil3.request.crossfade
 import coil3.size.Dimension
 import coil3.size.Precision
 import coil3.size.Scale as CoilScale
+import com.nodeseek.app.domain.model.NsAppWidgetTarget
+import com.nodeseek.app.domain.model.StardustTipTarget
+import com.nodeseek.app.domain.model.parseNsAppWidgetTarget
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
@@ -272,6 +275,10 @@ private fun rememberMarkdownImageSaveAction(): (String, String) -> Unit {
 private const val ASYNC_MARKDOWN_PARSE_THRESHOLD_CHARS = 32_000
 private const val QUICK_MARKDOWN_PREVIEW_CHARS = 12_000
 
+private val LocalNsAppWidgetController = compositionLocalOf<NsAppWidgetController> {
+    NoOpNsAppWidgetController
+}
+
 @Composable
 fun MarkdownRenderer(
     markdown: String,
@@ -286,6 +293,7 @@ fun MarkdownRenderer(
     onFloorClick: ((Int) -> Unit)? = null,
     onUrlClick: ((String) -> Unit)? = null,
     onUrlLongClick: ((String) -> Unit)? = null,
+    nsAppWidgetController: NsAppWidgetController = NoOpNsAppWidgetController,
 ) {
     val isInspection = LocalInspectionMode.current
     val offloadParse = !isInspection && markdown.length > ASYNC_MARKDOWN_PARSE_THRESHOLD_CHARS
@@ -312,19 +320,23 @@ fun MarkdownRenderer(
     }
     var lightboxImageState by remember { mutableStateOf<Pair<String, String>?>(null) }
     var actionSheetImage by remember { mutableStateOf<ImageActionTarget?>(null) }
+    var inlineVoteModalTarget by remember(nsAppWidgetController) {
+        mutableStateOf<NsAppWidgetTarget.Vote?>(null)
+    }
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val saveImage = rememberMarkdownImageSaveAction()
 
-    val effectiveUrlClick: (String) -> Unit = remember(onUrlClick, uriHandler) {
+    val effectiveUrlClick: (String) -> Unit = remember(onUrlClick, uriHandler, nsAppWidgetController) {
         { rawUrl ->
-            val unwrapped = unwrapNodeSeekJumpUrl(rawUrl)
-            if (onUrlClick != null) {
-                onUrlClick(unwrapped)
-            } else {
-                runCatching { uriHandler.openUri(unwrapped) }
-            }
+            dispatchMarkdownUrlClick(
+                rawUrl = rawUrl,
+                nsAppWidgetController = nsAppWidgetController,
+                onOpenInlineVote = { voteTarget -> inlineVoteModalTarget = voteTarget },
+                onUrlClick = onUrlClick,
+                onOpenExternalUri = { url -> runCatching { uriHandler.openUri(url) } },
+            )
         }
     }
 
@@ -381,6 +393,7 @@ fun MarkdownRenderer(
     CompositionLocalProvider(
         LocalMarkdownSelectionEnabled provides enableTextSelection,
         LocalMarkdownUrlLongClick provides effectiveUrlLongClick,
+        LocalNsAppWidgetController provides nsAppWidgetController,
     ) {
         if (enableTextSelection) {
             SelectionContainer(modifier = modifier.fillMaxWidth()) {
@@ -452,6 +465,87 @@ fun MarkdownRenderer(
                 null
             },
         )
+    }
+
+    inlineVoteModalTarget?.let { voteTarget ->
+        Dialog(onDismissRequest = { inlineVoteModalTarget = null }) {
+            Surface(
+                shape = PulseArchitecturalShapes.EditorialCard,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "互动投票 #${voteTarget.voteId}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        IconButton(onClick = { inlineVoteModalTarget = null }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "关闭")
+                        }
+                    }
+                    InteractiveVoteWidgetCard(
+                        target = voteTarget,
+                        fallbackTitle = "投票 #${voteTarget.voteId}",
+                        controller = nsAppWidgetController,
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun dispatchMarkdownUrlClick(
+    rawUrl: String,
+    nsAppWidgetController: NsAppWidgetController,
+    onOpenInlineVote: ((NsAppWidgetTarget.Vote) -> Unit)?,
+    onUrlClick: ((String) -> Unit)?,
+    onOpenExternalUri: (String) -> Unit,
+) {
+    val unwrapped = unwrapNodeSeekJumpUrl(rawUrl)
+    val nsWidget = parseNsAppWidgetTarget(unwrapped)
+    val hasLiveController = nsAppWidgetController !== NoOpNsAppWidgetController
+    if (hasLiveController && nsWidget != null) {
+        when (nsWidget) {
+            is NsAppWidgetTarget.StardustReceive -> {
+                nsAppWidgetController.openStardustTip(
+                    StardustTipTarget(
+                        receiverUid = nsWidget.receiverUid,
+                        suggestedAmount = nsWidget.suggestedAmount,
+                        refId = nsWidget.refId,
+                        once = nsWidget.once,
+                        note = nsWidget.note,
+                        widgetKey = nsWidget.rawUrl,
+                    ),
+                )
+            }
+            is NsAppWidgetTarget.Vote -> {
+                nsAppWidgetController.ensureVoteLoaded(nsWidget.voteId)
+                onOpenInlineVote?.invoke(nsWidget)
+            }
+        }
+        return
+    }
+    if (unwrapped.trim().startsWith("nsapp://", ignoreCase = true)) {
+        if (!hasLiveController && onUrlClick != null) {
+            onUrlClick(unwrapped)
+        }
+        return
+    }
+    if (onUrlClick != null) {
+        onUrlClick(unwrapped)
+    } else {
+        onOpenExternalUri(unwrapped)
     }
 }
 
@@ -2683,12 +2777,12 @@ private fun findWarmMemoryCachedImage(
     return entry
 }
 
-private sealed interface ParagraphRenderSegment {
+internal sealed interface ParagraphRenderSegment {
     data class InlineRun(val tokens: List<MdInlineToken>) : ParagraphRenderSegment
     data class PromotedImage(val token: MdInlineToken.Image) : ParagraphRenderSegment
 }
 
-private fun splitParagraphSegments(tokens: List<MdInlineToken>): List<ParagraphRenderSegment> {
+internal fun splitParagraphSegments(tokens: List<MdInlineToken>): List<ParagraphRenderSegment> {
     val segments = mutableListOf<ParagraphRenderSegment>()
     val pendingInline = mutableListOf<MdInlineToken>()
 
@@ -3064,11 +3158,54 @@ private fun EmbeddedNsAppWidgetCard(
     widget: MdBlock.SpecialWidget,
     onUrlClick: (String) -> Unit,
 ) {
+    val controller = LocalNsAppWidgetController.current
+    val isInspection = LocalInspectionMode.current
+    val parsedTarget = remember(widget.url) { parseNsAppWidgetTarget(widget.url) }
+
+    if (!isInspection && controller !== NoOpNsAppWidgetController && parsedTarget != null) {
+        when (parsedTarget) {
+            is NsAppWidgetTarget.Vote -> {
+                InteractiveVoteWidgetCard(
+                    target = parsedTarget,
+                    fallbackTitle = widget.title,
+                    controller = controller,
+                )
+                return
+            }
+            is NsAppWidgetTarget.StardustReceive -> {
+                InteractiveStardustWidgetCard(
+                    target = parsedTarget,
+                    fallbackTitle = widget.title,
+                    controller = controller,
+                )
+                return
+            }
+        }
+    }
+
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
-    val isVote = widget.url.startsWith("nsapp://vote", ignoreCase = true)
+    val isVote = parsedTarget is NsAppWidgetTarget.Vote ||
+        widget.url.startsWith("nsapp://vote", ignoreCase = true)
     val accent = if (isVote) MaterialTheme.colorScheme.primary else ext.stardustAccent
     val fgColor = if (isVote) MaterialTheme.colorScheme.onPrimaryContainer else ext.onStardustContainer
+    val subtitleText = when (parsedTarget) {
+        is NsAppWidgetTarget.Vote -> "投票 ID #${parsedTarget.voteId} · 点击查看投票详情或参与投票"
+        is NsAppWidgetTarget.StardustReceive -> buildString {
+            if (parsedTarget.note.isNotBlank()) {
+                append(parsedTarget.note)
+            } else {
+                append("收款人 UID ${parsedTarget.receiverUid}")
+            }
+            parsedTarget.suggestedAmount?.let { amount ->
+                append(" · 建议 $amount 星尘")
+            }
+            if (parsedTarget.once) {
+                append(" · 一次性打赏")
+            }
+        }
+        null -> if (isVote) "点击查看投票详情或参与投票" else "点击打开星尘转账互动面板"
+    }
 
     Row(
         modifier = Modifier
@@ -3113,7 +3250,7 @@ private fun EmbeddedNsAppWidgetCard(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = if (isVote) "点击查看投票详情或参与投票" else "点击打开星尘转账互动面板",
+                text = subtitleText,
                 style = MaterialTheme.typography.labelMedium,
                 color = fgColor.copy(alpha = 0.88f),
             )
@@ -5831,7 +5968,7 @@ private val SETEXT_H2_REGEX = Regex("""^-{3,}\s*$""")
 private val HR_REGEX = Regex("""^(?:-{3,}|\*{3,}|_{3,}|<hr\s*/?>)\s*$""", RegexOption.IGNORE_CASE)
 private val WRAPPER_TAG_LINE_REGEX = Regex("""^</?(?:p|div|center|span|font|small|section|article|h[1-6])\b[^>]*>\s*$""", RegexOption.IGNORE_CASE)
 private val WRAPPED_SINGLE_LINE_HTML_REGEX = Regex("""^<(?:p|div|center)\b[^>]*>(.*)</(?:p|div|center)>\s*$""", RegexOption.IGNORE_CASE)
-private val SPECIAL_WIDGET_REGEX =
+internal val SPECIAL_WIDGET_REGEX =
     Regex("""^\[([^\]]*)]\((nsapp://(?:vote|stardust-receive)[^)]*)\)\s*$""", RegexOption.IGNORE_CASE)
 private val LIST_ITEM_REGEX =
     Regex("""^(\s*)(?:([-*+])|(\d+)\.)\s+(?:\[([ xX])]\s+)?(.+)$""")

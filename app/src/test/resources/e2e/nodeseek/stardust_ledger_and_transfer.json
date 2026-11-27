@@ -1,0 +1,41 @@
+{
+  "list": {
+    "success": true,
+    "records": [
+      {
+        "id": 981,
+        "diff": 10,
+        "result": 42,
+        "type": "transfer",
+        "created_at": "2026-11-24T01:00:00Z",
+        "peer_id": 202
+      },
+      {
+        "id": 980,
+        "diff": -5,
+        "result": 32,
+        "type": "upvote",
+        "created_at": "2026-11-23T14:20:00Z",
+        "peer_id": 303
+      },
+      {
+        "id": 979,
+        "diff": 37,
+        "result": 37,
+        "type": "system",
+        "created_at": "2026-11-20T00:00:00Z",
+        "peer_id": null
+      }
+    ],
+    "exist_more": true,
+    "cursor": 979
+  },
+  "paymentPrepare": {
+    "success": true,
+    "receiver_name": "bob202"
+  },
+  "send": {
+    "success": true,
+    "message": "打赏成功"
+  }
+}

@@ -357,6 +357,7 @@ internal class PreviewAppContainer(
         override suspend fun setHomeCardScale(scale: Float) = Unit
         override suspend fun setPreferRandomCheckIn(preferRandom: Boolean) = Unit
         override suspend fun setPinnedCategorySlugs(slugs: Set<String>) = Unit
+        override suspend fun setHomepageCategoryOrder(slugs: List<String>) = Unit
         override suspend fun togglePinnedCategory(slug: String) = Unit
         override suspend fun setIncludeBlockedTopics(include: Boolean) = Unit
         override suspend fun setPreferRssFallback(preferRss: Boolean) = Unit
@@ -381,6 +382,7 @@ internal class PreviewAppContainer(
                 homeCardScale = s.homeCardScale,
                 preferRandomCheckIn = s.preferRandomCheckIn,
                 pinnedCategorySlugs = s.pinnedCategorySlugs,
+                homepageCategoryOrder = s.homepageCategoryOrder,
                 includeBlockedTopics = s.includeBlockedTopics,
                 preferRssFallback = s.preferRssFallback,
                 nodeImageApiKey = if (includeApiKeys) s.nodeImageApiKey else "",

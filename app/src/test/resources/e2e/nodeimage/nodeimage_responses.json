@@ -1,0 +1,114 @@
+{
+  "uploadSuccess": {
+    "success": true,
+    "imageId": "img_e2e_01",
+    "links": {
+      "direct": "https://img.nodeimage.com/i/img_e2e_01.png",
+      "markdown": "![img_e2e_01](https://img.nodeimage.com/i/img_e2e_01.png)"
+    }
+  },
+  "imagesList": {
+    "success": true,
+    "images": [
+      {
+        "id": "img_e2e_01",
+        "url": "https://img.nodeimage.com/i/img_e2e_01.png",
+        "filename": "mosaic_bench.png",
+        "size": 24512,
+        "created_at": "2026-11-25T04:00:00Z"
+      },
+      {
+        "id": "img_e2e_02",
+        "url": "https://img.nodeimage.com/i/img_e2e_02.jpg",
+        "filename": "speedtest.jpg",
+        "size": 48200,
+        "created_at": "2026-11-24T12:00:00Z"
+      }
+    ]
+  },
+  "deleteSuccess": {
+    "success": true,
+    "message": "deleted"
+  },
+  "unauthorized": {
+    "success": false,
+    "error": "Invalid API Key"
+  },
+  "notFound": {
+    "success": false,
+    "error": "Image not found"
+  },
+  "imagesPage1NestedData": {
+    "success": true,
+    "data": {
+      "images": [
+        {
+          "id": "img_page1_01",
+          "filename": "bench_p1_01.png",
+          "links": {
+            "direct": "//img.nodeimage.com/i/img_page1_01.png",
+            "thumbnail": "/thumb/img_page1_01.png"
+          },
+          "size": "24512",
+          "created_at": "2026-11-25T04:00:00Z"
+        },
+        {
+          "id": "img_page1_02",
+          "filename": "bench_p1_02.jpg",
+          "links": {
+            "direct": "http://img.nodeimage.com/i/img_page1_02.jpg",
+            "thumbnail": "https://img.nodeimage.com/thumb/img_page1_02.jpg"
+          },
+          "size": 18432,
+          "created_at": "2026-11-25T05:00:00Z"
+        }
+      ],
+      "page": 1,
+      "limit": 2,
+      "total": 3,
+      "totalPages": 2
+    }
+  },
+  "imagesPage2NestedData": {
+    "success": true,
+    "data": {
+      "images": [
+        {
+          "id": "img_page2_03",
+          "filename": "bench_p2_03.png",
+          "url": "https://img.nodeimage.com/i/img_page2_03.png",
+          "size": 9216,
+          "created_at": "2026-11-25T06:00:00Z"
+        }
+      ],
+      "page": 2,
+      "limit": 2,
+      "total": 3,
+      "totalPages": 2
+    }
+  },
+  "imagesListAlias": {
+    "success": 1,
+    "list": [
+      {
+        "id": "img_alias_03",
+        "originalName": "mtr_route.jpg",
+        "src": "http://img.nodeimage.com/i/mtr_route.jpg",
+        "bytes": 18432,
+        "uploadedAt": "2026-11-26T01:00:00Z"
+      }
+    ]
+  },
+  "imagesTopLevelArray": [
+    {
+      "imageId": "img_arr_04",
+      "fileName": "ping_loss.png",
+      "url": "https://img.nodeimage.com/i/ping_loss.png",
+      "sizeBytes": 9216
+    }
+  ],
+  "deleteFailure200": {
+    "success": false,
+    "error": "Image locked or already removed"
+  }
+}

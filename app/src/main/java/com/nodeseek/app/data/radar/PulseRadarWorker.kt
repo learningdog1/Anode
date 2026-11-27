@@ -6,6 +6,7 @@ import androidx.work.WorkerParameters
 import com.nodeseek.app.NodePulseApp
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.domain.radar.RadarBackgroundPollOutcome
+import com.nodeseek.app.widget.GlanceWidgetUpdater
 import kotlinx.coroutines.CancellationException
 
 internal interface AppContainerHost {
@@ -54,6 +55,12 @@ class PulseRadarWorker internal constructor(
             } else {
                 Result.failure()
             }
+        }
+
+        if (outcome is RadarBackgroundPollOutcome.Completed &&
+            (outcome.keywordAlertsTriggered > 0 || outcome.trackedReplyAlertsTriggered > 0)
+        ) {
+            GlanceWidgetUpdater.updateAll(applicationContext)
         }
 
         return when (outcome) {

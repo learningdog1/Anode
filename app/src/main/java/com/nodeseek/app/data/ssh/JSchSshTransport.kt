@@ -1,6 +1,7 @@
 package com.nodeseek.app.data.ssh
 
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.HostKey
 import com.jcraft.jsch.HostKeyRepository
@@ -13,6 +14,7 @@ import com.nodeseek.app.domain.ssh.HostKeyInfo
 import com.nodeseek.app.domain.ssh.HostKeyTrustPolicy
 import com.nodeseek.app.domain.ssh.HostKeyVerificationResult
 import com.nodeseek.app.domain.ssh.SshAuthMethod
+import com.nodeseek.app.domain.ssh.SshConnectionMode
 import com.nodeseek.app.domain.ssh.SshConnectionRequest
 import com.nodeseek.app.domain.ssh.SshHostKeyMismatchException
 import com.nodeseek.app.domain.ssh.SshJumpConnectionStage
@@ -23,6 +25,8 @@ import com.nodeseek.app.domain.ssh.SshPtyResizeCallbackContext
 import com.nodeseek.app.domain.ssh.SshPtyResizer
 import com.nodeseek.app.domain.ssh.SshPtySize
 import com.nodeseek.app.domain.ssh.SshServerProfile
+import com.nodeseek.app.domain.ssh.SshSftpClient
+import com.nodeseek.app.domain.ssh.SshSftpTransport
 import com.nodeseek.app.domain.ssh.SshStreamEvent
 import com.nodeseek.app.domain.ssh.SshTransport
 import com.nodeseek.app.domain.ssh.SshVaultRepository
@@ -34,6 +38,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -94,6 +99,8 @@ internal interface ManagedSshSession {
     fun delPortForwardingL(bindAddress: String, localPort: Int)
     fun openExecChannel(): ManagedExecChannel
     fun openShellChannel(): ManagedExecChannel = openExecChannel()
+    fun openSftpChannel(): ManagedSftpChannel =
+        error("SFTP channel not supported by this session")
     fun disconnect()
 }
 
@@ -120,7 +127,7 @@ class JSchSshTransport internal constructor(
     private val ioDispatcher: CoroutineDispatcher,
     private val vaultRepository: SshVaultRepository?,
     private val sessionConnector: SshSessionConnector,
-) : SshTransport {
+) : SshTransport, SshSftpTransport {
 
     constructor(
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -136,15 +143,104 @@ class JSchSshTransport internal constructor(
         val forwardedLocalPort: AtomicInteger = AtomicInteger(-1),
     )
 
-    override fun execute(
+    private class TunnelConnection(
+        val targetSession: ManagedSshSession,
+        private val closeLock: Any,
+        private val openedHops: MutableList<OpenedHopEntry>,
+        private val closedFlag: AtomicBoolean,
+    ) {
+        fun close() {
+            if (!closedFlag.compareAndSet(false, true)) return
+            val snapshot = synchronized(closeLock) {
+                openedHops.toList().also { openedHops.clear() }
+            }
+            for (index in snapshot.indices.reversed()) {
+                val entry = snapshot[index]
+                val forwardedPort = entry.forwardedLocalPort.getAndSet(-1)
+                if (forwardedPort > 0) {
+                    runCatching { entry.session.delPortForwardingL(LOOPBACK_BIND_ADDRESS, forwardedPort) }
+                }
+                runCatching { entry.session.disconnect() }
+            }
+        }
+    }
+
+    override suspend fun openSftpSession(
         request: SshConnectionRequest,
-        command: String,
-    ): Flow<SshStreamEvent> = callbackFlow {
+        onHostKeyObserved: (HostKeyVerificationResult, String?) -> Unit,
+    ): SshSftpClient = withContext(ioDispatcher) {
         val closeLock = Any()
         val openedHops = ArrayList<OpenedHopEntry>(2)
-        val channelRef = AtomicReference<ManagedExecChannel?>(null)
         val closedFlag = AtomicBoolean(false)
+        var sftpChannel: ManagedSftpChannel? = null
+        var tunnel: TunnelConnection? = null
+        try {
+            val openedTunnel = openTunnelConnection(
+                request = request,
+                closeLock = closeLock,
+                openedHops = openedHops,
+                closedFlag = closedFlag,
+                onHostKeyObserved = onHostKeyObserved,
+            )
+            tunnel = openedTunnel
+            val ch = openedTunnel.targetSession.openSftpChannel()
+            sftpChannel = ch
+            ch.connect(request.connectTimeoutMillis)
+            val home = runCatching { ch.getHome() }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: runCatching { ch.pwd() }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: "/"
+            JschSftpClient(
+                channel = ch,
+                homeDirectory = home,
+                onCloseResources = { openedTunnel.close() },
+                ioDispatcher = ioDispatcher,
+            )
+        } catch (t: Throwable) {
+            runCatching { sftpChannel?.disconnect() }
+            if (tunnel != null) {
+                tunnel.close()
+            } else if (closedFlag.compareAndSet(false, true)) {
+                val snapshot = synchronized(closeLock) {
+                    openedHops.toList().also { openedHops.clear() }
+                }
+                for (index in snapshot.indices.reversed()) {
+                    val entry = snapshot[index]
+                    val forwardedPort = entry.forwardedLocalPort.getAndSet(-1)
+                    if (forwardedPort > 0) {
+                        runCatching { entry.session.delPortForwardingL(LOOPBACK_BIND_ADDRESS, forwardedPort) }
+                    }
+                    runCatching { entry.session.disconnect() }
+                }
+            }
+            throw t
+        }
+    }
 
+    suspend fun openSftpSession(
+        profile: SshServerProfile,
+        allowHostKeyMismatchOverride: Boolean = false,
+        mismatchOverrideServerId: String? = null,
+        onHostKeyObserved: (HostKeyVerificationResult, String?) -> Unit = { _, _ -> },
+    ): SshSftpClient {
+        val vault = vaultRepository
+            ?: throw IllegalStateException("SshVaultRepository 未配置，无法从主机配置构建 SFTP 连接")
+        val request = SshJumpHostResolver.buildConnectionRequest(
+            vaultRepository = vault,
+            server = profile,
+            allowHostKeyMismatchOverride = allowHostKeyMismatchOverride,
+            mismatchOverrideServerId = mismatchOverrideServerId,
+            connectionModeOverride = SshConnectionMode.DIRECT_SSH,
+        )
+        return openSftpSession(request = request, onHostKeyObserved = onHostKeyObserved)
+    }
+
+    private suspend fun openTunnelConnection(
+        request: SshConnectionRequest,
+        closeLock: Any,
+        openedHops: MutableList<OpenedHopEntry>,
+        closedFlag: AtomicBoolean,
+        onHostKeyObserved: (HostKeyVerificationResult, String?) -> Unit,
+    ): TunnelConnection {
         fun registerHopSession(session: ManagedSshSession): OpenedHopEntry {
             val entry = OpenedHopEntry(session)
             val alreadyClosed = synchronized(closeLock) {
@@ -161,6 +257,174 @@ class JSchSshTransport internal constructor(
             }
             return entry
         }
+
+        val jumpHops = resolveEffectiveJumpHops(request)
+            val targetLabel = request.alias.trim().ifBlank {
+                formatEndpoint(request.host, request.port)
+            }
+
+            var nextConnectHost = request.host
+            var nextConnectPort = request.port
+            var upstreamHopEntry: OpenedHopEntry? = null
+
+            if (jumpHops.isNotEmpty()) {
+                nextConnectHost = jumpHops.first().host
+                nextConnectPort = jumpHops.first().port
+
+                for (index in jumpHops.indices) {
+                    val hop = jumpHops[index]
+                    val downstreamHost = if (index + 1 < jumpHops.size) {
+                        jumpHops[index + 1].host
+                    } else {
+                        request.host
+                    }
+                    val downstreamPort = if (index + 1 < jumpHops.size) {
+                        jumpHops[index + 1].port
+                    } else {
+                        request.port
+                    }
+
+                    val hopSpec = SshHopEndpointSpec(
+                        serverId = hop.serverId,
+                        displayLabel = hop.displayLabel,
+                        logicalHost = hop.host,
+                        logicalPort = hop.port,
+                        connectHost = nextConnectHost,
+                        connectPort = nextConnectPort,
+                        username = hop.username,
+                        authMethod = hop.authMethod,
+                        secret = hop.secret,
+                        passphrase = hop.passphrase,
+                        expectedHostKeyFingerprint = hop.expectedHostKeyFingerprint,
+                        allowHostKeyMismatchOverride = hop.allowHostKeyMismatchOverride,
+                    )
+
+                    val hopEntry: OpenedHopEntry
+                    val hopVerification: HostKeyVerificationResult?
+                    try {
+                        val hopSession = sessionConnector.createSession(hopSpec)
+                        hopEntry = registerHopSession(hopSession)
+                        hopVerification = hopSession.connect(request.connectTimeoutMillis)
+                        val forwardedPort = hopSession.setPortForwardingL(
+                            bindAddress = LOOPBACK_BIND_ADDRESS,
+                            localPort = 0,
+                            targetHost = downstreamHost,
+                            targetPort = downstreamPort,
+                            connectTimeoutMillis = request.connectTimeoutMillis,
+                        )
+                        hopEntry.forwardedLocalPort.set(forwardedPort)
+                        nextConnectHost = LOOPBACK_BIND_ADDRESS
+                        nextConnectPort = forwardedPort
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (mismatch: SshHostKeyMismatchException) {
+                        throw mismatch
+                    } catch (jumpEx: SshJumpHostConnectionException) {
+                        throw jumpEx
+                    } catch (t: Throwable) {
+                        val causeDetail = describeConnectionFailureCause(
+                            throwable = t,
+                            tunnelDiagnostic = upstreamHopEntry?.session?.lastTunnelError,
+                            isViaJumpTunnel = index > 0,
+                            targetEndpoint = formatEndpoint(hop.host, hop.port),
+                        )
+                        val hopEndpoint = formatEndpoint(hop.host, hop.port)
+                        val prefix = if (index == 0) {
+                            "跳板机连接失败（${hop.displayLabel} · $hopEndpoint）"
+                        } else {
+                            val prevLabel = jumpHops[index - 1].displayLabel
+                            "跳板机连接失败（经 $prevLabel 连接跳板 ${hop.displayLabel} · $hopEndpoint）"
+                        }
+                        throw SshJumpHostConnectionException(
+                            stage = SshJumpConnectionStage.JUMP_HOST,
+                            hopServerId = hop.serverId,
+                            hopDisplayName = hop.displayLabel,
+                            hopEndpoint = hopEndpoint,
+                            viaDisplayName = if (index > 0) jumpHops[index - 1].displayLabel else null,
+                            message = "$prefix：$causeDetail",
+                            cause = t,
+                        )
+                    }
+
+                    if (hopVerification != null) {
+                        onHostKeyObserved(hopVerification, hop.serverId)
+                    }
+                    upstreamHopEntry = hopEntry
+                }
+            }
+
+            val targetSpec = SshHopEndpointSpec(
+                serverId = request.serverId,
+                displayLabel = targetLabel,
+                logicalHost = request.host,
+                logicalPort = request.port,
+                connectHost = nextConnectHost,
+                connectPort = nextConnectPort,
+                username = request.username,
+                authMethod = request.authMethod,
+                secret = request.secret,
+                passphrase = request.passphrase,
+                expectedHostKeyFingerprint = request.expectedHostKeyFingerprint,
+                allowHostKeyMismatchOverride = request.allowHostKeyMismatchOverride,
+            )
+
+            val targetEntry: OpenedHopEntry
+            val targetVerification: HostKeyVerificationResult?
+            try {
+                val targetSession = sessionConnector.createSession(targetSpec)
+                targetEntry = registerHopSession(targetSession)
+                targetVerification = targetSession.connect(request.connectTimeoutMillis)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (mismatch: SshHostKeyMismatchException) {
+                throw mismatch
+            } catch (jumpEx: SshJumpHostConnectionException) {
+                throw jumpEx
+            } catch (t: Throwable) {
+                if (jumpHops.isEmpty()) {
+                    throw t
+                }
+                val jumpChainSummary = jumpHops.joinToString(" -> ") { it.displayLabel }
+                val targetEndpoint = formatEndpoint(request.host, request.port)
+                val causeDetail = describeConnectionFailureCause(
+                    throwable = t,
+                    tunnelDiagnostic = upstreamHopEntry?.session?.lastTunnelError,
+                    isViaJumpTunnel = true,
+                    targetEndpoint = targetEndpoint,
+                )
+                throw SshJumpHostConnectionException(
+                    stage = SshJumpConnectionStage.TARGET_VIA_JUMP,
+                    hopServerId = request.serverId,
+                    hopDisplayName = targetLabel,
+                    hopEndpoint = targetEndpoint,
+                    viaDisplayName = jumpChainSummary,
+                    message = "目标经跳板连接失败（经跳板「$jumpChainSummary」连接目标「$targetLabel」$targetEndpoint）：$causeDetail",
+                    cause = t,
+                )
+            }
+
+            if (targetVerification != null) {
+                onHostKeyObserved(targetVerification, request.serverId)
+            }
+            if (closedFlag.get()) {
+                throw CancellationException("SSH 会话已取消")
+            }
+            return TunnelConnection(
+                targetSession = targetEntry.session,
+                closeLock = closeLock,
+                openedHops = openedHops,
+                closedFlag = closedFlag,
+            )
+    }
+
+    override fun execute(
+        request: SshConnectionRequest,
+        command: String,
+    ): Flow<SshStreamEvent> = callbackFlow {
+        val closeLock = Any()
+        val openedHops = ArrayList<OpenedHopEntry>(2)
+        val channelRef = AtomicReference<ManagedExecChannel?>(null)
+        val closedFlag = AtomicBoolean(false)
 
         fun disconnectQuietly() {
             if (!closedFlag.compareAndSet(false, true)) return
@@ -183,164 +447,20 @@ class JSchSshTransport internal constructor(
 
         val workerJob = launch(ioDispatcher) {
             try {
-                val jumpHops = resolveEffectiveJumpHops(request)
-                val targetLabel = request.alias.trim().ifBlank {
-                    formatEndpoint(request.host, request.port)
-                }
-
-                var nextConnectHost = request.host
-                var nextConnectPort = request.port
-                var upstreamHopEntry: OpenedHopEntry? = null
-
-                if (jumpHops.isNotEmpty()) {
-                    nextConnectHost = jumpHops.first().host
-                    nextConnectPort = jumpHops.first().port
-
-                    for (index in jumpHops.indices) {
-                        val hop = jumpHops[index]
-                        val downstreamHost = if (index + 1 < jumpHops.size) {
-                            jumpHops[index + 1].host
-                        } else {
-                            request.host
-                        }
-                        val downstreamPort = if (index + 1 < jumpHops.size) {
-                            jumpHops[index + 1].port
-                        } else {
-                            request.port
-                        }
-
-                        val hopSpec = SshHopEndpointSpec(
-                            serverId = hop.serverId,
-                            displayLabel = hop.displayLabel,
-                            logicalHost = hop.host,
-                            logicalPort = hop.port,
-                            connectHost = nextConnectHost,
-                            connectPort = nextConnectPort,
-                            username = hop.username,
-                            authMethod = hop.authMethod,
-                            secret = hop.secret,
-                            passphrase = hop.passphrase,
-                            expectedHostKeyFingerprint = hop.expectedHostKeyFingerprint,
-                            allowHostKeyMismatchOverride = hop.allowHostKeyMismatchOverride,
+                val tunnel = openTunnelConnection(
+                    request = request,
+                    closeLock = closeLock,
+                    openedHops = openedHops,
+                    closedFlag = closedFlag,
+                    onHostKeyObserved = { verification, serverId ->
+                        trySend(
+                            SshStreamEvent.HostKeyObserved(
+                                verification = verification,
+                                serverId = serverId,
+                            ),
                         )
-
-                        val hopEntry: OpenedHopEntry
-                        val hopVerification: HostKeyVerificationResult?
-                        try {
-                            val hopSession = sessionConnector.createSession(hopSpec)
-                            hopEntry = registerHopSession(hopSession)
-                            hopVerification = hopSession.connect(request.connectTimeoutMillis)
-                            val forwardedPort = hopSession.setPortForwardingL(
-                                bindAddress = LOOPBACK_BIND_ADDRESS,
-                                localPort = 0,
-                                targetHost = downstreamHost,
-                                targetPort = downstreamPort,
-                                connectTimeoutMillis = request.connectTimeoutMillis,
-                            )
-                            hopEntry.forwardedLocalPort.set(forwardedPort)
-                            nextConnectHost = LOOPBACK_BIND_ADDRESS
-                            nextConnectPort = forwardedPort
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        } catch (mismatch: SshHostKeyMismatchException) {
-                            throw mismatch
-                        } catch (jumpEx: SshJumpHostConnectionException) {
-                            throw jumpEx
-                        } catch (t: Throwable) {
-                            val causeDetail = describeConnectionFailureCause(
-                                throwable = t,
-                                tunnelDiagnostic = upstreamHopEntry?.session?.lastTunnelError,
-                                isViaJumpTunnel = index > 0,
-                                targetEndpoint = formatEndpoint(hop.host, hop.port),
-                            )
-                            val hopEndpoint = formatEndpoint(hop.host, hop.port)
-                            val prefix = if (index == 0) {
-                                "跳板机连接失败（${hop.displayLabel} · $hopEndpoint）"
-                            } else {
-                                val prevLabel = jumpHops[index - 1].displayLabel
-                                "跳板机连接失败（经 $prevLabel 连接跳板 ${hop.displayLabel} · $hopEndpoint）"
-                            }
-                            throw SshJumpHostConnectionException(
-                                stage = SshJumpConnectionStage.JUMP_HOST,
-                                hopServerId = hop.serverId,
-                                hopDisplayName = hop.displayLabel,
-                                hopEndpoint = hopEndpoint,
-                                viaDisplayName = if (index > 0) jumpHops[index - 1].displayLabel else null,
-                                message = "$prefix：$causeDetail",
-                                cause = t,
-                            )
-                        }
-
-                        if (hopVerification != null) {
-                            trySend(
-                                SshStreamEvent.HostKeyObserved(
-                                    verification = hopVerification,
-                                    serverId = hop.serverId,
-                                ),
-                            )
-                        }
-                        upstreamHopEntry = hopEntry
-                    }
-                }
-
-                val targetSpec = SshHopEndpointSpec(
-                    serverId = request.serverId,
-                    displayLabel = targetLabel,
-                    logicalHost = request.host,
-                    logicalPort = request.port,
-                    connectHost = nextConnectHost,
-                    connectPort = nextConnectPort,
-                    username = request.username,
-                    authMethod = request.authMethod,
-                    secret = request.secret,
-                    passphrase = request.passphrase,
-                    expectedHostKeyFingerprint = request.expectedHostKeyFingerprint,
-                    allowHostKeyMismatchOverride = request.allowHostKeyMismatchOverride,
+                    },
                 )
-
-                val targetEntry: OpenedHopEntry
-                val targetVerification: HostKeyVerificationResult?
-                try {
-                    val targetSession = sessionConnector.createSession(targetSpec)
-                    targetEntry = registerHopSession(targetSession)
-                    targetVerification = targetSession.connect(request.connectTimeoutMillis)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (mismatch: SshHostKeyMismatchException) {
-                    throw mismatch
-                } catch (jumpEx: SshJumpHostConnectionException) {
-                    throw jumpEx
-                } catch (t: Throwable) {
-                    if (jumpHops.isEmpty()) {
-                        throw t
-                    }
-                    val jumpChainSummary = jumpHops.joinToString(" -> ") { it.displayLabel }
-                    val targetEndpoint = formatEndpoint(request.host, request.port)
-                    val causeDetail = describeConnectionFailureCause(
-                        throwable = t,
-                        tunnelDiagnostic = upstreamHopEntry?.session?.lastTunnelError,
-                        isViaJumpTunnel = true,
-                        targetEndpoint = targetEndpoint,
-                    )
-                    throw SshJumpHostConnectionException(
-                        stage = SshJumpConnectionStage.TARGET_VIA_JUMP,
-                        hopServerId = request.serverId,
-                        hopDisplayName = targetLabel,
-                        hopEndpoint = targetEndpoint,
-                        viaDisplayName = jumpChainSummary,
-                        message = "目标经跳板连接失败（经跳板「$jumpChainSummary」连接目标「$targetLabel」$targetEndpoint）：$causeDetail",
-                        cause = t,
-                    )
-                }
-
-                if (targetVerification != null) {
-                    trySend(
-                        SshStreamEvent.HostKeyObserved(
-                            verification = targetVerification,
-                            serverId = request.serverId,
-                        ),
-                    )
-                }
                 trySend(SshStreamEvent.Connected)
 
                 if (closedFlag.get()) {
@@ -356,9 +476,9 @@ class JSchSshTransport internal constructor(
 
                 val isInteractiveShell = request.interactiveShell || command.isBlank()
                 val channel = if (isInteractiveShell) {
-                    targetEntry.session.openShellChannel()
+                    tunnel.targetSession.openShellChannel()
                 } else {
-                    targetEntry.session.openExecChannel()
+                    tunnel.targetSession.openExecChannel()
                 }
                 channelRef.set(channel)
                 if (!isInteractiveShell) {
@@ -605,6 +725,11 @@ class JSchSshTransport internal constructor(
         override fun openShellChannel(): ManagedExecChannel {
             val channel = session.openChannel("shell") as ChannelShell
             return JschManagedShellChannel(channel)
+        }
+
+        override fun openSftpChannel(): ManagedSftpChannel {
+            val channel = session.openChannel("sftp") as ChannelSftp
+            return JschManagedSftpChannel(channel)
         }
 
         override fun disconnect() {

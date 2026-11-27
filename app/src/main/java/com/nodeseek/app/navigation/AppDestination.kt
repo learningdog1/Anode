@@ -158,3 +158,13 @@ data class MobileNetBenchRoute(
 
 @Serializable
 data object LiteSshRoute : AppDestination
+
+@Serializable
+data class InviteAndRulingsRoute(
+    val initialTab: Int = 0,
+) : AppDestination
+
+@Serializable
+data class DomainAssetsRoute(
+    val highlightAssetId: String = "",
+) : AppDestination

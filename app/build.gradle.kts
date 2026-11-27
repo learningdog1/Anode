@@ -9,8 +9,8 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-val appVersionName = "2.12.2"
-val appVersionCode = 27
+val appVersionName = "2.13.0"
+val appVersionCode = 28
 
 base {
     archivesName.set("Anode-v$appVersionName")
@@ -185,6 +185,7 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.svg)
     implementation(libs.androidx.exifinterface)
+    implementation(libs.zxing.core)
 
     // WebView Control
     implementation(libs.androidx.webkit)
@@ -194,6 +195,10 @@ dependencies {
 
     // Background Scheduling (WorkManager)
     implementation(libs.androidx.work.runtime.ktx)
+
+    // Jetpack Glance (AppWidgets)
+    implementation(libs.androidx.glance.appwidget)
+    implementation(libs.androidx.glance.material3)
 
     // Unit Testing
     testImplementation(libs.junit)

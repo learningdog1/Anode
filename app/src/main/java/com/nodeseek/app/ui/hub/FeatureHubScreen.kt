@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Celebration
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Mail
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Public
@@ -75,6 +76,7 @@ data class FeatureHubTelemetry(
     val activeRestockWatchCount: Int = 0,
     val restockUnreadCount: Int = 0,
     val fleetServerCount: Int = 0,
+    val domainAssetCount: Int = 0,
     val sshServerCount: Int = 0,
 )
 
@@ -92,7 +94,7 @@ private data class FeatureTileItem(
 /**
  * Anode「功能栏」主入口页（网格与分组卡片风格，沿用 Cool Mist & Slate Steel 主题）。
  *
- * 汇聚邮箱、活动、海外情报、补货监控、我的服务器、手机端测机与轻量 SSH。
+ * 汇聚邮箱、活动、海外情报、补货监控、我的服务器、域名/证书资产、手机端测机与轻量 SSH。
  */
 @Composable
 fun FeatureHubScreen(
@@ -104,6 +106,7 @@ fun FeatureHubScreen(
     onOpenNetBench: () -> Unit,
     onOpenLiteSsh: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenDomainAssets: () -> Unit = {},
     contentBottomPadding: Dp = 104.dp,
     scrollToTopTrigger: Int = 0,
     onScrollToTopConsumed: () -> Unit = {},
@@ -134,13 +137,16 @@ fun FeatureHubScreen(
             sshServers,
         ) {
             val liveCounts = activitySnapshot.liveCounts()
+            val vpsAssetCount = fleetAssets.count { !it.isDomainAsset }
+            val domainCount = fleetAssets.count { it.isDomainAsset }
             FeatureHubTelemetry(
                 seekMailConfigured = settings.seekMailApiKey.isNotBlank(),
                 ongoingActivityCount = liveCounts.ongoing,
                 totalActivityCount = liveCounts.all,
                 activeRestockWatchCount = restockWatches.count { it.isEnabled },
                 restockUnreadCount = restockEvents.count { !it.isRead },
-                fleetServerCount = maxOf(fleetAssets.size, fleetSnapshots.size),
+                fleetServerCount = maxOf(vpsAssetCount, fleetSnapshots.size),
+                domainAssetCount = domainCount,
                 sshServerCount = sshServers.size,
             )
         }
@@ -252,6 +258,20 @@ fun FeatureHubScreen(
         onClick = onOpenLiteSsh,
     )
 
+    val domainAssetsHeroItem = FeatureTileItem(
+        title = "域名 / 证书资产",
+        subtitle = "RDAP 注册到期追踪与 HTTPS TLS 证书监测",
+        icon = Icons.Rounded.Language,
+        statusText = if (resolvedTelemetry.domainAssetCount > 0) {
+            "${resolvedTelemetry.domainAssetCount} 个域名"
+        } else {
+            "RDAP · TLS"
+        },
+        isStatusHighlighted = resolvedTelemetry.domainAssetCount > 0,
+        accentColor = tertiary,
+        onClick = onOpenDomainAssets,
+    )
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -333,6 +353,20 @@ fun FeatureHubScreen(
                         }
                     }
                 }
+
+                item(key = "feature_group_domains") {
+                    PulseStaggeredEntrance(index = 4) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "域名与证书",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                            )
+                            FeatureWideTerminalCard(item = domainAssetsHeroItem)
+                        }
+                    }
+                }
             }
         }
     }
@@ -355,7 +389,7 @@ private fun FeatureHubHeaderBar(
                 maxLines = 1,
             )
             Text(
-                text = "邮箱收信、促销线报与主机运维工具集",
+                text = "邮箱收信、促销线报、域名证书与主机运维工具集",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -598,11 +632,13 @@ private fun FeatureHubScreenLightPreview() {
             onOpenMyServers = {},
             onOpenNetBench = {},
             onOpenLiteSsh = {},
+            onOpenDomainAssets = {},
             previewTelemetry = FeatureHubTelemetry(
                 seekMailConfigured = true,
                 activeRestockWatchCount = 4,
                 restockUnreadCount = 2,
                 fleetServerCount = 6,
+                domainAssetCount = 3,
                 sshServerCount = 5,
             ),
         )
@@ -621,11 +657,13 @@ private fun FeatureHubScreenDarkPreview() {
             onOpenMyServers = {},
             onOpenNetBench = {},
             onOpenLiteSsh = {},
+            onOpenDomainAssets = {},
             previewTelemetry = FeatureHubTelemetry(
                 seekMailConfigured = false,
                 activeRestockWatchCount = 0,
                 restockUnreadCount = 0,
                 fleetServerCount = 3,
+                domainAssetCount = 2,
                 sshServerCount = 2,
             ),
         )

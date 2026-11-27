@@ -1,0 +1,101 @@
+{
+  "unreadList": {
+    "data": [
+      {
+        "id": 301,
+        "mailboxId": 5,
+        "fromAddress": "security@nodeseek.com",
+        "fromName": "NodeSeek Security",
+        "toAddress": "tester@seek.li",
+        "subject": "NodeSeek Verification Code",
+        "bodyText": "Your verification code is G-482910. Note: valid in 2026 using SHA256 transport. Ignore https://example.com/123456.",
+        "bodyHtml": "<p>Your verification code is <strong>G-482910</strong>.</p>",
+        "verificationCode": null,
+        "messageId": "<otp-301@nodeseek.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-25T05:50:00Z",
+        "createdAt": "2026-11-25T05:50:00Z"
+      },
+      {
+        "id": 302,
+        "mailboxId": 5,
+        "fromAddress": "billing@racknerd.com",
+        "fromName": "RackNerd Billing",
+        "toAddress": "tester@seek.li",
+        "subject": "[RackNerd] 续费成功通知 #88120",
+        "bodyText": "账单 #88120 已支付成功！\n服务器 IP: 198.51.100.88\n实付金额: $10.98 USD\n新到期时间: 2027-03-20",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<inv-88120@racknerd.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-25T05:51:00Z",
+        "createdAt": "2026-11-25T05:51:00Z"
+      }
+    ],
+    "page": {
+      "hasMore": false,
+      "limit": 50,
+      "nextCursor": ""
+    }
+  },
+  "otpDetail": {
+    "data": {
+      "mail": {
+        "id": 301,
+        "mailboxId": 5,
+        "fromAddress": "security@nodeseek.com",
+        "fromName": "NodeSeek Security",
+        "toAddress": "tester@seek.li",
+        "subject": "NodeSeek Verification Code",
+        "bodyText": "Your verification code is G-482910. Note: valid in 2026 using SHA256 transport. Ignore https://example.com/123456.",
+        "bodyHtml": "<p>Your verification code is <strong>G-482910</strong>.</p>",
+        "verificationCode": null,
+        "messageId": "<otp-301@nodeseek.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-25T05:50:00Z",
+        "createdAt": "2026-11-25T05:50:00Z"
+      },
+      "tags": []
+    }
+  },
+  "vpsRenewalDetail": {
+    "data": {
+      "mail": {
+        "id": 302,
+        "mailboxId": 5,
+        "fromAddress": "billing@racknerd.com",
+        "fromName": "RackNerd Billing",
+        "toAddress": "tester@seek.li",
+        "subject": "[RackNerd] 续费成功通知 #88120",
+        "bodyText": "账单 #88120 已支付成功！\n服务器 IP: 198.51.100.88\n实付金额: $10.98 USD\n新到期时间: 2027-03-20",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<inv-88120@racknerd.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-25T05:51:00Z",
+        "createdAt": "2026-11-25T05:51:00Z"
+      },
+      "tags": []
+    }
+  },
+  "domainRenewalDetail": {
+    "data": {
+      "mail": {
+        "id": 303,
+        "mailboxId": 5,
+        "fromAddress": "noreply@registrar.cloudflare.com",
+        "fromName": "Cloudflare Registrar",
+        "toAddress": "tester@seek.li",
+        "subject": "Domain Renewal Confirmation - example.com",
+        "bodyText": "Domain: example.com\nPayment Status: Paid\nAmount Paid: $10.44 USD\nBilling Cycle: Annually\nNew Expiration Date: 2028-05-01",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<dom-ren-303@cloudflare.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-25T05:52:00Z",
+        "createdAt": "2026-11-25T05:52:00Z"
+      },
+      "tags": []
+    }
+  }
+}

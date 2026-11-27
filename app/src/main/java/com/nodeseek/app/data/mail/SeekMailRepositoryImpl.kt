@@ -1,7 +1,9 @@
 package com.nodeseek.app.data.mail
 
 import com.nodeseek.app.domain.backup.SeekMailBackupDto
+import com.nodeseek.app.domain.mail.LatestSeekMailOtp
 import com.nodeseek.app.domain.mail.SeekMailAttachment
+import com.nodeseek.app.domain.mail.VerificationCodeExtractor
 import com.nodeseek.app.domain.mail.SeekMailConnectionStatus
 import com.nodeseek.app.domain.mail.SeekMailContact
 import com.nodeseek.app.domain.mail.SeekMailDetail
@@ -742,9 +744,76 @@ class SeekMailRepositoryImpl(
         }
     }
 
+    override suspend fun getCachedLatestOtp(): LatestSeekMailOtp? {
+        val key = reconcileActiveKey()
+        if (key.isEmpty()) return null
+        val cache = diskCache ?: return null
+        val deletedIds = _localArchiveStore.value.deletedMailIds
+
+        val allCachedItems = cache.getCachedDefaultMailsPagesForKey(key)
+            .sortedByDescending { it.fetchedAtEpochMillis }
+            .flatMap { it.page.items }
+        return findLatestOtpInSummaries(
+            apiKey = key,
+            cache = cache,
+            summaries = allCachedItems,
+            deletedIds = deletedIds,
+        )
+    }
+
+    private suspend fun findLatestOtpInSummaries(
+        apiKey: String,
+        cache: SeekMailDiskCache,
+        summaries: List<SeekMailSummary>,
+        deletedIds: Set<Long>,
+    ): LatestSeekMailOtp? {
+        if (summaries.isEmpty()) return null
+        val candidates = summaries
+            .asSequence()
+            .filter { it.id > 0L && it.id !in deletedIds }
+            .distinctBy { it.id }
+            .sortedWith(
+                compareByDescending<SeekMailSummary> { it.receivedAt.ifBlank { it.createdAt } }
+                    .thenByDescending { it.id },
+            )
+            .toList()
+
+        for (summary in candidates) {
+            val directOrSnippetCode = summary.verificationCode
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: VerificationCodeExtractor.resolveCode(
+                    serverCode = null,
+                    subject = summary.subject,
+                    bodyText = summary.snippet,
+                )
+            val resolvedCode = directOrSnippetCode ?: cache.getMailDetail(apiKey, summary.id)
+                ?.detail
+                ?.let { detail ->
+                    detail.summary.verificationCode?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: VerificationCodeExtractor.resolveCode(
+                            serverCode = null,
+                            subject = detail.summary.subject,
+                            bodyText = detail.bodyText,
+                        )
+                }
+            if (!resolvedCode.isNullOrBlank()) {
+                return LatestSeekMailOtp(
+                    mailId = summary.id,
+                    code = resolvedCode,
+                    sender = summary.fromName.ifBlank { summary.fromAddress },
+                    subject = summary.subject,
+                    receivedAt = summary.receivedAt.ifBlank { summary.createdAt },
+                )
+            }
+        }
+        return null
+    }
+
     override suspend fun clearCacheForCurrentKey() {
+        val fallbackKey = settingsRepository.awaitLoadedSettings().seekMailApiKey.trim()
         stateMutex.withLock {
-            val keyToClear = activeKey.ifEmpty { settingsRepository.settings.value.seekMailApiKey.trim() }
+            val keyToClear = activeKey.ifEmpty { fallbackKey }
             if (keyToClear.isNotEmpty()) {
                 diskCache?.clearForKey(keyToClear)
             }
@@ -940,7 +1009,7 @@ class SeekMailRepositoryImpl(
     }
 
     private suspend fun reconcileActiveKey(): String {
-        val latestKey = settingsRepository.settings.value.seekMailApiKey.trim()
+        val latestKey = settingsRepository.awaitLoadedSettings().seekMailApiKey.trim()
         reconcileKeyChange(latestKey)
         return latestKey
     }

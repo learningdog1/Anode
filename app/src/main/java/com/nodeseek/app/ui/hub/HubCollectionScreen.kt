@@ -61,6 +61,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.AppContainer
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.ReadHistoryEntry
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.ui.components.PulseConfirmDialog
@@ -80,6 +81,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -140,7 +142,64 @@ class HubCollectionViewModel(
         initialValue = HubCollectionUiState(),
     )
 
+    private val cachedLocalBookmarkedIds = MutableStateFlow(
+        (container.bookmarkAndHistoryRepository.observeLocalBookmarks() as? StateFlow<List<BookmarkedTopic>>)?.value
+            ?.mapTo(HashSet()) { it.topicId }
+            ?: emptySet(),
+    )
+    private val cachedRepoBookmarkedIds = MutableStateFlow(
+        (container.bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+            ?: emptySet(),
+    )
+
+    @Volatile
+    private var hasReceivedLocalBookmarks =
+        container.bookmarkAndHistoryRepository.observeLocalBookmarks() is StateFlow<*>
+
+    @Volatile
+    private var hasReceivedRepoBookmarks =
+        container.bookmarkAndHistoryRepository.observeBookmarkedIds() is StateFlow<*>
+
+    private suspend fun isTopicBookmarkedWithoutUiState(topicId: Long): Boolean {
+        if (transientState.value.serverBookmarks.any { it.id == topicId }) return true
+        if (topicId in cachedLocalBookmarkedIds.value || topicId in cachedRepoBookmarkedIds.value) return true
+        val liveLocal = (container.bookmarkAndHistoryRepository.observeLocalBookmarks() as? StateFlow<List<BookmarkedTopic>>)?.value
+        if (liveLocal?.any { it.topicId == topicId } == true) return true
+        val liveIds = (container.bookmarkAndHistoryRepository.observeBookmarkedIds() as? StateFlow<Set<Long>>)?.value
+        if (liveIds?.contains(topicId) == true) return true
+        if (!hasReceivedRepoBookmarks) {
+            val ids = container.bookmarkAndHistoryRepository.observeBookmarkedIds().firstOrNull()
+            if (ids != null) {
+                cachedRepoBookmarkedIds.value = ids
+                hasReceivedRepoBookmarks = true
+                if (topicId in ids) return true
+            }
+        }
+        if (!hasReceivedLocalBookmarks) {
+            val localList = container.bookmarkAndHistoryRepository.observeLocalBookmarks().firstOrNull()
+            if (localList != null) {
+                val localIds = localList.mapTo(HashSet(localList.size)) { it.topicId }
+                cachedLocalBookmarkedIds.value = localIds
+                hasReceivedLocalBookmarks = true
+                if (topicId in localIds) return true
+            }
+        }
+        return container.bookmarkAndHistoryRepository.getOfflineBookmarkSnapshot(topicId) != null
+    }
+
     init {
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.observeLocalBookmarks().collect { list ->
+                cachedLocalBookmarkedIds.value = list.mapTo(HashSet(list.size)) { it.topicId }
+                hasReceivedLocalBookmarks = true
+            }
+        }
+        viewModelScope.launch {
+            container.bookmarkAndHistoryRepository.observeBookmarkedIds().collect { ids ->
+                cachedRepoBookmarkedIds.value = ids
+                hasReceivedRepoBookmarks = true
+            }
+        }
         viewModelScope.launch {
             var lastUid = Long.MIN_VALUE
             container.sessionRepository.sessionState.collect { session ->
@@ -192,36 +251,41 @@ class HubCollectionViewModel(
 
     fun removeBookmark(topicId: Long) {
         viewModelScope.launch {
-            val isSignedIn = container.sessionRepository.sessionState.value != null
-            if (isSignedIn) {
-                val remoteResult = container.bookmarkAndHistoryRepository
-                    .setTopicBookmarked(topicId, bookmarked = false)
-                if (remoteResult.isFailure) {
-                    val err = remoteResult.exceptionOrNull()
-                    _events.trySend(
-                        err?.message?.takeIf { it.isNotBlank() }
-                            ?: "取消云端收藏失败，请稍后重试",
-                    )
-                    return@launch
-                }
-            }
-            container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId)
-            transientState.update { state ->
-                state.copy(
-                    serverBookmarks = state.serverBookmarks.filterNot { it.id == topicId },
-                )
-            }
-            _events.trySend("已从收藏移除")
+            removeBookmarkInternal(topicId)
         }
     }
 
-    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
-        val currentlyBookmarked = uiState.value.bookmarks.any { it.topicId == entry.topicId }
-        if (currentlyBookmarked) {
-            removeBookmark(entry.topicId)
-            return
+    private suspend fun removeBookmarkInternal(topicId: Long) {
+        val isSignedIn = container.sessionRepository.sessionState.value != null
+        if (isSignedIn) {
+            val remoteResult = container.bookmarkAndHistoryRepository
+                .setTopicBookmarked(topicId, bookmarked = false)
+            if (remoteResult.isFailure) {
+                val err = remoteResult.exceptionOrNull()
+                _events.trySend(
+                    err?.message?.takeIf { it.isNotBlank() }
+                        ?: "取消云端收藏失败，请稍后重试",
+                )
+                return
+            }
         }
+        container.bookmarkAndHistoryRepository.removeLocalBookmark(topicId)
+        cachedLocalBookmarkedIds.update { it - topicId }
+        cachedRepoBookmarkedIds.update { it - topicId }
+        transientState.update { state ->
+            state.copy(
+                serverBookmarks = state.serverBookmarks.filterNot { it.id == topicId },
+            )
+        }
+        _events.trySend("已从收藏移除")
+    }
+
+    fun toggleHistoryBookmark(entry: ReadHistoryEntry) {
         viewModelScope.launch {
+            if (isTopicBookmarkedWithoutUiState(entry.topicId)) {
+                removeBookmarkInternal(entry.topicId)
+                return@launch
+            }
             val summary = TopicSummary(
                 id = entry.topicId,
                 title = entry.title,
@@ -238,6 +302,7 @@ class HubCollectionViewModel(
                 detailSnapshot = null,
                 syncedWithServer = false,
             )
+            cachedLocalBookmarkedIds.update { it + entry.topicId }
             if (container.sessionRepository.sessionState.value != null) {
                 container.bookmarkAndHistoryRepository.setTopicBookmarked(entry.topicId, bookmarked = true)
                     .onSuccess {

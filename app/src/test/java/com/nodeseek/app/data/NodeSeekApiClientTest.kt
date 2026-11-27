@@ -2,6 +2,7 @@ package com.nodeseek.app.data
 
 import com.nodeseek.app.data.network.CloudflareChallengeException
 import com.nodeseek.app.data.network.CsrfTokenStore
+import com.nodeseek.app.data.network.HomepageCategoryPrefDto
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.data.network.SameOriginHttpResponse
@@ -1144,6 +1145,35 @@ class NodeSeekApiClientTest {
     }
 
     @Test
+    fun `getLuckyFloorData and createDiscussionWithResult parse official DTOs cleanly`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"success":true,"data":[{"floor_id":1,"member_id":202,"member_name":"Bob"},{"floor_id":2,"member_id":303,"member_name":"Carol"}]}""",
+            ),
+        )
+        val floorResp = client.getLuckyFloorData(postId = 1073388L, timeEpochMillis = 1795438800000L)
+        val floorReq = server.takeRequest()
+        assertEquals("GET", floorReq.method)
+        assertEquals("/api/content/floor-data?postId=1073388&time=1795438800000", floorReq.path)
+        assertEquals(2, floorResp.data.size)
+        assertEquals(1, floorResp.data[0].floorId)
+        assertEquals(202L, floorResp.data[0].memberId)
+        assertEquals("Bob", floorResp.data[0].memberName)
+
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"success":true,"postId":998877}""",
+            ),
+        )
+        val createResp = client.createDiscussionWithResult(
+            title = "Lucky Topic",
+            markdownContent = "Body",
+            categorySlug = "daily",
+        )
+        assertEquals(998877L, createResp.resolvedPostId)
+    }
+
+    @Test
     fun `groupThreadsForViewer orders mixed ISO UTC and SQL Beijing timestamps chronologically`() {
         val dto = com.nodeseek.app.data.network.MessageListResponseDto(
             success = true,
@@ -1174,6 +1204,236 @@ class NodeSeekApiClientTest {
         assertEquals(1, threads.size)
         assertEquals(2L, threads.single().latestMessageId)
         assertEquals("later iso utc time", threads.single().preview)
+    }
+
+    @Test
+    fun `invite config, list, buyOne CSRF flow, and moderation rulings endpoints parse and send expected headers`() = runTest {
+        // 1. Missing csrf token fails locally before hitting network
+        try {
+            client.buyInviteCode("coin")
+            fail("Expected NodeSeekApiException when x-csrf-token is missing")
+        } catch (expected: NodeSeekApiException) {
+            assertTrue(expected.message!!.contains("邀请页面"))
+        }
+        assertEquals(0, server.requestCount)
+
+        // 2. GET /api/invite/config populates csrfTokenStore from header
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .addHeader("x-csrf-token", "invite-csrf-token-42")
+                .setBody("""{"success":true,"payment":{"coin":{"enabled":true,"cost":100},"stardust":{"enabled":true,"cost":500}}}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"data":[{"code":"NS-INV-2026-ABCD","applied":false,"created_at":"2026-11-01T00:00:00Z"}],"total":1}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"code":"NS-INV-2026-NEW1","message":"购买成功"}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"total":1,"data":[{"id":701,"member_id":9901,"member_name":"spammer99","reason":"恶意刷屏发布广告","action":"封禁 30 天","created_at":"2026-11-20T10:00:00Z"}]}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true,"data":{"id":701,"member_id":9901,"member_name":"spammer99","reason":"恶意刷屏发布广告","action":"封禁 30 天","evidence":"连续发广告","created_at":"2026-11-20T10:00:00Z"}}"""),
+        )
+
+        val config = client.getInviteConfig()
+        assertEquals(100, config.resolvedPayment?.coin?.cost)
+        assertEquals(500, config.resolvedPayment?.stardust?.cost)
+
+        val invites = client.listInvites(page = 1)
+        assertEquals("NS-INV-2026-ABCD", invites.data.single().code)
+        assertFalse(invites.data.single().applied)
+
+        val bought = client.buyInviteCode("coin")
+        assertEquals("NS-INV-2026-NEW1", bought.code)
+
+        val rulings = client.listModerationRulings(page = 1, search = "a+b")
+        assertEquals(701L, rulings.data.single().id)
+
+        val detail = client.getModerationRulingDetail(701L)
+        assertEquals("连续发广告", detail.resolvedRuling?.evidence)
+
+        val _cfgReq = server.takeRequest()
+        val listReq = server.takeRequest()
+        assertEquals("/api/invite/list?page=1", listReq.path)
+
+        val buyReq = server.takeRequest()
+        assertEquals("/api/invite/buyOne", buyReq.path)
+        assertEquals("simple-token", buyReq.getHeader("x-csrf-challenge"))
+        assertEquals("invite-csrf-token-42", buyReq.getHeader("x-csrf-token"))
+        assertEquals("https://www.nodeseek.com/invite", buyReq.getHeader("Referer"))
+        assertEquals("""{"payment":"coin"}""", buyReq.body.readUtf8())
+
+        val rulingListReq = server.takeRequest()
+        assertEquals("/api/admin/ruling/page-1?search=a%2Bb", rulingListReq.path)
+
+        val rulingDetailReq = server.takeRequest()
+        assertEquals("/api/admin/ruling/id-701", rulingDetailReq.path)
+    }
+
+    @Test
+    fun `getHomepageCategories and saveHomepageCategories parse WebsiteFlag and encode ordered payload`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":1,"data":[{"category":"tech","showInIndex":1},{"category":"trade","showInIndex":0}]}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"success":true}"""),
+        )
+
+        val fetched = client.getHomepageCategories()
+        assertEquals(true, fetched.success)
+        assertEquals(2, fetched.data.size)
+        assertTrue(fetched.data[0].showInIndex)
+        assertFalse(fetched.data[1].showInIndex)
+
+        val saved = client.saveHomepageCategories(
+            listOf(
+                HomepageCategoryPrefDto("trade", true),
+                HomepageCategoryPrefDto("tech", false),
+            ),
+        )
+        assertEquals(true, saved.success)
+
+        val getReq = server.takeRequest()
+        assertEquals("/api/homepage", getReq.path)
+
+        val postReq = server.takeRequest()
+        assertEquals("/api/homepage", postReq.path)
+        assertEquals("""{"data":[{"category":"trade","showInIndex":true},{"category":"tech","showInIndex":false}]}""", postReq.body.readUtf8())
+    }
+
+    @Test
+    fun `getCreditLedger decodes JSON null tuple strings as empty and comma-formatted numbers`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(
+                    """{"success":true,"total":2,"data":[[5,100,null,null],["1,000","2,000","转账","2026-11-24 08:00:00"]]}""",
+                ),
+        )
+        val resp = client.getCreditLedger(page = 1)
+        assertEquals(2, resp.data.size)
+        assertEquals(5, resp.data[0].change)
+        assertEquals(100, resp.data[0].balance)
+        assertEquals("", resp.data[0].reason)
+        assertEquals("", resp.data[0].createdAt)
+        assertEquals(1000, resp.data[1].change)
+        assertEquals(2000, resp.data[1].balance)
+        assertEquals("转账", resp.data[1].reason)
+        assertEquals("/api/account/credit/page-1", server.takeRequest().path)
+    }
+
+    @Test
+    fun `listNodeImages and deleteNodeImage enforce CookieJar NO_COOKIES and block HTTP downgrade or cross-origin redirects`() = runTest {
+        val validKey = "0123456789abcdef0123456789abcdef"
+        cookieBridge.saveFromResponse(
+            "https://www.nodeseek.com/".toHttpUrl(),
+            listOf(
+                Cookie.Builder()
+                    .name("ns_session")
+                    .value("forum_secret")
+                    .domain("api.nodeimage.com")
+                    .build(),
+            ),
+        )
+
+        MockWebServer().use { nodeImageHttpsServer ->
+            nodeImageHttpsServer.useHttps(tlsFixture.sslContext.socketFactory, false)
+            nodeImageHttpsServer.start()
+
+            val nodeImageOrigin = "https://api.nodeimage.com:${nodeImageHttpsServer.port}".toHttpUrl()
+            val tlsClient = NodeSeekApiClient(
+                httpClient = buildTlsForumHttpClient(cookieBridge, csrfTokenStore),
+                baseOrigin = "https://www.nodeseek.com".toHttpUrl(),
+                rssUrl = server.url("/rss.xml"),
+                nodeImageOrigin = nodeImageOrigin,
+            )
+
+            // 1. Top-level array + cookie isolation
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""[{"id":"img_1","name":"a.png","url":"https://img.nodeimage.com/a.png"}]"""),
+            )
+            val page = tlsClient.listNodeImages(validKey)
+            assertEquals(1, page.items.size)
+            assertEquals("img_1", page.items.single().imageId)
+            val listReq = nodeImageHttpsServer.takeRequest()
+            assertEquals("/api/v1/images", listReq.path)
+            assertNull("NodeImage must NEVER receive forum cookies", listReq.getHeader("Cookie"))
+            assertEquals(validKey, listReq.getHeader("X-API-Key"))
+
+            // 2. HTTPS -> HTTP downgrade redirect on DELETE is blocked
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(307)
+                    .addHeader("Location", "http://api.nodeimage.com:${nodeImageHttpsServer.port}/api/v1/delete/img_1"),
+            )
+            var downgradeMsg = ""
+            try {
+                tlsClient.deleteNodeImage(validKey, "img_1")
+                fail("Expected HTTPS->HTTP downgrade rejection")
+            } catch (e: NodeSeekApiException) {
+                downgradeMsg = e.message.orEmpty()
+            }
+            assertTrue("Expected downgrade message, got '$downgradeMsg'", downgradeMsg.contains("降级"))
+
+            // 3. Cross-origin redirect on GET /api/v1/images is blocked
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(302)
+                    .addHeader("Location", "https://evil.example:${nodeImageHttpsServer.port}/steal"),
+            )
+            var crossOriginMsg = ""
+            try {
+                tlsClient.listNodeImages(validKey, page = 2)
+                fail("Expected cross-origin redirect rejection")
+            } catch (e: NodeSeekApiException) {
+                crossOriginMsg = e.message.orEmpty()
+            }
+            assertTrue("Expected cross-origin message, got '$crossOriginMsg'", crossOriginMsg.contains("跨源"))
+
+            // 4. Effective safePage is used for hasMore when server omits page or returns stale page=1
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"success":true,"images":[{"id":"img_50","url":"https://img.nodeimage.com/50.png"}],"totalCount":50,"limit":24}"""),
+            )
+            val page3Omitted = tlsClient.listNodeImages(validKey, page = 3, limit = 24)
+            assertEquals(3, page3Omitted.page)
+            assertFalse("page=3 * limit=24 >= totalCount=50 must yield hasMore=false", page3Omitted.hasMore)
+
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"success":true,"images":[{"id":"img_50","url":"https://img.nodeimage.com/50.png"}],"page":1,"totalCount":50,"limit":24}"""),
+            )
+            val page3Stale = tlsClient.listNodeImages(validKey, page = 3, limit = 24)
+            assertEquals(3, page3Stale.page)
+            assertFalse("stale page=1 on page=3 request must resolve hasMore=false", page3Stale.hasMore)
+
+            nodeImageHttpsServer.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("""{"success":true,"images":[{"id":"img_25","url":"https://img.nodeimage.com/25.png"}],"totalPages":2}"""),
+            )
+            val page2TotalPages = tlsClient.listNodeImages(validKey, page = 2)
+            assertEquals(2, page2TotalPages.page)
+            assertFalse("page=2 with totalPages=2 and omitted page field must yield hasMore=false", page2TotalPages.hasMore)
+        }
     }
 
     companion object {

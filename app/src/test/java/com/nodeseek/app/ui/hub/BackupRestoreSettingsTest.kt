@@ -115,11 +115,13 @@ class BackupRestoreSettingsTest {
         assertTrue(decodedLegacy.settings.awayDigestEnabled)
         assertEquals(AwayDigestTriggerMode.CUSTOM_DURATION, decodedLegacy.settings.awayDigestTriggerMode)
         assertEquals(60, decodedLegacy.settings.awayDigestThresholdMinutes)
+        assertEquals(emptyList<String>(), decodedLegacy.settings.homepageCategoryOrder)
 
         val customBundle = NodePulseBackupBundle(
             appVersion = "1.2.0",
             exportedAtEpochMillis = 1765000000000L,
             settings = AppSettingsBackupDto(
+                homepageCategoryOrder = listOf("trade", "review", "tech"),
                 awayDigestEnabled = false,
                 awayDigestTriggerMode = AwayDigestTriggerMode.DURATION_OR_REOPEN,
                 awayDigestThresholdMinutes = 240,
@@ -131,6 +133,7 @@ class BackupRestoreSettingsTest {
         )
         val encoded = BackupManagerImpl.backupJson.encodeToString(customBundle)
         val roundTripped = BackupManagerImpl.backupJson.decodeFromString<NodePulseBackupBundle>(encoded)
+        assertEquals(listOf("trade", "review", "tech"), roundTripped.settings.homepageCategoryOrder)
         assertFalse(roundTripped.settings.awayDigestEnabled)
         assertEquals(AwayDigestTriggerMode.DURATION_OR_REOPEN, roundTripped.settings.awayDigestTriggerMode)
         assertEquals(240, roundTripped.settings.awayDigestThresholdMinutes)

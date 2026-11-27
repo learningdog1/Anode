@@ -68,6 +68,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FitScreen
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.LocalOffer
@@ -132,6 +133,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.domain.fleet.ProbePanelConfig
+import com.nodeseek.app.ui.baseline.BaselineActionRow
+import com.nodeseek.app.ui.baseline.BaselineComparisonBottomSheet
+import com.nodeseek.app.ui.baseline.SaveBaselineDialog
 import com.nodeseek.app.domain.ssh.CustomSshPreset
 import com.nodeseek.app.domain.ssh.IpPrivacyMasker
 import com.nodeseek.app.domain.ssh.SshAuthMethod
@@ -263,7 +267,9 @@ fun LiteSshScreen(
         topBar = {
             LiteSshTopBar(
                 recentRunCount = uiState.recentRuns.size,
+                hasServers = uiState.servers.isNotEmpty(),
                 onBack = onBack,
+                onOpenSftp = { viewModel.openSftpDrawer() },
                 onOpenHistory = viewModel::openHistorySheet,
                 onAddServer = viewModel::openAddServerDialog,
             )
@@ -340,6 +346,7 @@ fun LiteSshScreen(
                 onSelectServer = viewModel::selectServer,
                 onSetConnectionMode = viewModel::setServerConnectionMode,
                 onOpenInteractiveTerminal = { serverId -> viewModel.openInteractiveTerminal(serverId) },
+                onOpenSftp = { serverId -> viewModel.openSftpDrawer(serverId) },
                 onAddServer = viewModel::openAddServerDialog,
                 onEditServer = viewModel::openEditServerDialog,
                 onDeleteServer = { pendingDeleteServer = it },
@@ -492,6 +499,17 @@ fun LiteSshScreen(
                     },
                 )
             }
+
+            if (exportMeta != null && !uiState.isRunning) {
+                item(key = "ssh_baseline_actions") {
+                    BaselineActionRow(
+                        matchingBaselineCount = uiState.matchingBaselines.size,
+                        totalBaselineCount = uiState.savedBaselines.size,
+                        onSaveAsBaseline = viewModel::openSaveBaselineDialog,
+                        onOpenCompare = { viewModel.openBaselineCompareSheet() },
+                    )
+                }
+            }
         }
     }
 
@@ -619,6 +637,75 @@ fun LiteSshScreen(
         )
     }
 
+    if (uiState.sftpDrawer.isOpen) {
+        SshSftpDrawerSheet(
+            drawer = uiState.sftpDrawer,
+            onDismiss = viewModel::dismissSftpDrawer,
+            onOpenServerEditor = {
+                val targetServer = uiState.servers.firstOrNull { it.id == uiState.sftpDrawer.serverId }
+                    ?: uiState.selectedServer
+                viewModel.dismissSftpDrawer()
+                if (targetServer != null) {
+                    viewModel.openEditServerDialog(targetServer)
+                } else {
+                    viewModel.openAddServerDialog()
+                }
+            },
+            onReconnect = { viewModel.openSftpDrawer(uiState.sftpDrawer.serverId) },
+            onRefreshDir = viewModel::sftpRefreshCurrentDir,
+            onNavigateUp = viewModel::sftpNavigateUp,
+            onOpenDirectory = viewModel::sftpListDir,
+            onOpenFile = viewModel::sftpOpenFile,
+            onQuickShortcut = viewModel::sftpOpenQuickShortcut,
+            onEnterEditMode = viewModel::sftpEnterEditMode,
+            onUpdateEditorContent = viewModel::sftpUpdateEditorContent,
+            onSaveFileWithBak = viewModel::sftpSaveFileWithBak,
+            onCloseFileViewer = viewModel::sftpCloseFileViewer,
+            onUploadStream = viewModel::sftpUploadStream,
+            onCreateDirectory = viewModel::sftpCreateDirectory,
+            onDeleteEntry = viewModel::sftpDeleteEntry,
+            onClearError = viewModel::sftpClearError,
+            onReportError = viewModel::sftpReportError,
+            onCopyText = copyToClipboard,
+        )
+    }
+
+    if (uiState.showSaveBaselineDialog) {
+        val suggestedName = uiState.selectedServer?.displayName
+            ?: uiState.viewingRun?.serverAlias?.takeIf { it.isNotBlank() }
+            ?: "SSH 服务器"
+        SaveBaselineDialog(
+            defaultLabel = "$suggestedName · 购入基线",
+            onConfirm = { label, notes -> viewModel.saveCurrentAsBaseline(label, notes) },
+            onDismiss = viewModel::dismissSaveBaselineDialog,
+        )
+    }
+
+    if (uiState.showBaselineCompareSheet) {
+        BaselineComparisonBottomSheet(
+            diff = uiState.activeBaselineDiff,
+            allBaselines = uiState.savedBaselines,
+            matchingBaselineIds = remember(uiState.matchingBaselines) {
+                uiState.matchingBaselines.mapTo(HashSet()) { it.id }
+            },
+            selectedBaselineId = uiState.selectedBaselineIdForCompare,
+            maskTargetIp = uiState.maskServerIp,
+            onSelectBaseline = viewModel::selectBaselineForComparison,
+            onDeleteBaseline = viewModel::deleteBaseline,
+            onToggleMaskTargetIp = viewModel::toggleMaskServerIp,
+            onCopyMarkdown = { md -> copyToClipboard(md, "已复制 Before vs After 对比卡 Markdown") },
+            onPublishMarkdown = { md ->
+                val serverLabel = uiState.selectedServer?.displayName ?: "VPS"
+                onPublishToComposer("[$serverLabel] 购入基线 Before vs After 实测对比", md)
+            },
+            onInsertToReply = onInsertToReply,
+            onFeedbackMessage = { msg ->
+                scope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = viewModel::dismissBaselineCompareSheet,
+        )
+    }
+
     pendingDeleteServer?.let { server ->
         PulseConfirmDialog(
             onDismissRequest = { pendingDeleteServer = null },
@@ -736,7 +823,9 @@ private fun VaultCorruptionErrorBanner(
 @Composable
 private fun LiteSshTopBar(
     recentRunCount: Int,
+    hasServers: Boolean,
     onBack: () -> Unit,
+    onOpenSftp: () -> Unit,
     onOpenHistory: () -> Unit,
     onAddServer: () -> Unit,
 ) {
@@ -781,6 +870,14 @@ private fun LiteSshTopBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        if (hasServers) {
+            IconButton(onClick = onOpenSftp) {
+                Icon(
+                    imageVector = Icons.Rounded.FolderOpen,
+                    contentDescription = "SFTP 文件面板",
+                )
+            }
         }
         IconButton(onClick = onOpenHistory) {
             Box(contentAlignment = Alignment.TopEnd) {
@@ -833,6 +930,7 @@ private fun LazyListScope.serverVaultItems(
     onSelectServer: (String) -> Unit,
     onSetConnectionMode: (String, SshConnectionMode) -> Unit,
     onOpenInteractiveTerminal: (String) -> Unit,
+    onOpenSftp: (String) -> Unit,
     onAddServer: () -> Unit,
     onEditServer: (SshServerProfile) -> Unit,
     onDeleteServer: (SshServerProfile) -> Unit,
@@ -1278,6 +1376,7 @@ private fun LazyListScope.serverVaultItems(
                     onToggleExpand = { onToggleServerExpanded(server.id) },
                     onSetConnectionMode = { mode -> onSetConnectionMode(server.id, mode) },
                     onOpenTerminal = { onOpenInteractiveTerminal(server.id) },
+                    onOpenSftp = { onOpenSftp(server.id) },
                     onEdit = { onEditServer(server) },
                     onDelete = { onDeleteServer(server) },
                 )
@@ -1363,6 +1462,7 @@ private fun ServerVaultCollapsibleRow(
     onToggleExpand: () -> Unit,
     onSetConnectionMode: (SshConnectionMode) -> Unit,
     onOpenTerminal: () -> Unit,
+    onOpenSftp: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -1648,22 +1748,31 @@ private fun ServerVaultCollapsibleRow(
                     FilledTonalButton(
                         onClick = onOpenTerminal,
                         enabled = enabled,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         modifier = Modifier.weight(1f),
                     ) {
                         Icon(Icons.Rounded.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(5.dp))
+                        Spacer(Modifier.width(4.dp))
                         Text(
-                            text = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) "打开探针终端" else "打开 SSH 终端",
+                            text = if (effectiveMode == SshConnectionMode.PANEL_TERMINAL) "探针终端" else "SSH 终端",
                             style = MaterialTheme.typography.labelMedium,
                             maxLines = 1,
                             softWrap = false,
                         )
                     }
                     OutlinedButton(
+                        onClick = onOpenSftp,
+                        enabled = enabled,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("SFTP", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
                         onClick = onEdit,
                         enabled = enabled,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     ) {
                         Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(Modifier.width(4.dp))

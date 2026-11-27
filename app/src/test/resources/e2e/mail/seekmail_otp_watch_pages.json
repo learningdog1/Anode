@@ -1,0 +1,190 @@
+{
+  "mailboxes": {
+    "data": [
+      {
+        "id": 5,
+        "address": "otp@seek.li",
+        "alias": "Main OTP",
+        "isPinned": true,
+        "status": 1,
+        "sortOrder": 0,
+        "createdAt": "2026-11-01T00:00:00Z"
+      },
+      {
+        "id": 6,
+        "address": "backup@seek.li",
+        "alias": "Backup",
+        "isPinned": false,
+        "status": 1,
+        "sortOrder": 1,
+        "createdAt": "2026-11-02T00:00:00Z"
+      }
+    ]
+  },
+  "baselineMailsPage": {
+    "data": [
+      {
+        "id": 300,
+        "mailboxId": 5,
+        "fromAddress": "security@older.example",
+        "fromName": "OlderAuth",
+        "toAddress": "otp@seek.li",
+        "subject": "Older OTP 111222",
+        "bodyText": "Your older verification code is 111222.",
+        "bodyHtml": "",
+        "verificationCode": "111222",
+        "messageId": "<otp-300@older.example>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T05:50:00Z",
+        "createdAt": "2026-11-26T05:50:00Z"
+      }
+    ],
+    "pagination": {
+      "limit": 20,
+      "offset": 0,
+      "total": 1
+    }
+  },
+  "nonOtpMailsPage": {
+    "data": [
+      {
+        "id": 301,
+        "mailboxId": 5,
+        "fromAddress": "welcome@example.com",
+        "fromName": "Example Team",
+        "toAddress": "otp@seek.li",
+        "subject": "Welcome aboard",
+        "bodyText": "",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<welcome-301@example.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T06:00:00Z",
+        "createdAt": "2026-11-26T06:00:00Z"
+      },
+      {
+        "id": 300,
+        "mailboxId": 5,
+        "fromAddress": "security@older.example",
+        "fromName": "OlderAuth",
+        "toAddress": "otp@seek.li",
+        "subject": "Older OTP 111222",
+        "bodyText": "Your older verification code is 111222.",
+        "bodyHtml": "",
+        "verificationCode": "111222",
+        "messageId": "<otp-300@older.example>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T05:50:00Z",
+        "createdAt": "2026-11-26T05:50:00Z"
+      }
+    ],
+    "pagination": {
+      "limit": 20,
+      "offset": 0,
+      "total": 2
+    }
+  },
+  "nonOtpDetail301": {
+    "data": {
+      "mail": {
+        "id": 301,
+        "mailboxId": 5,
+        "fromAddress": "welcome@example.com",
+        "fromName": "Example Team",
+        "toAddress": "otp@seek.li",
+        "subject": "Welcome aboard",
+        "bodyText": "Thanks for signing up! No digits or codes are inside this welcome message.",
+        "bodyHtml": "<p>Thanks for signing up!</p>",
+        "verificationCode": null,
+        "messageId": "<welcome-301@example.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T06:00:00Z",
+        "createdAt": "2026-11-26T06:00:00Z"
+      },
+      "tags": []
+    }
+  },
+  "newOtpSummaryOnlyPage": {
+    "data": [
+      {
+        "id": 302,
+        "mailboxId": 5,
+        "fromAddress": "security@github.com",
+        "fromName": "GitHub",
+        "toAddress": "otp@seek.li",
+        "subject": "Your login verification",
+        "bodyText": "",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<otp-302@github.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T06:01:00Z",
+        "createdAt": "2026-11-26T06:01:00Z"
+      },
+      {
+        "id": 301,
+        "mailboxId": 5,
+        "fromAddress": "welcome@example.com",
+        "fromName": "Example Team",
+        "toAddress": "otp@seek.li",
+        "subject": "Welcome aboard",
+        "bodyText": "",
+        "bodyHtml": "",
+        "verificationCode": null,
+        "messageId": "<welcome-301@example.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T06:00:00Z",
+        "createdAt": "2026-11-26T06:00:00Z"
+      },
+      {
+        "id": 300,
+        "mailboxId": 5,
+        "fromAddress": "security@older.example",
+        "fromName": "OlderAuth",
+        "toAddress": "otp@seek.li",
+        "subject": "Older OTP 111222",
+        "bodyText": "Your older verification code is 111222.",
+        "bodyHtml": "",
+        "verificationCode": "111222",
+        "messageId": "<otp-300@older.example>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T05:50:00Z",
+        "createdAt": "2026-11-26T05:50:00Z"
+      }
+    ],
+    "pagination": {
+      "limit": 20,
+      "offset": 0,
+      "total": 3
+    }
+  },
+  "otpDetailNew": {
+    "data": {
+      "mail": {
+        "id": 302,
+        "mailboxId": 5,
+        "fromAddress": "security@github.com",
+        "fromName": "GitHub",
+        "toAddress": "otp@seek.li",
+        "subject": "Your login verification",
+        "bodyText": "您的验证码是 839-201，请在 5 分钟内输入。",
+        "bodyHtml": "<p>您的验证码是 <strong>839-201</strong>，请在 5 分钟内输入。</p>",
+        "verificationCode": null,
+        "messageId": "<otp-302@github.com>",
+        "isRead": false,
+        "receivedAt": "2026-11-26T06:01:00Z",
+        "createdAt": "2026-11-26T06:01:00Z"
+      },
+      "tags": []
+    }
+  },
+  "rateLimitError429": {
+    "error": {
+      "code": "RATE_LIMITED",
+      "message": "Too many requests"
+    }
+  },
+  "unauthorizedError401": {
+    "error": "Invalid API key"
+  }
+}

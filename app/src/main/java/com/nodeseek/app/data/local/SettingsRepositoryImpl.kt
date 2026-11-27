@@ -2,12 +2,14 @@ package com.nodeseek.app.data.local
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.nodeseek.app.domain.backup.AppSettingsBackupDto
@@ -15,16 +17,22 @@ import com.nodeseek.app.domain.model.AppSettings
 import com.nodeseek.app.domain.model.AwayDigestTriggerMode
 import com.nodeseek.app.domain.model.ThemeMode
 import com.nodeseek.app.domain.repository.SettingsRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.IOException
@@ -35,7 +43,7 @@ val Context.nodePulseDataStore: DataStore<Preferences> by preferencesDataStore(
 
 class SettingsRepositoryImpl(
     private val dataStore: DataStore<Preferences>,
-    externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val externalScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val secretCipher: SettingsSecretCipher = SettingsSecretCipherFactory.createDefault(),
 ) : SettingsRepository {
 
@@ -61,13 +69,16 @@ class SettingsRepositoryImpl(
         }
     }
 
-    override val settings: StateFlow<AppSettings> = safePreferencesFlow
-        .map { prefs -> prefs.toAppSettings() }
-        .stateIn(
-            scope = externalScope,
-            started = SharingStarted.Eagerly,
-            initialValue = AppSettings(),
-        )
+    private val _settings = MutableStateFlow(AppSettings())
+    override val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+
+    private val initialSettingsLoaded = CompletableDeferred<AppSettings>()
+
+    private val editMutex = Mutex()
+    private val stateLock = Any()
+    private var editSeq: Long = 0L
+    private var boundAccountUid: Long? = null
+    private var cachedOrdersByUid: Map<Long, List<String>> = emptyMap()
 
     override val recentSearchQueries: StateFlow<List<String>> = safePreferencesFlow
         .map { prefs ->
@@ -82,16 +93,75 @@ class SettingsRepositoryImpl(
         )
 
     init {
-        val ds = dataStore
         val flow = safePreferencesFlow
         val cipher = secretCipher
         externalScope.launch {
-            migratePlaintextSecretsIfNeeded(ds, flow, cipher)
+            try {
+                flow.collect { prefs ->
+                    val base = prefs.toBaseAppSettings()
+                    val orders = decodeAllOrders(prefs)
+                    val snapshotSeq = prefs[Keys.SETTINGS_EDIT_SEQ] ?: 0L
+                    synchronized(stateLock) {
+                        val effectiveUid = resolveEffectiveUidLocked(prefs)
+                        val loaded = base.copy(homepageCategoryOrder = orders[effectiveUid].orEmpty())
+                        if (snapshotSeq >= editSeq) {
+                            cachedOrdersByUid = orders
+                            if (snapshotSeq > editSeq) {
+                                editSeq = snapshotSeq
+                            }
+                            _settings.value = loaded
+                            initialSettingsLoaded.complete(loaded)
+                        }
+                    }
+                }
+            } finally {
+                if (!initialSettingsLoaded.isCompleted) {
+                    initialSettingsLoaded.complete(_settings.value)
+                }
+            }
+        }
+        externalScope.launch {
+            migratePlaintextSecretsIfNeeded(flow, cipher)
+        }
+    }
+
+    override suspend fun awaitLoadedSettings(): AppSettings {
+        initialSettingsLoaded.await()
+        return _settings.value
+    }
+
+    private fun resolveEffectiveUidLocked(prefs: Preferences): Long =
+        boundAccountUid ?: (prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] ?: 0L).coerceAtLeast(0L)
+
+    private suspend fun editAndSyncSettings(
+        transform: (MutablePreferences) -> Unit,
+    ) {
+        editMutex.withLock {
+            var assignedSeq = 0L
+            val updated = dataStore.edit { mutablePrefs ->
+                transform(mutablePrefs)
+                val diskSeq = mutablePrefs[Keys.SETTINGS_EDIT_SEQ] ?: 0L
+                val baseSeq = synchronized(stateLock) { maxOf(diskSeq, editSeq) }
+                assignedSeq = baseSeq + 1L
+                mutablePrefs[Keys.SETTINGS_EDIT_SEQ] = assignedSeq
+            }
+            val base = updated.toBaseAppSettings()
+            val orders = decodeAllOrders(updated)
+            val mapped = synchronized(stateLock) {
+                cachedOrdersByUid = orders
+                val effectiveUid = resolveEffectiveUidLocked(updated)
+                val result = base.copy(homepageCategoryOrder = orders[effectiveUid].orEmpty())
+                if (assignedSeq > editSeq) {
+                    editSeq = assignedSeq
+                }
+                _settings.value = result
+                result
+            }
+            initialSettingsLoaded.complete(mapped)
         }
     }
 
     private suspend fun migratePlaintextSecretsIfNeeded(
-        ds: DataStore<Preferences>,
         prefsFlow: kotlinx.coroutines.flow.Flow<Preferences>,
         cipher: SettingsSecretCipher,
     ) {
@@ -102,7 +172,7 @@ class SettingsRepositoryImpl(
             val needsNodeImageMigration = rawNodeImage.isNotEmpty() && !cipher.isEncryptedEnvelope(rawNodeImage)
             val needsSeekMailMigration = rawSeekMail.isNotEmpty() && !cipher.isEncryptedEnvelope(rawSeekMail)
             if (!needsNodeImageMigration && !needsSeekMailMigration) return
-            ds.edit { mutablePrefs ->
+            editAndSyncSettings { mutablePrefs ->
                 val curNodeImage = mutablePrefs[Keys.NODE_IMAGE_API_KEY].orEmpty().trim()
                 if (curNodeImage.isNotEmpty() && !cipher.isEncryptedEnvelope(curNodeImage)) {
                     mutablePrefs[Keys.NODE_IMAGE_API_KEY] = cipher.encrypt(curNodeImage)
@@ -120,54 +190,135 @@ class SettingsRepositoryImpl(
     }
 
     override suspend fun setThemeMode(mode: ThemeMode) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.THEME_MODE] = mode.name
         }
     }
 
     override suspend fun setPurePitchAmoled(enabled: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.PURE_PITCH_AMOLED] = enabled
         }
     }
 
     override suspend fun setUseDynamicColor(enabled: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.USE_DYNAMIC_COLOR] = enabled
         }
     }
 
     override suspend fun setFontScale(scale: Float) {
         val clamped = scale.coerceIn(MIN_FONT_SCALE, MAX_FONT_SCALE)
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.FONT_SCALE] = clamped
         }
     }
 
     override suspend fun setHomeCardScale(scale: Float) {
         val clamped = scale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.HOME_CARD_SCALE] = clamped
         }
     }
 
     override suspend fun setPreferRandomCheckIn(preferRandom: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.PREFER_RANDOM_CHECK_IN] = preferRandom
         }
     }
 
     override suspend fun setPinnedCategorySlugs(slugs: Set<String>) {
         val cleaned = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.PINNED_CATEGORY_SLUGS] = json.encodeToString(cleaned)
+        }
+    }
+
+    override suspend fun getHomepageCategoryOrder(accountUid: Long): List<String> {
+        initialSettingsLoaded.await()
+        val normalizedUid = accountUid.coerceAtLeast(0L)
+        return synchronized(stateLock) {
+            cachedOrdersByUid[normalizedUid].orEmpty()
+        }
+    }
+
+    override suspend fun setHomepageCategoryOrder(slugs: List<String>) {
+        val cleaned = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        editAndSyncSettings { prefs ->
+            val targetUid = synchronized(stateLock) { resolveEffectiveUidLocked(prefs) }
+            val currentOrders = decodeAllOrders(prefs).toMutableMap()
+            if (cleaned.isEmpty()) {
+                currentOrders.remove(targetUid)
+            } else {
+                currentOrders[targetUid] = cleaned
+            }
+            writeOrdersMap(prefs, currentOrders)
+            if (synchronized(stateLock) { boundAccountUid } != null) {
+                prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] = targetUid
+            }
+        }
+    }
+
+    override suspend fun setHomepageCategoryOrder(accountUid: Long, slugs: List<String>) {
+        val normalizedUid = accountUid.coerceAtLeast(0L)
+        val cleaned = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        editAndSyncSettings { prefs ->
+            val currentOrders = decodeAllOrders(prefs).toMutableMap()
+            if (cleaned.isEmpty()) {
+                currentOrders.remove(normalizedUid)
+            } else {
+                currentOrders[normalizedUid] = cleaned
+            }
+            writeOrdersMap(prefs, currentOrders)
+            if (synchronized(stateLock) { boundAccountUid } == normalizedUid) {
+                prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] = normalizedUid
+            }
+        }
+    }
+
+    override suspend fun setActiveHomepageCategoryAccountUid(accountUid: Long) {
+        val normalizedUid = accountUid.coerceAtLeast(0L)
+        synchronized(stateLock) {
+            boundAccountUid = normalizedUid
+            if (initialSettingsLoaded.isCompleted) {
+                _settings.value = _settings.value.copy(
+                    homepageCategoryOrder = cachedOrdersByUid[normalizedUid].orEmpty(),
+                )
+            }
+        }
+        editAndSyncSettings { prefs ->
+            prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] = normalizedUid
+        }
+    }
+
+    override fun onActiveAccountChanged(accountUid: Long) {
+        val normalizedUid = accountUid.coerceAtLeast(0L)
+        val shouldPersist = synchronized(stateLock) {
+            val prev = boundAccountUid
+            boundAccountUid = normalizedUid
+            if (initialSettingsLoaded.isCompleted) {
+                _settings.value = _settings.value.copy(
+                    homepageCategoryOrder = cachedOrdersByUid[normalizedUid].orEmpty(),
+                )
+            }
+            prev != normalizedUid
+        }
+        if (shouldPersist) {
+            externalScope.launch {
+                runCatching {
+                    editAndSyncSettings { prefs ->
+                        val latestUid = synchronized(stateLock) { boundAccountUid } ?: normalizedUid
+                        prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] = latestUid
+                    }
+                }
+            }
         }
     }
 
     override suspend fun togglePinnedCategory(slug: String) {
         val normalized = slug.trim()
         if (normalized.isEmpty()) return
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             val current = decodePinnedSlugs(prefs[Keys.PINNED_CATEGORY_SLUGS]).toMutableSet()
             if (!current.remove(normalized)) {
                 current.add(normalized)
@@ -177,57 +328,57 @@ class SettingsRepositoryImpl(
     }
 
     override suspend fun setIncludeBlockedTopics(include: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.INCLUDE_BLOCKED_TOPICS] = include
         }
     }
 
     override suspend fun setPreferRssFallback(preferRss: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.PREFER_RSS_FALLBACK] = preferRss
         }
     }
 
     override suspend fun setNodeImageApiKey(apiKey: String) {
         val trimmed = apiKey.trim()
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.NODE_IMAGE_API_KEY] = if (trimmed.isEmpty()) "" else secretCipher.encrypt(trimmed)
         }
     }
 
     override suspend fun setSeekMailApiKey(apiKey: String) {
         val trimmed = apiKey.trim()
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.SEEK_MAIL_API_KEY] = if (trimmed.isEmpty()) "" else secretCipher.encrypt(trimmed)
         }
     }
 
     override suspend fun setAutoCheckUpdates(enabled: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.AUTO_CHECK_UPDATES] = enabled
         }
     }
 
     override suspend fun setIncludePrereleaseUpdates(enabled: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.INCLUDE_PRERELEASE_UPDATES] = enabled
         }
     }
 
     override suspend fun setIgnoredUpdateTag(tag: String) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.IGNORED_UPDATE_TAG] = tag.trim()
         }
     }
 
     override suspend fun setAwayDigestEnabled(enabled: Boolean) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.AWAY_DIGEST_ENABLED] = enabled
         }
     }
 
     override suspend fun setAwayDigestTriggerMode(mode: AwayDigestTriggerMode) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.AWAY_DIGEST_TRIGGER_MODE] = mode.name
         }
     }
@@ -237,7 +388,7 @@ class SettingsRepositoryImpl(
             AppSettings.MIN_AWAY_DIGEST_THRESHOLD_MINUTES,
             AppSettings.MAX_AWAY_DIGEST_THRESHOLD_MINUTES,
         )
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             prefs[Keys.AWAY_DIGEST_THRESHOLD_MINUTES] = clamped
         }
     }
@@ -285,6 +436,7 @@ class SettingsRepositoryImpl(
             homeCardScale = current.homeCardScale,
             preferRandomCheckIn = current.preferRandomCheckIn,
             pinnedCategorySlugs = current.pinnedCategorySlugs,
+            homepageCategoryOrder = current.homepageCategoryOrder,
             includeBlockedTopics = current.includeBlockedTopics,
             preferRssFallback = current.preferRssFallback,
             nodeImageApiKey = if (includeApiKeys) current.nodeImageApiKey else "",
@@ -303,8 +455,11 @@ class SettingsRepositoryImpl(
         backup: AppSettingsBackupDto,
         merge: Boolean,
     ) {
-        dataStore.edit { prefs ->
+        editAndSyncSettings { prefs ->
             val current = prefs.toAppSettings()
+            val targetUid = synchronized(stateLock) { resolveEffectiveUidLocked(prefs) }
+            val currentOrders = decodeAllOrders(prefs).toMutableMap()
+            val currentOrderForTarget = currentOrders[targetUid].orEmpty()
             val existingQueries = decodeRecentSearchQueries(prefs[Keys.RECENT_SEARCH_QUERIES])
 
             val resolvedNodeImageKey = if (
@@ -341,6 +496,16 @@ class SettingsRepositoryImpl(
                 .filter { it.isNotEmpty() }
                 .distinct()
 
+            val cleanedBackupOrder = backup.homepageCategoryOrder
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            val resolvedCategoryOrder = if (merge && currentOrderForTarget.isNotEmpty()) {
+                (currentOrderForTarget + cleanedBackupOrder).distinct()
+            } else {
+                cleanedBackupOrder
+            }
+
             val resolvedQueries = if (merge) {
                 (backup.recentSearchQueries + existingQueries)
             } else {
@@ -358,6 +523,15 @@ class SettingsRepositoryImpl(
             prefs[Keys.HOME_CARD_SCALE] = backup.homeCardScale.coerceIn(MIN_HOME_CARD_SCALE, MAX_HOME_CARD_SCALE)
             prefs[Keys.PREFER_RANDOM_CHECK_IN] = backup.preferRandomCheckIn
             prefs[Keys.PINNED_CATEGORY_SLUGS] = json.encodeToString(cleanedPinned)
+            if (resolvedCategoryOrder.isEmpty()) {
+                currentOrders.remove(targetUid)
+            } else {
+                currentOrders[targetUid] = resolvedCategoryOrder
+            }
+            writeOrdersMap(prefs, currentOrders)
+            if (synchronized(stateLock) { boundAccountUid } != null) {
+                prefs[Keys.ACTIVE_HOMEPAGE_CATEGORY_UID] = targetUid
+            }
             prefs[Keys.INCLUDE_BLOCKED_TOPICS] = backup.includeBlockedTopics
             prefs[Keys.PREFER_RSS_FALLBACK] = backup.preferRssFallback
             prefs[Keys.NODE_IMAGE_API_KEY] = if (resolvedNodeImageKey.isEmpty()) "" else secretCipher.encrypt(resolvedNodeImageKey)
@@ -385,6 +559,15 @@ class SettingsRepositoryImpl(
         } ?: emptyList()
 
     private fun Preferences.toAppSettings(): AppSettings {
+        val base = toBaseAppSettings()
+        val orders = decodeAllOrders(this)
+        return synchronized(stateLock) {
+            val effectiveUid = resolveEffectiveUidLocked(this)
+            base.copy(homepageCategoryOrder = orders[effectiveUid].orEmpty())
+        }
+    }
+
+    private fun Preferences.toBaseAppSettings(): AppSettings {
         val mode = this[Keys.THEME_MODE]?.let { raw ->
             runCatching { ThemeMode.valueOf(raw) }.getOrNull()
         } ?: ThemeMode.SYSTEM
@@ -404,6 +587,7 @@ class SettingsRepositoryImpl(
             ),
             preferRandomCheckIn = this[Keys.PREFER_RANDOM_CHECK_IN] ?: false,
             pinnedCategorySlugs = decodePinnedSlugs(this[Keys.PINNED_CATEGORY_SLUGS]),
+            homepageCategoryOrder = emptyList(),
             includeBlockedTopics = this[Keys.INCLUDE_BLOCKED_TOPICS] ?: false,
             preferRssFallback = this[Keys.PREFER_RSS_FALLBACK] ?: false,
             nodeImageApiKey = secretCipher.decrypt(this[Keys.NODE_IMAGE_API_KEY] ?: ""),
@@ -429,6 +613,55 @@ class SettingsRepositoryImpl(
         return LinkedHashSet(decoded)
     }
 
+    private fun decodeHomepageCategoryOrder(raw: String?): List<String> {
+        if (raw == null) return emptyList()
+        val decoded = runCatching { json.decodeFromString<List<String>>(raw) }.getOrNull()
+            ?: return emptyList()
+        return decoded.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+    }
+
+    private fun decodeAllOrders(prefs: Preferences): Map<Long, List<String>> {
+        val rawByUid = prefs[Keys.HOMEPAGE_CATEGORY_ORDER_BY_UID]
+        if (rawByUid != null) {
+            val decoded = runCatching {
+                json.decodeFromString<Map<String, List<String>>>(rawByUid)
+            }.getOrNull() ?: return emptyMap()
+            val result = LinkedHashMap<Long, List<String>>()
+            for ((uidKey, slugs) in decoded) {
+                val uid = uidKey.toLongOrNull() ?: continue
+                if (uid < 0L) continue
+                val cleaned = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+                if (cleaned.isNotEmpty()) {
+                    result[uid] = cleaned
+                }
+            }
+            return result
+        }
+        val legacyGuestOrder = decodeHomepageCategoryOrder(prefs[Keys.HOMEPAGE_CATEGORY_ORDER])
+        return if (legacyGuestOrder.isEmpty()) emptyMap() else mapOf(0L to legacyGuestOrder)
+    }
+
+    private fun writeOrdersMap(
+        prefs: MutablePreferences,
+        ordersByUid: Map<Long, List<String>>,
+    ) {
+        val normalized = LinkedHashMap<String, List<String>>()
+        for ((uid, slugs) in ordersByUid) {
+            if (uid < 0L) continue
+            val cleaned = slugs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (cleaned.isNotEmpty()) {
+                normalized[uid.toString()] = cleaned
+            }
+        }
+        prefs[Keys.HOMEPAGE_CATEGORY_ORDER_BY_UID] = json.encodeToString(normalized)
+        val guestOrder = normalized["0"].orEmpty()
+        if (guestOrder.isEmpty()) {
+            prefs.remove(Keys.HOMEPAGE_CATEGORY_ORDER)
+        } else {
+            prefs[Keys.HOMEPAGE_CATEGORY_ORDER] = json.encodeToString(guestOrder)
+        }
+    }
+
     private object Keys {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val PURE_PITCH_AMOLED = booleanPreferencesKey("pure_pitch_amoled")
@@ -437,6 +670,9 @@ class SettingsRepositoryImpl(
         val HOME_CARD_SCALE = floatPreferencesKey("home_card_scale")
         val PREFER_RANDOM_CHECK_IN = booleanPreferencesKey("prefer_random_check_in")
         val PINNED_CATEGORY_SLUGS = stringPreferencesKey("pinned_category_slugs")
+        val HOMEPAGE_CATEGORY_ORDER = stringPreferencesKey("homepage_category_order")
+        val HOMEPAGE_CATEGORY_ORDER_BY_UID = stringPreferencesKey("homepage_category_order_by_uid")
+        val ACTIVE_HOMEPAGE_CATEGORY_UID = longPreferencesKey("active_homepage_category_uid")
         val INCLUDE_BLOCKED_TOPICS = booleanPreferencesKey("include_blocked_topics")
         val PREFER_RSS_FALLBACK = booleanPreferencesKey("prefer_rss_fallback")
         val NODE_IMAGE_API_KEY = stringPreferencesKey("node_image_api_key")
@@ -448,6 +684,7 @@ class SettingsRepositoryImpl(
         val AWAY_DIGEST_TRIGGER_MODE = stringPreferencesKey("away_digest_trigger_mode")
         val AWAY_DIGEST_THRESHOLD_MINUTES = intPreferencesKey("away_digest_threshold_minutes")
         val RECENT_SEARCH_QUERIES = stringPreferencesKey("recent_search_queries")
+        val SETTINGS_EDIT_SEQ = longPreferencesKey("settings_edit_seq")
     }
 
     companion object {

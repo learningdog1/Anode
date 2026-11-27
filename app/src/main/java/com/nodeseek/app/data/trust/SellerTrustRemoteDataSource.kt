@@ -163,6 +163,8 @@ internal class HttpSellerTrustRemoteDataSource(
     baseOrigin: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl(),
     sameOriginTransport: SameOriginTransport? = null,
     onConfigObserved: ((ConfigPayloadDto) -> Unit)? = null,
+    sessionGenerationProvider: () -> Long = { 0L },
+    onConfigObservedWithGeneration: ((ConfigPayloadDto, Long) -> Unit)? = null,
     clockMillis: () -> Long = System::currentTimeMillis,
     private val forumRepository: ForumRepository? = null,
     connectTimeoutSeconds: Long = DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -192,6 +194,8 @@ internal class HttpSellerTrustRemoteDataSource(
         baseOrigin = baseOrigin,
         sameOriginTransport = sameOriginTransport,
         onConfigObserved = onConfigObserved,
+        sessionGenerationProvider = sessionGenerationProvider,
+        onConfigObservedWithGeneration = onConfigObservedWithGeneration,
     )
 
     override suspend fun resolveUidByUsername(username: String): Long? = mapTrustRemoteExceptions {

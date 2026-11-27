@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="shortcut_check_in"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_monochrome"
+        android:shortcutShortLabel="@string/shortcut_check_in_short"
+        android:shortcutLongLabel="@string/shortcut_check_in_long"
+        android:shortcutDisabledMessage="@string/shortcut_check_in_disabled">
+        <intent
+            android:action="com.nodeseek.app.action.SHORTCUT_CHECK_IN"
+            android:targetPackage="com.nodeseek.app"
+            android:targetClass="com.nodeseek.app.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="shortcut_lite_ssh"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_monochrome"
+        android:shortcutShortLabel="@string/shortcut_lite_ssh_short"
+        android:shortcutLongLabel="@string/shortcut_lite_ssh_long"
+        android:shortcutDisabledMessage="@string/shortcut_lite_ssh_disabled">
+        <intent
+            android:action="com.nodeseek.app.action.SHORTCUT_OPEN_SSH"
+            android:targetPackage="com.nodeseek.app"
+            android:targetClass="com.nodeseek.app.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="shortcut_copy_otp"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_monochrome"
+        android:shortcutShortLabel="@string/shortcut_copy_otp_short"
+        android:shortcutLongLabel="@string/shortcut_copy_otp_long"
+        android:shortcutDisabledMessage="@string/shortcut_copy_otp_disabled">
+        <intent
+            android:action="com.nodeseek.app.action.SHORTCUT_COPY_OTP"
+            android:targetPackage="com.nodeseek.app"
+            android:targetClass="com.nodeseek.app.MainActivity" />
+    </shortcut>
+</shortcuts>

@@ -8,6 +8,7 @@ import com.nodeseek.app.domain.overseas.OverseasIntelRepository
 import com.nodeseek.app.domain.overseas.OverseasIntelSnapshot
 import com.nodeseek.app.domain.overseas.OverseasOfferDetail
 import com.nodeseek.app.domain.overseas.OverseasRepostContent
+import com.nodeseek.app.domain.overseas.OverseasSyncStatus
 import com.nodeseek.app.ui.overseas.OVERSEAS_MONITOR_TG_CHANNEL_URL
 import com.nodeseek.app.ui.overseas.OverseasDetailContentSanitizer
 import com.nodeseek.app.ui.overseas.OverseasIntelDetailViewModel
@@ -292,31 +293,68 @@ class OverseasUiAndDetailViewModelTest {
         assertNull(vm.uiState.value.errorMessage)
     }
 
+    @Test
+    fun headlessLoadNextPageUsesControlsAndRepositorySnapshotWithoutUiStateCollector() = runTest {
+        val repo = TrackingDetailRepository(
+            initialOffers = listOf(
+                OverseasDealOffer(
+                    id = "1",
+                    title = "Offer 1",
+                    originalTitle = "Offer 1",
+                    summary = "",
+                    merchant = "Host",
+                    sourceLink = "https://lowendtalk.com/discussion/1",
+                ),
+            ),
+            initialHasMore = true,
+        )
+        val vm = OverseasIntelViewModel(
+            repository = repo,
+            autoLoadOnInit = false,
+        )
+
+        // Zero uiState collectors: searchQuery is blank and hasMore is true -> loadNextPage() calls repo
+        vm.loadNextPage()
+        advanceUntilIdle()
+        assertEquals(1, repo.loadNextPageCalls)
+
+        // Non-blank searchQuery suppresses pagination without uiState collector
+        vm.updateSearchQuery("Offer")
+        vm.loadNextPage()
+        advanceUntilIdle()
+        assertEquals(1, repo.loadNextPageCalls)
+    }
+
     private class TrackingDetailRepository(
         initialOffers: List<OverseasDealOffer> = emptyList(),
         private var failFirstDetailFetch: Boolean = false,
         private val failureMessage: String = "网络超时",
         private val customDetail: OverseasOfferDetail? = null,
         private val customRepost: OverseasRepostContent? = null,
+        initialHasMore: Boolean = false,
     ) : OverseasIntelRepository {
 
         private val delegate = PreviewOverseasIntelRepository()
         private val _snapshot = MutableStateFlow(
             OverseasIntelSnapshot(
                 offers = initialOffers.ifEmpty { delegate.snapshot.value.offers },
+                syncStatus = OverseasSyncStatus(hasMore = initialHasMore),
             ),
         )
         override val snapshot: StateFlow<OverseasIntelSnapshot> = _snapshot.asStateFlow()
 
         var getDetailCalls = 0
+        var loadNextPageCalls = 0
 
         override suspend fun loadFromCache(): List<OverseasDealOffer> = _snapshot.value.offers
 
         override suspend fun refresh(query: String): Result<List<OverseasDealOffer>> =
             Result.success(_snapshot.value.offers)
 
-        override suspend fun loadNextPage(query: String): Result<List<OverseasDealOffer>> =
-            Result.success(_snapshot.value.offers)
+        override suspend fun loadNextPage(query: String): Result<List<OverseasDealOffer>> {
+            loadNextPageCalls++
+            return Result.success(_snapshot.value.offers)
+        }
 
         override suspend fun getOfferDetail(offerId: String, forceRefresh: Boolean): Result<OverseasOfferDetail> {
             getDetailCalls++

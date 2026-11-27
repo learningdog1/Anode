@@ -8,6 +8,7 @@ import androidx.exifinterface.media.ExifInterface
 import android.os.Build
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
+import com.nodeseek.app.domain.model.NodeImageGalleryPage
 import com.nodeseek.app.domain.repository.ImageHostRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import kotlinx.coroutines.CancellationException
@@ -587,6 +588,31 @@ class NodeImageHostRepositoryImpl(
                 throw NodeSeekApiException("请先填写 NodeImage 图床 API Key。")
             }
             apiClientProvider().verifyNodeImageApiKey(trimmed)
+        }
+
+    override suspend fun listImages(page: Int, limit: Int?): Result<NodeImageGalleryPage> =
+        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val apiKey = settingsRepository.settings.value.nodeImageApiKey.trim()
+            if (apiKey.isEmpty()) {
+                throw NodeSeekApiException("请先在「我的 -> 设置」中填写 NodeImage 图床 API Key。")
+            }
+            apiClientProvider().listNodeImages(
+                apiKey = apiKey,
+                page = page,
+                limit = limit,
+            )
+        }
+
+    override suspend fun deleteImage(imageId: String): Result<Unit> =
+        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val apiKey = settingsRepository.settings.value.nodeImageApiKey.trim()
+            if (apiKey.isEmpty()) {
+                throw NodeSeekApiException("请先在「我的 -> 设置」中填写 NodeImage 图床 API Key。")
+            }
+            apiClientProvider().deleteNodeImage(
+                apiKey = apiKey,
+                imageId = imageId,
+            )
         }
 
     override suspend fun uploadImage(

@@ -66,17 +66,23 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DirectionsCar
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.EmojiEvents
 import androidx.compose.material.icons.rounded.FormatQuote
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.rounded.Language
@@ -93,9 +99,11 @@ import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Sell
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.ThumbDown
 import androidx.compose.material.icons.rounded.ThumbDownOffAlt
@@ -173,6 +181,25 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.data.restock.MerchantLinkDetector
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.activity.DrandLuckyEngine
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
+import com.nodeseek.app.domain.carpool.CarpoolStatusUpdater
+import com.nodeseek.app.domain.trade.TradeTitleFormatter
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.domain.valuation.ValuationMode
+import com.nodeseek.app.ui.activity.LuckyDrawInlineBannerCard
+import com.nodeseek.app.ui.activity.LuckyDrawSheet
+import com.nodeseek.app.ui.activity.LuckyDrawSheetMode
+import com.nodeseek.app.ui.carpool.CarpoolQuickStatusBar
+import com.nodeseek.app.ui.carpool.CarpoolStatusSheet
+import com.nodeseek.app.ui.composer.ImagePrivacyEditorSheet
+import com.nodeseek.app.ui.share.TopicLongImageShareSheet
+import com.nodeseek.app.ui.trade.TradeClosureSheet
+import com.nodeseek.app.ui.valuation.MarketPremiumReferenceCard
+import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
+import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
+import com.nodeseek.app.ui.components.NoOpNsAppWidgetController
+import com.nodeseek.app.ui.components.NsAppWidgetController
 import com.nodeseek.app.domain.model.AuthorBadge
 import com.nodeseek.app.domain.model.FloorComment
 import com.nodeseek.app.domain.model.TopicDetailPage
@@ -289,7 +316,31 @@ fun TopicDetailScreen(
     var restockWatchPrefillUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var lastLinkLongPressMs by remember { mutableLongStateOf(0L) }
     var trustSheetTarget by remember { mutableStateOf<TopicTrustInspectTarget?>(null) }
+    var activeLuckyDrawSpec by remember { mutableStateOf<LuckyDrawSpec?>(null) }
+    var activeLuckyDrawMode by remember { mutableStateOf<LuckyDrawSheetMode?>(null) }
+    var showTradeClosureSheet by rememberSaveable { mutableStateOf(false) }
+    var showCarpoolStatusSheet by rememberSaveable { mutableStateOf(false) }
+    var showMarketValuationSheet by rememberSaveable { mutableStateOf(false) }
+    var longImageShareTarget by remember { mutableStateOf<FloorComment?>(null) }
+    var marketRefCooldownSec by remember { mutableIntStateOf(0) }
     val uploadedMarkdownChannel = remember { Channel<String>(Channel.BUFFERED) }
+
+    LaunchedEffect(uiState.marketReference?.cooldownUntilEpochMillis) {
+        val until = uiState.marketReference?.cooldownUntilEpochMillis ?: 0L
+        if (until <= 0L) {
+            marketRefCooldownSec = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val remMs = until - System.currentTimeMillis()
+            if (remMs <= 0L) {
+                marketRefCooldownSec = 0
+                break
+            }
+            marketRefCooldownSec = ((remMs + 999L) / 1000L).toInt()
+            delay(1_000L)
+        }
+    }
 
     val openFloorMoreActions: (FloorComment) -> Unit = { comment ->
         if (System.currentTimeMillis() - lastLinkLongPressMs > 350L && linkActionUrl == null) {
@@ -490,6 +541,10 @@ fun TopicDetailScreen(
                 onOpenTopic = onOpenTopic,
                 onOpenUser = onNavigateToUser,
                 onOpenCategory = onNavigateToCategory,
+                onOpenLuckyDraw = { deepLink ->
+                    activeLuckyDrawSpec = deepLink.toSpec()
+                    activeLuckyDrawMode = LuckyDrawSheetMode.VERIFY
+                },
             )
         }
     }
@@ -527,6 +582,7 @@ fun TopicDetailScreen(
                 title = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint,
                 author = uiState.pageData?.author,
                 categorySlug = uiState.pageData?.categorySlug,
+                categoryName = uiState.pageData?.categoryName,
                 showCompactIdentity = hasScrolledPastHeader || uiState.pageData == null,
                 opOnly = uiState.opOnly,
                 reverseOrder = uiState.reverseOrder,
@@ -556,6 +612,18 @@ fun TopicDetailScreen(
                 onEditTopic = {
                     uiState.pageData?.let { onEditTopic(topicId, it.categorySlug) }
                 },
+                onOpenTradeClosure = { showTradeClosureSheet = true },
+                onOpenCarpoolStatus = { showCarpoolStatusSheet = true },
+                onOpenLuckyGenerator = {
+                    val existingSpec = uiState.openingFloor?.markdownBody?.let { body ->
+                        DrandLuckyEngine.extractFirstLuckySpec(body, fallbackPostId = topicId)
+                    }
+                    activeLuckyDrawSpec = existingSpec ?: LuckyDrawSpec(
+                        postId = topicId,
+                        drawTimeEpochMillis = System.currentTimeMillis() + 3_600_000L,
+                    )
+                    activeLuckyDrawMode = LuckyDrawSheetMode.GENERATOR
+                },
                 onCopyLink = {
                     val link = "https://www.nodeseek.com/post-$topicId-${uiState.currentPage}"
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -571,6 +639,16 @@ fun TopicDetailScreen(
                     }
                 },
                 onShare = shareTopic,
+                onShareLongImage = {
+                    coroutineScope.launch {
+                        val op = viewModel.resolveOpeningFloorForShare()
+                        if (op != null) {
+                            longImageShareTarget = op
+                        } else {
+                            snackbarHostState.showSnackbar("主楼内容仍在加载，请稍后重试")
+                        }
+                    }
+                },
             )
         },
         bottomBar = {
@@ -686,6 +764,29 @@ fun TopicDetailScreen(
                                     onJumpToFloor = viewModel::jumpToFloor,
                                     onJumpToLastPage = { viewModel.selectPage(uiState.totalPages) },
                                     onToggleReplyTracking = viewModel::toggleReplyTracking,
+                                    marketReference = uiState.marketReference,
+                                    marketCooldownRemainingSeconds = marketRefCooldownSec,
+                                    isMutatingTopic = uiState.isMutatingTopic,
+                                    onSearchMarketRemote = { customQuery ->
+                                        viewModel.searchTradeMarketReference(customQuery)
+                                    },
+                                    onOpenMarketValuation = { showMarketValuationSheet = true },
+                                    onOpenMarketTopic = { targetId, targetTitle ->
+                                        onOpenTopic(targetId, 0, targetTitle)
+                                    },
+                                    onQuickCarpoolStatus = { tag ->
+                                        val parsed = CarpoolStatusUpdater.parseStatusToken(tag)
+                                        viewModel.updateCarpoolStatus(
+                                            statusToken = tag,
+                                            occupiedSeats = parsed?.occupiedSeats,
+                                            totalSeats = if (parsed?.occupiedSeats != null && parsed.remainingSeats != null) {
+                                                parsed.occupiedSeats + parsed.remainingSeats
+                                            } else {
+                                                null
+                                            },
+                                        )
+                                    },
+                                    onOpenCarpoolStatusSheet = { showCarpoolStatusSheet = true },
                                 )
                             }
 
@@ -695,11 +796,23 @@ fun TopicDetailScreen(
                                     if (uiState.loadedStartPage == 1 || uiState.isOpExpandedOnSubPage) {
                                         val opening = uiState.openingFloor
                                         if (opening != null) {
+                                            val detectedLuckySpec = remember(opening.markdownBody, topicId) {
+                                                DrandLuckyEngine.extractFirstLuckySpec(
+                                                    markdown = opening.markdownBody,
+                                                    fallbackPostId = topicId,
+                                                )
+                                            }
                                             OpeningFloorArticleBody(
                                                 openingFloor = opening,
                                                 isSubPageExpanded = uiState.loadedStartPage > 1,
                                                 isBusy = uiState.busyCommentIds.contains(opening.commentId),
                                                 canEditTopic = uiState.canEditTopic,
+                                                nsAppWidgetController = viewModel.nsAppWidgetController,
+                                                detectedLuckySpec = detectedLuckySpec,
+                                                onOpenLuckySheet = { spec ->
+                                                    activeLuckyDrawSpec = spec
+                                                    activeLuckyDrawMode = LuckyDrawSheetMode.VERIFY
+                                                },
                                                 onCollapseSubPageOp = viewModel::toggleOpExpandedOnSubPage,
                                                 onMentionClick = viewModel::resolveAndNavigateToUser,
                                                 onFloorClick = viewModel::jumpToFloor,
@@ -778,6 +891,7 @@ fun TopicDetailScreen(
                                         isHighlighted = uiState.highlightedFloor == reply.floorNumber,
                                         isBusy = uiState.busyCommentIds.contains(reply.commentId),
                                         showTrustQuickBadge = true,
+                                        nsAppWidgetController = viewModel.nsAppWidgetController,
                                         onAuthorClick = {
                                             onNavigateToUser(reply.author.uid, reply.author.username)
                                         },
@@ -848,9 +962,14 @@ fun TopicDetailScreen(
             comment = targetComment,
             isViewerTopicAuthor = uiState.isViewerTopicAuthor,
             canEdit = canEditTarget,
+            canTipStardust = targetComment.author.uid > 0L && targetComment.author.uid != uiState.session?.uid,
             firstMerchantLinkUrl = detectedMerchantLinks.firstOrNull()?.resolvedUrl,
             merchantLinkCount = detectedMerchantLinks.size,
             onDismiss = { actionSheetComment = null },
+            onTipStardust = {
+                actionSheetComment = null
+                viewModel.openStardustTipForComment(targetComment)
+            },
             onInspectSellerTrust = {
                 actionSheetComment = null
                 openSellerTrust(
@@ -879,6 +998,10 @@ fun TopicDetailScreen(
                 actionSheetComment = null
                 copyMarkdownSource(targetComment)
             },
+            onShareLongImage = {
+                actionSheetComment = null
+                longImageShareTarget = targetComment
+            },
             onEdit = {
                 actionSheetComment = null
                 val slug = uiState.pageData?.categorySlug
@@ -898,6 +1021,7 @@ fun TopicDetailScreen(
     selectableSheetComment?.let { comment ->
         SelectableMarkdownBottomSheet(
             comment = comment,
+            nsAppWidgetController = viewModel.nsAppWidgetController,
             onDismiss = { selectableSheetComment = null },
             onCopyAllMarkdown = {
                 copyMarkdownSource(comment)
@@ -932,6 +1056,18 @@ fun TopicDetailScreen(
     }
 
     if (uiState.replyComposer.isSheetOpen) {
+        val replyValuationLabel = remember(
+            uiState.marketReference?.query,
+            uiState.pageData?.title,
+            uiState.titleHint,
+            uiState.openingFloor?.markdownBody,
+        ) {
+            uiState.marketReference?.query?.takeIf { it.isNotBlank() }
+                ?: extractMarketQueryWithContext(
+                    title = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint,
+                    openingMarkdown = uiState.openingFloor?.markdownBody,
+                )
+        }
         ReplyComposerBottomSheet(
             state = uiState.replyComposer,
             insertedUploadSnippets = remember(uploadedMarkdownChannel) {
@@ -953,6 +1089,7 @@ fun TopicDetailScreen(
             onOpenFullNetBench = onOpenFullNetBench,
             onOpenFullLiteSsh = onOpenFullLiteSsh,
             onPublishSshToComposer = onPublishSshToComposer,
+            initialValuationMachineLabel = replyValuationLabel,
         )
     }
 
@@ -1030,12 +1167,101 @@ fun TopicDetailScreen(
         )
     }
 
+    uiState.replyComposer.pendingPrivacyImage?.let { pending ->
+        ImagePrivacyEditorSheet(
+            sourceBytes = pending.bytes,
+            mimeType = pending.mimeType,
+            fileName = pending.fileName,
+            onConfirmUpload = viewModel::confirmReplyPrivacyImageUpload,
+            onSkipMosaicUpload = viewModel::skipReplyPrivacyEditAndUpload,
+            onDismiss = viewModel::dismissReplyPrivacyEditor,
+        )
+    }
+
+    longImageShareTarget?.let { targetFloor ->
+        val pageData = uiState.pageData
+        val shareTitle = pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint
+        val shareUrl = "https://www.nodeseek.com/post-$topicId-1"
+        TopicLongImageShareSheet(
+            topicId = topicId,
+            title = shareTitle,
+            categorySlug = pageData?.categorySlug.orEmpty(),
+            categoryName = pageData?.categoryName.orEmpty(),
+            targetFloor = targetFloor,
+            topicUrl = shareUrl,
+            viewCount = pageData?.viewCount ?: 0,
+            bookmarkCount = uiState.effectiveBookmarkCount,
+            coilOkHttpClient = viewModel.imageFetchClient,
+            onFeedbackMessage = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = { longImageShareTarget = null },
+        )
+    }
+
     uiState.pendingPaidAction?.let { pendingAction ->
         PaidActionConfirmationDialog(
             action = pendingAction,
             viewerDrumsticks = uiState.session?.drumsticks,
             onConfirm = viewModel::confirmPendingPaidAction,
             onDismiss = viewModel::dismissPendingPaidAction,
+        )
+    }
+
+    uiState.stardustTipDialog?.let { tipDialogState ->
+        StardustTipDialog(
+            state = tipDialogState,
+            viewerUid = uiState.session?.uid,
+            viewerBalance = uiState.session?.stardust,
+            onAmountChanged = viewModel::updateStardustTipAmount,
+            onRetryPrepare = viewModel::retryStardustPrepare,
+            onConfirmSend = viewModel::submitStardustTip,
+            onDismiss = viewModel::dismissStardustTipDialog,
+        )
+    }
+
+    if (activeLuckyDrawMode != null && activeLuckyDrawSpec != null) {
+        LuckyDrawSheet(
+            spec = activeLuckyDrawSpec,
+            initialMode = activeLuckyDrawMode ?: LuckyDrawSheetMode.VERIFY,
+            allowGeneratorMode = uiState.canEditTopic,
+            isViewerTopicAuthor = uiState.isViewerTopicAuthor,
+            viewerUid = uiState.session?.uid,
+            luckyDrawRepository = appContainer.luckyDrawRepository,
+            forumRepository = appContainer.forumRepository,
+            onDismiss = {
+                activeLuckyDrawMode = null
+                activeLuckyDrawSpec = null
+            },
+            onFeedbackMessage = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onOpenTopicFloor = { targetPostId, targetFloor ->
+                activeLuckyDrawMode = null
+                activeLuckyDrawSpec = null
+                if (targetPostId == topicId) {
+                    viewModel.jumpToFloor(targetFloor)
+                } else {
+                    onOpenTopic(targetPostId, targetFloor, "")
+                }
+            },
+            onOpenUser = { uid, username ->
+                activeLuckyDrawMode = null
+                activeLuckyDrawSpec = null
+                onNavigateToUser(uid, username)
+            },
+            onWinnerReplyPosted = {
+                viewModel.refreshCurrentPage()
+            },
+            onAppendLuckyToTopicOp = if (uiState.canEditTopic) {
+                { luckyMarkdown, _ ->
+                    activeLuckyDrawMode = null
+                    activeLuckyDrawSpec = null
+                    viewModel.appendLuckyLinkToTopicOp(luckyMarkdown)
+                }
+            } else {
+                null
+            },
         )
     }
 
@@ -1056,6 +1282,73 @@ fun TopicDetailScreen(
             },
         )
     }
+
+    if (showTradeClosureSheet) {
+        val currentTitle = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint
+        TradeClosureSheet(
+            topicId = topicId,
+            topicTitle = currentTitle,
+            openingMarkdown = uiState.openingFloor?.markdownBody,
+            isMutating = uiState.isMutatingTopic,
+            onConfirmClosure = { options ->
+                showTradeClosureSheet = false
+                viewModel.closeTradeTopic(options)
+            },
+            onCopyFeedback = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = { showTradeClosureSheet = false },
+        )
+    }
+
+    if (showCarpoolStatusSheet) {
+        val currentTitle = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint
+        CarpoolStatusSheet(
+            topicTitle = currentTitle,
+            isMutating = uiState.isMutatingTopic,
+            onUpdateStatus = { token, occupied, total, updateBody ->
+                showCarpoolStatusSheet = false
+                viewModel.updateCarpoolStatus(
+                    statusToken = token,
+                    occupiedSeats = occupied,
+                    totalSeats = total,
+                    updateBody = updateBody,
+                )
+            },
+            onDismiss = { showCarpoolStatusSheet = false },
+        )
+    }
+
+    if (showMarketValuationSheet) {
+        val valuationMachineLabel = remember(
+            uiState.marketReference?.query,
+            uiState.pageData?.title,
+            uiState.titleHint,
+            uiState.openingFloor?.markdownBody,
+        ) {
+            uiState.marketReference?.query?.takeIf { it.isNotBlank() }
+                ?: extractMarketQueryWithContext(
+                    title = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint,
+                    openingMarkdown = uiState.openingFloor?.markdownBody,
+                )
+        }
+        VpsValuationBottomSheet(
+            primaryActionLabel = "复制估值报价",
+            onInsertMarkdown = { generatedMarkdown ->
+                showMarketValuationSheet = false
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(ClipData.newPlainText("Anode Valuation", generatedMarkdown))
+                coroutineScope.launch { snackbarHostState.showSnackbar("已复制估值报价") }
+            },
+            onDismiss = { showMarketValuationSheet = false },
+            initialMachineLabel = valuationMachineLabel,
+            initialMode = ValuationMode.TRANSFER_DEAL,
+            onCopiedFeedback = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            marketReferenceRepository = appContainer.tradeMarketReferenceRepository,
+        )
+    }
 }
 
 // ── Top Bar ───────────────────────────────────────────────────────────────────
@@ -1065,6 +1358,7 @@ private fun TopicReaderTopBar(
     title: String,
     author: com.nodeseek.app.domain.model.FloorAuthor?,
     categorySlug: String?,
+    categoryName: String? = null,
     showCompactIdentity: Boolean,
     opOnly: Boolean,
     reverseOrder: Boolean,
@@ -1087,15 +1381,22 @@ private fun TopicReaderTopBar(
     onOpenFloorJumpSheet: () -> Unit,
     onRefresh: () -> Unit,
     onEditTopic: () -> Unit,
+    onOpenTradeClosure: () -> Unit = {},
+    onOpenCarpoolStatus: () -> Unit = {},
+    onOpenLuckyGenerator: () -> Unit,
     onCopyLink: () -> Unit,
     onOpenInWebView: () -> Unit,
     onOpenBrowser: () -> Unit,
     onShare: () -> Unit,
+    onShareLongImage: () -> Unit = {},
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val categoryAccent = categorySlug?.takeIf { it.isNotBlank() }?.let {
         NodePulseThemeTokens.categorySpec(it).spineColor
     }
+    val isTradeTopic = categorySlug.equals("trade", ignoreCase = true) || categoryName?.trim() == "交易"
+    val isCarpoolTopic = categorySlug.equals("carpool", ignoreCase = true) || categoryName?.trim() == "拼车"
+    val isAlreadySold = remember(title) { TradeTitleFormatter.isMarkedSold(title) }
     var menuExpanded by remember { mutableStateOf(false) }
 
     Column(
@@ -1247,7 +1548,80 @@ private fun TopicReaderTopBar(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (opOnly) FontWeight.Bold else FontWeight.Medium,
                     color = opChipFg,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
+            }
+
+            if (canEditTopic && isTradeTopic) {
+                val tradeAccent = NodePulseThemeTokens.categorySpec("trade").spineColor
+                Row(
+                    modifier = Modifier
+                        .height(32.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isAlreadySold) tradeAccent else tradeAccent.copy(alpha = 0.14f),
+                        )
+                        .border(0.8.dp, tradeAccent.copy(alpha = 0.55f), CircleShape)
+                        .pulseBouncyClickable(
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.Button,
+                            onClick = onOpenTradeClosure,
+                        )
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = if (isAlreadySold) Icons.Rounded.TaskAlt else Icons.Rounded.CheckCircleOutline,
+                        contentDescription = null,
+                        tint = if (isAlreadySold) Color.White else tradeAccent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = if (isAlreadySold) "已出" else "标已出",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isAlreadySold) Color.White else tradeAccent,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else if (canEditTopic && isCarpoolTopic) {
+                val carpoolAccent = NodePulseThemeTokens.categorySpec("carpool").spineColor
+                Row(
+                    modifier = Modifier
+                        .height(32.dp)
+                        .clip(CircleShape)
+                        .background(carpoolAccent.copy(alpha = 0.14f))
+                        .border(0.8.dp, carpoolAccent.copy(alpha = 0.55f), CircleShape)
+                        .pulseBouncyClickable(
+                            pressedScale = NodePulseMotion.chipPressScale,
+                            role = Role.Button,
+                            onClick = onOpenCarpoolStatus,
+                        )
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Groups,
+                        contentDescription = null,
+                        tint = carpoolAccent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = "车位",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = carpoolAccent,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
 
             if (isEmbeddedInDualPane && onToggleMaximizePane != null) {
@@ -1370,6 +1744,30 @@ private fun TopicReaderTopBar(
                         },
                     )
                     if (canEditTopic) {
+                        if (isTradeTopic) {
+                            PulseDropdownMenuItem(
+                                text = "一键标记已出 & 交割助手",
+                                subtitle = "标题追加 [已出]、脱敏隐私并核对交割清单",
+                                icon = Icons.Rounded.Sell,
+                                accentColor = NodePulseThemeTokens.categorySpec("trade").spineColor,
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenTradeClosure()
+                                },
+                            )
+                        }
+                        if (isCarpoolTopic) {
+                            PulseDropdownMenuItem(
+                                text = "更新拼车状态",
+                                subtitle = "一键切换 3=1 / 已满车 等车位状态",
+                                icon = Icons.Rounded.DirectionsCar,
+                                accentColor = NodePulseThemeTokens.categorySpec("carpool").spineColor,
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenCarpoolStatus()
+                                },
+                            )
+                        }
                         PulseDropdownMenuItem(
                             text = "编辑主题",
                             subtitle = "修改主楼标题、正文或阅读等级",
@@ -1378,6 +1776,16 @@ private fun TopicReaderTopBar(
                             onClick = {
                                 menuExpanded = false
                                 onEditTopic()
+                            },
+                        )
+                        PulseDropdownMenuItem(
+                            text = "生成 / 管理抽奖",
+                            subtitle = "配置 Drand 可验证 `/lucky` 抽奖链接",
+                            icon = Icons.Rounded.Casino,
+                            accentColor = MaterialTheme.colorScheme.primary,
+                            onClick = {
+                                menuExpanded = false
+                                onOpenLuckyGenerator()
                             },
                         )
                     }
@@ -1401,6 +1809,15 @@ private fun TopicReaderTopBar(
                         onClick = {
                             menuExpanded = false
                             onShare()
+                        },
+                    )
+                    PulseDropdownMenuItem(
+                        text = "生成杂志长图",
+                        icon = Icons.Rounded.Image,
+                        accentColor = MaterialTheme.colorScheme.primary,
+                        onClick = {
+                            menuExpanded = false
+                            onShareLongImage()
                         },
                     )
                     PulseDropdownMenuItem(
@@ -1453,6 +1870,14 @@ private fun MagazineArticleHeader(
     onJumpToFloor: (Int) -> Unit,
     onJumpToLastPage: () -> Unit,
     onToggleReplyTracking: () -> Unit,
+    marketReference: TradeMarketReferenceState? = null,
+    marketCooldownRemainingSeconds: Int = 0,
+    isMutatingTopic: Boolean = false,
+    onSearchMarketRemote: ((String?) -> Unit)? = null,
+    onOpenMarketValuation: (() -> Unit)? = null,
+    onOpenMarketTopic: ((Long, String) -> Unit)? = null,
+    onQuickCarpoolStatus: ((String) -> Unit)? = null,
+    onOpenCarpoolStatusSheet: (() -> Unit)? = null,
 ) {
     val ext = NodePulseThemeTokens.extendedColors
     val isDark = NodePulseThemeTokens.isDark
@@ -1740,6 +2165,29 @@ private fun MagazineArticleHeader(
             }
         }
 
+        val isCarpoolTopic = pageData.categorySlug.equals("carpool", ignoreCase = true) ||
+            pageData.categoryName.trim() == "拼车"
+
+        if (marketReference != null) {
+            MarketPremiumReferenceCard(
+                state = marketReference,
+                cooldownRemainingSeconds = marketCooldownRemainingSeconds,
+                onSearchRemote = { onSearchMarketRemote?.invoke(null) },
+                onSearchWithQuery = { editedQuery -> onSearchMarketRemote?.invoke(editedQuery) },
+                onOpenTopic = onOpenMarketTopic,
+                onOpenValuation = onOpenMarketValuation,
+            )
+        }
+
+        if (canEditTopic && isCarpoolTopic) {
+            CarpoolQuickStatusBar(
+                topicTitle = pageData.title,
+                isMutating = isMutatingTopic,
+                onQuickSelectTag = { tag -> onQuickCarpoolStatus?.invoke(tag) },
+                onOpenStatusSheet = { onOpenCarpoolStatusSheet?.invoke() },
+            )
+        }
+
         PulseGradientDivider(
             color = categorySpec.spineColor.copy(alpha = 0.42f),
             thickness = 1.dp,
@@ -1753,6 +2201,9 @@ private fun OpeningFloorArticleBody(
     isSubPageExpanded: Boolean,
     isBusy: Boolean,
     canEditTopic: Boolean,
+    nsAppWidgetController: NsAppWidgetController = NoOpNsAppWidgetController,
+    detectedLuckySpec: LuckyDrawSpec? = null,
+    onOpenLuckySheet: (LuckyDrawSpec) -> Unit = {},
     onCollapseSubPageOp: () -> Unit,
     onMentionClick: (String) -> Unit,
     onFloorClick: (Int) -> Unit,
@@ -1812,7 +2263,15 @@ private fun OpeningFloorArticleBody(
                 onFloorClick = onFloorClick,
                 onUrlClick = onUrlClick,
                 onUrlLongClick = onUrlLongClick,
+                nsAppWidgetController = nsAppWidgetController,
             )
+
+            if (detectedLuckySpec != null) {
+                LuckyDrawInlineBannerCard(
+                    spec = detectedLuckySpec,
+                    onOpenLuckySheet = { onOpenLuckySheet(detectedLuckySpec) },
+                )
+            }
 
             // Optional Author Signature Footnote
             val sig = openingFloor.signatureMarkdown?.trim().orEmpty()
@@ -2037,6 +2496,7 @@ private fun ThreadedFloorReplyRow(
     isHighlighted: Boolean,
     isBusy: Boolean,
     showTrustQuickBadge: Boolean,
+    nsAppWidgetController: NsAppWidgetController = NoOpNsAppWidgetController,
     onAuthorClick: () -> Unit,
     onAvatarClick: () -> Unit,
     onMentionClick: (String) -> Unit,
@@ -2251,6 +2711,7 @@ private fun ThreadedFloorReplyRow(
                 onFloorClick = onFloorClick,
                 onUrlClick = onUrlClick,
                 onUrlLongClick = onUrlLongClick,
+                nsAppWidgetController = nsAppWidgetController,
             )
 
             // Author Signature (if non-blank)
@@ -3190,15 +3651,18 @@ private fun FloorActionBottomSheet(
     comment: FloorComment,
     isViewerTopicAuthor: Boolean,
     canEdit: Boolean,
+    canTipStardust: Boolean = false,
     firstMerchantLinkUrl: String? = null,
     merchantLinkCount: Int = 0,
     onDismiss: () -> Unit,
+    onTipStardust: () -> Unit = {},
     onInspectSellerTrust: () -> Unit,
     onAddMerchantLinkToRestock: (String) -> Unit,
     onReplyOrQuote: () -> Unit,
     onDrumstick: () -> Unit,
     onFreeTextSelect: () -> Unit,
     onCopyMarkdown: () -> Unit,
+    onShareLongImage: () -> Unit = {},
     onEdit: () -> Unit,
     onTogglePin: () -> Unit,
 ) {
@@ -3286,6 +3750,20 @@ private fun FloorActionBottomSheet(
                     iconTint = ext.onDrumstickContainer,
                     onClick = onDrumstick,
                 )
+                if (canTipStardust) {
+                    PulseGradientDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(horizontal = 14.dp),
+                    )
+                    FloorSheetActionRow(
+                        icon = Icons.Rounded.AutoAwesome,
+                        label = "投喂星尘",
+                        subtitle = "向 @${comment.author.username} 转账打赏星尘",
+                        badgeContainer = ext.stardustContainer,
+                        iconTint = ext.onStardustContainer,
+                        onClick = onTipStardust,
+                    )
+                }
                 PulseGradientDivider(
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     modifier = Modifier.padding(horizontal = 14.dp),
@@ -3304,6 +3782,18 @@ private fun FloorActionBottomSheet(
                     icon = Icons.Rounded.ContentCopy,
                     label = "复制 Markdown 源码",
                     onClick = onCopyMarkdown,
+                )
+                PulseGradientDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                )
+                FloorSheetActionRow(
+                    icon = Icons.Rounded.Image,
+                    label = "生成长图分享",
+                    subtitle = "导出当前楼层为杂志级长图 + 原帖二维码",
+                    badgeContainer = MaterialTheme.colorScheme.primaryContainer,
+                    iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = onShareLongImage,
                 )
                 if (comment.author.uid > 0L) {
                     PulseGradientDivider(
@@ -3584,6 +4074,7 @@ private fun splitTextForSelectionChunks(rawText: String): List<String> {
 @Composable
 private fun SelectableMarkdownBottomSheet(
     comment: FloorComment,
+    nsAppWidgetController: NsAppWidgetController = NoOpNsAppWidgetController,
     onDismiss: () -> Unit,
     onCopyAllMarkdown: () -> Unit,
     onMentionClick: (String) -> Unit,
@@ -3743,6 +4234,7 @@ private fun SelectableMarkdownBottomSheet(
                             onMentionClick = onMentionClick,
                             onFloorClick = onFloorClick,
                             onUrlClick = onUrlClick,
+                            nsAppWidgetController = nsAppWidgetController,
                         )
                     } else {
                         val textChunks = remember(comment.markdownBody) {

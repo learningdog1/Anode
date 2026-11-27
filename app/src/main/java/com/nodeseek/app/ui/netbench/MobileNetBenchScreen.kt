@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Edit
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Tune
@@ -82,6 +84,10 @@ import com.nodeseek.app.domain.netbench.Iperf3TestMode
 import com.nodeseek.app.domain.netbench.PreferredIpFamily
 import com.nodeseek.app.domain.netbench.TcpPingConfig
 import com.nodeseek.app.domain.netbench.TcpPortPreset
+import com.nodeseek.app.domain.netbench.TracerouteConfig
+import com.nodeseek.app.ui.baseline.BaselineActionRow
+import com.nodeseek.app.ui.baseline.BaselineComparisonBottomSheet
+import com.nodeseek.app.ui.baseline.SaveBaselineDialog
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseTextField
 import com.nodeseek.app.ui.components.SortSegmentItem
@@ -125,6 +131,7 @@ fun MobileNetBenchScreen(
             imageHostRepository = LocalAppContainer.current.imageHostRepository,
             settingsRepository = LocalAppContainer.current.settingsRepository,
             sshVaultRepository = LocalAppContainer.current.sshVaultRepository,
+            sshSessionManager = LocalAppContainer.current.sshSessionManager,
         ),
     ),
 ) {
@@ -139,6 +146,8 @@ fun MobileNetBenchScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     var directSshControlTrigger by rememberSaveable { mutableIntStateOf(0) }
     var showVaultHostPicker by rememberSaveable { mutableStateOf(false) }
+    var showReverseVaultPicker by rememberSaveable { mutableStateOf(false) }
+    var showReverseConfigServerPicker by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(isDark) {
         viewModel.updateRenderDarkTheme(isDark)
@@ -192,7 +201,7 @@ fun MobileNetBenchScreen(
                         maxLines = 1,
                     )
                     Text(
-                        text = "Ping · TCPing · 原生 iperf3 · IP 原生/广播鉴定",
+                        text = "Ping · TCPing · 去/回程 MTR · 原生 iperf3 · IP 鉴定",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -255,6 +264,13 @@ fun MobileNetBenchScreen(
                         uiState = uiState,
                         onToggleIcmpPing = viewModel::toggleIcmpPing,
                         onToggleTcpPing = viewModel::toggleTcpPing,
+                        onToggleTraceroute = viewModel::toggleTraceroute,
+                        onToggleReverseTraceroute = viewModel::toggleReverseTraceroute,
+                        onSelectReverseServerClick = {
+                            keyboardController?.hide()
+                            showReverseConfigServerPicker = true
+                        },
+                        onTracerouteProbesChange = viewModel::updateTracerouteProbesPerHop,
                         onToggleIpCheck = viewModel::toggleIpCheck,
                         onToggleIperf3 = viewModel::toggleIperf3,
                         onToggleHttpProbe = viewModel::toggleHttpProbe,
@@ -347,6 +363,69 @@ fun MobileNetBenchScreen(
                 }
             }
 
+            // 8.5 Visual Traceroute / MTR & 1-Tap VPS Reverse Trace Card
+            if (uiState.enableTraceroute ||
+                uiState.enableReverseTraceroute ||
+                uiState.tracerouteProgress != null ||
+                uiState.reverseTracerouteResult != null ||
+                uiState.isRunningReverseTrace ||
+                !uiState.reverseTraceError.isNullOrBlank()
+            ) {
+                item(key = "traceroute_card") {
+                    val selectedReverseServer = uiState.selectedReverseServerId?.let { id ->
+                        uiState.vaultServers.firstOrNull { it.id == id }
+                    }
+                    val matchedServer = remember(uiState.targetInput, uiState.vaultServers) {
+                        val norm = normalizeHostForVaultMatch(uiState.targetInput)
+                        if (norm.isEmpty()) null else uiState.vaultServers.firstOrNull {
+                            normalizeHostForVaultMatch(it.resolvableNetBenchHost()) == norm
+                        }
+                    }
+                    NetBenchTracerouteCard(
+                        targetInput = uiState.targetInput,
+                        isRunningBenchmark = uiState.isRunning,
+                        forwardProgress = if (uiState.enableTraceroute) uiState.tracerouteProgress else null,
+                        reverseSummary = if (uiState.enableReverseTraceroute) uiState.reverseTracerouteResult else null,
+                        isRunningReverseTrace = uiState.isRunningReverseTrace,
+                        reverseTraceError = if (uiState.enableReverseTraceroute) uiState.reverseTraceError else null,
+                        selectedReverseServer = selectedReverseServer,
+                        clientEgress = uiState.clientEgress,
+                        vaultServers = uiState.vaultServers,
+                        enableForwardTrace = uiState.enableTraceroute,
+                        enableReverseTrace = uiState.enableReverseTraceroute,
+                        onRunForwardTraceOnly = {
+                            keyboardController?.hide()
+                            viewModel.runForwardTracerouteOnly()
+                        },
+                        onTriggerReverseTrace = {
+                            keyboardController?.hide()
+                            val targetServer = selectedReverseServer ?: matchedServer
+                            if (targetServer != null) {
+                                viewModel.runReverseTraceroute(targetServer)
+                            } else {
+                                showReverseVaultPicker = true
+                            }
+                        },
+                        onPickReverseServer = {
+                            keyboardController?.hide()
+                            showReverseVaultPicker = true
+                        },
+                    )
+                }
+            }
+
+            // 8.9 Purchase Baseline Actions (R7)
+            if (uiState.hasAnyResult && !uiState.isRunning) {
+                item(key = "baseline_actions") {
+                    BaselineActionRow(
+                        matchingBaselineCount = uiState.matchingBaselines.size,
+                        totalBaselineCount = uiState.savedBaselines.size,
+                        onSaveAsBaseline = viewModel::openSaveBaselineDialog,
+                        onOpenCompare = { viewModel.openBaselineCompareSheet() },
+                    )
+                }
+            }
+
             // 9. Unified NodeSeek Markdown Report Card
             if (uiState.generatedMarkdown.isNotBlank()) {
                 item(key = "markdown_report_card") {
@@ -410,6 +489,44 @@ fun MobileNetBenchScreen(
         )
     }
 
+    if (showReverseVaultPicker && !uiState.isRunningReverseTrace) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                showReverseVaultPicker = false
+                viewModel.runReverseTraceroute(server)
+            },
+            onDismiss = { showReverseVaultPicker = false },
+            onNavigateToVault = onNavigateToVault
+                ?: onOpenLiteSshIperf3Setup?.let { openSsh -> { openSsh("", 0) } },
+        )
+    }
+
+    if (showReverseConfigServerPicker && !uiState.isRunning) {
+        VaultHostPickerSheet(
+            servers = uiState.vaultServers,
+            currentTargetInput = uiState.targetInput,
+            onSelectServer = { server ->
+                keyboardController?.hide()
+                showReverseConfigServerPicker = false
+                viewModel.selectReverseServer(server.id)
+            },
+            onDismiss = { showReverseConfigServerPicker = false },
+            onNavigateToVault = onNavigateToVault
+                ?: onOpenLiteSshIperf3Setup?.let { openSsh -> { openSsh("", 0) } },
+        )
+    }
+
+    uiState.pendingReverseTraceHostKeyMismatch?.let { mismatch ->
+        ReverseTraceHostKeyMismatchDialog(
+            mismatch = mismatch,
+            onTrustAndContinue = viewModel::confirmTrustReverseTraceHostKey,
+            onDismiss = viewModel::dismissReverseTraceHostKeyMismatch,
+        )
+    }
+
     NetBenchIperf3DialogsHost(
         showPrepPrompt = uiState.showIperf3ServerPrompt,
         openDirectSshControlTrigger = directSshControlTrigger,
@@ -423,6 +540,42 @@ fun MobileNetBenchScreen(
         },
         onNavigateToLiteSsh = onOpenLiteSshIperf3Setup,
     )
+
+    if (uiState.showSaveBaselineDialog) {
+        val suggestedName = uiState.resolvedTarget?.displayHost?.takeIf { it.isNotBlank() }
+            ?: uiState.targetInput.trim().ifBlank { "测机目标" }
+        SaveBaselineDialog(
+            defaultLabel = "$suggestedName · 购入基线",
+            onConfirm = { label, notes -> viewModel.saveCurrentAsBaseline(label, notes) },
+            onDismiss = viewModel::dismissSaveBaselineDialog,
+        )
+    }
+
+    if (uiState.showBaselineCompareSheet) {
+        BaselineComparisonBottomSheet(
+            diff = uiState.activeBaselineDiff,
+            allBaselines = uiState.savedBaselines,
+            matchingBaselineIds = remember(uiState.matchingBaselines) {
+                uiState.matchingBaselines.mapTo(HashSet()) { it.id }
+            },
+            selectedBaselineId = uiState.selectedBaselineIdForCompare,
+            maskTargetIp = uiState.maskTargetIpInReport,
+            onSelectBaseline = viewModel::selectBaselineForComparison,
+            onDeleteBaseline = viewModel::deleteBaseline,
+            onToggleMaskTargetIp = viewModel::toggleMaskTargetIp,
+            onCopyMarkdown = { md ->
+                val ok = copyTextToClipboard(context, "Before vs After 对比卡", md)
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(if (ok) "已复制对比卡 Markdown" else "复制失败")
+                }
+            },
+            onPublishMarkdown = onInsertMarkdown,
+            onFeedbackMessage = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = viewModel::dismissBaselineCompareSheet,
+        )
+    }
 }
 
 @Composable
@@ -609,6 +762,10 @@ private fun TestModulesConfigCard(
     uiState: MobileNetBenchUiState,
     onToggleIcmpPing: (Boolean) -> Unit,
     onToggleTcpPing: (Boolean) -> Unit,
+    onToggleTraceroute: (Boolean) -> Unit,
+    onToggleReverseTraceroute: (Boolean) -> Unit,
+    onSelectReverseServerClick: () -> Unit,
+    onTracerouteProbesChange: (Int) -> Unit,
     onToggleIpCheck: (Boolean) -> Unit,
     onToggleIperf3: (Boolean) -> Unit,
     onToggleHttpProbe: (Boolean) -> Unit,
@@ -629,7 +786,7 @@ private fun TestModulesConfigCard(
     ) {
         PulseSectionHeader(
             title = "测机项目开关",
-            subtitle = "按需组合延迟、IP 鉴定与带宽测速",
+            subtitle = "按需组合延迟、去程/回程 MTR、IP 鉴定与带宽测速",
             icon = Icons.Rounded.Tune,
         )
 
@@ -649,6 +806,97 @@ private fun TestModulesConfigCard(
             enabled = !uiState.isRunning,
             onCheckedChange = onToggleTcpPing,
         )
+        ModuleToggleRow(
+            title = "去程 MTR (手机 → VPS)",
+            subtitle = "多协议并发追踪去程路由与丢包，自动识别 CN2 GIA / 9929 / CMIN2 / 4837 / IIJ / SoftBank",
+            icon = Icons.AutoMirrored.Rounded.AltRoute,
+            checked = uiState.enableTraceroute,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleTraceroute,
+        )
+        AnimatedVisibility(
+            visible = uiState.enableTraceroute,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 28.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "每跳探测轮数",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TracerouteConfig.PROBE_COUNT_PRESETS.forEach { count ->
+                        NetBenchSelectableChip(
+                            label = "${count}次/跳",
+                            selected = uiState.tracerouteProbesPerHop == count,
+                            enabled = !uiState.isRunning,
+                            onClick = { onTracerouteProbesChange(count) },
+                        )
+                    }
+                }
+            }
+        }
+        ModuleToggleRow(
+            title = "回程 MTR (VPS → 手机)",
+            subtitle = "经由远端 VPS（nexttrace / mtr / traceroute）反向追踪至本机真实出口 IP",
+            icon = Icons.Rounded.SwapHoriz,
+            checked = uiState.enableReverseTraceroute,
+            enabled = !uiState.isRunning,
+            onCheckedChange = onToggleReverseTraceroute,
+        )
+        AnimatedVisibility(
+            visible = uiState.enableReverseTraceroute,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            val selectedReverseServer = uiState.selectedReverseServerId?.let { id ->
+                uiState.vaultServers.firstOrNull { it.id == id }
+            }
+            val matchedReverseServer = remember(uiState.targetInput, uiState.vaultServers) {
+                val norm = normalizeHostForVaultMatch(uiState.targetInput)
+                if (norm.isEmpty()) null else uiState.vaultServers.firstOrNull {
+                    normalizeHostForVaultMatch(it.resolvableNetBenchHost()) == norm
+                }
+            }
+            val effectiveReverseServer = selectedReverseServer ?: matchedReverseServer
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 28.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = if (effectiveReverseServer != null) {
+                        "回程 SSH：${effectiveReverseServer.displayName}"
+                    } else if (uiState.vaultServers.isEmpty()) {
+                        "需先在保险库添加 SSH 服务器"
+                    } else {
+                        "未匹配到目标对应 SSH，请手动选择"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                NetBenchSelectableChip(
+                    label = if (effectiveReverseServer != null) "切换服务器" else "选择服务器",
+                    selected = effectiveReverseServer != null,
+                    icon = Icons.Rounded.Terminal,
+                    enabled = !uiState.isRunning,
+                    onClick = onSelectReverseServerClick,
+                )
+            }
+        }
         ModuleToggleRow(
             title = "IP 归属与原生/广播鉴定",
             subtitle = "多源 GeoIP + RIR WHOIS/RDAP 比对原生与广播 IP",

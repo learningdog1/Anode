@@ -1,6 +1,8 @@
 package com.nodeseek.app.data.network
 
 import android.webkit.CookieManager
+import com.nodeseek.app.domain.model.CookieHostScope
+import com.nodeseek.app.domain.model.StoredCookieRecord
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.Headers
@@ -8,7 +10,6 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.io.IOException
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -52,14 +53,15 @@ class NodeSeekApiException(
 class WebViewCookieBridge internal constructor(
     private val forceInMemory: Boolean,
     private val cookieManagerProvider: () -> CookieManager?,
-) : CookieJar {
+) : CookieJar, SessionCookieStore {
 
     constructor(forceInMemory: Boolean = false) : this(
         forceInMemory = forceInMemory,
         cookieManagerProvider = { CookieManager.getInstance() },
     )
 
-    private val inMemoryCookies = CopyOnWriteArrayList<Cookie>()
+    private val inMemoryCookiesLock = Any()
+    private val inMemoryCookies = ArrayList<Cookie>()
     private val cachedSystemCookieManager = AtomicReference<CookieManager?>(null)
 
     /**
@@ -118,7 +120,7 @@ class WebViewCookieBridge internal constructor(
         return cookies.joinToString("; ") { "${it.name}=${it.value}" }
     }
 
-    fun hasClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
+    override fun hasClearanceCookie(url: HttpUrl): Boolean =
         loadForRequest(url).any { it.name.equals("cf_clearance", ignoreCase = true) && it.value.isNotBlank() }
 
     fun hasSessionCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
@@ -130,29 +132,160 @@ class WebViewCookieBridge internal constructor(
                 )
         }
 
-    fun hasAnyAuthCookie(
-        urls: List<HttpUrl> = listOf(
-            NodeSeekUrlNormalizer.ORIGIN.toHttpUrl(),
-            "https://${NodeSeekUrlNormalizer.BARE_HOST}/".toHttpUrl(),
-        ),
-    ): Boolean {
+    override fun hasAnyAuthCookie(urls: List<HttpUrl>): Boolean {
         for (target in urls) {
             for (cookie in loadForRequest(target)) {
-                val lower = cookie.name.trim().lowercase()
-                if (cookie.value.isBlank() ||
-                    isUnreplayableCookie(lower) ||
-                    isCloudflarePreservedCookie(lower) ||
-                    lower == "colorscheme" ||
-                    lower.startsWith("__cf") ||
-                    lower.startsWith("_cf") ||
-                    lower.startsWith("cf_")
-                ) {
+                if (cookie.value.isBlank() || isIgnoredForAccountExport(cookie.name)) {
                     continue
                 }
                 return true
             }
         }
         return false
+    }
+
+    override fun exportAccountCookies(): List<StoredCookieRecord> {
+        val wwwUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()
+        val bareUrl = "https://${NodeSeekUrlNormalizer.BARE_HOST}/".toHttpUrl()
+
+        val wwwMap = LinkedHashMap<String, String>()
+        for (cookie in loadForRequest(wwwUrl)) {
+            if (cookie.name.isNotBlank() && cookie.value.isNotBlank() && !isIgnoredForAccountExport(cookie.name)) {
+                wwwMap[cookie.name] = cookie.value
+            }
+        }
+
+        val bareMap = LinkedHashMap<String, String>()
+        for (cookie in loadForRequest(bareUrl)) {
+            if (cookie.name.isNotBlank() && cookie.value.isNotBlank() && !isIgnoredForAccountExport(cookie.name)) {
+                bareMap[cookie.name] = cookie.value
+            }
+        }
+
+        val orderedNames = LinkedHashSet<String>(wwwMap.size + bareMap.size).apply {
+            addAll(wwwMap.keys)
+            addAll(bareMap.keys)
+        }
+
+        return buildList {
+            for (name in orderedNames) {
+                val wwwVal = wwwMap[name]
+                val bareVal = bareMap[name]
+                when {
+                    wwwVal != null && bareVal != null && wwwVal == bareVal -> {
+                        add(
+                            StoredCookieRecord(
+                                name = name,
+                                value = wwwVal,
+                                scope = CookieHostScope.SHARED_DOT_DOMAIN,
+                            ),
+                        )
+                    }
+                    wwwVal != null && bareVal != null -> {
+                        add(
+                            StoredCookieRecord(
+                                name = name,
+                                value = wwwVal,
+                                scope = CookieHostScope.WWW_ONLY,
+                            ),
+                        )
+                        add(
+                            StoredCookieRecord(
+                                name = name,
+                                value = bareVal,
+                                scope = CookieHostScope.BARE_ONLY,
+                            ),
+                        )
+                    }
+                    wwwVal != null -> {
+                        add(
+                            StoredCookieRecord(
+                                name = name,
+                                value = wwwVal,
+                                scope = CookieHostScope.WWW_ONLY,
+                            ),
+                        )
+                    }
+                    bareVal != null -> {
+                        add(
+                            StoredCookieRecord(
+                                name = name,
+                                value = bareVal,
+                                scope = CookieHostScope.BARE_ONLY,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    override fun restoreAccountCookies(cookies: List<StoredCookieRecord>) {
+        val validRecords = cookies.filter { record ->
+            val trimmedName = record.name.trim()
+            val trimmedValue = record.value.trim()
+            trimmedName.isNotEmpty() &&
+                trimmedValue.isNotEmpty() &&
+                !isIgnoredForAccountExport(trimmedName) &&
+                !hasUnsafeCookieChars(trimmedName) &&
+                !hasUnsafeCookieChars(trimmedValue)
+        }
+        if (validRecords.isEmpty()) {
+            flush()
+            return
+        }
+
+        val manager = resolveSystemCookieManager()
+        if (manager != null) {
+            var wroteToSystem = false
+            for (record in validRecords) {
+                val name = record.name.trim()
+                val value = record.value.trim()
+                val (targetUrl, header) = when (record.scope) {
+                    CookieHostScope.SHARED_DOT_DOMAIN ->
+                        NodeSeekUrlNormalizer.ORIGIN to
+                            "$name=$value; Domain=.${NodeSeekUrlNormalizer.BARE_HOST}; Max-Age=$RESTORED_COOKIE_MAX_AGE_SECONDS; Path=/; Secure"
+                    CookieHostScope.WWW_ONLY ->
+                        NodeSeekUrlNormalizer.ORIGIN to
+                            "$name=$value; Max-Age=$RESTORED_COOKIE_MAX_AGE_SECONDS; Path=/; Secure"
+                    CookieHostScope.BARE_ONLY ->
+                        "https://${NodeSeekUrlNormalizer.BARE_HOST}" to
+                            "$name=$value; Max-Age=$RESTORED_COOKIE_MAX_AGE_SECONDS; Path=/; Secure"
+                }
+                runCatching {
+                    manager.setCookie(targetUrl, header)
+                    wroteToSystem = true
+                }
+            }
+            if (wroteToSystem) {
+                flush()
+                return
+            }
+        }
+
+        val expiresAt = System.currentTimeMillis() + RESTORED_COOKIE_MAX_AGE_SECONDS * 1000L
+        val okCookies = validRecords.mapNotNull { record ->
+            val name = record.name.trim()
+            val value = record.value.trim()
+            runCatching {
+                val builder = Cookie.Builder()
+                    .name(name)
+                    .value(value)
+                    .path("/")
+                    .secure()
+                    .expiresAt(expiresAt)
+                when (record.scope) {
+                    CookieHostScope.SHARED_DOT_DOMAIN -> builder.domain(NodeSeekUrlNormalizer.BARE_HOST)
+                    CookieHostScope.WWW_ONLY -> builder.hostOnlyDomain(NodeSeekUrlNormalizer.CANONICAL_HOST)
+                    CookieHostScope.BARE_ONLY -> builder.hostOnlyDomain(NodeSeekUrlNormalizer.BARE_HOST)
+                }
+                builder.build()
+            }.getOrNull()
+        }
+        if (okCookies.isNotEmpty()) {
+            saveInMemory(okCookies)
+        }
+        flush()
     }
 
     fun hasSessionOrClearanceCookie(url: HttpUrl = NodeSeekUrlNormalizer.ORIGIN.toHttpUrl()): Boolean =
@@ -193,7 +326,9 @@ class WebViewCookieBridge internal constructor(
      * `?sortBy=` in explicit query strings.
      */
     fun dropUnreplayableCookies() {
-        inMemoryCookies.removeAll { isUnreplayableCookie(it.name) }
+        synchronized(inMemoryCookiesLock) {
+            inMemoryCookies.removeIf { isUnreplayableCookie(it.name) }
+        }
         val manager = resolveSystemCookieManager() ?: return
         for (name in UNREPLAYABLE_COOKIE_NAMES) {
             runCatching {
@@ -206,7 +341,7 @@ class WebViewCookieBridge internal constructor(
         }
     }
 
-    fun flush() {
+    override fun flush() {
         dropUnreplayableCookies()
         runCatching {
             resolveSystemCookieManager()?.flush()
@@ -218,9 +353,11 @@ class WebViewCookieBridge internal constructor(
      * `.nodeseek.com` without hardcoding session cookie names. Preserves Cloudflare `cf_clearance`
      * unless [includeClearance] is `true` so guest browsing avoids an immediate challenge loop.
      */
-    fun clearSessionCookies(includeClearance: Boolean = false) {
-        inMemoryCookies.removeAll { cookie ->
-            includeClearance || !isCloudflarePreservedCookie(cookie.name)
+    override fun clearSessionCookies(includeClearance: Boolean) {
+        synchronized(inMemoryCookiesLock) {
+            inMemoryCookies.removeIf { cookie ->
+                includeClearance || !isCloudflarePreservedCookie(cookie.name)
+            }
         }
         val manager = resolveSystemCookieManager() ?: return
         val targetUrls = listOf(
@@ -242,7 +379,9 @@ class WebViewCookieBridge internal constructor(
     }
 
     fun clearAllCookies() {
-        inMemoryCookies.clear()
+        synchronized(inMemoryCookiesLock) {
+            inMemoryCookies.clear()
+        }
         val manager = resolveSystemCookieManager() ?: return
         runCatching {
             manager.removeAllCookies(null)
@@ -268,33 +407,51 @@ class WebViewCookieBridge internal constructor(
 
     private fun saveInMemory(newCookies: List<Cookie>) {
         val now = System.currentTimeMillis()
-        for (incoming in newCookies) {
-            if (isUnreplayableCookie(incoming.name)) continue
-            inMemoryCookies.removeAll { existing ->
-                existing.name == incoming.name &&
-                    existing.domain == incoming.domain &&
-                    existing.path == incoming.path
-            }
-            if (incoming.expiresAt > now) {
-                inMemoryCookies.add(incoming)
+        synchronized(inMemoryCookiesLock) {
+            for (incoming in newCookies) {
+                if (isUnreplayableCookie(incoming.name)) continue
+                inMemoryCookies.removeIf { existing ->
+                    existing.name == incoming.name &&
+                        existing.domain == incoming.domain &&
+                        existing.path == incoming.path
+                }
+                if (incoming.expiresAt > now) {
+                    inMemoryCookies.add(incoming)
+                }
             }
         }
     }
 
     private fun loadInMemory(url: HttpUrl): List<Cookie> {
         val now = System.currentTimeMillis()
-        inMemoryCookies.removeAll { it.expiresAt <= now || isUnreplayableCookie(it.name) }
-        return inMemoryCookies.filter { it.matches(url) }
+        return synchronized(inMemoryCookiesLock) {
+            inMemoryCookies.removeIf { it.expiresAt <= now || isUnreplayableCookie(it.name) }
+            inMemoryCookies.filter { it.matches(url) }
+        }
     }
 
     companion object {
         private val UNREPLAYABLE_COOKIE_NAMES = setOf("sortBy")
+        private const val RESTORED_COOKIE_MAX_AGE_SECONDS = 2_592_000L
 
         fun isUnreplayableCookie(name: String): Boolean =
             UNREPLAYABLE_COOKIE_NAMES.any { it.equals(name.trim(), ignoreCase = true) }
 
         fun isCloudflarePreservedCookie(name: String): Boolean =
             name.trim().equals("cf_clearance", ignoreCase = true)
+
+        internal fun isIgnoredForAccountExport(name: String): Boolean {
+            val lower = name.trim().lowercase()
+            return isUnreplayableCookie(lower) ||
+                isCloudflarePreservedCookie(lower) ||
+                lower == "colorscheme" ||
+                lower.startsWith("__cf") ||
+                lower.startsWith("_cf") ||
+                lower.startsWith("cf_")
+        }
+
+        private fun hasUnsafeCookieChars(value: String): Boolean =
+            value.indexOfAny(charArrayOf(';', '\r', '\n')) >= 0
 
         fun parseCookieHeader(url: HttpUrl, cookieHeader: String): List<Cookie> {
             if (cookieHeader.isBlank()) return emptyList()

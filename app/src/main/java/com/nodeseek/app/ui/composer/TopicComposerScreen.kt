@@ -48,6 +48,7 @@ import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Calculate
+import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Computer
@@ -59,9 +60,12 @@ import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.FormatBold
 import androidx.compose.material.icons.rounded.FormatItalic
 import androidx.compose.material.icons.rounded.FormatQuote
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.HowToVote
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Restaurant
@@ -114,8 +118,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nodeseek.app.di.LocalAppContainer
+import com.nodeseek.app.domain.activity.LuckyDrawSpec
+import com.nodeseek.app.domain.carpool.CarpoolStatusUpdater
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.navigation.openNodeSeekOrExternalUrl
+import com.nodeseek.app.ui.activity.LuckyDrawSheet
+import com.nodeseek.app.ui.activity.LuckyDrawSheetMode
+import com.nodeseek.app.ui.carpool.CarpoolCalculatorSheet
 import com.nodeseek.app.ui.components.AccessLockChip
 import com.nodeseek.app.ui.components.CategoryMicroTag
 import com.nodeseek.app.ui.components.MarkdownRenderer
@@ -135,6 +144,7 @@ import com.nodeseek.app.ui.netbench.NetBenchQuickBottomSheet
 import com.nodeseek.app.ui.netbench.insertNetBenchMarkdownAtCursor
 import com.nodeseek.app.ui.ssh.SshQuickInsertSheet
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
+import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
 import com.nodeseek.app.ui.valuation.insertMarkdownBlockAtCursor
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
@@ -219,8 +229,11 @@ fun TopicComposerScreen(
 
     var fallbackWebViewUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var showValuationSheet by rememberSaveable { mutableStateOf(false) }
+    var showCarpoolSheet by rememberSaveable { mutableStateOf(false) }
     var showNetBenchSheet by rememberSaveable { mutableStateOf(false) }
     var showSshSheet by rememberSaveable { mutableStateOf(false) }
+    var showLuckyGeneratorSheet by rememberSaveable { mutableStateOf(false) }
+    var showNodeImageGallery by rememberSaveable { mutableStateOf(false) }
 
     var bodyFieldValue by remember(uiState.editorRevision) {
         mutableStateOf(
@@ -336,9 +349,12 @@ fun TopicComposerScreen(
                     categorySlug = uiState.selectedCategorySlug,
                     onApplyTransform = applyEditorTransform,
                     onOpenValuationCalculator = { showValuationSheet = true },
+                    onOpenCarpoolCalculator = { showCarpoolSheet = true },
                     onOpenNetBench = { showNetBenchSheet = true },
                     onOpenSshInsert = { showSshSheet = true },
                     onOpenStickers = { viewModel.setStickerSheetVisible(true) },
+                    onOpenPollCreator = { viewModel.setPollSheetVisible(true) },
+                    onOpenLuckyGenerator = { showLuckyGeneratorSheet = true },
                     onPickPhoto = {
                         try {
                             photoPickerLauncher.launch(
@@ -350,6 +366,9 @@ fun TopicComposerScreen(
                     },
                     onPickImageFile = {
                         fallbackDocumentLauncher.launch(arrayOf("image/*"))
+                    },
+                    onOpenImageGallery = {
+                        showNodeImageGallery = true
                     },
                 )
             }
@@ -453,7 +472,59 @@ fun TopicComposerScreen(
         )
     }
 
+    if (uiState.showPollSheet) {
+        PollCreatorBottomSheet(
+            isCreatingPoll = uiState.isCreatingPoll,
+            errorMessage = uiState.pollCreateError,
+            viewerUid = uiState.session?.uid,
+            onCreatePoll = viewModel::createPollAndInsert,
+            onInsertStardustMarkdown = { snippet ->
+                viewModel.setPollSheetVisible(false)
+                applyEditorTransform { current ->
+                    insertMarkdownBlockAtCursor(current, snippet)
+                }
+            },
+            onDismiss = { viewModel.setPollSheetVisible(false) },
+        )
+    }
+
+    if (showLuckyGeneratorSheet) {
+        val initialSpec = uiState.pendingLuckyDrawSpec ?: LuckyDrawSpec(
+            postId = editTopicId ?: 0L,
+            drawTimeEpochMillis = System.currentTimeMillis() + 3_600_000L,
+        )
+        LuckyDrawSheet(
+            spec = initialSpec,
+            initialMode = LuckyDrawSheetMode.GENERATOR,
+            allowGeneratorMode = false,
+            isViewerTopicAuthor = true,
+            viewerUid = uiState.session?.uid,
+            luckyDrawRepository = appContainer.luckyDrawRepository,
+            forumRepository = appContainer.forumRepository,
+            onDismiss = { showLuckyGeneratorSheet = false },
+            onFeedbackMessage = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onInsertGeneratedLuckyMarkdown = { generatedMd, generatedSpec ->
+                showLuckyGeneratorSheet = false
+                if (editTopicId != null && generatedMd.isNotBlank()) {
+                    applyEditorTransform { current ->
+                        insertMarkdownBlockAtCursor(current, generatedMd)
+                    }
+                } else {
+                    viewModel.setPendingLuckyDrawSpec(generatedSpec)
+                }
+            },
+        )
+    }
+
     if (showValuationSheet) {
+        val suggestedLabel = remember(uiState.title, bodyFieldValue.text) {
+            extractMarketQueryWithContext(
+                title = uiState.title,
+                openingMarkdown = bodyFieldValue.text,
+            )
+        }
         VpsValuationBottomSheet(
             primaryActionLabel = "插入发帖正文",
             onInsertMarkdown = { generatedMarkdown ->
@@ -463,9 +534,32 @@ fun TopicComposerScreen(
                 }
             },
             onDismiss = { showValuationSheet = false },
+            initialMachineLabel = suggestedLabel,
             onCopiedFeedback = { msg ->
                 coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
             },
+            marketReferenceRepository = appContainer.tradeMarketReferenceRepository,
+        )
+    }
+
+    if (showCarpoolSheet) {
+        CarpoolCalculatorSheet(
+            initialServiceName = uiState.title,
+            onInsertCarpoolMarkdown = { generatedMarkdown, suggestedStatusTag ->
+                showCarpoolSheet = false
+                applyEditorTransform { current ->
+                    insertMarkdownBlockAtCursor(current, generatedMarkdown)
+                }
+                if (!suggestedStatusTag.isNullOrBlank() && uiState.title.isNotBlank()) {
+                    viewModel.onTitleChanged(
+                        CarpoolStatusUpdater.updateTitle(uiState.title, suggestedStatusTag),
+                    )
+                }
+            },
+            onCopiedFeedback = { msg ->
+                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+            },
+            onDismiss = { showCarpoolSheet = false },
         )
     }
 
@@ -514,6 +608,40 @@ fun TopicComposerScreen(
         ComposerNodeImageKeyDialog(
             onSaveAndUpload = viewModel::saveApiKeyAndUpload,
             onDismiss = viewModel::dismissApiKeyDialog,
+        )
+    }
+
+    uiState.pendingPrivacyImage?.let { pending ->
+        ImagePrivacyEditorSheet(
+            sourceBytes = pending.bytes,
+            mimeType = pending.mimeType,
+            fileName = pending.fileName,
+            onConfirmUpload = viewModel::confirmPrivacyImageUpload,
+            onSkipMosaicUpload = viewModel::skipPrivacyEditAndUpload,
+            onDismiss = viewModel::dismissPrivacyEditor,
+        )
+    }
+
+    if (showNodeImageGallery) {
+        NodeImageGallerySheet(
+            hasApiKey = uiState.settings.nodeImageApiKey.isNotBlank(),
+            imageHostRepository = appContainer.imageHostRepository,
+            onInsertMarkdown = { snippet ->
+                applyEditorTransform { current ->
+                    insertComposerMarkdown(current, prefix = snippet)
+                }
+            },
+            onOpenApiKeyConfig = {
+                showNodeImageGallery = false
+                viewModel.openApiKeyDialog()
+            },
+            onFeedbackMessage = { msg ->
+                coroutineScope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    snackbarHostState.showSnackbar(msg)
+                }
+            },
+            onDismiss = { showNodeImageGallery = false },
         )
     }
 
@@ -1329,11 +1457,15 @@ private fun ComposerBottomFormattingBar(
     categorySlug: String,
     onApplyTransform: ((TextFieldValue) -> TextFieldValue) -> Unit,
     onOpenValuationCalculator: () -> Unit,
+    onOpenCarpoolCalculator: () -> Unit = {},
     onOpenNetBench: () -> Unit,
     onOpenSshInsert: () -> Unit,
     onOpenStickers: () -> Unit,
+    onOpenPollCreator: () -> Unit = {},
+    onOpenLuckyGenerator: () -> Unit = {},
     onPickPhoto: () -> Unit,
     onPickImageFile: () -> Unit,
+    onOpenImageGallery: () -> Unit = {},
 ) {
     val categoryAccent = NodePulseThemeTokens.categorySpec(categorySlug).spineColor
     Column(
@@ -1361,6 +1493,11 @@ private fun ComposerBottomFormattingBar(
                 onClick = onOpenValuationCalculator,
             )
             ComposerToolbarButton(
+                icon = Icons.Rounded.Groups,
+                label = "拼车",
+                onClick = onOpenCarpoolCalculator,
+            )
+            ComposerToolbarButton(
                 icon = Icons.Rounded.Speed,
                 label = "测机",
                 onClick = onOpenNetBench,
@@ -1374,6 +1511,16 @@ private fun ComposerBottomFormattingBar(
                 icon = Icons.Rounded.EmojiEmotions,
                 label = "贴纸",
                 onClick = onOpenStickers,
+            )
+            ComposerToolbarButton(
+                icon = Icons.Rounded.HowToVote,
+                label = "投票",
+                onClick = onOpenPollCreator,
+            )
+            ComposerToolbarButton(
+                icon = Icons.Rounded.Casino,
+                label = "抽奖",
+                onClick = onOpenLuckyGenerator,
             )
 
             if (isUploadingImage) {
@@ -1415,6 +1562,11 @@ private fun ComposerBottomFormattingBar(
                     icon = Icons.Rounded.FolderOpen,
                     label = "文件选图",
                     onClick = onPickImageFile,
+                )
+                ComposerToolbarButton(
+                    icon = Icons.Rounded.PhotoLibrary,
+                    label = "图床相册",
+                    onClick = onOpenImageGallery,
                 )
             }
 
@@ -1556,6 +1708,7 @@ private fun ComposerToolbarButton(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

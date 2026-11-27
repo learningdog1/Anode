@@ -5,10 +5,13 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.nodeseek.app.data.fleet.DomainRdapClient
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
+import com.nodeseek.app.data.fleet.JvmTlsCertificateInspector
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
 import com.nodeseek.app.data.valuation.FxRatesState
+import com.nodeseek.app.domain.fleet.FleetAssetType
 import com.nodeseek.app.domain.fleet.FleetIdleThresholdConfig
 import com.nodeseek.app.domain.fleet.FleetMonitorSettings
 import com.nodeseek.app.domain.fleet.FleetPortfolioCalculator
@@ -25,6 +28,7 @@ import com.nodeseek.app.domain.fleet.ProbeServerSnapshot
 import com.nodeseek.app.domain.fleet.RestockAssetPrefill
 import com.nodeseek.app.domain.fleet.ServerIdleAssessment
 import com.nodeseek.app.domain.fleet.ServerTrafficForecast
+import com.nodeseek.app.domain.fleet.TlsCertificateInspector
 import com.nodeseek.app.domain.fleet.VpsAssetRecord
 import com.nodeseek.app.domain.fleet.formatBytesBinary
 import com.nodeseek.app.domain.valuation.BillingCyclePreset
@@ -35,6 +39,7 @@ import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -57,7 +62,9 @@ import java.time.Clock
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 enum class MyServersTab(val label: String) {
     PROBES("探针状态"),
@@ -68,6 +75,12 @@ enum class ProbeOnlineFilter(val label: String) {
     ALL("全部"),
     ONLINE("在线"),
     OFFLINE("离线"),
+}
+
+enum class AssetCategoryFilter(val label: String) {
+    ALL("全部"),
+    VPS("VPS 小鸡"),
+    DOMAIN_CERT("域名·证书"),
 }
 
 enum class PanelManagerSection {
@@ -106,6 +119,21 @@ data class AssetEditorDraft(
     val autoRenewNote: String = "",
     val notes: String = "",
     val openSalePostAfterSave: Boolean = false,
+    val assetType: FleetAssetType = FleetAssetType.VPS,
+    val domainName: String = "",
+    val registrarName: String = "",
+    val domainCreatedIso: String? = null,
+    val rdapSyncedAtEpochMillis: Long? = null,
+    val rdapStatusTags: List<String> = emptyList(),
+    val tlsHost: String = "",
+    val tlsPort: String = VpsAssetRecord.DEFAULT_TLS_PORT.toString(),
+    val tlsExpiresAtEpochMillis: Long? = null,
+    val tlsIssuer: String = "",
+    val tlsSubject: String = "",
+    val tlsCheckedAtEpochMillis: Long? = null,
+    val tlsCheckError: String? = null,
+    val rdapSyncRevision: Int = 0,
+    val tlsCheckRevision: Int = 0,
 ) {
     companion object {
         private val ISO_FORMAT: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
@@ -138,6 +166,19 @@ data class AssetEditorDraft(
             autoRenew = record.autoRenew,
             autoRenewNote = record.autoRenewNote,
             notes = record.notes,
+            assetType = record.assetType,
+            domainName = record.domainName.orEmpty(),
+            registrarName = record.registrarName,
+            domainCreatedIso = record.domainCreatedIso,
+            rdapSyncedAtEpochMillis = record.rdapSyncedAtEpochMillis,
+            rdapStatusTags = record.rdapStatusTags,
+            tlsHost = record.tlsHost.orEmpty(),
+            tlsPort = record.tlsPort.toString(),
+            tlsExpiresAtEpochMillis = record.tlsExpiresAtEpochMillis,
+            tlsIssuer = record.tlsIssuer,
+            tlsSubject = record.tlsSubject,
+            tlsCheckedAtEpochMillis = record.tlsCheckedAtEpochMillis,
+            tlsCheckError = record.tlsCheckError,
         )
     }
 }
@@ -172,6 +213,13 @@ data class MyServersUiState(
     val assetSaveError: String? = null,
     val salePostAsset: VpsAssetRecord? = null,
     val bindingProbeAsset: VpsAssetRecord? = null,
+    val assetCategoryFilter: AssetCategoryFilter = AssetCategoryFilter.ALL,
+    val filteredAssets: List<VpsAssetRecord> = emptyList(),
+    val isLookingUpRdap: Boolean = false,
+    val rdapLookupError: String? = null,
+    val isCheckingTls: Boolean = false,
+    val tlsCheckResultMessage: String? = null,
+    val refreshingDomainAssetIds: Set<String> = emptySet(),
 )
 
 class MyServersViewModel(
@@ -185,10 +233,20 @@ class MyServersViewModel(
     private val idleThresholdConfig: FleetIdleThresholdConfig = FleetIdleThresholdConfig(),
     initialTab: MyServersTab = MyServersTab.PROBES,
     private val computationDispatcher: CoroutineDispatcher? = null,
+    private val domainRdapClient: DomainRdapClient? = null,
+    private val tlsCertificateInspector: TlsCertificateInspector? = null,
 ) : ViewModel() {
+
+    private val effectiveRdapClient: DomainRdapClient
+        get() = domainRdapClient ?: DomainRdapClient.sharedDefault
+
+    private val effectiveTlsInspector: TlsCertificateInspector by lazy {
+        tlsCertificateInspector ?: JvmTlsCertificateInspector(nowMillisProvider = nowMillisProvider)
+    }
 
     private val _selectedTab = MutableStateFlow(initialTab)
     private val _probeFilter = MutableStateFlow(ProbeOnlineFilter.ALL)
+    private val _assetCategoryFilter = MutableStateFlow(AssetCategoryFilter.ALL)
     private val _selectedPanelIdFilter = MutableStateFlow<String?>(null)
     private val _showPanelManagerSheet = MutableStateFlow(false)
     private val _panelManagerInitialSection = MutableStateFlow(PanelManagerSection.PANELS)
@@ -199,9 +257,20 @@ class MyServersViewModel(
     private val _assetSaveError = MutableStateFlow<String?>(null)
     private val _salePostAsset = MutableStateFlow<VpsAssetRecord?>(null)
     private val _bindingProbeAsset = MutableStateFlow<VpsAssetRecord?>(null)
+    private val _isLookingUpRdap = MutableStateFlow(false)
+    private val _rdapLookupError = MutableStateFlow<String?>(null)
+    private val _isCheckingTls = MutableStateFlow(false)
+    private val _tlsCheckResultMessage = MutableStateFlow<String?>(null)
+    private val _refreshingDomainAssetIds = MutableStateFlow<Set<String>>(emptySet())
 
     private val probeRefreshMutex = Mutex()
     private val manualRefreshRequested = AtomicBoolean(false)
+    private val rdapLookupSeq = AtomicLong(0L)
+    private var rdapLookupJob: Job? = null
+    private val tlsCheckSeq = AtomicLong(0L)
+    private var tlsCheckJob: Job? = null
+    private val assetRefreshSeqs = ConcurrentHashMap<String, AtomicLong>()
+    private val assetRefreshJobs = ConcurrentHashMap<String, Job>()
 
     private val _snackbarChannel = Channel<String>(Channel.BUFFERED)
     val snackbarMessages: Flow<String> = _snackbarChannel.receiveAsFlow()
@@ -209,6 +278,7 @@ class MyServersViewModel(
     private data class NavigationFilterState(
         val tab: MyServersTab,
         val probeFilter: ProbeOnlineFilter,
+        val assetCategoryFilter: AssetCategoryFilter,
         val panelIdFilter: String?,
         val showPanelManager: Boolean,
         val panelManagerInitialSection: PanelManagerSection,
@@ -222,6 +292,11 @@ class MyServersViewModel(
         val panelSaveSuccessVersion: Long,
         val saleAsset: VpsAssetRecord?,
         val bindingAsset: VpsAssetRecord?,
+        val isLookingUpRdap: Boolean,
+        val rdapLookupError: String?,
+        val isCheckingTls: Boolean,
+        val tlsCheckResultMessage: String?,
+        val refreshingDomainAssetIds: Set<String>,
     )
 
     private data class RepoCollections(
@@ -240,9 +315,10 @@ class MyServersViewModel(
         combine(
             _selectedTab,
             _probeFilter,
+            _assetCategoryFilter,
             _selectedPanelIdFilter,
-        ) { tab, probeFilter, panelIdFilter ->
-            Triple(tab, probeFilter, panelIdFilter)
+        ) { tab, probeFilter, assetFilter, panelIdFilter ->
+            Quad(tab, probeFilter, assetFilter, panelIdFilter)
         },
         combine(
             _showPanelManagerSheet,
@@ -251,15 +327,26 @@ class MyServersViewModel(
         ) { showPanelManager, initialSection, testState ->
             Triple(showPanelManager, initialSection, testState)
         },
-    ) { (tab, probeFilter, panelIdFilter), (showPanelManager, initialSection, testState) ->
+    ) { (tab, probeFilter, assetFilter, panelIdFilter), (showPanelManager, initialSection, testState) ->
         NavigationFilterState(
             tab = tab,
             probeFilter = probeFilter,
+            assetCategoryFilter = assetFilter,
             panelIdFilter = panelIdFilter,
             showPanelManager = showPanelManager,
             panelManagerInitialSection = initialSection,
             panelTestState = testState,
         )
+    }
+
+    private val domainLookupUiFlow = combine(
+        _isLookingUpRdap,
+        _rdapLookupError,
+        _isCheckingTls,
+        _tlsCheckResultMessage,
+        _refreshingDomainAssetIds,
+    ) { lookingUpRdap, rdapErr, checkingTls, tlsMsg, refreshingIds ->
+        Quint(lookingUpRdap, rdapErr, checkingTls, tlsMsg, refreshingIds)
     }
 
     private val modalFlow = combine(
@@ -277,7 +364,8 @@ class MyServersViewModel(
         ) { saveVer, saleAsset, bindingAsset ->
             Triple(saveVer, saleAsset, bindingAsset)
         },
-    ) { (draft, assetErr, panelErr), (saveVer, saleAsset, bindingAsset) ->
+        domainLookupUiFlow,
+    ) { (draft, assetErr, panelErr), (saveVer, saleAsset, bindingAsset), (lookingUpRdap, rdapErr, checkingTls, tlsMsg, refreshingIds) ->
         SheetModalState(
             editorDraft = draft,
             assetSaveError = assetErr,
@@ -285,6 +373,11 @@ class MyServersViewModel(
             panelSaveSuccessVersion = saveVer,
             saleAsset = saleAsset,
             bindingAsset = bindingAsset,
+            isLookingUpRdap = lookingUpRdap,
+            rdapLookupError = rdapErr,
+            isCheckingTls = checkingTls,
+            tlsCheckResultMessage = tlsMsg,
+            refreshingDomainAssetIds = refreshingIds,
         )
     }
 
@@ -420,6 +513,12 @@ class MyServersViewModel(
                     .thenBy { it.probeKey },
             )
 
+        val filteredAssets = when (nav.assetCategoryFilter) {
+            AssetCategoryFilter.ALL -> repo.assets
+            AssetCategoryFilter.VPS -> repo.assets.filter { !it.isDomainAsset }
+            AssetCategoryFilter.DOMAIN_CERT -> repo.assets.filter { it.isDomainAsset }
+        }
+
         MyServersUiState(
             selectedTab = nav.tab,
             probeFilter = nav.probeFilter,
@@ -449,6 +548,13 @@ class MyServersViewModel(
             assetSaveError = modals.assetSaveError,
             salePostAsset = modals.saleAsset,
             bindingProbeAsset = modals.bindingAsset,
+            assetCategoryFilter = nav.assetCategoryFilter,
+            filteredAssets = filteredAssets,
+            isLookingUpRdap = modals.isLookingUpRdap,
+            rdapLookupError = modals.rdapLookupError,
+            isCheckingTls = modals.isCheckingTls,
+            tlsCheckResultMessage = modals.tlsCheckResultMessage,
+            refreshingDomainAssetIds = modals.refreshingDomainAssetIds,
         )
     }
 
@@ -726,15 +832,32 @@ class MyServersViewModel(
 
     // ── Asset Ledger Actions ──────────────────────────────────────────────────
 
+    private fun resetDraftInspectionJobs() {
+        rdapLookupSeq.incrementAndGet()
+        rdapLookupJob?.cancel()
+        rdapLookupJob = null
+        tlsCheckSeq.incrementAndGet()
+        tlsCheckJob?.cancel()
+        tlsCheckJob = null
+        _isLookingUpRdap.value = false
+        _isCheckingTls.value = false
+    }
+
     fun openAddAssetSheet() {
+        resetDraftInspectionJobs()
         _assetSaveError.value = null
+        _rdapLookupError.value = null
+        _tlsCheckResultMessage.value = null
         _assetEditorDraft.value = AssetEditorDraft(
             expiryDateIso = AssetEditorDraft.defaultExpiryDateIso(todayProvider()),
         )
     }
 
     fun openEditAssetSheet(asset: VpsAssetRecord) {
+        resetDraftInspectionJobs()
         _assetSaveError.value = null
+        _rdapLookupError.value = null
+        _tlsCheckResultMessage.value = null
         _assetEditorDraft.value = AssetEditorDraft.fromRecord(asset)
     }
 
@@ -813,8 +936,251 @@ class MyServersViewModel(
     }
 
     fun closeAssetEditor() {
+        resetDraftInspectionJobs()
         _assetSaveError.value = null
+        _rdapLookupError.value = null
+        _tlsCheckResultMessage.value = null
         _assetEditorDraft.value = null
+    }
+
+    fun selectAssetCategoryFilter(filter: AssetCategoryFilter) {
+        _assetCategoryFilter.value = filter
+    }
+
+    fun openAddDomainAssetSheet() {
+        resetDraftInspectionJobs()
+        _assetSaveError.value = null
+        _rdapLookupError.value = null
+        _tlsCheckResultMessage.value = null
+        _selectedTab.value = MyServersTab.ASSETS
+        _assetEditorDraft.value = AssetEditorDraft(
+            assetType = FleetAssetType.DOMAIN_CERT,
+            cyclePreset = BillingCyclePreset.ANNUAL,
+            expiryDateIso = AssetEditorDraft.defaultExpiryDateIso(todayProvider()),
+        )
+    }
+
+    fun lookupDomainRdapForDraft(rawDomain: String) {
+        val cleanDomain = VpsAssetRecord.normalizeDomainName(rawDomain)
+        if (cleanDomain == null) {
+            _rdapLookupError.value = "请输入有效的域名，例如 example.com"
+            return
+        }
+        val initialDraft = _assetEditorDraft.value ?: return
+        val editingIdSnapshot = initialDraft.editingId
+        val seq = rdapLookupSeq.incrementAndGet()
+        rdapLookupJob?.cancel()
+        _rdapLookupError.value = null
+        _isLookingUpRdap.value = true
+        rdapLookupJob = viewModelScope.launch {
+            try {
+                val res = effectiveRdapClient.lookupDomain(cleanDomain)
+                val current = _assetEditorDraft.value
+                if (rdapLookupSeq.get() != seq || current == null || current.editingId != editingIdSnapshot) {
+                    return@launch
+                }
+                res.onSuccess { rdap ->
+                    val registrar = rdap.registrarName?.trim().orEmpty()
+                    val isDifferentDomain = current.domainName.isNotBlank() &&
+                        !current.domainName.trim().equals(rdap.domainName, ignoreCase = true)
+                    val shouldUpdateDraftTlsHost = current.tlsHost.isBlank() ||
+                        current.tlsHost.trim().equals(current.domainName.trim(), ignoreCase = true)
+                    val nextRegistrar = when {
+                        registrar.isNotEmpty() -> registrar
+                        isDifferentDomain -> ""
+                        else -> current.registrarName
+                    }
+                    val nextProvider = when {
+                        registrar.isNotEmpty() -> registrar
+                        isDifferentDomain -> ""
+                        else -> current.providerName
+                    }
+                    _assetEditorDraft.value = current.copy(
+                        assetType = FleetAssetType.DOMAIN_CERT,
+                        domainName = rdap.domainName,
+                        nickname = current.nickname.ifBlank { rdap.domainName },
+                        registrarName = nextRegistrar,
+                        providerName = nextProvider,
+                        expiryDateIso = rdap.expiryDateIso ?: current.expiryDateIso,
+                        domainCreatedIso = rdap.registrationDateIso ?: if (isDifferentDomain) null else current.domainCreatedIso,
+                        rdapSyncedAtEpochMillis = rdap.fetchedAtEpochMillis,
+                        rdapStatusTags = rdap.statuses,
+                        tlsHost = if (shouldUpdateDraftTlsHost) rdap.domainName else current.tlsHost,
+                        rdapSyncRevision = current.rdapSyncRevision + 1,
+                    )
+                    _rdapLookupError.value = null
+                    _snackbarChannel.trySend(rdap.toSyncSummary())
+                }.onFailure { err ->
+                    _rdapLookupError.value = err.message ?: "RDAP 查询失败"
+                }
+            } finally {
+                if (rdapLookupSeq.get() == seq) {
+                    _isLookingUpRdap.value = false
+                }
+            }
+        }
+    }
+
+    fun checkTlsForDraft(
+        rawHost: String,
+        port: Int = VpsAssetRecord.DEFAULT_TLS_PORT,
+    ) {
+        val cleanHost = VpsAssetRecord.normalizeDomainName(rawHost)
+        if (cleanHost == null) {
+            _tlsCheckResultMessage.value = "请输入有效的 HTTPS 主机名或域名"
+            return
+        }
+        val initialDraft = _assetEditorDraft.value ?: return
+        val editingIdSnapshot = initialDraft.editingId
+        val cleanPort = port.coerceIn(1, 65535)
+        val seq = tlsCheckSeq.incrementAndGet()
+        tlsCheckJob?.cancel()
+        _tlsCheckResultMessage.value = null
+        _isCheckingTls.value = true
+        tlsCheckJob = viewModelScope.launch {
+            try {
+                val res = effectiveTlsInspector.inspect(cleanHost, cleanPort)
+                val current = _assetEditorDraft.value
+                if (tlsCheckSeq.get() != seq || current == null || current.editingId != editingIdSnapshot) {
+                    return@launch
+                }
+                res.onSuccess { tls ->
+                    _assetEditorDraft.value = current.copy(
+                        tlsHost = tls.host,
+                        tlsPort = tls.port.toString(),
+                        tlsExpiresAtEpochMillis = tls.notAfterEpochMillis,
+                        tlsIssuer = tls.issuer,
+                        tlsSubject = tls.subject,
+                        tlsCheckedAtEpochMillis = tls.checkedAtEpochMillis,
+                        tlsCheckError = if (tls.isExpired) {
+                            "证书已过期 ${-tls.daysRemaining} 天"
+                        } else if (!tls.isTrusted) {
+                            tls.warningMessage ?: "证书未受系统信任"
+                        } else {
+                            null
+                        },
+                        tlsCheckRevision = current.tlsCheckRevision + 1,
+                    )
+                    val summaryMsg = buildString {
+                        if (tls.isExpired) {
+                            append("证书已过期 ${-tls.daysRemaining} 天")
+                        } else {
+                            append("TLS 剩余 ${tls.daysRemaining} 天")
+                        }
+                        if (tls.issuer.isNotBlank()) append(" · ${tls.issuer}")
+                        append(" · 到期 ${tls.expiresDateIso}")
+                        if (!tls.isTrusted && !tls.isExpired) append(" (未受信任)")
+                    }
+                    _tlsCheckResultMessage.value = summaryMsg
+                }.onFailure { err ->
+                    val errMsg = err.message ?: "HTTPS 证书检测失败"
+                    _assetEditorDraft.value = current.copy(
+                        tlsHost = cleanHost,
+                        tlsPort = cleanPort.toString(),
+                        tlsCheckedAtEpochMillis = nowMillisProvider(),
+                        tlsCheckError = errMsg,
+                        tlsCheckRevision = current.tlsCheckRevision + 1,
+                    )
+                    _tlsCheckResultMessage.value = errMsg
+                }
+            } finally {
+                if (tlsCheckSeq.get() == seq) {
+                    _isCheckingTls.value = false
+                }
+            }
+        }
+    }
+
+    fun refreshDomainAndTlsForAsset(assetId: String) {
+        val asset = fleetRepository.assetsFlow.value.firstOrNull { it.id == assetId }
+            ?: uiState.value.assets.firstOrNull { it.id == assetId }
+            ?: return
+        val domain = asset.domainName?.let { VpsAssetRecord.normalizeDomainName(it) }
+        val tlsTarget = asset.effectiveTlsHost?.let { VpsAssetRecord.normalizeDomainName(it) }
+        if (domain == null && tlsTarget == null) {
+            _snackbarChannel.trySend("该资产未设置域名或 HTTPS 主机")
+            return
+        }
+        val seqCounter = assetRefreshSeqs.computeIfAbsent(assetId) { AtomicLong(0L) }
+        val seq = seqCounter.incrementAndGet()
+        assetRefreshJobs.remove(assetId)?.cancel()
+        _refreshingDomainAssetIds.value = _refreshingDomainAssetIds.value + assetId
+        assetRefreshJobs[assetId] = viewModelScope.launch {
+            try {
+                var rdapResult: com.nodeseek.app.domain.fleet.DomainRdapResult? = null
+                var tlsResult: com.nodeseek.app.domain.fleet.TlsCertificateInspectionResult? = null
+                var tlsFailureMessage: String? = null
+                var rdapOk = false
+                var tlsOk = false
+                if (domain != null) {
+                    effectiveRdapClient.lookupDomain(domain).onSuccess { rdap ->
+                        rdapOk = true
+                        rdapResult = rdap
+                    }
+                }
+                if (tlsTarget != null) {
+                    effectiveTlsInspector.inspect(tlsTarget, asset.tlsPort).onSuccess { tls ->
+                        tlsOk = true
+                        tlsResult = tls
+                    }.onFailure { err ->
+                        tlsFailureMessage = err.message ?: "HTTPS 证书检测失败"
+                    }
+                }
+                if (seqCounter.get() != seq) {
+                    return@launch
+                }
+                val latestAsset = fleetRepository.assetsFlow.value.firstOrNull { it.id == assetId }
+                    ?: return@launch
+                var updated = latestAsset
+                rdapResult?.let { rdap ->
+                    val registrar = rdap.registrarName?.trim().orEmpty()
+                    updated = updated.copy(
+                        domainName = rdap.domainName,
+                        registrarName = registrar.ifBlank { updated.registrarName },
+                        providerName = registrar.ifBlank { updated.providerName },
+                        expiryDateIso = rdap.expiryDateIso ?: updated.expiryDateIso,
+                        domainCreatedIso = rdap.registrationDateIso ?: updated.domainCreatedIso,
+                        rdapSyncedAtEpochMillis = rdap.fetchedAtEpochMillis,
+                        rdapStatusTags = rdap.statuses,
+                    )
+                }
+                val tls = tlsResult
+                if (tls != null) {
+                    updated = updated.copy(
+                        tlsHost = tls.host,
+                        tlsPort = tls.port,
+                        tlsExpiresAtEpochMillis = tls.notAfterEpochMillis,
+                        tlsIssuer = tls.issuer,
+                        tlsSubject = tls.subject,
+                        tlsCheckedAtEpochMillis = tls.checkedAtEpochMillis,
+                        tlsCheckError = if (tls.isExpired) {
+                            "证书已过期 ${-tls.daysRemaining} 天"
+                        } else if (!tls.isTrusted) {
+                            tls.warningMessage ?: "证书未受系统信任"
+                        } else {
+                            null
+                        },
+                    )
+                } else if (tlsFailureMessage != null) {
+                    updated = updated.copy(
+                        tlsCheckedAtEpochMillis = nowMillisProvider(),
+                        tlsCheckError = tlsFailureMessage,
+                    )
+                }
+                fleetRepository.upsertAsset(updated)
+                val msg = when {
+                    rdapOk && tlsOk -> "已刷新「${updated.nickname}」RDAP 与 TLS 证书状态"
+                    rdapOk -> "已刷新「${updated.nickname}」RDAP 信息"
+                    tlsOk -> "已更新「${updated.nickname}」TLS 证书剩余天数"
+                    else -> "未能拉取「${updated.nickname}」的 RDAP/TLS 更新"
+                }
+                _snackbarChannel.trySend(msg)
+            } finally {
+                if (seqCounter.get() == seq) {
+                    _refreshingDomainAssetIds.value = _refreshingDomainAssetIds.value - assetId
+                }
+            }
+        }
     }
 
     fun saveAsset(asset: VpsAssetRecord) {
@@ -865,6 +1231,9 @@ class MyServersViewModel(
     }
 
     fun deleteAsset(assetId: String) {
+        assetRefreshSeqs.computeIfAbsent(assetId) { AtomicLong(0L) }.incrementAndGet()
+        assetRefreshJobs.remove(assetId)?.cancel()
+        _refreshingDomainAssetIds.value = _refreshingDomainAssetIds.value - assetId
         viewModelScope.launch {
             try {
                 fleetRepository.deleteAsset(assetId)
@@ -1051,6 +1420,8 @@ class MyServersViewModel(
             exchangeRateRepository: ExchangeRateRepository,
             workScheduler: FleetWorkScheduler? = null,
             initialTab: MyServersTab = MyServersTab.PROBES,
+            domainRdapClient: DomainRdapClient? = null,
+            tlsCertificateInspector: TlsCertificateInspector? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1060,6 +1431,8 @@ class MyServersViewModel(
                     workScheduler = workScheduler,
                     initialTab = initialTab,
                     computationDispatcher = Dispatchers.Default,
+                    domainRdapClient = domainRdapClient,
+                    tlsCertificateInspector = tlsCertificateInspector,
                 ) as T
             }
         }

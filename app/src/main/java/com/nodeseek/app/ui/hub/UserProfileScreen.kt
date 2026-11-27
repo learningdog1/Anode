@@ -154,6 +154,7 @@ fun UserProfileScreen(
     onOpenDirectMessage: ((peerUid: Long, peerName: String) -> Unit)? = null,
     onOpenUserProfile: ((uid: Long, usernameHint: String) -> Unit)? = null,
     onOpenCategory: ((slug: String) -> Unit)? = null,
+    onOpenInviteAndRulings: ((initialTab: Int) -> Unit)? = null,
     onRequestWebViewAuth: ((url: String, requireSignedIn: Boolean) -> Unit)? = null,
     previewUiState: UserProfileUiState? = null,
     viewModel: UserProfileViewModel = viewModel(
@@ -168,6 +169,7 @@ fun UserProfileScreen(
     val uriHandler = LocalUriHandler.current
     var showBlockConfirm by rememberSaveable { mutableStateOf(false) }
     var showSellerTrustSheet by rememberSaveable { mutableStateOf(false) }
+    var activeLedgerTab by rememberSaveable { mutableStateOf<EconomyLedgerTab?>(null) }
 
     val handleMarkdownMentionClick: (String) -> Unit = remember(onOpenUserProfile) {
         { username ->
@@ -322,6 +324,16 @@ fun UserProfileScreen(
                                     },
                                     onOpenFollowers = {
                                         if (uiState.isOwnProfile) viewModel.showOwnConnections(following = false)
+                                    },
+                                    onOpenDrumsticksLedger = if (uiState.isOwnProfile) {
+                                        { activeLedgerTab = EconomyLedgerTab.DRUMSTICKS }
+                                    } else {
+                                        null
+                                    },
+                                    onOpenStardustLedger = if (uiState.isOwnProfile || uiState.isSignedIn) {
+                                        { activeLedgerTab = EconomyLedgerTab.STARDUST }
+                                    } else {
+                                        null
                                     },
                                     onMentionClick = handleMarkdownMentionClick,
                                     onUrlClick = handleMarkdownUrlClick,
@@ -587,6 +599,23 @@ fun UserProfileScreen(
             )
         }
     }
+
+    val ledgerTab = activeLedgerTab
+    if (ledgerTab != null && profile != null) {
+        CreditStardustLedgerSheet(
+            uid = profile.uid,
+            currentCoins = profile.drumsticks ?: 0,
+            currentStardust = profile.stardust ?: 0,
+            initialTab = ledgerTab,
+            canAccessDrumsticks = uiState.isOwnProfile,
+            onDismiss = { activeLedgerTab = null },
+            onOpenUserProfile = { targetUid, hint ->
+                activeLedgerTab = null
+                onOpenUserProfile?.invoke(targetUid, hint)
+            },
+            onOpenInviteAndRulings = onOpenInviteAndRulings,
+        )
+    }
 }
 
 @Composable
@@ -601,6 +630,8 @@ private fun UserProfileHeroBento(
     onInspectTrust: () -> Unit,
     onOpenFollowing: () -> Unit,
     onOpenFollowers: () -> Unit,
+    onOpenDrumsticksLedger: (() -> Unit)? = null,
+    onOpenStardustLedger: (() -> Unit)? = null,
     onMentionClick: (String) -> Unit,
     onUrlClick: (String) -> Unit,
 ) {
@@ -1096,6 +1127,7 @@ private fun UserProfileHeroBento(
                         accent = ext.onDrumstickContainer,
                         iconContainer = ext.drumstickContainer,
                         icon = Icons.Rounded.Restaurant,
+                        onClick = onOpenDrumsticksLedger,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight(),
@@ -1106,6 +1138,7 @@ private fun UserProfileHeroBento(
                         accent = ext.onStardustContainer,
                         iconContainer = ext.stardustContainer,
                         icon = Icons.Rounded.AutoAwesome,
+                        onClick = onOpenStardustLedger,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight(),

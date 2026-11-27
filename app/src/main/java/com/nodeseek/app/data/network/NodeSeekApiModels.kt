@@ -1243,20 +1243,25 @@ object CreditLedgerTupleSerializer : KSerializer<CreditLedgerTupleDto> {
         if (arr.size < 4) {
             throw SerializationException("Expected at least 4 elements in credit tuple, got ${arr.size}")
         }
-        val change = (arr[0] as? JsonPrimitive)?.let {
-            it.intOrNull ?: it.content.toIntOrNull()
-        } ?: 0
-        val balance = (arr[1] as? JsonPrimitive)?.let {
-            it.intOrNull ?: it.content.toIntOrNull()
-        } ?: 0
-        val reason = (arr[2] as? JsonPrimitive)?.content.orEmpty()
-        val createdAt = (arr[3] as? JsonPrimitive)?.content.orEmpty()
+        val change = parseTupleInt(arr[0] as? JsonPrimitive)
+        val balance = parseTupleInt(arr[1] as? JsonPrimitive)
+        val reason = (arr[2] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.contentOrNull.orEmpty()
+        val createdAt = (arr[3] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.contentOrNull.orEmpty()
         return CreditLedgerTupleDto(
             change = change,
             balance = balance,
             reason = reason,
             createdAt = createdAt,
         )
+    }
+
+    private fun parseTupleInt(element: JsonPrimitive?): Int {
+        val prim = element?.takeUnless { it is JsonNull } ?: return 0
+        if (!prim.isString) {
+            return prim.intOrNull ?: prim.doubleOrNull?.toInt() ?: 0
+        }
+        val cleaned = prim.contentOrNull?.replace(",", "")?.trim() ?: return 0
+        return cleaned.toIntOrNull() ?: 0
     }
 
     override fun serialize(encoder: Encoder, value: CreditLedgerTupleDto) {
@@ -1389,6 +1394,8 @@ data class NodeImageLinksDto(
     val markdown: String? = null,
     val html: String? = null,
     val raw: String? = null,
+    val thumbnail: String? = null,
+    val thumb: String? = null,
 )
 
 @Serializable
@@ -1397,6 +1404,7 @@ data class NodeImageUploadResponseDto(
     val success: Boolean? = null,
     val url: String? = null,
     val links: NodeImageLinksDto? = null,
+    @JsonNames("imageId", "image_id", "id")
     val imageId: String? = null,
     val message: String? = null,
     val error: String? = null,
@@ -1409,6 +1417,264 @@ data class NodeImageUploadResponseDto(
             ?: links?.html?.let(::extractUrlFromNodeImageHtml)
 }
 
+@Serializable
+data class NodeImageDeleteResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val message: String? = null,
+    val error: String? = null,
+)
+
+data class NodeImageItemDto(
+    val imageId: String,
+    val fileName: String,
+    val url: String,
+    val thumbnailUrl: String,
+    val sizeBytes: Long? = null,
+    val mimeType: String? = null,
+    val createdAt: String = "",
+    val deleteAfterDays: Int? = null,
+)
+
+@Serializable(with = NodeImageGalleryResponseSerializer::class)
+data class NodeImageGalleryResponseDto(
+    val success: Boolean? = null,
+    val message: String? = null,
+    val error: String? = null,
+    val items: List<NodeImageItemDto> = emptyList(),
+    val page: Int = 1,
+    val totalCount: Int? = null,
+    val hasMore: Boolean = false,
+    val totalPages: Int? = null,
+    val perPage: Int? = null,
+    val explicitHasMore: Boolean? = null,
+)
+
+internal object NodeImageGalleryResponseSerializer : KSerializer<NodeImageGalleryResponseDto> {
+    override val descriptor: SerialDescriptor =
+        buildClassSerialDescriptor("NodeImageGalleryResponseDto")
+
+    override fun deserialize(decoder: Decoder): NodeImageGalleryResponseDto {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return NodeImageGalleryResponseDto()
+        val root = jsonDecoder.decodeJsonElement()
+        return when (root) {
+            is JsonArray -> {
+                val items = root.mapNotNull { (it as? JsonObject)?.let(::parseItem) }
+                NodeImageGalleryResponseDto(success = true, items = items)
+            }
+            is JsonObject -> {
+                val success = (root["success"] as? JsonPrimitive)?.let { prim ->
+                    runCatching { WebsiteFlagSerializer.parsePrimitive(prim) }.getOrNull()
+                }
+                val message = (root["message"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                val error = (root["error"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+                val dataObj = root["data"] as? JsonObject
+                val paginationObj = (root["pagination"] as? JsonObject)
+                    ?: (root["meta"] as? JsonObject)
+                    ?: (dataObj?.get("pagination") as? JsonObject)
+                    ?: (dataObj?.get("meta") as? JsonObject)
+
+                val arrayEl = (root["images"] as? JsonArray)
+                    ?: (root["list"] as? JsonArray)
+                    ?: (root["items"] as? JsonArray)
+                    ?: (root["data"] as? JsonArray)
+                    ?: (dataObj?.get("images") as? JsonArray)
+                    ?: (dataObj?.get("list") as? JsonArray)
+                    ?: (dataObj?.get("items") as? JsonArray)
+
+                val items = arrayEl?.mapNotNull { (it as? JsonObject)?.let(::parseItem) }.orEmpty()
+
+                val page = firstInt(
+                    root["page"], root["currentPage"], root["current_page"],
+                    dataObj?.get("page"), dataObj?.get("currentPage"), dataObj?.get("current_page"),
+                    paginationObj?.get("page"), paginationObj?.get("currentPage"), paginationObj?.get("current_page"),
+                )?.coerceAtLeast(1) ?: 1
+
+                val totalCount = firstInt(
+                    root["total"], root["totalCount"], root["total_count"],
+                    dataObj?.get("total"), dataObj?.get("totalCount"), dataObj?.get("total_count"),
+                    paginationObj?.get("total"), paginationObj?.get("totalCount"), paginationObj?.get("total_count"),
+                )
+
+                val totalPages = firstInt(
+                    root["totalPages"], root["total_pages"], root["pages"],
+                    dataObj?.get("totalPages"), dataObj?.get("total_pages"),
+                    paginationObj?.get("totalPages"), paginationObj?.get("total_pages"), paginationObj?.get("pages"),
+                )
+
+                val perPage = firstInt(
+                    root["limit"], root["perPage"], root["per_page"], root["pageSize"], root["page_size"],
+                    dataObj?.get("limit"), dataObj?.get("perPage"), dataObj?.get("per_page"),
+                    paginationObj?.get("limit"), paginationObj?.get("perPage"), paginationObj?.get("per_page"),
+                )
+
+                val explicitHasMore = firstBool(
+                    root["hasMore"], root["has_more"],
+                    dataObj?.get("hasMore"), dataObj?.get("has_more"),
+                    paginationObj?.get("hasMore"), paginationObj?.get("has_more"),
+                )
+
+                val inferredHasMore = explicitHasMore
+                    ?: totalPages?.let { page < it }
+                    ?: if (totalCount != null && perPage != null && perPage > 0) {
+                        page * perPage < totalCount
+                    } else if (totalCount != null && items.isNotEmpty()) {
+                        items.size < totalCount && (page * items.size < totalCount)
+                    } else {
+                        false
+                    }
+
+                NodeImageGalleryResponseDto(
+                    success = success,
+                    message = message,
+                    error = error,
+                    items = items,
+                    page = page,
+                    totalCount = totalCount,
+                    hasMore = inferredHasMore,
+                    totalPages = totalPages,
+                    perPage = perPage,
+                    explicitHasMore = explicitHasMore,
+                )
+            }
+            else -> NodeImageGalleryResponseDto()
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: NodeImageGalleryResponseDto) {
+        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder ?: return
+        val map = buildMap<String, kotlinx.serialization.json.JsonElement> {
+            value.success?.let { put("success", JsonPrimitive(it)) }
+            value.message?.let { put("message", JsonPrimitive(it)) }
+            value.error?.let { put("error", JsonPrimitive(it)) }
+            put("page", JsonPrimitive(value.page))
+            value.totalCount?.let { put("totalCount", JsonPrimitive(it)) }
+            put("hasMore", JsonPrimitive(value.hasMore))
+        }
+        jsonEncoder.encodeJsonElement(JsonObject(map))
+    }
+
+    private fun parseItem(obj: JsonObject): NodeImageItemDto? {
+        val linksObj = obj["links"] as? JsonObject
+        val url = firstString(
+            linksObj?.get("direct"),
+            obj["url"],
+            obj["direct"],
+            obj["src"],
+            linksObj?.get("raw"),
+        ) ?: firstString(linksObj?.get("markdown"))?.let(::extractUrlFromNodeImageMarkdown)
+            ?: firstString(linksObj?.get("html"))?.let(::extractUrlFromNodeImageHtml)
+            ?: return null
+
+        val rawId = firstString(
+            obj["imageId"],
+            obj["image_id"],
+            obj["id"],
+            obj["key"],
+        ) ?: url.substringAfterLast('/').substringBefore('?').substringBefore('.').takeIf { it.isNotBlank() }
+            ?: return null
+
+        val fileName = firstString(
+            obj["fileName"],
+            obj["filename"],
+            obj["name"],
+            obj["originalName"],
+            obj["original_name"],
+            obj["title"],
+        ) ?: url.substringAfterLast('/').substringBefore('?').ifBlank { rawId }
+
+        val thumb = firstString(
+            obj["thumbnailUrl"],
+            obj["thumbnail_url"],
+            obj["thumb"],
+            obj["thumb_url"],
+            obj["thumbnail"],
+            linksObj?.get("thumbnail"),
+            linksObj?.get("thumb"),
+        ) ?: url
+
+        val sizeBytes = firstLong(
+            obj["sizeBytes"],
+            obj["size_bytes"],
+            obj["size"],
+            obj["fileSize"],
+            obj["file_size"],
+            obj["bytes"],
+        )
+
+        val mimeType = firstString(
+            obj["mimeType"],
+            obj["mime_type"],
+            obj["mime"],
+            obj["contentType"],
+            obj["content_type"],
+        )
+
+        val createdAt = firstString(
+            obj["createdAt"],
+            obj["created_at"],
+            obj["uploadedAt"],
+            obj["uploaded_at"],
+            obj["time"],
+            obj["date"],
+        ).orEmpty()
+
+        val deleteAfterDays = firstInt(
+            obj["deleteAfterDays"],
+            obj["delete_after_days"],
+            obj["deleteDays"],
+            obj["delete_days"],
+        )
+
+        return NodeImageItemDto(
+            imageId = rawId,
+            fileName = fileName,
+            url = url,
+            thumbnailUrl = thumb,
+            sizeBytes = sizeBytes,
+            mimeType = mimeType,
+            createdAt = createdAt,
+            deleteAfterDays = deleteAfterDays,
+        )
+    }
+
+    private fun firstString(vararg els: kotlinx.serialization.json.JsonElement?): String? {
+        for (el in els) {
+            val s = (el as? JsonPrimitive)?.contentOrNull?.trim()
+            if (!s.isNullOrBlank()) return s
+        }
+        return null
+    }
+
+    private fun firstInt(vararg els: kotlinx.serialization.json.JsonElement?): Int? {
+        for (el in els) {
+            val prim = el as? JsonPrimitive ?: continue
+            prim.intOrNull?.let { return it }
+            prim.contentOrNull?.trim()?.toIntOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    private fun firstLong(vararg els: kotlinx.serialization.json.JsonElement?): Long? {
+        for (el in els) {
+            val prim = el as? JsonPrimitive ?: continue
+            prim.longOrNull?.let { return it }
+            prim.contentOrNull?.trim()?.toLongOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    private fun firstBool(vararg els: kotlinx.serialization.json.JsonElement?): Boolean? {
+        for (el in els) {
+            val prim = el as? JsonPrimitive ?: continue
+            runCatching { WebsiteFlagSerializer.parsePrimitive(prim) }.getOrNull()?.let { return it }
+        }
+        return null
+    }
+}
+
 private val NODE_IMAGE_MD_URL_REGEX = Regex("""!\[[^\]]*\]\(([^)\s]+)""")
 private val NODE_IMAGE_HTML_URL_REGEX = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
 
@@ -1417,3 +1683,167 @@ private fun extractUrlFromNodeImageMarkdown(raw: String): String? =
 
 private fun extractUrlFromNodeImageHtml(raw: String): String? =
     NODE_IMAGE_HTML_URL_REGEX.find(raw)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+
+@Serializable
+data class CreateDiscussionDataDto(
+    @JsonNames("postId", "post_id", "id", "topicId", "topic_id")
+    @Serializable(with = FlexibleNullableLongSerializer::class)
+    val postId: Long? = null,
+)
+
+@Serializable
+data class CreateDiscussionResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val message: String? = null,
+    @JsonNames("postId", "post_id", "id", "topicId", "topic_id")
+    @Serializable(with = FlexibleNullableLongSerializer::class)
+    val postId: Long? = null,
+    val data: CreateDiscussionDataDto? = null,
+) {
+    val resolvedPostId: Long?
+        get() = postId?.takeIf { it > 0L } ?: data?.postId?.takeIf { it > 0L }
+}
+
+@Serializable
+data class LuckyFloorItemDto(
+    @SerialName("floor_id")
+    @JsonNames("floor_id", "floorId")
+    @Serializable(with = FlexibleIntSerializer::class)
+    val floorId: Int = 0,
+    @SerialName("member_id")
+    @JsonNames("member_id", "memberId")
+    @Serializable(with = FlexibleLongSerializer::class)
+    val memberId: Long = 0L,
+    @SerialName("member_name")
+    @JsonNames("member_name", "memberName")
+    val memberName: String = "",
+)
+
+@Serializable
+data class LuckyFloorDataResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val data: List<LuckyFloorItemDto> = emptyList(),
+    val message: String? = null,
+)
+
+@Serializable
+data class InvitePaymentOptionDto(
+    @Serializable(with = WebsiteBoolSerializer::class)
+    val enabled: Boolean = false,
+    @Serializable(with = FlexibleIntSerializer::class)
+    val cost: Int = 0,
+)
+
+@Serializable
+data class InvitePaymentMethodsDto(
+    val coin: InvitePaymentOptionDto? = null,
+    val stardust: InvitePaymentOptionDto? = null,
+)
+
+@Serializable
+data class InviteConfigResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val payment: InvitePaymentMethodsDto? = null,
+    val data: InvitePaymentMethodsDto? = null,
+    val message: String? = null,
+) {
+    val resolvedPayment: InvitePaymentMethodsDto?
+        get() = payment ?: data
+}
+
+@Serializable
+data class InviteCodeRowDto(
+    @JsonNames("code", "inviteCode", "invite_code")
+    val code: String = "",
+    @Serializable(with = WebsiteBoolSerializer::class)
+    @JsonNames("applied", "used", "is_used", "isUsed")
+    val applied: Boolean = false,
+    @SerialName("created_at")
+    @JsonNames("created_at", "createdAt")
+    val createdAt: String = "",
+    @SerialName("applied_at")
+    @JsonNames("applied_at", "appliedAt", "used_at", "usedAt")
+    val appliedAt: String? = null,
+    @SerialName("applied_by")
+    @JsonNames("applied_by", "appliedBy", "used_by", "usedBy")
+    val appliedBy: String? = null,
+)
+
+@Serializable
+data class InviteListResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val data: List<InviteCodeRowDto> = emptyList(),
+    @Serializable(with = FlexibleIntSerializer::class)
+    val total: Int = 0,
+    val message: String? = null,
+)
+
+@Serializable
+data class BuyInviteRequestDto(
+    val payment: String,
+)
+
+@Serializable
+data class BuyInviteResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    @JsonNames("code", "inviteCode", "invite_code")
+    val code: String? = null,
+    val message: String? = null,
+)
+
+@Serializable
+data class ModerationRulingRowDto(
+    @Serializable(with = FlexibleLongSerializer::class)
+    val id: Long = 0L,
+    @SerialName("member_id")
+    @JsonNames("member_id", "memberId", "uid")
+    @Serializable(with = FlexibleNullableLongSerializer::class)
+    val memberId: Long? = null,
+    @SerialName("member_name")
+    @JsonNames("member_name", "memberName", "username")
+    val memberName: String = "",
+    @JsonNames("reason", "title")
+    val reason: String = "",
+    @JsonNames("action", "result", "punishment")
+    val action: String = "",
+    @JsonNames("evidence", "detail", "description", "remark")
+    val evidence: String? = null,
+    @SerialName("operator_name")
+    @JsonNames("operator_name", "operatorName", "operator", "admin_name", "adminName")
+    val operatorName: String? = null,
+    @SerialName("post_id")
+    @JsonNames("post_id", "postId", "topic_id", "topicId")
+    @Serializable(with = FlexibleNullableLongSerializer::class)
+    val postId: Long? = null,
+    @SerialName("created_at")
+    @JsonNames("created_at", "createdAt", "time")
+    val createdAt: String = "",
+)
+
+@Serializable
+data class RulingListResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val data: List<ModerationRulingRowDto> = emptyList(),
+    @Serializable(with = FlexibleIntSerializer::class)
+    val total: Int = 0,
+    val message: String? = null,
+)
+
+@Serializable
+data class RulingDetailResponseDto(
+    @Serializable(with = WebsiteFlagSerializer::class)
+    val success: Boolean? = null,
+    val data: ModerationRulingRowDto? = null,
+    val ruling: ModerationRulingRowDto? = null,
+    val detail: ModerationRulingRowDto? = null,
+    val message: String? = null,
+) {
+    val resolvedRuling: ModerationRulingRowDto?
+        get() = data ?: ruling ?: detail
+}

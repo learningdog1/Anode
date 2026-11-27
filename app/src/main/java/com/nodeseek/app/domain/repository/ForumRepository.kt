@@ -12,6 +12,11 @@ import kotlinx.coroutines.flow.Flow
 interface ForumRepository {
     fun observeCategories(): Flow<List<Category>>
     suspend fun refreshCategories(force: Boolean = false): Result<List<Category>>
+    suspend fun syncHomepageCategories(): Result<List<Category>> = Result.success(emptyList())
+    suspend fun saveHomepageCategories(
+        orderedCategories: List<Category>,
+        syncToServer: Boolean = true,
+    ): Result<Unit> = Result.success(Unit)
 
     fun getCachedFeed(
         categorySlug: String = "",
@@ -31,6 +36,12 @@ interface ForumRepository {
      * from local in-memory/disk feed caches, bookmarks, and read history without making network requests.
      */
     suspend fun resolveKnownTopics(topicIds: Collection<Long>): Map<Long, TopicSummary> = emptyMap()
+
+    /**
+     * Returns locally cached [TopicSummary] items for [categorySlug] from in-memory & disk feed
+     * snapshots without performing any network requests.
+     */
+    suspend fun getLocalCachedTopics(categorySlug: String): List<TopicSummary> = emptyList()
 
     suspend fun getFeed(
         categorySlug: String = "",
@@ -64,6 +75,18 @@ interface ForumRepository {
         markdownContent: String,
         requiredViewLevel: Int = 0,
     ): Result<Unit>
+
+    suspend fun createTopicWithResult(
+        categorySlug: String,
+        title: String,
+        markdownContent: String,
+        requiredViewLevel: Int = 0,
+    ): Result<Long?> = createTopic(
+        categorySlug = categorySlug,
+        title = title,
+        markdownContent = markdownContent,
+        requiredViewLevel = requiredViewLevel,
+    ).map { null }
 
     suspend fun editTopic(
         topicId: Long,

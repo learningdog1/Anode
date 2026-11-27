@@ -35,4 +35,6 @@ interface BookmarkAndHistoryRepository {
     fun observeReadStateMap(topicIds: Collection<Long>): Flow<Map<Long, ReadHistoryEntry>>
     suspend fun recordTopicVisit(entry: ReadHistoryEntry)
     suspend fun clearReadHistory()
+
+    fun clearMemoryCache() {}
 }

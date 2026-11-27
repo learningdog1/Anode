@@ -1,0 +1,34 @@
+{
+  "telegramSuccess": {
+    "ok": true,
+    "result": {
+      "message_id": 9001
+    }
+  },
+  "telegramUnauthorized": {
+    "ok": false,
+    "error_code": 401,
+    "description": "Unauthorized"
+  },
+  "telegramRateLimited": {
+    "ok": false,
+    "error_code": 429,
+    "description": "Too Many Requests: retry after 15",
+    "parameters": {
+      "retry_after": 15
+    }
+  },
+  "barkSuccess": {
+    "code": 200,
+    "message": "success",
+    "timestamp": 1764050000
+  },
+  "barkError": {
+    "code": 400,
+    "message": "failed to get device token"
+  },
+  "webhookSuccess": {
+    "received": true,
+    "status": "accepted"
+  }
+}

@@ -260,6 +260,12 @@ object FleetPortfolioCalculator {
     ): FleetPortfolioSummary {
         var totalMonthlyRaw = BigDecimal.ZERO
         var totalAnnualRaw = BigDecimal.ZERO
+        var vpsMonthlyRaw = BigDecimal.ZERO
+        var vpsAnnualRaw = BigDecimal.ZERO
+        var domainMonthlyRaw = BigDecimal.ZERO
+        var domainAnnualRaw = BigDecimal.ZERO
+        var vpsCount = 0
+        var domainCount = 0
         val renewals = mutableListOf<UpcomingRenewalItem>()
 
         for (asset in assets) {
@@ -267,6 +273,15 @@ object FleetPortfolioCalculator {
             val (cycleCny, monthlyRaw, annualRaw) = computeAssetCnyCosts(asset, rate)
             totalMonthlyRaw = totalMonthlyRaw.add(monthlyRaw)
             totalAnnualRaw = totalAnnualRaw.add(annualRaw)
+            if (asset.isDomainAsset) {
+                domainCount++
+                domainMonthlyRaw = domainMonthlyRaw.add(monthlyRaw)
+                domainAnnualRaw = domainAnnualRaw.add(annualRaw)
+            } else {
+                vpsCount++
+                vpsMonthlyRaw = vpsMonthlyRaw.add(monthlyRaw)
+                vpsAnnualRaw = vpsAnnualRaw.add(annualRaw)
+            }
 
             val expiryDate = parseExpiryDate(asset.expiryDateIso)
             if (expiryDate != null) {
@@ -306,17 +321,29 @@ object FleetPortfolioCalculator {
         val expiredCount = sortedRenewals.count { it.urgency == AssetExpiryUrgency.EXPIRED }
         val dueSoonCount = dueRenewals.size
 
+        val vpsMonthlyCostCny = vpsMonthlyRaw.setScale(2, RoundingMode.HALF_UP)
+        val vpsAnnualizedCostCny = vpsAnnualRaw.setScale(2, RoundingMode.HALF_UP)
+        val domainMonthlyCostCny = domainMonthlyRaw.setScale(2, RoundingMode.HALF_UP)
+        val domainAnnualizedCostCny = domainAnnualRaw.setScale(2, RoundingMode.HALF_UP)
+
         return FleetPortfolioSummary(
-            totalMachineCount = assets.size,
+            totalMachineCount = vpsCount,
             totalProbeNodeCount = snapshots.size,
             onlineProbeCount = onlineCount,
             offlineProbeCount = offlineCount,
-            totalMonthlyCostCny = totalMonthlyRaw.setScale(2, RoundingMode.HALF_UP),
-            totalAnnualizedCostCny = totalAnnualRaw.setScale(2, RoundingMode.HALF_UP),
+            totalMonthlyCostCny = vpsMonthlyCostCny.add(domainMonthlyCostCny),
+            totalAnnualizedCostCny = vpsAnnualizedCostCny.add(domainAnnualizedCostCny),
             upcomingRenewals = sortedRenewals,
             dueSoonRenewalCount = dueSoonCount,
             dueRenewals = dueRenewals,
             expiredRenewalCount = expiredCount,
+            vpsCount = vpsCount,
+            domainCount = domainCount,
+            totalAssetCount = assets.size,
+            vpsMonthlyCostCny = vpsMonthlyCostCny,
+            vpsAnnualizedCostCny = vpsAnnualizedCostCny,
+            domainMonthlyCostCny = domainMonthlyCostCny,
+            domainAnnualizedCostCny = domainAnnualizedCostCny,
         )
     }
 

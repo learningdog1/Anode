@@ -3,6 +3,9 @@ package com.nodeseek.app.data.restock
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import com.nodeseek.app.domain.alerts.AlertForwarder
+import com.nodeseek.app.domain.alerts.ForwardableAlertEvent
+import com.nodeseek.app.domain.alerts.NoOpAlertForwarder
 import com.nodeseek.app.domain.restock.RestockBackgroundPollOutcome
 import com.nodeseek.app.domain.restock.RestockEventRecord
 import com.nodeseek.app.domain.restock.RestockMonitorController
@@ -49,6 +52,7 @@ class RestockMonitorControllerImpl(
     private val scope: CoroutineScope,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val isUnmeteredNetwork: () -> Boolean = { true },
+    private val alertForwarder: AlertForwarder = NoOpAlertForwarder,
 ) : RestockMonitorController {
 
     constructor(
@@ -58,6 +62,7 @@ class RestockMonitorControllerImpl(
         notificationHelper: RestockNotificationHelper,
         scope: CoroutineScope,
         clockMillis: () -> Long = System::currentTimeMillis,
+        alertForwarder: AlertForwarder = NoOpAlertForwarder,
     ) : this(
         repository = repository,
         analyzer = analyzer,
@@ -65,6 +70,7 @@ class RestockMonitorControllerImpl(
         scope = scope,
         clockMillis = clockMillis,
         isUnmeteredNetwork = { defaultIsUnmeteredNetwork(appContext) },
+        alertForwarder = alertForwarder,
     )
 
     private val _runtimeStatus = MutableStateFlow(RestockRuntimeStatus())
@@ -358,6 +364,23 @@ class RestockMonitorControllerImpl(
                                     RestockNotificationHelper.MAX_INDIVIDUAL_RESTOCK_NOTIFICATIONS
                                 ) {
                                     notificationHelper.postRestockUrgentNotification(event)
+                                }
+                                try {
+                                    alertForwarder.forward(
+                                        ForwardableAlertEvent.RestockAvailable(
+                                            watchId = event.watchItemId,
+                                            watchTitle = event.watchTitle,
+                                            resolvedOrderUrl = event.resolvedOrderUrl,
+                                            priceHint = event.priceHint,
+                                            panelTypeLabel = event.panelType.displayName,
+                                            evidenceSummary = event.evidenceSummary,
+                                            occurredAtEpochMillis = event.detectedAtEpochMillis,
+                                        ),
+                                    )
+                                } catch (c: CancellationException) {
+                                    throw c
+                                } catch (_: Throwable) {
+                                    // External alert forwarding errors never fail restock checks.
                                 }
                             }
                             _runtimeStatus.update { state ->

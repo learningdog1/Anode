@@ -11,6 +11,7 @@ import com.nodeseek.app.data.local.ReadHistoryDao
 import com.nodeseek.app.data.local.toDomain
 import com.nodeseek.app.data.local.toEntity
 import com.nodeseek.app.data.network.CloudflareChallengeException
+import com.nodeseek.app.data.network.HomepageCategoryPrefDto
 import com.nodeseek.app.data.network.NodeSeekApiClient
 import com.nodeseek.app.data.network.NodeSeekApiException
 import com.nodeseek.app.data.parser.CategoryDto
@@ -40,6 +41,7 @@ import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Concrete [ForumRepository] orchestrating Web HTML + `temp-script` feeds, RSS fallback,
@@ -72,6 +74,9 @@ class ForumRepositoryImpl(
     private val inFlightFeedRequests = HashMap<FeedRequestKey, CompletableDeferred<Result<FeedPageResult>>>()
     private val categoryRefreshMutex = Mutex()
     private var inFlightCategoryRefresh: CompletableDeferred<Result<List<Category>>>? = null
+    private var inFlightCategoryRefreshUid: Long? = null
+    private val categoryMutationMutex = Mutex()
+    private val categoryAuthorityEpoch = AtomicLong(0L)
 
     private val rssCacheMutex = Mutex()
     private var cachedRssFeed: Pair<Long, ParsedFeedPageDto>? = null
@@ -89,23 +94,34 @@ class ForumRepositoryImpl(
         get() = sessionRepository.sessionState.value?.uid ?: 0L
 
     fun onEmbeddedCategoriesObserved(dtos: List<CategoryDto>, accountUid: Long) {
+        val capturedGeneration = sessionRepository.currentSessionGeneration()
         backgroundScope.launch {
             runSuspendCatching {
-                val existing = categoryDao.getCategories(accountUid)
-                val existingBySlug = existing.associateBy { it.slug }
-                val mapped = mergeWithAllCategory(dtos, existingBySlug = existingBySlug)
-                if (mapped.size > 1) {
-                    val now = clockMillis()
-                    val preservedSyncedAt = existing.maxOfOrNull { it.syncedAtEpochMillis } ?: now
-                    val entities = mapped.mapIndexed { index, cat ->
-                        cat.toEntity(
-                            accountUid = accountUid,
-                            sortOrder = index,
-                            syncedAtEpochMillis = if (existing.isEmpty()) now else preservedSyncedAt,
-                        )
+                categoryMutationMutex.withLock {
+                    if (accountUid != currentUid || capturedGeneration != sessionRepository.currentSessionGeneration()) {
+                        return@withLock
                     }
-                    if (existing.isEmpty() || hasCategoryMetadataChange(existing, entities)) {
-                        categoryDao.replaceForAccount(accountUid, entities)
+                    val existing = categoryDao.getCategories(accountUid)
+                    val existingBySlug = existing.associateBy { it.slug }
+                    val mapped = mergeWithAllCategory(dtos, existingBySlug = existingBySlug)
+                    if (mapped.size > 1) {
+                        val ordered = resolveCategoryOrder(
+                            categories = mapped,
+                            customOrder = settingsRepository.getHomepageCategoryOrder(accountUid),
+                            existingBySlug = existingBySlug,
+                        )
+                        val now = clockMillis()
+                        val preservedSyncedAt = existing.maxOfOrNull { it.syncedAtEpochMillis } ?: now
+                        val entities = ordered.mapIndexed { index, cat ->
+                            cat.toEntity(
+                                accountUid = accountUid,
+                                sortOrder = index,
+                                syncedAtEpochMillis = if (existing.isEmpty()) now else preservedSyncedAt,
+                            )
+                        }
+                        if (existing.isEmpty() || hasCategoryMetadataChange(existing, entities)) {
+                            categoryDao.replaceForAccount(accountUid, entities)
+                        }
                     }
                 }
             }
@@ -122,6 +138,7 @@ class ForumRepositoryImpl(
             val b = updated[i]
             if (a.slug != b.slug ||
                 a.name != b.name ||
+                a.sortOrder != b.sortOrder ||
                 a.isCustomizable != b.isCustomizable ||
                 a.visibleOnHome != b.visibleOnHome ||
                 a.isAdminOnly != b.isAdminOnly
@@ -149,12 +166,21 @@ class ForumRepositoryImpl(
     override suspend fun refreshCategories(force: Boolean): Result<List<Category>> {
         val uid = currentUid
         if (!force) {
-            val lastSync = categoryDao.getLastSyncedAtMillis(uid)
-            if (lastSync != null && clockMillis() - lastSync < CATEGORY_TTL_MILLIS) {
-                val cached = categoryDao.getCategories(uid)
-                if (cached.isNotEmpty()) {
-                    return Result.success(cached.map(CategoryEntity::toDomain))
+            val cachedResult = categoryMutationMutex.withLock {
+                val lastSync = categoryDao.getLastSyncedAtMillis(uid)
+                if (lastSync != null && clockMillis() - lastSync < CATEGORY_TTL_MILLIS) {
+                    val cached = categoryDao.getCategories(uid)
+                    if (cached.isNotEmpty()) {
+                        Result.success(cached.map(CategoryEntity::toDomain))
+                    } else {
+                        null
+                    }
+                } else {
+                    null
                 }
+            }
+            if (cachedResult != null) {
+                return cachedResult
             }
         }
 
@@ -162,12 +188,13 @@ class ForumRepositoryImpl(
         val isOwner: Boolean
         categoryRefreshMutex.withLock {
             val existing = inFlightCategoryRefresh
-            if (existing != null) {
+            if (existing != null && inFlightCategoryRefreshUid == uid) {
                 deferred = existing
                 isOwner = false
             } else {
                 deferred = CompletableDeferred()
                 inFlightCategoryRefresh = deferred
+                inFlightCategoryRefreshUid = uid
                 isOwner = true
             }
         }
@@ -177,21 +204,32 @@ class ForumRepositoryImpl(
 
         return try {
             val result = runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-                val targetUid = currentUid
+                val targetUid = uid
+                val startGeneration = sessionRepository.currentSessionGeneration()
                 val response = apiClientProvider().listCategories()
-                if (!response.success || response.data.isEmpty()) {
-                    val fallback = categoryDao.getCategories(targetUid).map(CategoryEntity::toDomain)
-                    return@runDomainCatching fallback.ifEmpty { Category.DEFAULT_CATEGORIES }
-                }
+                categoryMutationMutex.withLock {
+                    if (targetUid != currentUid || startGeneration != sessionRepository.currentSessionGeneration()) {
+                        throw NodeSeekApiException("账号会话已切换，请重试")
+                    }
+                    if (!response.success || response.data.isEmpty()) {
+                        val fallback = categoryDao.getCategories(targetUid).map(CategoryEntity::toDomain)
+                        return@withLock fallback.ifEmpty { Category.DEFAULT_CATEGORIES }
+                    }
 
-                val existingBySlug = categoryDao.getCategories(targetUid).associateBy { it.slug }
-                val merged = mergeWithAllCategory(response.data, existingBySlug = existingBySlug)
-                val now = clockMillis()
-                val entities = merged.mapIndexed { index, cat ->
-                    cat.toEntity(accountUid = targetUid, sortOrder = index, syncedAtEpochMillis = now)
+                    val existingBySlug = categoryDao.getCategories(targetUid).associateBy { it.slug }
+                    val merged = mergeWithAllCategory(response.data, existingBySlug = existingBySlug)
+                    val ordered = resolveCategoryOrder(
+                        categories = merged,
+                        customOrder = settingsRepository.getHomepageCategoryOrder(targetUid),
+                        existingBySlug = existingBySlug,
+                    )
+                    val now = clockMillis()
+                    val entities = ordered.mapIndexed { index, cat ->
+                        cat.toEntity(accountUid = targetUid, sortOrder = index, syncedAtEpochMillis = now)
+                    }
+                    categoryDao.replaceForAccount(targetUid, entities)
+                    ordered
                 }
-                categoryDao.replaceForAccount(targetUid, entities)
-                merged
             }
             deferred.complete(result)
             result
@@ -205,7 +243,179 @@ class ForumRepositoryImpl(
             categoryRefreshMutex.withLock {
                 if (inFlightCategoryRefresh === deferred) {
                     inFlightCategoryRefresh = null
+                    inFlightCategoryRefreshUid = null
                 }
+            }
+        }
+    }
+
+    override suspend fun syncHomepageCategories(): Result<List<Category>> =
+        runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val targetUid = currentUid
+            val startGeneration = sessionRepository.currentSessionGeneration()
+            val startAuthorityEpoch = categoryAuthorityEpoch.get()
+            val response = apiClientProvider().getHomepageCategories()
+            if (response.success == false) {
+                throw NodeSeekApiException(response.message?.takeIf { it.isNotBlank() } ?: "获取首页版块配置失败")
+            }
+
+            categoryMutationMutex.withLock {
+                if (targetUid != currentUid || startGeneration != sessionRepository.currentSessionGeneration()) {
+                    throw NodeSeekApiException("账号会话已切换，请重试")
+                }
+                if (categoryAuthorityEpoch.get() != startAuthorityEpoch) {
+                    return@withLock categoryDao.getCategories(targetUid).map(CategoryEntity::toDomain)
+                }
+
+                val existing = categoryDao.getCategories(targetUid)
+                val existingBySlug = existing.associateBy { it.slug }
+                val baseCategories = if (existing.isNotEmpty()) {
+                    existing.map(CategoryEntity::toDomain)
+                } else {
+                    Category.DEFAULT_CATEGORIES
+                }
+                val prefBySlug = response.data
+                    .mapNotNull { dto ->
+                        val slug = dto.category.trim()
+                        if (slug.isEmpty()) null else slug to dto.showInIndex
+                    }
+                    .toMap()
+
+                val updatedKnown = baseCategories.map { cat ->
+                    when {
+                        cat.slug.isBlank() -> cat.copy(visibleOnHome = true, isCustomizable = false)
+                        cat.isCustomizable && prefBySlug.containsKey(cat.slug) ->
+                            cat.copy(visibleOnHome = prefBySlug.getValue(cat.slug))
+                        else -> cat
+                    }
+                }
+                val knownSlugs = updatedKnown.mapTo(HashSet()) { it.slug }
+                val extraFromServer = response.data.mapNotNull { dto ->
+                    val slug = dto.category.trim()
+                    if (slug.isBlank() || !knownSlugs.add(slug)) return@mapNotNull null
+                    Category(
+                        slug = slug,
+                        name = Category.DEFAULT_CATEGORIES.firstOrNull { it.slug == slug }?.name ?: slug,
+                        isCustomizable = true,
+                        visibleOnHome = dto.showInIndex,
+                        description = Category.defaultDescriptionFor(slug),
+                    )
+                }
+
+                val customOrder = settingsRepository.getHomepageCategoryOrder(targetUid)
+                val serverOrder = response.data
+                    .map { it.category.trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+                val ordered = resolveCategoryOrder(
+                    categories = updatedKnown + extraFromServer,
+                    customOrder = customOrder.ifEmpty { serverOrder },
+                    existingBySlug = existingBySlug,
+                )
+
+                if (customOrder.isEmpty() && serverOrder.isNotEmpty()) {
+                    val persistedOrder = ordered
+                        .filter { it.slug.isNotBlank() && !it.isAdminOnly && it.isCustomizable }
+                        .map { it.slug }
+                    if (persistedOrder.isNotEmpty()) {
+                        settingsRepository.setHomepageCategoryOrder(targetUid, persistedOrder)
+                    }
+                }
+
+                val now = clockMillis()
+                val syncedAt = existing.maxOfOrNull { it.syncedAtEpochMillis } ?: now
+                val entities = ordered.mapIndexed { index, cat ->
+                    cat.toEntity(
+                        accountUid = targetUid,
+                        sortOrder = index,
+                        syncedAtEpochMillis = syncedAt,
+                    )
+                }
+                categoryDao.replaceForAccount(targetUid, entities)
+                categoryAuthorityEpoch.incrementAndGet()
+                ordered
+            }
+        }
+
+    override suspend fun saveHomepageCategories(
+        orderedCategories: List<Category>,
+        syncToServer: Boolean,
+    ): Result<Unit> {
+        val customSlugs = orderedCategories
+            .map { it.slug.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val startGeneration = sessionRepository.currentSessionGeneration()
+        val (targetUid, mergedList) = categoryMutationMutex.withLock {
+            val uid = currentUid
+            settingsRepository.setHomepageCategoryOrder(uid, customSlugs)
+
+            val existing = categoryDao.getCategories(uid)
+            val baseBySlug = if (existing.isNotEmpty()) {
+                existing.associate { it.slug to it.toDomain() }
+            } else {
+                Category.DEFAULT_CATEGORIES.associateBy { it.slug }
+            }
+
+            val resultList = buildList {
+                val allCategory = baseBySlug[""] ?: Category.DEFAULT_CATEGORIES.first()
+                add(allCategory.copy(visibleOnHome = true, isCustomizable = false))
+
+                val seen = HashSet<String>().apply { add("") }
+                orderedCategories.forEach { incoming ->
+                    val slug = incoming.slug.trim()
+                    if (slug.isNotBlank() && seen.add(slug)) {
+                        val base = baseBySlug[slug]
+                        add(
+                            (base ?: incoming).copy(
+                                slug = slug,
+                                visibleOnHome = if (incoming.isCustomizable) incoming.visibleOnHome else (base?.visibleOnHome ?: true),
+                            ),
+                        )
+                    }
+                }
+                baseBySlug.values.forEach { remaining ->
+                    if (remaining.slug.isNotBlank() && seen.add(remaining.slug)) {
+                        add(remaining)
+                    }
+                }
+            }
+
+            val now = clockMillis()
+            val syncedAt = existing.maxOfOrNull { it.syncedAtEpochMillis } ?: now
+            val entities = resultList.mapIndexed { index, cat ->
+                cat.toEntity(
+                    accountUid = uid,
+                    sortOrder = index,
+                    syncedAtEpochMillis = syncedAt,
+                )
+            }
+            categoryDao.replaceForAccount(uid, entities)
+            categoryAuthorityEpoch.incrementAndGet()
+            uid to resultList
+        }
+
+        if (!syncToServer) {
+            return Result.success(Unit)
+        }
+
+        return runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            if (targetUid != currentUid || startGeneration != sessionRepository.currentSessionGeneration()) {
+                throw NodeSeekApiException("账号会话已切换，请重试")
+            }
+            val payload = mergedList
+                .filter { it.slug.isNotBlank() && !it.isAdminOnly && it.isCustomizable }
+                .distinctBy { it.slug }
+                .map { category ->
+                    HomepageCategoryPrefDto(
+                        category = category.slug,
+                        showInIndex = category.visibleOnHome,
+                    )
+                }
+            val response = apiClientProvider().saveHomepageCategories(payload)
+            if (response.success == false) {
+                throw NodeSeekApiException(response.message?.takeIf { it.isNotBlank() } ?: "保存首页版块配置失败")
             }
         }
     }
@@ -252,7 +462,9 @@ class ForumRepositoryImpl(
             getOrLoadSnapshot(uid, "trade", FeedSort.NEWEST_TOPIC, includeBlocked)
             getOrLoadSnapshot(uid, "", FeedSort.LATEST_REPLY, includeBlocked)
         }
-        for (snapshot in memoryFeedSnapshots.values) {
+        for ((key, snapshot) in memoryFeedSnapshots) {
+            val keyUid = FeedDiskCache.extractUidFromCacheKey(key)
+            if (keyUid != uid) continue
             for (topic in snapshot.result.pinnedTopics + snapshot.result.topics) {
                 if (topic.id in uniqueIds && !resolved.containsKey(topic.id) &&
                     (topic.categorySlug.isNotBlank() || topic.categoryName.isNotBlank())
@@ -306,6 +518,51 @@ class ForumRepositoryImpl(
         }
 
         return resolved
+    }
+
+    override suspend fun getLocalCachedTopics(categorySlug: String): List<TopicSummary> {
+        val trimmed = categorySlug.trim()
+        val activeUid = currentUid
+        val allowedUids = setOf(activeUid)
+        val snapshots = ArrayList<CachedFeedSnapshot>()
+        feedDiskCache?.let { disk ->
+            runSuspendCatching {
+                snapshots += disk.getSnapshotsForCategory(trimmed, allowedUids = allowedUids)
+            }
+        }
+        val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
+        for (sort in listOf(FeedSort.LATEST_REPLY, FeedSort.NEWEST_TOPIC)) {
+            runSuspendCatching {
+                getOrLoadSnapshot(activeUid, trimmed, sort, includeBlocked)?.let { snapshots += it }
+                getOrLoadSnapshot(activeUid, "", sort, includeBlocked)?.let { snapshots += it }
+            }
+        }
+        for ((key, snap) in memoryFeedSnapshots) {
+            val keyUid = FeedDiskCache.extractUidFromCacheKey(key)
+            if (keyUid == activeUid) {
+                snapshots += snap
+            }
+        }
+
+        val isTradeQuery = trimmed.equals("trade", ignoreCase = true)
+        val deduped = LinkedHashMap<Long, TopicSummary>()
+        for (snap in snapshots.sortedByDescending { it.fetchedAtEpochMillis }) {
+            for (topic in snap.result.pinnedTopics + snap.result.topics) {
+                if (topic.id <= 0L) continue
+                val matchesCategory = when {
+                    trimmed.isEmpty() -> true
+                    topic.categorySlug.equals(trimmed, ignoreCase = true) -> true
+                    isTradeQuery && topic.categoryName.trim() == "交易" -> true
+                    isTradeQuery && topic.categorySlug.isBlank() && topic.categoryName.isBlank() &&
+                        com.nodeseek.app.domain.trust.TrustRiskEvaluator.isTradeTopic(topic) -> true
+                    else -> false
+                }
+                if (matchesCategory && !deduped.containsKey(topic.id)) {
+                    deduped[topic.id] = topic
+                }
+            }
+        }
+        return deduped.values.toList()
     }
 
     override fun getCachedFeed(
@@ -486,6 +743,19 @@ class ForumRepositoryImpl(
                     }
                 }
                 Result.failure(challenge.mapToDomainThrowable(sessionRepository::reportChallengeRequired))
+            } catch (apiErr: NodeSeekApiException) {
+                if (safePage > 1 && apiErr.statusCode == 404) {
+                    return@singleFlightFeed Result.success(
+                        FeedPageResult(
+                            pinnedTopics = emptyList(),
+                            topics = emptyList(),
+                            currentPage = safePage,
+                            hasNextPage = false,
+                        ),
+                    )
+                }
+                recordRateLimitIfNeeded(apiErr)
+                Result.failure(apiErr.mapToDomainThrowable(sessionRepository::reportChallengeRequired))
             } catch (t: Throwable) {
                 recordRateLimitIfNeeded(t)
                 Result.failure(t.mapToDomainThrowable(sessionRepository::reportChallengeRequired))
@@ -575,19 +845,44 @@ class ForumRepositoryImpl(
         page: Int,
     ): Result<FeedPageResult> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
+            val safePage = page.coerceAtLeast(1)
+            val normalizedQuery = query.replace(SEARCH_CONTROL_WHITESPACE_REGEX, " ").trim()
+            if (normalizedQuery.isEmpty()) {
+                return@runDomainCatching FeedPageResult(
+                    pinnedTopics = emptyList(),
+                    topics = emptyList(),
+                    currentPage = safePage,
+                    hasNextPage = false,
+                )
+            }
+            val cleanCategory = categorySlug.trim().takeIf {
+                it.isEmpty() || VALID_CATEGORY_SLUG_REGEX.matches(it)
+            }.orEmpty()
             val includeBlocked = settingsRepository.settings.value.includeBlockedTopics
             val serverSort = if (sort == FeedSort.HOT || sort == FeedSort.CURATED) {
                 FeedSort.LATEST_REPLY.queryValue
             } else {
                 sort.queryValue
             }
-            val parsed = apiClientProvider().searchTopicsPage(
-                query = query,
-                categorySlug = categorySlug.trim(),
-                sortBy = serverSort,
-                page = page.coerceAtLeast(1),
-                includeBlocked = includeBlocked,
-            )
+            val parsed = try {
+                apiClientProvider().searchTopicsPage(
+                    query = normalizedQuery,
+                    categorySlug = cleanCategory,
+                    sortBy = serverSort,
+                    page = safePage,
+                    includeBlocked = includeBlocked,
+                )
+            } catch (err: NodeSeekApiException) {
+                if (safePage > 1 && err.statusCode == 404) {
+                    return@runDomainCatching FeedPageResult(
+                        pinnedTopics = emptyList(),
+                        topics = emptyList(),
+                        currentPage = safePage,
+                        hasNextPage = false,
+                    )
+                }
+                throw err
+            }
             parsed.toEnrichedFeedResult(sort = sort)
         }
 
@@ -641,15 +936,28 @@ class ForumRepositoryImpl(
         title: String,
         markdownContent: String,
         requiredViewLevel: Int,
-    ): Result<Unit> =
+    ): Result<Unit> = createTopicWithResult(
+        categorySlug = categorySlug,
+        title = title,
+        markdownContent = markdownContent,
+        requiredViewLevel = requiredViewLevel,
+    ).map { Unit }
+
+    override suspend fun createTopicWithResult(
+        categorySlug: String,
+        title: String,
+        markdownContent: String,
+        requiredViewLevel: Int,
+    ): Result<Long?> =
         runDomainCatching(onChallengeDetected = sessionRepository::reportChallengeRequired) {
-            apiClientProvider().createDiscussion(
+            val response = apiClientProvider().createDiscussionWithResult(
                 title = title.trim(),
                 markdownContent = markdownContent,
                 categorySlug = categorySlug.trim(),
                 requiredRank = requiredViewLevel,
             )
             invalidateCachesAfterWrite(topicId = null)
+            response.resolvedPostId
         }
 
     override suspend fun editTopic(
@@ -1006,7 +1314,7 @@ class ForumRepositoryImpl(
             if (existing != null) {
                 mapped.copy(
                     isCustomizable = dto.customizable ?: existing.isCustomizable,
-                    visibleOnHome = dto.showInIndex ?: existing.visibleOnHome,
+                    visibleOnHome = existing.visibleOnHome,
                     isAdminOnly = dto.adminOnly ?: existing.isAdminOnly,
                 )
             } else {
@@ -1016,10 +1324,45 @@ class ForumRepositoryImpl(
         return listOf(Category.DEFAULT_CATEGORIES.first()) + dynamic
     }
 
+    private fun resolveCategoryOrder(
+        categories: List<Category>,
+        customOrder: List<String>,
+        existingBySlug: Map<String, CategoryEntity>,
+    ): List<Category> {
+        val bySlug = categories.associateBy { it.slug }
+        val seen = HashSet<String>()
+        return buildList {
+            val allTab = bySlug[""] ?: Category.DEFAULT_CATEGORIES.first()
+            if (seen.add("")) {
+                add(allTab.copy(visibleOnHome = true, isCustomizable = false))
+            }
+            customOrder.forEach { rawSlug ->
+                val slug = rawSlug.trim()
+                val candidate = bySlug[slug]
+                if (slug.isNotBlank() && candidate != null && seen.add(slug)) {
+                    add(candidate)
+                }
+            }
+            val remaining = categories
+                .filter { it.slug.isNotBlank() && it.slug !in seen }
+                .sortedWith(
+                    compareBy<Category>(
+                        { existingBySlug[it.slug]?.sortOrder ?: Int.MAX_VALUE },
+                    ),
+                )
+            remaining.forEach { cat ->
+                if (seen.add(cat.slug)) {
+                    add(cat)
+                }
+            }
+        }
+    }
+
     companion object {
         private const val CATEGORY_TTL_MILLIS = 12L * 60L * 60L * 1000L // 12 hours
         internal const val MIN_FORCE_REFRESH_INTERVAL_MS = 4_000L
         internal const val RSS_CACHE_TTL_MILLIS = 60_000L
         private const val DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 20L
+        private val SEARCH_CONTROL_WHITESPACE_REGEX = Regex("""[\u0000-\u001F\u007F\s]+""")
     }
 }

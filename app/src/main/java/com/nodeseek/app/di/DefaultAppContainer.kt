@@ -7,14 +7,21 @@ import com.nodeseek.app.data.activity.ActivityMonitorControllerImpl
 import com.nodeseek.app.data.activity.ActivityMonitorWorker
 import com.nodeseek.app.data.activity.ActivityPreferencesStore
 import com.nodeseek.app.data.activity.ActivityWorkScheduler
+import com.nodeseek.app.data.activity.DrandApiClient
 import com.nodeseek.app.data.activity.ForumWatchActivityRepositoryImpl
+import com.nodeseek.app.data.activity.LuckyDrawRepositoryImpl
+import com.nodeseek.app.data.alerts.AlertForwarderImpl
+import com.nodeseek.app.data.alerts.AlertForwardingStore
 import com.nodeseek.app.data.backup.BackupManagerImpl
 import com.nodeseek.app.data.backup.ContentFilterRepositoryBackupBridge
 import com.nodeseek.app.data.backup.FullBackupV2Stores
+import com.nodeseek.app.data.baseline.BenchmarkBaselineStore
+import com.nodeseek.app.data.fleet.DomainRdapClient
 import com.nodeseek.app.data.fleet.FleetAlertNotifier
 import com.nodeseek.app.data.fleet.FleetMonitorWorker
 import com.nodeseek.app.data.fleet.FleetRepositoryImpl
 import com.nodeseek.app.data.fleet.FleetWorkScheduler
+import com.nodeseek.app.data.fleet.JvmTlsCertificateInspector
 import com.nodeseek.app.data.local.BlockedUsersCache
 import com.nodeseek.app.data.local.ContentFilterRepositoryImpl
 import com.nodeseek.app.data.local.DataStoreBlockedUsersCache
@@ -46,9 +53,13 @@ import com.nodeseek.app.data.radar.PulseRadarMonitor
 import com.nodeseek.app.data.radar.RadarWorkScheduler
 import com.nodeseek.app.data.repository.BookmarkAndHistoryRepositoryImpl
 import com.nodeseek.app.data.repository.CheckInRepositoryImpl
+import com.nodeseek.app.data.repository.CommunityToolsRepositoryImpl
+import com.nodeseek.app.data.repository.FileAccountCookieVault
 import com.nodeseek.app.data.repository.ForumRepositoryImpl
 import com.nodeseek.app.data.repository.InboxRepositoryImpl
+import com.nodeseek.app.data.repository.MultiAccountManagerImpl
 import com.nodeseek.app.data.repository.NodeImageHostRepositoryImpl
+import com.nodeseek.app.data.repository.PollAndStardustRepositoryImpl
 import com.nodeseek.app.data.repository.RadarRepositoryImpl
 import com.nodeseek.app.data.repository.SessionRepositoryImpl
 import com.nodeseek.app.data.repository.SharedPreferencesSessionSnapshotStore
@@ -67,11 +78,17 @@ import com.nodeseek.app.data.update.AndroidApkUpdateInstaller
 import com.nodeseek.app.data.update.AppUpdateManagerImpl
 import com.nodeseek.app.data.update.GitHubReleaseClient
 import com.nodeseek.app.data.valuation.ExchangeRateRepository
+import com.nodeseek.app.data.valuation.TradeMarketReferenceRepositoryImpl
+import com.nodeseek.app.data.widget.WidgetSnapshotRepositoryImpl
 import com.nodeseek.app.domain.activity.ActivityMonitorController
 import com.nodeseek.app.domain.activity.ActivityRepository
+import com.nodeseek.app.domain.activity.LuckyDrawRepository
+import com.nodeseek.app.domain.alerts.AlertForwarder
 import com.nodeseek.app.domain.backup.BackupManager
 import com.nodeseek.app.domain.filter.ContentFilterRepository
 import com.nodeseek.app.domain.fleet.FleetRepository
+import com.nodeseek.app.domain.mail.DefaultSeekMailOtpWatcher
+import com.nodeseek.app.domain.mail.SeekMailOtpWatcher
 import com.nodeseek.app.domain.mail.SeekMailRepository
 import com.nodeseek.app.domain.mail.VpsMailAutoIngestService
 import com.nodeseek.app.domain.overseas.OverseasIntelRepository
@@ -83,10 +100,14 @@ import com.nodeseek.app.domain.digest.AwayDigestRepository
 import com.nodeseek.app.domain.digest.AwayDigestRepositoryImpl
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.CheckInRepository
+import com.nodeseek.app.domain.repository.CommunityToolsRepository
 import com.nodeseek.app.domain.repository.DraftRepository
 import com.nodeseek.app.domain.repository.ForumRepository
 import com.nodeseek.app.domain.repository.ImageHostRepository
 import com.nodeseek.app.domain.repository.InboxRepository
+import com.nodeseek.app.domain.repository.MultiAccountManager
+import com.nodeseek.app.domain.repository.PollAndStardustRepository
+import com.nodeseek.app.domain.repository.AccountCookieVault
 import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SettingsRepository
 import com.nodeseek.app.domain.repository.UserRepository
@@ -96,10 +117,20 @@ import com.nodeseek.app.domain.ssh.SshVaultRepository
 import com.nodeseek.app.domain.trust.OfficialTradeRepository
 import com.nodeseek.app.domain.trust.SellerTrustRepository
 import com.nodeseek.app.domain.update.AppUpdateManager
+import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
+import com.nodeseek.app.domain.widget.WidgetSnapshotRepository
+import com.nodeseek.app.notifications.OtpWatchNotificationHelper
 import com.nodeseek.app.notifications.PulseNotificationDispatcher
+import com.nodeseek.app.widget.GlanceWidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
@@ -134,7 +165,7 @@ class DefaultAppContainer(
         )
     }
 
-    val coilOkHttpClient: OkHttpClient by lazy {
+    override val coilOkHttpClient: OkHttpClient by lazy {
         CoilHttpClientFactory.create(
             cookieBridge = cookieBridge,
             userAgentProvider = userAgentProvider,
@@ -156,6 +187,13 @@ class DefaultAppContainer(
             sameOriginTransport = sameOriginActionRunner,
             onConfigObserved = { config ->
                 sessionRepositoryImpl.onConfigPayloadObserved(config)
+            },
+            sessionGenerationProvider = { sessionRepositoryImpl.currentSessionGeneration() },
+            onConfigObservedWithGeneration = { config, expectedGeneration ->
+                sessionRepositoryImpl.onConfigPayloadObserved(
+                    config = config,
+                    expectedGeneration = expectedGeneration,
+                )
             },
         )
     }
@@ -190,6 +228,10 @@ class DefaultAppContainer(
             sessionRepo.embeddedCategoriesListener = { categories, uid ->
                 forumRepositoryImpl.onEmbeddedCategoriesObserved(categories, uid)
             }
+            sessionRepo.activeUidChangedListener = { uid ->
+                settingsRepository.onActiveAccountChanged(uid)
+            }
+            settingsRepository.onActiveAccountChanged(sessionRepo.sessionState.value?.uid ?: 0L)
             sessionRepo.onVerifiedCallback = {
                 sameOriginActionRunner.markVerifiedByUser()
                 forumRepositoryImpl.clearRssFallbackCache()
@@ -197,9 +239,10 @@ class DefaultAppContainer(
             sessionRepo.onChallengeClearedOrAuthenticated = {
                 forumRepositoryImpl.clearRssFallbackCache()
             }
-            sessionRepo.onSignedOutCallback = {
+            sessionRepo.onSignedOutWithUidCallback = { uid ->
                 applicationScope.launch {
-                    runCatching { blockedUsersCache.clear() }
+                    runCatching { blockedUsersCache.clearForUid(uid) }
+                    runCatching { awayDigestStore.clearForAccount(uid) }
                 }
             }
         }
@@ -246,6 +289,24 @@ class DefaultAppContainer(
     override val sessionRepository: SessionRepository
         get() = sessionRepositoryImpl
 
+    val accountCookieVault: AccountCookieVault by lazy {
+        FileAccountCookieVault.forContext(appContext)
+    }
+
+    override val multiAccountManager: MultiAccountManager by lazy {
+        MultiAccountManagerImpl(
+            vault = accountCookieVault,
+            cookieStore = cookieBridge,
+            sessionRepository = sessionRepositoryImpl,
+            apiClientProvider = { apiClient },
+            checkInRepository = checkInRepository,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            forumRepository = forumRepository,
+            externalScope = applicationScope,
+            settingsRepository = settingsRepository,
+        )
+    }
+
     override val inboxRepository: InboxRepository
         get() = inboxRepositoryImpl
 
@@ -256,7 +317,10 @@ class DefaultAppContainer(
         get() = forumRepositoryImpl
 
     private val awayDigestStore: SharedPreferencesAwayDigestStore by lazy {
-        SharedPreferencesAwayDigestStore(appContext)
+        SharedPreferencesAwayDigestStore(
+            context = appContext,
+            accountUidProvider = { sessionRepositoryImpl.sessionState.value?.uid ?: 0L },
+        )
     }
 
     override val awayDigestRepository: AwayDigestRepository by lazy {
@@ -345,6 +409,42 @@ class DefaultAppContainer(
         )
     }
 
+    val otpWatchNotificationHelper: OtpWatchNotificationHelper by lazy {
+        OtpWatchNotificationHelper(appContext)
+    }
+
+    override val seekMailOtpWatcher: SeekMailOtpWatcher by lazy {
+        DefaultSeekMailOtpWatcher(
+            seekMailRepository = seekMailRepository,
+            settingsRepository = settingsRepository,
+            notificationSink = otpWatchNotificationHelper,
+            scope = applicationScope,
+        )
+    }
+
+    val alertForwardingStore: AlertForwardingStore by lazy {
+        AlertForwardingStore.forContext(appContext)
+    }
+
+    override val alertForwarder: AlertForwarder by lazy {
+        AlertForwarderImpl(
+            store = alertForwardingStore,
+            baseHttpClient = apiHttpClient,
+            allowLoopbackTargets = false,
+        )
+    }
+
+    override val widgetSnapshotRepository: WidgetSnapshotRepository by lazy {
+        WidgetSnapshotRepositoryImpl(
+            fleetRepository = fleetRepository,
+            sessionRepository = sessionRepository,
+            checkInRepository = checkInRepository,
+            settingsRepository = settingsRepository,
+            radarRepository = radarRepository,
+            seekMailRepository = seekMailRepository,
+        )
+    }
+
     private val radarPreferencesStore: RadarPreferencesStore by lazy {
         RadarPreferencesStore(appContext)
     }
@@ -374,6 +474,7 @@ class DefaultAppContainer(
             radarRepository = radarRepositoryImpl,
             notificationDispatcher = notificationDispatcher,
             watermarkStore = radarPreferencesStore,
+            alertForwarder = alertForwarder,
         )
     }
 
@@ -462,6 +563,7 @@ class DefaultAppContainer(
                 officialTradeRepository = officialTradeRepository,
                 netBenchHistoryStore = netBenchHistoryStore,
                 exchangeRateRepository = exchangeRateRepository,
+                benchmarkBaselineRepository = benchmarkBaselineRepository,
             ),
         )
     }
@@ -475,10 +577,20 @@ class DefaultAppContainer(
             ),
             managerProvider = { backupManager },
         )
+        applicationScope.launch {
+            runCatching { multiAccountManager.initializeAndSyncActiveAccount() }
+        }
     }
 
     override val exchangeRateRepository: ExchangeRateRepository by lazy {
         ExchangeRateRepository.forContext(appContext)
+    }
+
+    override val tradeMarketReferenceRepository: TradeMarketReferenceRepository by lazy {
+        TradeMarketReferenceRepositoryImpl(
+            forumRepository = forumRepository,
+            bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+        )
     }
 
     override val restockNotificationHelper: RestockNotificationHelper by lazy {
@@ -507,6 +619,7 @@ class DefaultAppContainer(
             analyzer = stockPageAnalyzer,
             notificationHelper = restockNotificationHelper,
             scope = applicationScope,
+            alertForwarder = alertForwarder,
         )
     }
 
@@ -563,6 +676,32 @@ class DefaultAppContainer(
         ActivityWorkScheduler(appContext)
     }
 
+    val drandApiClient: DrandApiClient by lazy {
+        DrandApiClient(baseHttpClient = apiHttpClient)
+    }
+
+    override val luckyDrawRepository: LuckyDrawRepository by lazy {
+        LuckyDrawRepositoryImpl(
+            apiClientProvider = { apiClient },
+            drandApiClient = drandApiClient,
+            sessionRepository = sessionRepositoryImpl,
+        )
+    }
+
+    override val pollAndStardustRepository: PollAndStardustRepository by lazy {
+        PollAndStardustRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepositoryImpl,
+        )
+    }
+
+    override val communityToolsRepository: CommunityToolsRepository by lazy {
+        CommunityToolsRepositoryImpl(
+            apiClientProvider = { apiClient },
+            sessionRepository = sessionRepositoryImpl,
+        )
+    }
+
     override val sellerTrustRepository: SellerTrustRepository by lazy {
         SellerTrustRepositoryImpl.forContext(
             context = appContext,
@@ -573,6 +712,13 @@ class DefaultAppContainer(
             sameOriginTransport = sameOriginActionRunner,
             onConfigObserved = { config ->
                 sessionRepositoryImpl.onConfigPayloadObserved(config)
+            },
+            sessionGenerationProvider = { sessionRepositoryImpl.currentSessionGeneration() },
+            onConfigObservedWithGeneration = { config, expectedGeneration ->
+                sessionRepositoryImpl.onConfigPayloadObserved(
+                    config = config,
+                    expectedGeneration = expectedGeneration,
+                )
             },
         )
     }
@@ -600,6 +746,18 @@ class DefaultAppContainer(
         NetBenchHistoryStore.forContext(appContext)
     }
 
+    override val benchmarkBaselineRepository: com.nodeseek.app.domain.baseline.BenchmarkBaselineRepository by lazy {
+        BenchmarkBaselineStore.forContext(appContext)
+    }
+
+    override val domainRdapClient: DomainRdapClient by lazy {
+        DomainRdapClient()
+    }
+
+    override val tlsCertificateInspector: com.nodeseek.app.domain.fleet.TlsCertificateInspector by lazy {
+        JvmTlsCertificateInspector()
+    }
+
     override val sshVaultRepository: SshVaultRepository by lazy {
         SshServerVault.getDefault(appContext)
     }
@@ -625,6 +783,7 @@ class DefaultAppContainer(
                 )
             },
             baseHttpClient = apiHttpClient,
+            benchmarkBaselineRepository = benchmarkBaselineRepository,
         )
     }
 
@@ -633,6 +792,7 @@ class DefaultAppContainer(
         OverseasPromoWorker.registerControllerProvider { overseasPromoMonitorController }
         ActivityMonitorWorker.registerControllerProvider { activityMonitorController }
         FleetMonitorWorker.externalRepositoryFactory = { fleetRepository }
+        FleetMonitorWorker.externalAlertForwarderFactory = { alertForwarder }
     }
 
     fun startBackgroundServicesAsync(
@@ -640,9 +800,12 @@ class DefaultAppContainer(
     ) {
         applicationScope.launch {
             runCatching { notificationDispatcher.ensureChannels() }
+            runCatching { otpWatchNotificationHelper.ensureChannel() }
+            runCatching { alertForwardingStore.ensureLoaded() }
             runCatching { userAgentProvider.initFromContext(appContext) }
             runCatching { startBackgroundRadarScheduling() }
             runCatching { startBackgroundFeatureSchedulers() }
+            runCatching { startWidgetSnapshotObserver() }
             val inForeground = isForegroundProvider()
             runCatching {
                 radarMonitorController.onForegroundChanged(inForeground)
@@ -711,5 +874,37 @@ class DefaultAppContainer(
             scope = applicationScope,
             repository = fleetRepository,
         )
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun startWidgetSnapshotObserver() {
+        applicationScope.launch {
+            val loadedSettings = runCatching {
+                settingsRepository.awaitLoadedSettings()
+            }.getOrNull()
+            if (loadedSettings != null &&
+                (loadedSettings.seekMailApiKey.isNotBlank() ||
+                    loadedSettings.preferRandomCheckIn ||
+                    sessionRepository.sessionState.value != null)
+            ) {
+                GlanceWidgetUpdater.updateAll(appContext)
+            }
+            merge(
+                fleetRepository.snapshotsFlow.drop(1).map { },
+                fleetRepository.assetsFlow.drop(1).map { },
+                checkInRepository.checkInStatus.drop(1).map { },
+                radarRepository.unreadAlertCountFlow.drop(1).map { },
+                sessionRepository.sessionState.drop(1).map { },
+                settingsRepository.settings
+                    .map { it.preferRandomCheckIn to it.seekMailApiKey }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .map { },
+            )
+                .debounce(750L)
+                .collect {
+                    GlanceWidgetUpdater.updateAll(appContext)
+                }
+        }
     }
 }
