@@ -24,14 +24,43 @@ import com.nodeseek.app.domain.repository.SessionRepository
 import com.nodeseek.app.domain.repository.SignInStepResult
 import com.nodeseek.app.domain.repository.UserRepository
 import com.nodeseek.app.domain.trade.TradePrivacyOptions
+import com.nodeseek.app.domain.valuation.BillingCyclePreset
+import com.nodeseek.app.domain.valuation.DealSpreadStatus
+import com.nodeseek.app.domain.valuation.FeePayer
 import com.nodeseek.app.domain.valuation.MarketDataSource
 import com.nodeseek.app.domain.valuation.MarketSearchStatus
-import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
+import com.nodeseek.app.domain.valuation.MiddlemanFeeMode
+import com.nodeseek.app.domain.valuation.NaturalCycleSpan
+import com.nodeseek.app.domain.valuation.TradeAskPriceObservation
 import com.nodeseek.app.domain.valuation.TradeCandidateTopic
+import com.nodeseek.app.domain.valuation.TradeListingIntent
+import com.nodeseek.app.domain.valuation.TradeListingPriceParser
+import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.domain.valuation.TradePremiumDistribution
+import com.nodeseek.app.domain.valuation.TradePremiumObservation
+import com.nodeseek.app.domain.valuation.TransferPricingBasis
+import com.nodeseek.app.domain.valuation.ValuationCurrency
+import com.nodeseek.app.domain.valuation.ValuationMode
+import com.nodeseek.app.domain.valuation.VpsValuationOutcome
+import com.nodeseek.app.ui.valuation.buildValuationSheetPrefill
+import com.nodeseek.app.ui.valuation.evaluateValuationForm
 import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
+import com.nodeseek.app.ui.valuation.formatAskObservationDetail
+import com.nodeseek.app.ui.valuation.formatAskPriceHeadline
+import com.nodeseek.app.ui.valuation.formatCompactCny
+import com.nodeseek.app.ui.valuation.formatCurrentTopicPricingSummary
+import com.nodeseek.app.ui.valuation.formatDistributionSummaryDetail
+import com.nodeseek.app.ui.valuation.formatMatchAndPricedSummary
+import com.nodeseek.app.ui.valuation.formatMatchedOnlyHint
+import com.nodeseek.app.ui.valuation.formatObservationDetail
+import com.nodeseek.app.ui.valuation.formatTransferBasisReadout
+import com.nodeseek.app.ui.valuation.parseSignedDecimalOrNull
 import com.nodeseek.app.ui.valuation.sanitizeMarketStatusMessage
+import com.nodeseek.app.ui.valuation.sanitizeSignedDecimalInput
+import com.nodeseek.app.ui.valuation.seedTargetSpreadOnBasisSwitch
+import com.nodeseek.app.ui.valuation.toggleSignedDecimalText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -58,6 +87,7 @@ import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Proxy
 import java.math.BigDecimal
+import java.time.LocalDate
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TradeAndCarpoolTopicDetailViewModelTest {
@@ -304,25 +334,33 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         var localCalls = 0
         var remoteCalls = 0
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 localCalls++
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(1L, "[出] DMIT LAX.Pro.Tiny 溢价 +60", MarketDataSource.FEED_CACHE),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(query = query, distribution = dist)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 remoteCalls++
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(1L, "[出] DMIT LAX.Pro.Tiny 溢价 +60", MarketDataSource.FEED_CACHE),
                         TradeCandidateTopic(2L, "[出] DMIT LAX.Pro.Tiny 溢价 +100", MarketDataSource.REMOTE_SEARCH),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(
                     query = query,
@@ -371,12 +409,20 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         val session = FakeSessionRepo(AccountSession(uid = 10L, username = "viewer"))
         var localCalls = 0
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 localCalls++
                 return TradeMarketReferenceState(query = query)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState =
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState =
                 TradeMarketReferenceState(query = query)
         }
         val forum = FakeForumRepo(
@@ -402,18 +448,26 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         val session = FakeSessionRepo(AccountSession(uid = 10L, username = "viewer"))
         val recordedQueries = mutableListOf<String>()
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 recordedQueries += query
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(201L, "[出] 搬瓦工 MEGABOX-PRO 溢价 +120", MarketDataSource.FEED_CACHE),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(query = query, distribution = dist)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState =
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState =
                 TradeMarketReferenceState(query = query, searchStatus = MarketSearchStatus.SUCCESS, hasRemoteResults = true)
         }
 
@@ -499,19 +553,27 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         var localCalls = 0
         var remoteCalls = 0
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 localCalls++
-                // Only self-topic 510 in local cache (0 peer samples) -> must still trigger remote search!
+                // Only self-topic 510 in local cache (excluded -> 0 peer samples) -> must still trigger remote search!
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(510L, "[出] DMIT LAX.Pro.WEE 溢价 +80", MarketDataSource.READ_HISTORY),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(query = query, distribution = dist)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 remoteCalls++
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
@@ -519,7 +581,7 @@ class TradeAndCarpoolTopicDetailViewModelTest {
                         TradeCandidateTopic(510L, "[出] DMIT LAX.Pro.WEE 溢价 +80", MarketDataSource.READ_HISTORY),
                         TradeCandidateTopic(801L, "[出] DMIT LAX.Pro.WEE 溢价 +60", MarketDataSource.REMOTE_SEARCH),
                         TradeCandidateTopic(802L, "[出] DMIT LAX.Pro.WEE 溢价 +100", MarketDataSource.REMOTE_SEARCH),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(
                     query = query,
@@ -553,14 +615,16 @@ class TradeAndCarpoolTopicDetailViewModelTest {
 
         assertEquals(1, localCalls)
         assertEquals(1, remoteCalls)
-        assertEquals(3, loaded.marketReference?.distribution?.sampleCount)
+        // Current topic 510L is excluded; only peers 801 (+60) and 802 (+100) remain (median +80.00)
+        assertEquals(2, loaded.marketReference?.distribution?.sampleCount)
+        assertTrue(loaded.marketReference?.distribution?.observations?.none { it.topicId == 510L } == true)
         assertEquals(BigDecimal("80.00"), loaded.marketReference?.distribution?.medianCny)
 
         // Refreshing the current page must NOT clobber completed remote results or spam remote search
         vm.refreshCurrentPage()
         assertEquals(1, remoteCalls)
         assertTrue(vm.uiState.value.marketReference?.hasRemoteResults == true)
-        assertEquals(3, vm.uiState.value.marketReference?.distribution?.sampleCount)
+        assertEquals(2, vm.uiState.value.marketReference?.distribution?.sampleCount)
         collectJob.cancel()
     }
 
@@ -571,19 +635,27 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         val analyzedQueries = mutableListOf<String>()
 
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 analyzedQueries += query
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(901L, "[出] DMIT LAX.Pro.WEE 溢价 +70", MarketDataSource.FEED_CACHE),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(query = query, distribution = dist)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState =
-                analyzeLocal(query, includeBuyRequests).copy(
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState =
+                analyzeLocal(query, includeBuyRequests, excludeTopicId).copy(
                     searchStatus = MarketSearchStatus.SUCCESS,
                     hasRemoteResults = true,
                 )
@@ -648,23 +720,31 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         val session = FakeSessionRepo(AccountSession(uid = 10L, username = "viewer"))
         val remoteQueries = mutableListOf<String>()
         val fakeMarketRepo = object : TradeMarketReferenceRepository {
-            override suspend fun analyzeLocal(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(1L, "[出] DMIT LAX.Pro.Tiny 溢价 +60", MarketDataSource.FEED_CACHE),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(query = query, distribution = dist)
             }
 
-            override suspend fun searchRemoteAndMerge(query: String, includeBuyRequests: Boolean): TradeMarketReferenceState {
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
                 remoteQueries += query
                 val dist = TradeMarketPremiumAnalyzer.analyze(
                     query = query,
                     candidates = listOf(
                         TradeCandidateTopic(2L, "[出] 搬瓦工 MEGABOX-PRO 溢价 +150", MarketDataSource.REMOTE_SEARCH),
-                    ),
+                    ).filterNot { it.topicId == excludeTopicId },
                 )
                 return TradeMarketReferenceState(
                     query = query,
@@ -857,6 +937,637 @@ class TradeAndCarpoolTopicDetailViewModelTest {
         assertEquals(2, carpoolForum.edits.size)
         assertFalse(carpoolVm.uiState.value.isMutatingTopic)
         carpoolCollect.cancel()
+    }
+
+    @Test
+    fun `TopicDetailViewModel triggers market reference on concise trade blank all and buy posts caches OP body and excludes self`() = runTest {
+        val session = FakeSessionRepo(AccountSession(uid = 10L, username = "viewer"))
+        val cachedBodies = mutableMapOf<Long, String>()
+        val excludedIds = mutableListOf<Long?>()
+        val recordedQueries = mutableListOf<String>()
+
+        val fakeMarketRepo = object : TradeMarketReferenceRepository {
+            override fun cacheTopicBody(topicId: Long, bodyMarkdown: String) {
+                cachedBodies[topicId] = bodyMarkdown
+            }
+
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
+                recordedQueries += query
+                excludedIds += excludeTopicId
+                val dist = TradeMarketPremiumAnalyzer.analyze(
+                    query = query,
+                    candidates = listOf(
+                        TradeCandidateTopic(9901L, "[出] DMIT LAX Pro Wee 溢价 +50", MarketDataSource.FEED_CACHE),
+                    ),
+                    excludeTopicId = excludeTopicId,
+                )
+                return TradeMarketReferenceState(query = query, distribution = dist)
+            }
+
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState {
+                excludedIds += excludeTopicId
+                return TradeMarketReferenceState(
+                    query = query,
+                    searchStatus = MarketSearchStatus.SUCCESS,
+                    hasRemoteResults = true,
+                )
+            }
+        }
+
+        data class ConciseCase(
+            val topicId: Long,
+            val slug: String,
+            val name: String,
+            val title: String,
+            val body: String,
+        )
+
+        val cases = listOf(
+            // Concise sell on trade board without "溢价"
+            ConciseCase(751L, "trade", "交易", "出 DMIT LAX Pro Wee 300", "续费 \$36.9/年 2026-12-01到期"),
+            // Concise buy (收) post with blank category
+            ConciseCase(752L, "", "", "收咸鱼云 圣何塞 9929", "预算 200 带原油"),
+            // Concise buy (收) post with "all" category
+            ConciseCase(753L, "all", "全部", "[收] 搬瓦工 MEGABOX", "带原油收一台"),
+            // Empty title-only extraction -> extracts from OP body
+            ConciseCase(754L, "trade", "交易", "回血出个吃灰鸡", "机型：DMIT LAX Pro Wee\n明盘 280"),
+        )
+
+        for (tc in cases) {
+            val forum = FakeForumRepo(
+                detailHandler = { _, p ->
+                    Result.success(
+                        makePage(
+                            topicId = tc.topicId,
+                            pageNum = p,
+                            categorySlug = tc.slug,
+                            categoryName = tc.name,
+                            title = tc.title,
+                            opMarkdown = tc.body,
+                        ),
+                    )
+                },
+            )
+            val vm = TopicDetailViewModel(
+                container = buildContainer(forum, session),
+                topicId = tc.topicId,
+                tradeMarketReferenceRepository = fakeMarketRepo,
+            )
+            val job = launch(testDispatcher) { vm.uiState.collect {} }
+            val loaded = vm.uiState.first { it.marketReference != null }
+            assertTrue(
+                "Expected non-blank extracted query for '${tc.title}', got '${loaded.marketReference?.query}'",
+                loaded.marketReference!!.query.isNotBlank(),
+            )
+            assertEquals(tc.body, cachedBodies[tc.topicId])
+            assertTrue("Expected excludeTopicId=${tc.topicId} passed to repo", tc.topicId in excludedIds)
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `MarketPremiumSection formatters render derived spread formula ask price summary and match counts`() {
+        assertEquals("300", formatCompactCny(BigDecimal("300.00")))
+        assertEquals("36.9", formatCompactCny(BigDecimal("36.90")))
+        assertEquals("12.35", formatCompactCny(BigDecimal("12.35")))
+
+        val derivedObs = TradePremiumObservation(
+            topicId = 10L,
+            title = "出 DMIT LAX Pro Wee 300",
+            premiumDeltaCny = BigDecimal("80.00"),
+            spreadStatus = DealSpreadStatus.PREMIUM,
+            intent = TradeListingIntent.SELL,
+            isClosedSold = false,
+            source = MarketDataSource.REMOTE_SEARCH,
+            matchedExpression = "推算: 挂牌¥300 − 残值¥220",
+            askPriceCny = BigDecimal("300.00"),
+            residualCny = BigDecimal("220.00"),
+            isDerived = true,
+        )
+        assertEquals(
+            "全站搜索 · 推算溢价 +¥80.00（总价¥300 − 残值¥220）",
+            formatObservationDetail(derivedObs),
+        )
+
+        val derivedTotalObs = TradePremiumObservation(
+            topicId = 101L,
+            title = "出 DMIT LAX Pro Wee 溢价 +80",
+            premiumDeltaCny = BigDecimal("80.00"),
+            spreadStatus = DealSpreadStatus.PREMIUM,
+            intent = TradeListingIntent.SELL,
+            isClosedSold = false,
+            source = MarketDataSource.REMOTE_SEARCH,
+            matchedExpression = "溢价 +80",
+            askPriceCny = BigDecimal("300.00"),
+            residualCny = BigDecimal("220.00"),
+            isDerived = false,
+            isAskDerived = true,
+        )
+        assertEquals(
+            "全站搜索 · 推算总价 ¥300（残值¥220 + 溢价¥80）",
+            formatObservationDetail(derivedTotalObs),
+        )
+
+        val derivedDiscountTotalObs = derivedTotalObs.copy(
+            topicId = 102L,
+            premiumDeltaCny = BigDecimal("-20.00"),
+            spreadStatus = DealSpreadStatus.DISCOUNT,
+            askPriceCny = BigDecimal("200.00"),
+        )
+        assertEquals(
+            "全站搜索 · 推算总价 ¥200（残值¥220 − 折价¥20）",
+            formatObservationDetail(derivedDiscountTotalObs),
+        )
+
+        val explicitObs = TradePremiumObservation(
+            topicId = 11L,
+            title = "[已出] DMIT LAX Pro Wee 溢价 +50",
+            premiumDeltaCny = BigDecimal("50.00"),
+            spreadStatus = DealSpreadStatus.PREMIUM,
+            intent = TradeListingIntent.SELL,
+            isClosedSold = true,
+            source = MarketDataSource.FEED_CACHE,
+            matchedExpression = "溢价 +50",
+        )
+        assertEquals(
+            "版块缓存 · 已出 · 溢价 +50",
+            formatObservationDetail(explicitObs),
+        )
+
+        val askObs = TradeAskPriceObservation(
+            topicId = 12L,
+            title = "出 DMIT LAX Pro Wee 280r",
+            askPriceCny = BigDecimal("280.00"),
+            intent = TradeListingIntent.SELL,
+            isClosedSold = false,
+            source = MarketDataSource.REMOTE_SEARCH,
+            matchedExpression = "280r",
+        )
+        assertEquals(
+            "全站搜索 · 280r",
+            formatAskObservationDetail(askObs),
+        )
+
+        val askOnlyDist = TradePremiumDistribution(
+            query = "DMIT LAX Pro Wee",
+            normalizedTokens = listOf("dmit", "lax", "pro", "wee"),
+            sampleCount = 0,
+            matchedTopicCount = 5,
+            premiumCount = 0,
+            parCount = 0,
+            discountCount = 0,
+            minCny = null,
+            p25Cny = null,
+            medianCny = null,
+            p75Cny = null,
+            maxCny = null,
+            observations = emptyList(),
+            localSampleCount = 0,
+            remoteSampleCount = 0,
+            askSampleCount = 3,
+            askMinCny = BigDecimal("260.00"),
+            askP25Cny = BigDecimal("280.00"),
+            askMedianCny = BigDecimal("300.00"),
+            askP75Cny = BigDecimal("340.00"),
+            askMaxCny = BigDecimal("360.00"),
+            askObservations = listOf(
+                askObs,
+                askObs.copy(topicId = 13L, askPriceCny = BigDecimal("300.00")),
+                askObs.copy(topicId = 14L, askPriceCny = BigDecimal("360.00")),
+            ),
+            matchedButUnparsedCount = 2,
+        )
+        assertEquals("匹配 5 帖 · 可计价 3 帖", formatMatchAndPricedSummary(askOnlyDist))
+        assertEquals("同款挂牌价 中位 ¥300（¥280–¥340）", formatAskPriceHeadline(askOnlyDist))
+
+        // Mixed 1 local spread + 2 remote ask-only -> priced local/remote counts must reconcile to (本地 1 / 全站 2)
+        val mixedDist = TradePremiumDistribution(
+            query = "DMIT LAX Pro Wee",
+            normalizedTokens = listOf("dmit", "lax", "pro", "wee"),
+            sampleCount = 1,
+            matchedTopicCount = 3,
+            premiumCount = 1,
+            parCount = 0,
+            discountCount = 0,
+            minCny = BigDecimal("50.00"),
+            p25Cny = BigDecimal("50.00"),
+            medianCny = BigDecimal("50.00"),
+            p75Cny = BigDecimal("50.00"),
+            maxCny = BigDecimal("50.00"),
+            observations = listOf(explicitObs),
+            localSampleCount = 1,
+            remoteSampleCount = 0,
+            askSampleCount = 2,
+            askMinCny = BigDecimal("280.00"),
+            askP25Cny = BigDecimal("290.00"),
+            askMedianCny = BigDecimal("300.00"),
+            askP75Cny = BigDecimal("310.00"),
+            askMaxCny = BigDecimal("320.00"),
+            askObservations = listOf(
+                askObs.copy(topicId = 21L, source = MarketDataSource.REMOTE_SEARCH),
+                askObs.copy(topicId = 22L, source = MarketDataSource.REMOTE_SEARCH),
+            ),
+        )
+        assertEquals(
+            "匹配 3 帖 · 可计价 3 帖（本地 1 / 全站 2） · 样本较少仅供参考",
+            formatDistributionSummaryDetail(mixedDist),
+        )
+
+        // When sampleCount >= 3, summary detail omits duplicate 极值 (already displayed in Tile 1)
+        val threeSampleDist = mixedDist.copy(
+            sampleCount = 3,
+            matchedTopicCount = 5,
+            observations = listOf(
+                explicitObs,
+                explicitObs.copy(topicId = 15L, premiumDeltaCny = BigDecimal("70.00")),
+                explicitObs.copy(topicId = 16L, premiumDeltaCny = BigDecimal("90.00")),
+            ),
+            minCny = BigDecimal("50.00"),
+            maxCny = BigDecimal("90.00"),
+        )
+        val threeSampleSummary = formatDistributionSummaryDetail(threeSampleDist)
+        assertFalse("Summary detail must not duplicate 极值 already shown in metric tile", threeSampleSummary.contains("极值"))
+        assertEquals("匹配 5 帖 · 可计价 5 帖（本地 3 / 全站 2）", threeSampleSummary)
+
+        // Matched-only copy must not claim clickable rows below when sampleItems is empty
+        val noRowsRemoteHint = formatMatchedOnlyHint(hasRemoteResults = true, hasClickableSamples = false)
+        assertFalse("Hint must not reference rows below when list is empty", noRowsRemoteHint.contains("点开下方"))
+        val withRowsRemoteHint = formatMatchedOnlyHint(hasRemoteResults = true, hasClickableSamples = true)
+        assertTrue(withRowsRemoteHint.contains("点开下方"))
+
+        // extractMarketQueryWithContext preserves newlines & markdown table pipes for analyzer fallback parsing
+        assertEquals(
+            "DMIT LAX Pro WEE",
+            extractMarketQueryWithContext(
+                title = "出个大妈传家宝",
+                openingMarkdown = "LAX.Pro.WEE，续费 \$36.9/yr\n2027-03-01到期\n也可换 搬瓦工 MEGABOX-PRO",
+            ),
+        )
+        assertEquals(
+            "BWG MEGABOX PRO",
+            extractMarketQueryWithContext(
+                title = "出吃灰传家宝",
+                openingMarkdown = "商家：BandwagonHost\n套餐：MEGABOX-PRO\n续费：\$45.68/年\n也可换 DMIT",
+            ),
+        )
+        assertEquals(
+            "DMIT LAX Pro WEE",
+            extractMarketQueryWithContext(
+                title = "出吃灰传家宝",
+                openingMarkdown = "| 商家 | DMIT |\n| 套餐 | LAX.Pro.WEE |\n| 备注 | 也可换 搬瓦工 |",
+            ),
+        )
+
+        // Current-topic pricing summary banner copy for total-ask, explicit-spread, and BUY posts
+        val fixedDate = LocalDate.of(2026, 6, 1)
+        val totalWithResidual = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 300",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        val (totalHead, totalDetail) = formatCurrentTopicPricingSummary(totalWithResidual)!!
+        assertEquals("本帖按总价出：总价 ¥300", totalHead)
+        assertEquals("净残值 ¥130.5 · 推算溢价 +¥169.50", totalDetail)
+
+        val totalOnly = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 300",
+            bodySnippet = "带原油，私信",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按总价出：总价 ¥300" to "未标续费/到期，点「估值核算」算溢价",
+            formatCurrentTopicPricingSummary(totalOnly),
+        )
+
+        val spreadWithResidual = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 溢价 +80",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        val (spreadHead, spreadDetail) = formatCurrentTopicPricingSummary(spreadWithResidual)!!
+        assertEquals("本帖按溢价出：溢价 +¥80.00", spreadHead)
+        assertEquals("净残值 ¥130.5 · 推算总价 ¥210.5", spreadDetail)
+
+        val spreadOnly = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 溢价 +80",
+            bodySnippet = "带原油",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按溢价出：溢价 +¥80.00" to "未标续费/到期，点「估值核算」算总价",
+            formatCurrentTopicPricingSummary(spreadOnly),
+        )
+
+        // Explicit par ("剩余价值出") and explicit discount ("折价30出") differentiate wording
+        val explicitPar = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 剩余价值出",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按残值平出：平出 ¥0.00" to "净残值 ¥130.5 · 推算总价 ¥130.5",
+            formatCurrentTopicPricingSummary(explicitPar),
+        )
+
+        val explicitDiscount = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 折价30出",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按折价出：折价 -¥30.00" to "净残值 ¥130.5 · 推算总价 ¥100.5",
+            formatCurrentTopicPricingSummary(explicitDiscount),
+        )
+
+        // Derived discount and derived par differentiate wording instead of hardcoding "推算溢价"
+        val totalDiscount = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 100r",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按总价出：总价 ¥100" to "净残值 ¥130.5 · 推算折价 -¥30.50",
+            formatCurrentTopicPricingSummary(totalDiscount),
+        )
+
+        val totalPar = TradeListingPriceParser.inferSpread(
+            title = "出 DMIT LAX Pro Wee 130.5r",
+            bodySnippet = "续费 \$36.5/年 2026-11-28到期",
+            now = fixedDate,
+        )!!
+        assertEquals(
+            "本帖按总价出：总价 ¥130.5" to "净残值 ¥130.5 · 推算平出 ¥0.00",
+            formatCurrentTopicPricingSummary(totalPar),
+        )
+
+        val buyPost = TradeListingPriceParser.inferSpread(
+            title = "[收] DMIT LAX Pro Wee 溢价 +80",
+            now = fixedDate,
+        )!!
+        assertNull(formatCurrentTopicPricingSummary(buyPost))
+    }
+
+    @Test
+    fun `TopicDetailViewModel attaches currentTopicPricing for total-ask and explicit-spread posts across remote search`() = runTest {
+        val session = FakeSessionRepo(AccountSession(uid = 10L, username = "viewer"))
+        val fakeMarketRepo = object : TradeMarketReferenceRepository {
+            override suspend fun analyzeLocal(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState = TradeMarketReferenceState(query = query)
+
+            override suspend fun searchRemoteAndMerge(
+                query: String,
+                includeBuyRequests: Boolean,
+                excludeTopicId: Long?,
+            ): TradeMarketReferenceState = TradeMarketReferenceState(
+                query = query,
+                searchStatus = MarketSearchStatus.SUCCESS,
+                hasRemoteResults = true,
+            )
+        }
+
+        // Case 1: Total-ask post with stated residual -> derives spread on currentTopicPricing
+        val totalForum = FakeForumRepo(
+            detailHandler = { _, p ->
+                Result.success(
+                    makePage(
+                        topicId = 781L,
+                        pageNum = p,
+                        categorySlug = "trade",
+                        categoryName = "交易",
+                        title = "出 DMIT LAX Pro Wee 300",
+                        opMarkdown = "剩余价值 220，明盘 300 带原油",
+                    ),
+                )
+            },
+        )
+        val totalVm = TopicDetailViewModel(
+            container = buildContainer(totalForum, session),
+            topicId = 781L,
+            tradeMarketReferenceRepository = fakeMarketRepo,
+        )
+        val totalJob = launch(testDispatcher) { totalVm.uiState.collect {} }
+        val totalLoaded = totalVm.uiState.first { it.marketReference?.hasRemoteResults == true }
+        val totalPricing = totalLoaded.marketReference?.currentTopicPricing
+        assertNotNull(totalPricing)
+        assertTrue(totalPricing!!.hasBothTotalAndSpread)
+        assertTrue(totalPricing.isDerived)
+        assertFalse(totalPricing.isAskDerived)
+        assertEquals(BigDecimal("300.00"), totalPricing.askPriceCny)
+        assertEquals(BigDecimal("80.00"), totalPricing.spreadDeltaCny)
+        totalJob.cancel()
+
+        // Case 2: Explicit-spread post with stated residual -> derives total ask on currentTopicPricing
+        val spreadForum = FakeForumRepo(
+            detailHandler = { _, p ->
+                Result.success(
+                    makePage(
+                        topicId = 782L,
+                        pageNum = p,
+                        categorySlug = "trade",
+                        categoryName = "交易",
+                        title = "出 DMIT LAX Pro Wee 溢价 +80",
+                        opMarkdown = "剩余价值 220，带原油",
+                    ),
+                )
+            },
+        )
+        val spreadVm = TopicDetailViewModel(
+            container = buildContainer(spreadForum, session),
+            topicId = 782L,
+            tradeMarketReferenceRepository = fakeMarketRepo,
+        )
+        val spreadJob = launch(testDispatcher) { spreadVm.uiState.collect {} }
+        val spreadLoaded = spreadVm.uiState.first { it.marketReference?.hasRemoteResults == true }
+        val spreadPricing = spreadLoaded.marketReference?.currentTopicPricing
+        assertNotNull(spreadPricing)
+        assertTrue(spreadPricing!!.hasBothTotalAndSpread)
+        assertFalse(spreadPricing.isDerived)
+        assertTrue(spreadPricing.isAskDerived)
+        assertEquals(BigDecimal("80.00"), spreadPricing.spreadDeltaCny)
+        assertEquals(BigDecimal("300.00"), spreadPricing.askPriceCny)
+        spreadJob.cancel()
+    }
+
+    @Test
+    fun `VpsValuationBottomSheet prefill and bidirectional spread form helpers compute total and spread accurately`() {
+        val fixedDate = LocalDate.of(2026, 6, 1)
+
+        // 1. Auto-prefill from total-ask listing
+        val totalPrefill = buildValuationSheetPrefill(
+            title = "[出] DMIT LAX Pro Wee 明盘 300",
+            openingMarkdown = "续费 \$36.5/年，2026-11-28到期，带原油",
+            now = fixedDate,
+        )
+        assertEquals(ValuationMode.TRANSFER_DEAL, totalPrefill.mode)
+        assertEquals(TransferPricingBasis.BY_TOTAL_PRICE, totalPrefill.pricingBasis)
+        assertEquals(ValuationCurrency.USD, totalPrefill.currency)
+        assertEquals("36.5", totalPrefill.renewalAmountText)
+        assertEquals(BillingCyclePreset.ANNUAL, totalPrefill.cyclePreset)
+        assertEquals("2026-11-28", totalPrefill.expiryDateText)
+        assertEquals("300", totalPrefill.askingPriceText)
+
+        // 2. Auto-prefill from explicit-spread listing (positive and negative discount)
+        val spreadPrefill = buildValuationSheetPrefill(
+            title = "[出] DMIT LAX Pro Wee 溢价 +80",
+            openingMarkdown = "续费 \$36.5/年，2026-11-28到期",
+            now = fixedDate,
+        )
+        assertEquals(ValuationMode.TRANSFER_DEAL, spreadPrefill.mode)
+        assertEquals(TransferPricingBasis.BY_SPREAD, spreadPrefill.pricingBasis)
+        assertEquals("80", spreadPrefill.targetSpreadText)
+
+        val discountPrefill = buildValuationSheetPrefill(
+            title = "[出] DMIT LAX Pro Wee 折价 -30",
+            openingMarkdown = "续费 \$36.5/年，2026-11-28到期",
+            now = fixedDate,
+        )
+        assertEquals(TransferPricingBasis.BY_SPREAD, discountPrefill.pricingBasis)
+        assertEquals("-30", discountPrefill.targetSpreadText)
+
+        // 3. Signed decimal helpers (handles fullwidth minus, leading sign, toggle)
+        assertEquals("-50.25", sanitizeSignedDecimalInput("－50.25"))
+        assertEquals("-", sanitizeSignedDecimalInput("-"))
+        assertNull(parseSignedDecimalOrNull("-"))
+        assertEquals(BigDecimal("-50.25"), parseSignedDecimalOrNull("-50.25"))
+        assertEquals("-80", toggleSignedDecimalText("80"))
+        assertEquals("80", toggleSignedDecimalText("-80"))
+        assertEquals("-", toggleSignedDecimalText("0"))
+
+        // 4. evaluateValuationForm in BY_SPREAD mode: +80, 0, -30, and clamped -500
+        fun evalBySpread(spreadText: String): VpsValuationOutcome = evaluateValuationForm(
+            mode = ValuationMode.TRANSFER_DEAL,
+            machineLabel = "DMIT LAX Pro Wee",
+            currency = ValuationCurrency.USD,
+            fxRateToCny = BigDecimal("7.25"),
+            renewalAmountText = "36.5",
+            cyclePreset = BillingCyclePreset.ANNUAL,
+            naturalSpan = NaturalCycleSpan.YEAR,
+            customDaysText = "365",
+            useCustomPrevRenewal = false,
+            prevRenewalDateText = "2025-11-28",
+            preciseToMinute = false,
+            valuationDateText = "2026-06-01",
+            valuationTimeText = "00:00",
+            expiryDateText = "2026-11-28",
+            expiryTimeText = "00:00",
+            askingPriceText = "0",
+            pushFeeText = "0",
+            pushCurrency = ValuationCurrency.CNY,
+            pushFeeToCnyRate = BigDecimal.ONE,
+            pushPayer = FeePayer.BUYER,
+            middlemanEnabled = false,
+            middlemanMode = MiddlemanFeeMode.PERCENT,
+            middlemanValueText = "0",
+            middlemanPayer = FeePayer.BUYER,
+            pricingBasis = TransferPricingBasis.BY_SPREAD,
+            targetSpreadText = spreadText,
+        )
+
+        val plus80 = (evalBySpread("80") as VpsValuationOutcome.Success).result
+        assertEquals(BigDecimal("130.50"), plus80.remainingValueCny)
+        val plus80Deal = plus80.transferBreakdown!!
+        assertEquals(BigDecimal("210.50"), plus80Deal.askingPriceCny)
+        assertEquals(BigDecimal("80.00"), plus80Deal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.PREMIUM, plus80Deal.spreadStatus)
+
+        val par0 = (evalBySpread("0") as VpsValuationOutcome.Success).result
+        val par0Deal = par0.transferBreakdown!!
+        assertEquals(BigDecimal("130.50"), par0Deal.askingPriceCny)
+        assertEquals(DealSpreadStatus.PAR, par0Deal.spreadStatus)
+
+        val minus30 = (evalBySpread("-30") as VpsValuationOutcome.Success).result
+        val minus30Deal = minus30.transferBreakdown!!
+        assertEquals(BigDecimal("100.50"), minus30Deal.askingPriceCny)
+        assertEquals(BigDecimal("-30.00"), minus30Deal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.DISCOUNT, minus30Deal.spreadStatus)
+
+        val clamped = (evalBySpread("-500") as VpsValuationOutcome.Success).result
+        val clampedDeal = clamped.transferBreakdown!!
+        assertEquals(BigDecimal("0.00"), clampedDeal.askingPriceCny)
+        assertEquals(DealSpreadStatus.DISCOUNT, clampedDeal.spreadStatus)
+
+        assertTrue(evalBySpread("-") is VpsValuationOutcome.Invalid)
+
+        // 5. Mode-switch round-trip and readout with buyer push fee (remainingValue=100, ask=150, buyerPush=20)
+        fun evalWithFees(
+            basis: TransferPricingBasis,
+            askText: String = "150",
+            spreadText: String = "0",
+            pushFeeText: String = "20",
+        ): VpsValuationOutcome = evaluateValuationForm(
+            mode = ValuationMode.TRANSFER_DEAL,
+            machineLabel = "DMIT Test",
+            currency = ValuationCurrency.CNY,
+            fxRateToCny = BigDecimal.ONE,
+            renewalAmountText = "365",
+            cyclePreset = BillingCyclePreset.ANNUAL,
+            naturalSpan = NaturalCycleSpan.YEAR,
+            customDaysText = "365",
+            useCustomPrevRenewal = false,
+            prevRenewalDateText = "2025-09-09",
+            preciseToMinute = false,
+            valuationDateText = "2026-06-01",
+            valuationTimeText = "00:00",
+            expiryDateText = "2026-09-09", // 100 days remaining -> net residual = 100.00 CNY
+            expiryTimeText = "00:00",
+            askingPriceText = askText,
+            pushFeeText = pushFeeText,
+            pushCurrency = ValuationCurrency.CNY,
+            pushFeeToCnyRate = BigDecimal.ONE,
+            pushPayer = FeePayer.BUYER,
+            middlemanEnabled = false,
+            middlemanMode = MiddlemanFeeMode.PERCENT,
+            middlemanValueText = "0",
+            middlemanPayer = FeePayer.BUYER,
+            pricingBasis = basis,
+            targetSpreadText = spreadText,
+        )
+
+        val totalWithFee = (evalWithFees(TransferPricingBasis.BY_TOTAL_PRICE, askText = "150", pushFeeText = "20") as VpsValuationOutcome.Success).result
+        val totalWithFeeDeal = totalWithFee.transferBreakdown!!
+        assertEquals(BigDecimal("100.00"), totalWithFee.remainingValueCny)
+        assertEquals(BigDecimal("150.00"), totalWithFeeDeal.askingPriceCny)
+        assertEquals(BigDecimal("70.00"), totalWithFeeDeal.buyerPremiumCny)
+        // Switching BY_TOTAL_PRICE -> BY_SPREAD must seed pure ask spread "50" (NOT fee-inflated "70")
+        val seededSpread = seedTargetSpreadOnBasisSwitch(totalWithFee)
+        assertEquals("50", seededSpread)
+        val roundTripped = (evalWithFees(TransferPricingBasis.BY_SPREAD, spreadText = seededSpread!!, pushFeeText = "20") as VpsValuationOutcome.Success).result
+        val roundTrippedDeal = roundTripped.transferBreakdown!!
+        assertEquals(BigDecimal("150.00"), roundTrippedDeal.askingPriceCny)
+        assertEquals(BigDecimal("170.00"), roundTrippedDeal.buyerTotalCostCny)
+        assertEquals(BigDecimal("70.00"), roundTrippedDeal.buyerPremiumCny)
+
+        // Readout shows exact ask-residual math (+50) plus fee-inclusive premium (+70) when buyer fees > 0
+        assertEquals(
+            "对应溢价：+¥50.00（总价 ¥150.00 − 净残值 ¥100.00） · 含买家费用溢价 +¥70.00",
+            formatTransferBasisReadout(totalWithFee),
+        )
+        assertEquals(
+            "推算总价：¥150.00（净残值 ¥100.00 +¥50.00） · 含买家费用溢价 +¥70.00",
+            formatTransferBasisReadout(roundTripped),
+        )
+        // Discount and par readouts with zero fees
+        val discountNoFee = (evalWithFees(TransferPricingBasis.BY_TOTAL_PRICE, askText = "80", pushFeeText = "0") as VpsValuationOutcome.Success).result
+        assertEquals(
+            "对应折价：-¥20.00（总价 ¥80.00 − 净残值 ¥100.00）",
+            formatTransferBasisReadout(discountNoFee),
+        )
+        val parNoFee = (evalWithFees(TransferPricingBasis.BY_TOTAL_PRICE, askText = "100", pushFeeText = "0") as VpsValuationOutcome.Success).result
+        assertEquals(
+            "对应平出：¥0.00（总价 ¥100.00 − 净残值 ¥100.00）",
+            formatTransferBasisReadout(parNoFee),
+        )
     }
 
     private class FakeForumRepo(

@@ -11,18 +11,34 @@ import com.nodeseek.app.domain.trust.TrustRiskEvaluator
 import com.nodeseek.app.domain.valuation.MarketDataSource
 import com.nodeseek.app.domain.valuation.MarketSearchStatus
 import com.nodeseek.app.domain.valuation.TradeCandidateTopic
+import com.nodeseek.app.domain.valuation.TradeListingIntent
+import com.nodeseek.app.domain.valuation.TradeListingPriceParser
 import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.domain.valuation.VALUATION_ZONE_ID
+import com.nodeseek.app.domain.valuation.ValuationCurrency
+import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.math.BigDecimal
+import java.time.Instant
+import java.time.LocalDate
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 
 class TradeMarketReferenceRepositoryImpl(
@@ -35,7 +51,20 @@ class TradeMarketReferenceRepositoryImpl(
     private val baseCooldownMillis: Long = DEFAULT_BASE_COOLDOWN_MILLIS,
     private val maxCooldownMillis: Long = DEFAULT_MAX_COOLDOWN_MILLIS,
     private val remoteCacheTtlMillis: Long = DEFAULT_REMOTE_CACHE_TTL_MILLIS,
+    private val exchangeRateRepository: ExchangeRateRepository? = null,
+    private val nowDateProvider: (() -> LocalDate)? = null,
+    private val maxBodyFetchesPerLookup: Int = DEFAULT_MAX_BODY_FETCHES_PER_LOOKUP,
+    private val bodyFetchConcurrency: Int = DEFAULT_BODY_FETCH_CONCURRENCY,
 ) : TradeMarketReferenceRepository {
+
+    private data class CachedTopicBody(
+        val fetchedAtMillis: Long,
+        val bodySnippet: String,
+        val isPermanentEmpty: Boolean = false,
+    ) {
+        fun isFresh(nowMillis: Long, ttlMillis: Long): Boolean =
+            nowMillis >= fetchedAtMillis && (nowMillis - fetchedAtMillis) < ttlMillis
+    }
 
     private data class RemoteCacheEntry(
         val fetchedAtMillis: Long,
@@ -64,6 +93,7 @@ class TradeMarketReferenceRepositoryImpl(
     }
 
     private val remoteCache = ConcurrentHashMap<String, RemoteCacheEntry>()
+    private val bodyCache = ConcurrentHashMap<Long, CachedTopicBody>()
     private val throttleMutex = Mutex()
     private val singleFlightMutex = Mutex()
     private val inFlightSearches = LinkedHashMap<String, CompletableDeferred<TradeMarketReferenceState>>()
@@ -86,19 +116,31 @@ class TradeMarketReferenceRepositoryImpl(
     private val fallbackCacheTtlMillis: Long
         get() = minOf(remoteCacheTtlMillis, DEFAULT_FALLBACK_CACHE_TTL_MILLIS)
 
+    override fun cacheTopicBody(topicId: Long, bodyMarkdown: String) {
+        if (topicId <= 0L || bodyMarkdown.isBlank()) return
+        val snippet = sanitizeBodySnippet(bodyMarkdown)
+        if (snippet.isBlank()) return
+        storeBodyCache(topicId = topicId, bodySnippet = snippet, isPermanentEmpty = false)
+    }
+
     override suspend fun analyzeLocal(
         query: String,
         includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
     ): TradeMarketReferenceState = analyzeLocalInternal(
         query = query,
         includeBuyRequests = includeBuyRequests,
+        excludeTopicId = excludeTopicId,
         extraRemoteTopics = emptyList(),
+        fxStateOverride = null,
     )
 
     private suspend fun analyzeLocalInternal(
         query: String,
         includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
         extraRemoteTopics: List<TopicSummary>,
+        fxStateOverride: FxRatesState? = null,
     ): TradeMarketReferenceState {
         val cleanQuery = query.trim()
         val now = clockMillis()
@@ -119,12 +161,20 @@ class TradeMarketReferenceRepositoryImpl(
         val candidates = collectLocalAndCachedCandidates(
             cachedRemoteTopics = remoteTopics,
             sharedBoardTopics = sharedBoardTopics,
+            excludeTopicId = excludeTopicId,
+            nowMillis = now,
         )
+        val fxState = fxStateOverride ?: resolveFxState(allowNetworkRefresh = false)
+        val fxToCny = buildFxResolver(fxState)
+        val valuationDate = resolveNowDate(now)
         val distribution = withContext(computeDispatcher) {
-            TradeMarketPremiumAnalyzer.analyze(
+            analyzeCandidates(
                 query = cleanQuery,
                 candidates = candidates,
                 includeBuyRequests = includeBuyRequests,
+                fxToCny = fxToCny,
+                now = valuationDate,
+                excludeTopicId = excludeTopicId,
             )
         }
 
@@ -150,11 +200,12 @@ class TradeMarketReferenceRepositoryImpl(
     override suspend fun searchRemoteAndMerge(
         query: String,
         includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
     ): TradeMarketReferenceState {
         val cleanQuery = query.trim()
         val tokens = TradeMarketPremiumAnalyzer.tokenizeQuery(cleanQuery)
         if (cleanQuery.isEmpty() || tokens.isEmpty()) {
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            return analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId).copy(
                 searchStatus = MarketSearchStatus.IDLE,
                 statusMessage = "请输入机型或商家关键词后再搜索交易版",
             )
@@ -165,7 +216,7 @@ class TradeMarketReferenceRepositoryImpl(
 
         // 1. Fresh non-empty remote cache hit -> zero network call.
         remoteCache[cacheKey]?.takeIf { it.isFresh(now) }?.let { cached ->
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            return analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId).copy(
                 searchStatus = MarketSearchStatus.SUCCESS,
                 lastRemoteSearchedAtMillis = cached.fetchedAtMillis,
                 hasRemoteResults = true,
@@ -187,7 +238,19 @@ class TradeMarketReferenceRepositoryImpl(
         }
 
         if (!isLeader) {
-            return deferred.await()
+            val leaderResult = deferred.await()
+            return if (excludeTopicId != null && leaderResult.searchStatus == MarketSearchStatus.SUCCESS) {
+                analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId).copy(
+                    searchStatus = leaderResult.searchStatus,
+                    cooldownUntilEpochMillis = leaderResult.cooldownUntilEpochMillis,
+                    cooldownRemainingSeconds = leaderResult.cooldownRemainingSeconds,
+                    statusMessage = leaderResult.statusMessage,
+                    lastRemoteSearchedAtMillis = leaderResult.lastRemoteSearchedAtMillis,
+                    hasRemoteResults = leaderResult.hasRemoteResults,
+                )
+            } else {
+                leaderResult
+            }
         }
 
         try {
@@ -195,6 +258,7 @@ class TradeMarketReferenceRepositoryImpl(
                 cleanQuery = cleanQuery,
                 cacheKey = cacheKey,
                 includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
             )
             deferred.complete(result)
             return result
@@ -202,10 +266,10 @@ class TradeMarketReferenceRepositoryImpl(
             deferred.cancel(c)
             throw c
         } catch (t: Throwable) {
-            val local = analyzeLocal(cleanQuery, includeBuyRequests)
+            val local = analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId)
             val fallback = local.copy(
                 searchStatus = MarketSearchStatus.FAILED,
-                statusMessage = formatFriendlyFailureMessage(t, localSampleCount = local.distribution?.sampleCount ?: 0),
+                statusMessage = formatFriendlyFailureMessage(t, localSampleCount = local.distribution?.pricedTopicCount ?: 0),
             )
             deferred.complete(fallback)
             return fallback
@@ -222,6 +286,7 @@ class TradeMarketReferenceRepositoryImpl(
         cleanQuery: String,
         cacheKey: String,
         includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
     ): TradeMarketReferenceState {
         // Re-check cache / cooldown / min-interval under throttleMutex without holding lock across IO.
         val cachedHit: RemoteCacheEntry?
@@ -246,7 +311,7 @@ class TradeMarketReferenceRepositoryImpl(
         }
 
         if (cachedHit != null) {
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            return analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId).copy(
                 searchStatus = MarketSearchStatus.SUCCESS,
                 lastRemoteSearchedAtMillis = cachedHit.fetchedAtMillis,
                 hasRemoteResults = true,
@@ -256,13 +321,15 @@ class TradeMarketReferenceRepositoryImpl(
         if (blockUntil > 0L) {
             val now = clockMillis()
             val remainSec = ceil((blockUntil - now).coerceAtLeast(1000L) / 1000.0).toInt().coerceAtLeast(1)
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            return analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId).copy(
                 searchStatus = MarketSearchStatus.COOLDOWN,
                 cooldownUntilEpochMillis = blockUntil,
                 cooldownRemainingSeconds = remainSec,
                 statusMessage = "搜索冷却中，请在 ${remainSec}s 后重试（已展示本地缓存分析）",
             )
         }
+
+        val fxState = resolveFxState(allowNetworkRefresh = true)
 
         // Step 1: Primary sanitized trade search (page 1, optional page 2 when sparse & paginated).
         val primaryQuery = sanitizeRemoteSearchQuery(cleanQuery)
@@ -284,7 +351,7 @@ class TradeMarketReferenceRepositoryImpl(
             }
             is SearchFetchOutcome.Failure -> {
                 if (isFatalNonFallbackFailure(primaryOutcome.error)) {
-                    return handleRemoteFailure(cleanQuery, includeBuyRequests, primaryOutcome.error)
+                    return handleRemoteFailure(cleanQuery, includeBuyRequests, excludeTopicId, primaryOutcome.error)
                 }
                 lastSearchError = primaryOutcome.error
             }
@@ -311,7 +378,7 @@ class TradeMarketReferenceRepositoryImpl(
                     }
                     is SearchFetchOutcome.Failure -> {
                         if (isFatalNonFallbackFailure(retryOutcome.error)) {
-                            return handleRemoteFailure(cleanQuery, includeBuyRequests, retryOutcome.error)
+                            return handleRemoteFailure(cleanQuery, includeBuyRequests, excludeTopicId, retryOutcome.error)
                         }
                         if (lastSearchError == null) {
                             lastSearchError = retryOutcome.error
@@ -334,15 +401,35 @@ class TradeMarketReferenceRepositoryImpl(
                 topics = collectedSearchTopics,
                 isFromBoardFallback = false,
             )
+            val preCandidates = collectLocalAndCachedCandidates(
+                cachedRemoteTopics = collectedSearchTopics,
+                sharedBoardTopics = sharedTradeBoardSnapshot
+                    ?.takeIf { it.isWithin(doneAt, remoteCacheTtlMillis) }
+                    ?.topics
+                    .orEmpty(),
+                excludeTopicId = excludeTopicId,
+                nowMillis = doneAt,
+            )
+            enrichConciseCandidateBodies(
+                cleanQuery = cleanQuery,
+                candidates = preCandidates,
+                includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
+                fxState = fxState,
+            )
             val msg = if (usedSimplifiedQuery != null) {
                 "已用核心词「$usedSimplifiedQuery」合并交易版搜索结果（${collectedSearchTopics.size} 条帖子）"
             } else {
                 "已合并交易版搜索结果（${collectedSearchTopics.size} 条帖子）"
             }
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            return analyzeLocalInternal(
+                query = cleanQuery,
+                includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
+                extraRemoteTopics = emptyList(),
+                fxStateOverride = fxState,
+            ).copy(
                 searchStatus = MarketSearchStatus.SUCCESS,
-                cooldownUntilEpochMillis = 0L,
-                cooldownRemainingSeconds = 0,
                 statusMessage = msg,
                 lastRemoteSearchedAtMillis = doneAt,
                 hasRemoteResults = true,
@@ -362,6 +449,19 @@ class TradeMarketReferenceRepositoryImpl(
                 rateLimitStrikes = 0
                 cooldownUntilEpochMillis = 0L
             }
+            val preCandidates = collectLocalAndCachedCandidates(
+                cachedRemoteTopics = fallbackTopics,
+                sharedBoardTopics = emptyList(),
+                excludeTopicId = excludeTopicId,
+                nowMillis = doneAt,
+            )
+            enrichConciseCandidateBodies(
+                cleanQuery = cleanQuery,
+                candidates = preCandidates,
+                includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
+                fxState = fxState,
+            )
             val matchedCount = countMatchedTopics(cleanQuery, fallbackTopics)
             if (matchedCount > 0) {
                 // Short TTL for board fallback so recovery to `/search` happens promptly and
@@ -376,23 +476,29 @@ class TradeMarketReferenceRepositoryImpl(
             val analyzed = analyzeLocalInternal(
                 query = cleanQuery,
                 includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
                 extraRemoteTopics = fallbackTopics,
+                fxStateOverride = fxState,
             )
-            val sampleCount = analyzed.distribution?.sampleCount ?: 0
+            val dist = analyzed.distribution
+            val pricedCount = dist?.pricedTopicCount ?: 0
+            val matchedTotal = dist?.matchedTopicCount ?: 0
             val msg = when {
-                !searchSucceeded && sampleCount > 0 ->
-                    "站内搜索暂不可用，已扫描最近交易版（${fallbackTopics.size} 条帖子）汇总 $sampleCount 条参考"
+                !searchSucceeded && pricedCount > 0 ->
+                    "站内搜索暂不可用，已扫描最近交易版（${fallbackTopics.size} 条帖子）汇总 $pricedCount 条参考"
+                !searchSucceeded && matchedTotal > 0 ->
+                    "站内搜索暂不可用，已扫描最近交易版（${fallbackTopics.size} 条帖子），匹配 $matchedTotal 帖"
                 !searchSucceeded ->
-                    "站内搜索暂不可用，已扫描最近交易版（${fallbackTopics.size} 条帖子），暂未匹配到同款溢价"
-                sampleCount > 0 ->
-                    "站内搜索无直接命中，已从最近交易版补充 $sampleCount 条参考样本"
+                    "站内搜索暂不可用，已扫描最近交易版（${fallbackTopics.size} 条帖子），暂未匹配到同款记录"
+                pricedCount > 0 ->
+                    "站内搜索无直接命中，已从最近交易版补充 $pricedCount 条参考样本"
+                matchedTotal > 0 ->
+                    "已搜索交易版并扫描最新帖子，匹配 $matchedTotal 条同款帖"
                 else ->
-                    "已搜索交易版并扫描最新帖子，暂未匹配到同款溢价记录"
+                    "已搜索交易版并扫描最新帖子，暂未匹配到同款记录"
             }
             return analyzed.copy(
                 searchStatus = MarketSearchStatus.SUCCESS,
-                cooldownUntilEpochMillis = 0L,
-                cooldownRemainingSeconds = 0,
                 statusMessage = msg,
                 lastRemoteSearchedAtMillis = doneAt,
                 hasRemoteResults = true,
@@ -407,10 +513,30 @@ class TradeMarketReferenceRepositoryImpl(
                 rateLimitStrikes = 0
                 cooldownUntilEpochMillis = 0L
             }
-            return analyzeLocal(cleanQuery, includeBuyRequests).copy(
+            val localCandidates = collectLocalAndCachedCandidates(
+                cachedRemoteTopics = emptyList(),
+                sharedBoardTopics = sharedTradeBoardSnapshot
+                    ?.takeIf { it.isWithin(doneAt, remoteCacheTtlMillis) }
+                    ?.topics
+                    .orEmpty(),
+                excludeTopicId = excludeTopicId,
+                nowMillis = doneAt,
+            )
+            enrichConciseCandidateBodies(
+                cleanQuery = cleanQuery,
+                candidates = localCandidates,
+                includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
+                fxState = fxState,
+            )
+            return analyzeLocalInternal(
+                query = cleanQuery,
+                includeBuyRequests = includeBuyRequests,
+                excludeTopicId = excludeTopicId,
+                extraRemoteTopics = emptyList(),
+                fxStateOverride = fxState,
+            ).copy(
                 searchStatus = MarketSearchStatus.SUCCESS,
-                cooldownUntilEpochMillis = 0L,
-                cooldownRemainingSeconds = 0,
                 statusMessage = "已搜索交易版（暂未找到更多同款帖子）",
                 lastRemoteSearchedAtMillis = doneAt,
                 hasRemoteResults = true,
@@ -420,11 +546,12 @@ class TradeMarketReferenceRepositoryImpl(
         // Outcome D: Both `/search` and `/categories/trade` fallback failed or returned empty.
         val fallbackError = boardFallbackResult.exceptionOrNull()
         if (fallbackError != null && isFatalNonFallbackFailure(fallbackError)) {
-            return handleRemoteFailure(cleanQuery, includeBuyRequests, fallbackError)
+            return handleRemoteFailure(cleanQuery, includeBuyRequests, excludeTopicId, fallbackError)
         }
         return handleRemoteFailure(
             cleanQuery = cleanQuery,
             includeBuyRequests = includeBuyRequests,
+            excludeTopicId = excludeTopicId,
             error = lastSearchError ?: fallbackError ?: NodeSeekApiException("搜索交易版失败"),
         )
     }
@@ -577,9 +704,10 @@ class TradeMarketReferenceRepositoryImpl(
     private suspend fun handleRemoteFailure(
         cleanQuery: String,
         includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
         error: Throwable,
     ): TradeMarketReferenceState {
-        val localState = analyzeLocal(cleanQuery, includeBuyRequests)
+        val localState = analyzeLocal(cleanQuery, includeBuyRequests, excludeTopicId)
         val apiErr = extractApiException(error)
 
         if (apiErr != null && (apiErr.statusCode == 429 || apiErr.statusCode == 503)) {
@@ -608,7 +736,7 @@ class TradeMarketReferenceRepositoryImpl(
             )
         }
 
-        val localSamples = localState.distribution?.sampleCount ?: 0
+        val localSamples = localState.distribution?.pricedTopicCount ?: 0
         return localState.copy(
             searchStatus = MarketSearchStatus.FAILED,
             statusMessage = formatFriendlyFailureMessage(error, localSamples),
@@ -636,6 +764,10 @@ class TradeMarketReferenceRepositoryImpl(
         includeBuyRequests: Boolean,
     ): Int {
         if (topics.isEmpty()) return 0
+        val now = clockMillis()
+        val fxState = resolveFxState(allowNetworkRefresh = false)
+        val fxToCny = buildFxResolver(fxState)
+        val valuationDate = resolveNowDate(now)
         val candidates = topics.map { topic ->
             TradeCandidateTopic(
                 topicId = topic.id,
@@ -643,6 +775,7 @@ class TradeMarketReferenceRepositoryImpl(
                 source = MarketDataSource.REMOTE_SEARCH,
                 authorName = topic.authorName,
                 activityHint = topic.lastActivityIso,
+                bodySnippet = getCachedBodySnippet(topic.id, now),
             )
         }
         return withContext(computeDispatcher) {
@@ -650,6 +783,8 @@ class TradeMarketReferenceRepositoryImpl(
                 query = query,
                 candidates = candidates,
                 includeBuyRequests = includeBuyRequests,
+                fxToCny = fxToCny,
+                now = valuationDate,
             ).sampleCount
         }
     }
@@ -659,66 +794,102 @@ class TradeMarketReferenceRepositoryImpl(
         topics: List<TopicSummary>,
     ): Int {
         if (topics.isEmpty()) return 0
+        val now = clockMillis()
         return withContext(computeDispatcher) {
-            topics.count { TradeMarketPremiumAnalyzer.matchesQuery(it.title, query) }
+            topics.count {
+                TradeMarketPremiumAnalyzer.matchesQuery(
+                    title = it.title,
+                    query = query,
+                    bodySnippet = getCachedBodySnippet(it.id, now),
+                )
+            }
         }
     }
 
     private suspend fun collectLocalAndCachedCandidates(
         cachedRemoteTopics: List<TopicSummary>,
         sharedBoardTopics: List<TopicSummary> = emptyList(),
+        excludeTopicId: Long? = null,
+        nowMillis: Long = clockMillis(),
     ): List<TradeCandidateTopic> = withContext(ioDispatcher) {
         val candidates = ArrayList<TradeCandidateTopic>()
+        val bookmarkBodies = HashMap<Long, String>()
+
+        val bookmarks = runCatching {
+            bookmarkAndHistoryRepository.observeLocalBookmarks().first()
+        }.getOrDefault(emptyList())
+        bookmarks.forEach { bookmark ->
+            val rawBody = bookmark.offlineDetailSnapshot?.openingFloor?.markdownBody
+            if (!rawBody.isNullOrBlank()) {
+                val snippet = sanitizeBodySnippet(rawBody)
+                if (snippet.isNotBlank()) {
+                    bookmarkBodies[bookmark.topicId] = snippet
+                    if (!bodyCache.containsKey(bookmark.topicId)) {
+                        storeBodyCache(bookmark.topicId, snippet, isPermanentEmpty = false)
+                    }
+                }
+            }
+        }
+
+        fun lookupBody(topicId: Long): String? =
+            getCachedBodySnippet(topicId, nowMillis) ?: bookmarkBodies[topicId]
 
         runCatching {
             forumRepository.getLocalCachedTopics("trade")
         }.getOrDefault(emptyList()).forEach { topic ->
-            candidates += TradeCandidateTopic(
-                topicId = topic.id,
-                title = topic.title,
-                source = MarketDataSource.FEED_CACHE,
-                authorName = topic.authorName,
-                activityHint = topic.lastActivityIso,
-            )
-        }
-
-        val remoteTopicIds = cachedRemoteTopics.mapTo(HashSet()) { it.id }
-        sharedBoardTopics.forEach { topic ->
-            if (topic.id !in remoteTopicIds) {
-                candidates += TradeCandidateTopic(
+            if (excludeTopicId == null || topic.id != excludeTopicId) {
+                candidates += createCandidate(
                     topicId = topic.id,
                     title = topic.title,
                     source = MarketDataSource.FEED_CACHE,
                     authorName = topic.authorName,
                     activityHint = topic.lastActivityIso,
+                    bodySnippet = lookupBody(topic.id),
+                )
+            }
+        }
+
+        val remoteTopicIds = cachedRemoteTopics.mapTo(HashSet()) { it.id }
+        sharedBoardTopics.forEach { topic ->
+            if (topic.id !in remoteTopicIds && (excludeTopicId == null || topic.id != excludeTopicId)) {
+                candidates += createCandidate(
+                    topicId = topic.id,
+                    title = topic.title,
+                    source = MarketDataSource.FEED_CACHE,
+                    authorName = topic.authorName,
+                    activityHint = topic.lastActivityIso,
+                    bodySnippet = lookupBody(topic.id),
                 )
             }
         }
 
         cachedRemoteTopics.forEach { topic ->
-            candidates += TradeCandidateTopic(
-                topicId = topic.id,
-                title = topic.title,
-                source = MarketDataSource.REMOTE_SEARCH,
-                authorName = topic.authorName,
-                activityHint = topic.lastActivityIso,
-            )
+            if (excludeTopicId == null || topic.id != excludeTopicId) {
+                candidates += createCandidate(
+                    topicId = topic.id,
+                    title = topic.title,
+                    source = MarketDataSource.REMOTE_SEARCH,
+                    authorName = topic.authorName,
+                    activityHint = topic.lastActivityIso,
+                    bodySnippet = lookupBody(topic.id),
+                )
+            }
         }
 
-        runCatching {
-            bookmarkAndHistoryRepository.observeLocalBookmarks().first()
-        }.getOrDefault(emptyList()).forEach { bookmark ->
+        bookmarks.forEach { bookmark ->
+            if (excludeTopicId != null && bookmark.topicId == excludeTopicId) return@forEach
             val summary = bookmark.summary
             val isTrade = summary.categorySlug.equals("trade", ignoreCase = true) ||
                 summary.categoryName.trim() == "交易" ||
                 (summary.categorySlug.isBlank() && summary.categoryName.isBlank() && TrustRiskEvaluator.isTradeTopic(summary))
             if (isTrade) {
-                candidates += TradeCandidateTopic(
+                candidates += createCandidate(
                     topicId = bookmark.topicId,
                     title = summary.title,
                     source = MarketDataSource.BOOKMARK,
                     authorName = summary.authorName,
                     activityHint = summary.lastActivityIso,
+                    bodySnippet = lookupBody(bookmark.topicId),
                 )
             }
         }
@@ -726,6 +897,7 @@ class TradeMarketReferenceRepositoryImpl(
         runCatching {
             bookmarkAndHistoryRepository.observeReadHistory().first()
         }.getOrDefault(emptyList()).forEach { entry ->
+            if (excludeTopicId != null && entry.topicId == excludeTopicId) return@forEach
             val summaryStub = TopicSummary(
                 id = entry.topicId,
                 title = entry.title,
@@ -737,16 +909,313 @@ class TradeMarketReferenceRepositoryImpl(
                 entry.categoryName.trim() == "交易" ||
                 (entry.categorySlug.isBlank() && entry.categoryName.isBlank() && TrustRiskEvaluator.isTradeTopic(summaryStub))
             if (isTrade) {
-                candidates += TradeCandidateTopic(
+                candidates += createCandidate(
                     topicId = entry.topicId,
                     title = entry.title,
                     source = MarketDataSource.READ_HISTORY,
                     authorName = entry.authorName,
+                    activityHint = "",
+                    bodySnippet = lookupBody(entry.topicId),
                 )
             }
         }
 
         candidates
+    }
+
+    private fun createCandidate(
+        topicId: Long,
+        title: String,
+        source: MarketDataSource,
+        authorName: String,
+        activityHint: String,
+        bodySnippet: String?,
+    ): TradeCandidateTopic = TradeCandidateTopic(
+        topicId = topicId,
+        title = title,
+        source = source,
+        authorName = authorName,
+        activityHint = activityHint,
+        bodySnippet = bodySnippet,
+    )
+
+    private fun analyzeCandidates(
+        query: String,
+        candidates: List<TradeCandidateTopic>,
+        includeBuyRequests: Boolean,
+        fxToCny: (String) -> BigDecimal?,
+        now: LocalDate,
+        excludeTopicId: Long?,
+    ) = TradeMarketPremiumAnalyzer.analyze(
+        query = query,
+        candidates = candidates,
+        includeBuyRequests = includeBuyRequests,
+        fxToCny = fxToCny,
+        now = now,
+        excludeTopicId = excludeTopicId,
+    )
+
+    private data class BodyFetchPlan(
+        val candidate: TradeCandidateTopic,
+        val priority: Int,
+        val isStrictTitleMatch: Boolean,
+    )
+
+    private suspend fun enrichConciseCandidateBodies(
+        cleanQuery: String,
+        candidates: List<TradeCandidateTopic>,
+        includeBuyRequests: Boolean,
+        excludeTopicId: Long?,
+        fxState: FxRatesState? = null,
+    ) {
+        val fetchLimit = maxBodyFetchesPerLookup.coerceIn(0, MAX_BODY_FETCHES_PER_LOOKUP_HARD_CAP)
+        if (fetchLimit <= 0 || candidates.isEmpty()) return
+        val now = clockMillis()
+        if (cooldownUntilEpochMillis > now) return
+        val fxToCny = buildFxResolver(fxState)
+        val valuationDate = resolveNowDate(now)
+
+        val targets = withContext(computeDispatcher) {
+            val unique = LinkedHashMap<Long, TradeCandidateTopic>()
+            for (candidate in candidates) {
+                if (candidate.topicId <= 0L) continue
+                if (excludeTopicId != null && candidate.topicId == excludeTopicId) continue
+                unique.putIfAbsent(candidate.topicId, candidate)
+            }
+            unique.values
+                .asSequence()
+                .filter { candidate -> !hasCachedBodyDecision(candidate.topicId, now) }
+                .mapNotNull { candidate ->
+                    classifyBodyFetchPlan(
+                        candidate = candidate,
+                        cleanQuery = cleanQuery,
+                        includeBuyRequests = includeBuyRequests,
+                        fxToCny = fxToCny,
+                        valuationDate = valuationDate,
+                    )
+                }
+                .sortedWith(
+                    compareBy<BodyFetchPlan> { it.priority }
+                        .thenByDescending { it.isStrictTitleMatch }
+                        .thenByDescending { it.candidate.topicId },
+                )
+                .map { it.candidate }
+                .take(fetchLimit)
+                .toList()
+        }
+
+        if (targets.isEmpty()) return
+
+        val concurrency = bodyFetchConcurrency.coerceIn(1, MAX_BODY_FETCH_CONCURRENCY_HARD_CAP)
+        val semaphore = Semaphore(concurrency)
+        val abortRemaining = AtomicBoolean(false)
+
+        withContext(ioDispatcher) {
+            coroutineScope {
+                targets.map { candidate ->
+                    async {
+                        semaphore.withPermit {
+                            if (abortRemaining.get()) return@withPermit
+                            val attemptNow = clockMillis()
+                            if (cooldownUntilEpochMillis > attemptNow) {
+                                abortRemaining.set(true)
+                                return@withPermit
+                            }
+                            if (hasCachedBodyDecision(candidate.topicId, attemptNow)) {
+                                return@withPermit
+                            }
+                            val detailResult = try {
+                                forumRepository.getTopicDetail(
+                                    topicId = candidate.topicId,
+                                    page = 1,
+                                    includeBlocked = false,
+                                )
+                            } catch (c: CancellationException) {
+                                throw c
+                            } catch (t: Throwable) {
+                                Result.failure(t)
+                            }
+                            detailResult.fold(
+                                onSuccess = { detail ->
+                                    val snippet = sanitizeBodySnippet(detail.openingFloor?.markdownBody.orEmpty())
+                                    storeBodyCache(
+                                        topicId = candidate.topicId,
+                                        bodySnippet = snippet,
+                                        isPermanentEmpty = snippet.isBlank(),
+                                    )
+                                },
+                                onFailure = { err ->
+                                    val apiErr = extractApiException(err)
+                                    when {
+                                        apiErr != null && (apiErr.statusCode == 429 || apiErr.statusCode == 503) -> {
+                                            recordRateLimitCooldown(apiErr)
+                                            abortRemaining.set(true)
+                                        }
+                                        isChallengeError(err) || isSignInError(err) -> {
+                                            abortRemaining.set(true)
+                                        }
+                                        isPermanentTopicBodyFailure(err, apiErr) -> {
+                                            storeBodyCache(
+                                                topicId = candidate.topicId,
+                                                bodySnippet = "",
+                                                isPermanentEmpty = true,
+                                            )
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+    }
+
+    private fun classifyBodyFetchPlan(
+        candidate: TradeCandidateTopic,
+        cleanQuery: String,
+        includeBuyRequests: Boolean,
+        fxToCny: (String) -> BigDecimal?,
+        valuationDate: LocalDate,
+    ): BodyFetchPlan? {
+        val strictMatch = TradeMarketPremiumAnalyzer.matchesQuery(candidate.title, cleanQuery)
+        val looseMatch = strictMatch || isLooseTitleMatch(candidate.title, cleanQuery)
+        if (!looseMatch) return null
+
+        val inferred = TradeListingPriceParser.inferSpread(
+            title = candidate.title,
+            bodySnippet = null,
+            fxToCny = fxToCny,
+            now = valuationDate,
+        )
+        if (!includeBuyRequests) {
+            val intent = inferred?.intent
+                ?: TradeListingPriceParser.parse(
+                    title = candidate.title,
+                    bodySnippet = null,
+                    fxToCny = fxToCny,
+                    now = valuationDate,
+                ).intent
+            if (intent == TradeListingIntent.BUY || isLikelyBuyRequestTitle(candidate.title)) {
+                return null
+            }
+        }
+
+        val priority = when {
+            inferred == null || (!inferred.hasSpread && !inferred.hasAskPrice) ->
+                BODY_FETCH_PRIORITY_NO_PRICING
+            !inferred.hasSpread && inferred.hasAskPrice ->
+                BODY_FETCH_PRIORITY_ASK_ONLY
+            inferred.hasSpread && !inferred.hasAskPrice ->
+                BODY_FETCH_PRIORITY_SPREAD_NO_ASK
+            !strictMatch ->
+                BODY_FETCH_PRIORITY_LOOSE_CONFIRM
+            else -> return null
+        }
+
+        return BodyFetchPlan(
+            candidate = candidate,
+            priority = priority,
+            isStrictTitleMatch = strictMatch,
+        )
+    }
+
+    private fun isLooseTitleMatch(title: String, query: String): Boolean =
+        TradeMarketPremiumAnalyzer.matchesQueryLoosely(title, query)
+
+    private fun isLikelyBuyRequestTitle(title: String): Boolean =
+        BUY_TITLE_HINT_REGEX.containsMatchIn(title.trim())
+
+    private fun isPermanentTopicBodyFailure(error: Throwable, apiErr: NodeSeekApiException?): Boolean =
+        apiErr?.statusCode == 404 ||
+            error is TopicAccessException.PrivateTopic ||
+            error.cause is TopicAccessException.PrivateTopic ||
+            error is TopicAccessException.LevelRequired ||
+            error.cause is TopicAccessException.LevelRequired
+
+    private fun storeBodyCache(
+        topicId: Long,
+        bodySnippet: String,
+        isPermanentEmpty: Boolean,
+    ) {
+        if (topicId <= 0L) return
+        if (bodyCache.size >= MAX_BODY_CACHE_ENTRIES && !bodyCache.containsKey(topicId)) {
+            val evictCount = (bodyCache.size - MAX_BODY_CACHE_ENTRIES + 32).coerceAtLeast(1)
+            bodyCache.entries
+                .sortedBy { it.value.fetchedAtMillis }
+                .take(evictCount)
+                .forEach { bodyCache.remove(it.key) }
+        }
+        bodyCache[topicId] = CachedTopicBody(
+            fetchedAtMillis = clockMillis(),
+            bodySnippet = bodySnippet,
+            isPermanentEmpty = isPermanentEmpty,
+        )
+    }
+
+    private fun getCachedBodySnippet(topicId: Long, nowMillis: Long): String? {
+        val entry = bodyCache[topicId] ?: return null
+        if (!entry.isFresh(nowMillis, BODY_CACHE_TTL_MILLIS)) return null
+        return entry.bodySnippet.takeIf { it.isNotBlank() }
+    }
+
+    private fun hasCachedBodyDecision(topicId: Long, nowMillis: Long): Boolean {
+        val entry = bodyCache[topicId] ?: return false
+        return entry.isFresh(nowMillis, BODY_CACHE_TTL_MILLIS)
+    }
+
+    private suspend fun resolveFxState(allowNetworkRefresh: Boolean): FxRatesState? {
+        val fxRepo = exchangeRateRepository ?: return null
+        val persisted = runCatching { fxRepo.loadPersistedState() }.getOrElse { fxRepo.state.value }
+        if (!allowNetworkRefresh) return persisted
+        val hasFreshOnline = persisted.fetchedAtEpochMillis > 0L && !persisted.isCacheExpired
+        if (hasFreshOnline) return persisted
+        val refreshed = try {
+            withTimeoutOrNull(FX_REFRESH_TIMEOUT_MILLIS) {
+                when (val outcome = fxRepo.ensureFreshRates(force = false)) {
+                    is FxRefreshOutcome.Success -> outcome.state
+                    is FxRefreshOutcome.Fallback -> outcome.state
+                }
+            }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            null
+        }
+        return refreshed ?: persisted
+    }
+
+    internal fun buildFxResolver(fxState: FxRatesState?): (String) -> BigDecimal? = { rawCode ->
+        val normalized = normalizeCurrencyCode(rawCode)
+        val currency = ValuationCurrency.fromCode(normalized)
+        when {
+            currency == null -> null
+            currency == ValuationCurrency.CNY -> BigDecimal.ONE
+            fxState != null -> fxState.rateFor(currency)
+            else -> currency.defaultCnyRate
+        }
+    }
+
+    private fun resolveNowDate(nowMillis: Long): LocalDate {
+        nowDateProvider?.let { return it() }
+        return if (nowMillis >= MIN_REAL_EPOCH_MILLIS) {
+            Instant.ofEpochMilli(nowMillis).atZone(VALUATION_ZONE_ID).toLocalDate()
+        } else {
+            VpsValuationEngine.todayInShanghai()
+        }
+    }
+
+    private fun sanitizeBodySnippet(rawMarkdown: String): String {
+        val trimmed = rawMarkdown.trim()
+        if (trimmed.isEmpty()) return ""
+        return trimmed
+            .replace(BODY_FENCED_CODE_REGEX, "\n")
+            .replace(BODY_IMAGE_REGEX, " ")
+            .replace(BODY_LINK_REGEX, "$1")
+            .replace(BODY_HTML_TAG_REGEX, " ")
+            .replace(BODY_WHITESPACE_LINE_REGEX, "\n")
+            .trim()
+            .take(MAX_CACHED_BODY_SNIPPET_CHARS)
     }
 
     private fun isTradeCategoryTopic(topic: TopicSummary): Boolean {
@@ -787,6 +1256,19 @@ class TradeMarketReferenceRepositoryImpl(
         const val DEFAULT_BASE_COOLDOWN_MILLIS: Long = 30_000L
         const val DEFAULT_MAX_COOLDOWN_MILLIS: Long = 300_000L
         const val DEFAULT_REMOTE_CACHE_TTL_MILLIS: Long = 15 * 60_000L
+        const val DEFAULT_MAX_BODY_FETCHES_PER_LOOKUP: Int = 6
+        const val DEFAULT_BODY_FETCH_CONCURRENCY: Int = 2
+        internal const val MAX_BODY_FETCHES_PER_LOOKUP_HARD_CAP: Int = 6
+        internal const val MAX_BODY_FETCH_CONCURRENCY_HARD_CAP: Int = 2
+        private const val BODY_FETCH_PRIORITY_NO_PRICING: Int = 0
+        private const val BODY_FETCH_PRIORITY_ASK_ONLY: Int = 1
+        private const val BODY_FETCH_PRIORITY_SPREAD_NO_ASK: Int = 2
+        private const val BODY_FETCH_PRIORITY_LOOSE_CONFIRM: Int = 3
+        internal const val BODY_CACHE_TTL_MILLIS: Long = 30 * 60_000L
+        private const val MAX_BODY_CACHE_ENTRIES: Int = 500
+        private const val MAX_CACHED_BODY_SNIPPET_CHARS: Int = 1_200
+        private const val FX_REFRESH_TIMEOUT_MILLIS: Long = 2_500L
+        private const val MIN_REAL_EPOCH_MILLIS: Long = 1_577_836_800_000L // 2020-01-01T00:00:00Z
         internal const val DEFAULT_FALLBACK_CACHE_TTL_MILLIS: Long = 3 * 60_000L
         internal const val DEFAULT_STALE_RETENTION_MILLIS: Long = 60 * 60_000L
         internal const val SHARED_TRADE_BOARD_FRESH_TTL_MILLIS: Long = 3 * 60_000L
@@ -795,6 +1277,30 @@ class TradeMarketReferenceRepositoryImpl(
         private const val TARGET_SEARCH_SPREAD_SAMPLES: Int = 3
         private const val TARGET_FALLBACK_SPREAD_SAMPLES: Int = 5
         private const val MAX_SEARCH_QUERY_LENGTH: Int = 64
+
+        private val BUY_TITLE_HINT_REGEX = Regex(
+            """(?:^\s*(?:\[(?:收|求购)]|【(?:收|求购)】|诚收|急收|慢收|求购|收一台|收个|收\s)|(?:原价收|溢价收|折价收))""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val BODY_FENCED_CODE_REGEX = Regex("""```[\s\S]*?```""")
+        private val BODY_IMAGE_REGEX = Regex("""!\[[^\]]*]\([^)]*\)""")
+        private val BODY_LINK_REGEX = Regex("""\[([^\]]+)]\([^)]*\)""")
+        private val BODY_HTML_TAG_REGEX = Regex("""<[^>]+>""")
+        private val BODY_WHITESPACE_LINE_REGEX = Regex("""\n{3,}""")
+
+        internal fun normalizeCurrencyCode(rawCode: String): String =
+            when (val upper = rawCode.trim().uppercase(Locale.ROOT)) {
+                "RMB", "CNH", "¥", "￥", "元", "R" -> "CNY"
+                "US$", "$", "刀", "U" -> "USD"
+                "€", "欧" -> "EUR"
+                "£", "镑" -> "GBP"
+                "HK$" -> "HKD"
+                "S$" -> "SGD"
+                "C$" -> "CAD"
+                "A$" -> "AUD"
+                "NT$" -> "TWD"
+                else -> upper
+            }
 
         private val BRACKETED_TRADE_PREFIX_REGEX = Regex(
             """[\[【]\s*(?:出|收|求购|转|转让|已出|已售|已成交|秒出|sold|closed)\s*[\]】]""",

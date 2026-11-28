@@ -302,7 +302,8 @@ class M3PairwiseE2eTest {
             // 1. Seed FeedDiskCache via trade feed
             harness.forumRepository.getFeed("trade", FeedSort.LATEST_REPLY, 1).getOrThrow()
 
-            // 2. Open topic 123 in TopicDetailViewModel; verify initial marketReference shows 123 with isClosedSold == false
+            // 2. Open topic 123 in TopicDetailViewModel; verify self-exclusion on topic 123's own card
+            //    while peer-perspective local analysis sees 123 with isClosedSold == false.
             val vm = harness.createTopicDetailViewModel(topicId = 123L)
             val job = harness.backgroundScope.launch(mainDispatcherRule.testDispatcher) { vm.uiState.collect {} }
 
@@ -311,7 +312,12 @@ class M3PairwiseE2eTest {
                     vm.uiState.first { it.pageData != null && it.marketReference?.distribution != null }
                 }
             }
-            val beforeObs123 = initialState.marketReference!!.distribution!!.observations.first { it.topicId == 123L }
+            assertTrue(
+                "Current topic 123L must be excluded from its own market reference",
+                initialState.marketReference!!.distribution!!.observations.none { it.topicId == 123L },
+            )
+            val peerBeforeDist = harness.tradeMarketReferenceRepository.analyzeLocal("DMIT Pro").distribution!!
+            val beforeObs123 = peerBeforeDist.observations.first { it.topicId == 123L }
             assertFalse(beforeObs123.isClosedSold)
             assertEquals(BigDecimal("80.00"), beforeObs123.premiumDeltaCny)
 
@@ -334,7 +340,8 @@ class M3PairwiseE2eTest {
                 }
             }
 
-            // 4. Reload trade feed (proves FeedDiskCache was invalidated) and refresh market reference
+            // 4. Reload trade feed (proves FeedDiskCache was invalidated) and verify both
+            //    topic 123's own card (excluding self) and peer-perspective market reference (including closed 123).
             harness.forumRepository.getFeed("trade", FeedSort.LATEST_REPLY, 1).getOrThrow()
             vm.refreshLocalMarketReference("DMIT Pro")
 
@@ -342,19 +349,26 @@ class M3PairwiseE2eTest {
                 withTimeout(5_000L) {
                     vm.uiState.first { state ->
                         val ref = state.marketReference
-                        val obs = ref?.distribution?.observations?.firstOrNull { it.topicId == 123L }
-                        ref?.query == "DMIT Pro" && obs != null && obs.isClosedSold
+                        ref?.query == "DMIT Pro" && ref.distribution != null
                     }
                 }
             }
-            val dist = refreshedState.marketReference!!.distribution!!
-            val afterObs123 = dist.observations.first { it.topicId == 123L }
+            val selfDist = refreshedState.marketReference!!.distribution!!
+            assertTrue(
+                "Current topic 123L must stay excluded from its own refreshed market reference",
+                selfDist.observations.none { it.topicId == 123L },
+            )
+            // Peer topics only: 1001(+40), 1002(+60), 1003(0) -> median = 40.00
+            assertEquals(BigDecimal("40.00"), selfDist.medianCny)
+
+            val peerAfterDist = harness.tradeMarketReferenceRepository.analyzeLocal("DMIT Pro").distribution!!
+            val afterObs123 = peerAfterDist.observations.first { it.topicId == 123L }
             assertTrue(afterObs123.isClosedSold)
             assertEquals("[已出] DMIT LAX.Pro.WEE 溢价 +80 出", afterObs123.title)
             assertEquals(BigDecimal("80.00"), afterObs123.premiumDeltaCny)
             assertFalse(afterObs123.title.contains("[已出] [已出]"))
-            // 1001(+40), 1002(+60), 1003(0), 123(+80) -> median of [0, 40, 60, 80] = 50.00
-            assertEquals(BigDecimal("50.00"), dist.medianCny)
+            // Peer view includes closed 123: 1001(+40), 1002(+60), 1003(0), 123(+80) -> median of [0, 40, 60, 80] = 50.00
+            assertEquals(BigDecimal("50.00"), peerAfterDist.medianCny)
 
             job.cancel()
         }

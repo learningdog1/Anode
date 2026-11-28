@@ -7,17 +7,22 @@ import com.nodeseek.app.domain.model.BookmarkedTopic
 import com.nodeseek.app.domain.model.Category
 import com.nodeseek.app.domain.model.FeedPageResult
 import com.nodeseek.app.domain.model.FeedSort
+import com.nodeseek.app.domain.model.FloorAuthor
+import com.nodeseek.app.domain.model.FloorComment
 import com.nodeseek.app.domain.model.ReactionResult
 import com.nodeseek.app.domain.model.ReactionType
 import com.nodeseek.app.domain.model.ReadHistoryEntry
+import com.nodeseek.app.domain.model.TopicAccessException
 import com.nodeseek.app.domain.model.TopicDetailPage
 import com.nodeseek.app.domain.model.TopicSummary
 import com.nodeseek.app.domain.repository.BookmarkAndHistoryRepository
 import com.nodeseek.app.domain.repository.ForumRepository
 import com.nodeseek.app.domain.valuation.MarketSearchStatus
+import com.nodeseek.app.domain.valuation.ValuationCurrency
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -29,7 +34,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.IOException
 import java.math.BigDecimal
+import java.time.LocalDate
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TradeMarketReferenceRepositoryImplTest {
@@ -46,10 +55,14 @@ class TradeMarketReferenceRepositoryImplTest {
         private val feedHandler: suspend (String, FeedSort, Int) -> Result<FeedPageResult> = { _, _, _ ->
             Result.success(FeedPageResult(topics = emptyList()))
         },
+        private val detailHandler: suspend (Long, Int) -> Result<TopicDetailPage> = { _, _ ->
+            Result.failure(UnsupportedOperationException())
+        },
     ) : ForumRepository {
         var searchCallCount = 0
         val recordedSearchCalls = mutableListOf<Triple<String, String, Int>>()
         val recordedFeedCalls = mutableListOf<Triple<String, FeedSort, Int>>()
+        val recordedDetailCalls: MutableList<Pair<Long, Int>> = Collections.synchronizedList(mutableListOf())
 
         override suspend fun getLocalCachedTopics(categorySlug: String): List<TopicSummary> =
             localTopicsProvider(categorySlug)
@@ -84,8 +97,10 @@ class TradeMarketReferenceRepositoryImplTest {
         override suspend fun getCuratedFeed(page: Int, forceRefresh: Boolean): Result<FeedPageResult> =
             Result.success(FeedPageResult(topics = emptyList()))
 
-        override suspend fun getTopicDetail(topicId: Long, page: Int, includeBlocked: Boolean): Result<TopicDetailPage> =
-            Result.failure(UnsupportedOperationException())
+        override suspend fun getTopicDetail(topicId: Long, page: Int, includeBlocked: Boolean): Result<TopicDetailPage> {
+            recordedDetailCalls += topicId to page
+            return detailHandler(topicId, page)
+        }
 
         override suspend fun createTopic(
             categorySlug: String,
@@ -595,5 +610,488 @@ class TradeMarketReferenceRepositoryImplTest {
         assertEquals(MarketSearchStatus.FAILED, gcRefreshFailed.searchStatus)
         assertEquals(1, gcRefreshFailed.distribution?.sampleCount)
         assertEquals(BigDecimal("30.00"), gcRefreshFailed.distribution?.medianCny)
+    }
+
+    private fun makeDetailPage(topicId: Long, title: String, opBody: String): TopicDetailPage {
+        val opAuthor = FloorAuthor(uid = topicId, username = "seller_$topicId", isTopicAuthor = true)
+        return TopicDetailPage(
+            topicId = topicId,
+            title = title,
+            categorySlug = "trade",
+            categoryName = "交易",
+            author = opAuthor,
+            currentPage = 1,
+            totalPages = 1,
+            openingFloor = FloorComment(
+                commentId = topicId * 10,
+                floorNumber = 0,
+                author = opAuthor,
+                createdAtIso = "2026-06-01T00:00:00Z",
+                markdownBody = opBody,
+            ),
+        )
+    }
+
+    @Test
+    fun `searchRemoteAndMerge fetches OP bodies for concise ask-only and spread-no-ask peers skips complete titles and caches across lookups`() = runTest {
+        var nowMs = 1_780_272_000_000L // 2026-06-01
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            // Concise matched peer: no spread & no ask in title -> MUST fetch body (Priority 0)
+                            TopicSummary(701L, "[出] DMIT LAX Pro Wee 带原油", "trade", "交易", authorName = "s1"),
+                            // Concise matched peer: no spread & no ask in title -> MUST fetch body (Priority 0, ask only in body)
+                            TopicSummary(702L, "[出] DMIT LAX Pro Wee 吃灰出", "trade", "交易", authorName = "s2"),
+                            // Ask-only in title (missing renewal/expiry) -> MUST fetch body (Priority 1) to upgrade to derived spread
+                            TopicSummary(703L, "[出] DMIT LAX Pro Wee 明盘 290", "trade", "交易", authorName = "s3"),
+                            // Explicit spread without total ask in title -> MUST fetch body (Priority 2) to derive total price
+                            TopicSummary(704L, "[出] DMIT LAX Pro Wee 溢价 +60", "trade", "交易", authorName = "s4"),
+                            // Already has complete ask + renewal + expiry in title -> MUST NOT fetch body
+                            TopicSummary(706L, "[出] DMIT LAX Pro Wee 310r \$36.5/年 2026-11-28到期", "trade", "交易", authorName = "s6"),
+                            // Unmatched model -> MUST NOT fetch body
+                            TopicSummary(705L, "[出] 搬瓦工 MEGABOX 带原油", "trade", "交易", authorName = "s5"),
+                        ),
+                    ),
+                )
+            },
+            detailHandler = { id, page ->
+                assertEquals(1, page)
+                when (id) {
+                    701L -> Result.success(
+                        makeDetailPage(
+                            topicId = 701L,
+                            title = "[出] DMIT LAX Pro Wee 带原油",
+                            opBody = "明盘 300\n续费 \$36.5/年\n2026-11-28到期",
+                        ),
+                    )
+                    702L -> Result.success(
+                        makeDetailPage(
+                            topicId = 702L,
+                            title = "[出] DMIT LAX Pro Wee 吃灰出",
+                            opBody = "一口价 270 带原油",
+                        ),
+                    )
+                    703L -> Result.success(
+                        makeDetailPage(
+                            topicId = 703L,
+                            title = "[出] DMIT LAX Pro Wee 明盘 290",
+                            opBody = "续费 \$36.5/年，2026-11-28到期，带原油",
+                        ),
+                    )
+                    704L -> Result.success(
+                        makeDetailPage(
+                            topicId = 704L,
+                            title = "[出] DMIT LAX Pro Wee 溢价 +60",
+                            opBody = "续费 \$36.5/年，2026-11-28到期，带原油",
+                        ),
+                    )
+                    else -> Result.failure(AssertionError("Unexpected detail fetch for topic $id"))
+                }
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+        assertEquals(setOf(701L, 702L, 703L, 704L), forum.recordedDetailCalls.map { it.first }.toSet())
+
+        val dist = state.distribution!!
+        assertEquals(5, dist.matchedTopicCount)
+        assertEquals(5, dist.pricedTopicCount)
+        assertEquals(4, dist.sampleCount) // 704 (+60 explicit), 701 (derived from body), 703 (upgraded from ask-only via body), 706 (derived from title)
+        assertEquals(3, dist.derivedSampleCount)
+        assertEquals(1, dist.derivedAskSampleCount)
+        val derived701 = dist.observations.first { it.topicId == 701L }
+        assertTrue(derived701.isDerived)
+        assertFalse(derived701.isAskDerived)
+        assertEquals(BigDecimal("300.00"), derived701.askPriceCny)
+        assertNotNull(derived701.residualCny)
+        assertTrue(derived701.matchedExpression.contains("推算:"))
+        val derived703 = dist.observations.first { it.topicId == 703L }
+        assertTrue("Ask-only title 703 should upgrade to derived spread after body fetch", derived703.isDerived)
+        assertEquals(BigDecimal("290.00"), derived703.askPriceCny)
+        assertNotNull(derived703.residualCny)
+        val explicit704 = dist.observations.first { it.topicId == 704L }
+        assertFalse(explicit704.isDerived)
+        assertTrue("Explicit-spread peer 704 should derive total ask from OP body", explicit704.isAskDerived)
+        assertEquals(BigDecimal("190.50"), explicit704.askPriceCny)
+        assertEquals(BigDecimal("130.50"), explicit704.residualCny)
+        // Ask observations include 704 (190.50 derived), 702 (270), 703 (290), 701 (300), 706 (310) -> median 290.00
+        assertEquals(5, dist.askSampleCount)
+        assertEquals(BigDecimal("290.00"), dist.askMedianCny)
+
+        // Expire 15m remote cache TTL (bodyCache TTL is 30m): second lookup MUST reuse cached bodies with 0 extra detail calls
+        nowMs += 16 * 60_000L
+        val afterTtl = repo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, afterTtl.searchStatus)
+        assertEquals(4, forum.recordedDetailCalls.size)
+        assertEquals(4, afterTtl.distribution?.sampleCount)
+        assertEquals(5, afterTtl.distribution?.askSampleCount)
+    }
+
+    @Test
+    fun `loose matched ultra-short peers fetch OP bodies and are confirmed or rejected by strict matchesQuery`() = runTest {
+        val nowMs = 1_780_272_000_000L // 2026-06-01
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            // Ultra-short loose match, no pricing -> body confirms LAX Pro + supplies price & renewal/expiry
+                            TopicSummary(851L, "出大妈wee", "trade", "交易", authorName = "u1"),
+                            // Ultra-short loose match, ask-only in title -> body confirms LAX Pro + supplies renewal/expiry
+                            TopicSummary(852L, "大妈 wee 300", "trade", "交易", authorName = "u2"),
+                            // Ultra-short loose match -> body reveals TYO EB (wrong region/tier) -> MUST be rejected after body arrives
+                            TopicSummary(853L, "出大妈wee 260", "trade", "交易", authorName = "u3"),
+                            // Conflicting location in title -> rejected by matchesQueryLoosely, MUST NOT fetch body
+                            TopicSummary(854L, "出大妈 HKG Pro Wee 300", "trade", "交易", authorName = "u4"),
+                        ),
+                    ),
+                )
+            },
+            detailHandler = { id, page ->
+                assertEquals(1, page)
+                when (id) {
+                    851L -> Result.success(
+                        makeDetailPage(
+                            topicId = 851L,
+                            title = "出大妈wee",
+                            opBody = "美西 LAX.Pro.WEE，明盘 280，续费 \$36.5/年，2026-11-28到期",
+                        ),
+                    )
+                    852L -> Result.success(
+                        makeDetailPage(
+                            topicId = 852L,
+                            title = "大妈 wee 300",
+                            opBody = "洛杉矶 LAX Pro Wee，续费 \$36.5/年，2026-11-28到期",
+                        ),
+                    )
+                    853L -> Result.success(
+                        makeDetailPage(
+                            topicId = 853L,
+                            title = "出大妈wee 260",
+                            opBody = "日本东京 TYO.EB.WEE，续费 \$39.9/年，2026-11-28到期",
+                        ),
+                    )
+                    else -> Result.failure(AssertionError("Conflicting peer $id must NOT be fetched"))
+                }
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro WEE")
+        assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+        assertEquals(setOf(851L, 852L, 853L), forum.recordedDetailCalls.map { it.first }.toSet())
+
+        val dist = state.distribution!!
+        assertEquals("Only strictly confirmed peers 851 & 852 should remain", 2, dist.matchedTopicCount)
+        assertEquals(2, dist.sampleCount)
+        assertEquals(2, dist.derivedSampleCount)
+        assertEquals(setOf(851L, 852L), dist.observations.map { it.topicId }.toSet())
+        assertTrue("Wrong-region peer 853 must be rejected after strict body check", dist.observations.none { it.topicId == 853L })
+        assertTrue(dist.askObservations.none { it.topicId == 853L })
+    }
+
+    @Test
+    fun `body fetch prioritizes no-pricing peers ahead of ask-only peers within cap of 6`() = runTest {
+        val nowMs = 1_780_272_000_000L
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            // 4 no-pricing peers (lower topicIds) -> MUST all be prioritized ahead of ask-only peers!
+                            TopicSummary(861L, "[出] DMIT LAX Pro Wee 带原油 A", "trade", "交易", authorName = "n1"),
+                            TopicSummary(862L, "[出] DMIT LAX Pro Wee 带原油 B", "trade", "交易", authorName = "n2"),
+                            TopicSummary(863L, "[出] DMIT LAX Pro Wee 带原油 C", "trade", "交易", authorName = "n3"),
+                            TopicSummary(864L, "[出] DMIT LAX Pro Wee 带原油 D", "trade", "交易", authorName = "n4"),
+                            // 4 ask-only peers (higher topicIds) -> only top 2 newest (874, 873) fit remaining cap!
+                            TopicSummary(871L, "[出] DMIT LAX Pro Wee 明盘 280", "trade", "交易", authorName = "a1"),
+                            TopicSummary(872L, "[出] DMIT LAX Pro Wee 明盘 290", "trade", "交易", authorName = "a2"),
+                            TopicSummary(873L, "[出] DMIT LAX Pro Wee 明盘 300", "trade", "交易", authorName = "a3"),
+                            TopicSummary(874L, "[出] DMIT LAX Pro Wee 明盘 310", "trade", "交易", authorName = "a4"),
+                        ),
+                    ),
+                )
+            },
+            detailHandler = { id, _ ->
+                Result.success(makeDetailPage(id, "t", "续费 \$36.5/年，2026-11-28到期"))
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+        assertEquals(6, forum.recordedDetailCalls.size)
+        assertEquals(
+            "All 4 no-pricing peers plus top 2 newest ask-only peers should be fetched",
+            setOf(861L, 862L, 863L, 864L, 873L, 874L),
+            forum.recordedDetailCalls.map { it.first }.toSet(),
+        )
+        // Ask-only peers 873 & 874 upgraded to derived spreads; 871 & 872 remain ask-only
+        assertEquals(2, state.distribution?.derivedSampleCount)
+        assertEquals(4, state.distribution?.askSampleCount)
+    }
+
+    @Test
+    fun `body fetch enforces cap of 6 and concurrency of 2 never throws on failures and respects 429 cooldown`() = runTest {
+        var nowMs = 1_780_272_000_000L
+        val inFlight = AtomicInteger(0)
+        val maxObservedConcurrency = AtomicInteger(0)
+
+        val conciseTopics = (1L..10L).map { idx ->
+            val label = ('A'.code + idx.toInt() - 1).toChar()
+            TopicSummary(800L + idx, "[出] DMIT LAX Pro Wee 带原油 $label", "trade", "交易", authorName = "u$idx")
+        }
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ -> Result.success(FeedPageResult(topics = conciseTopics)) },
+            detailHandler = { id, _ ->
+                val cur = inFlight.incrementAndGet()
+                maxObservedConcurrency.updateAndGet { prev -> maxOf(prev, cur) }
+                try {
+                    delay(20L)
+                    when (id) {
+                        810L -> Result.success(makeDetailPage(id, "t", "一口价 310"))
+                        809L -> Result.failure(IOException("transient timeout"))
+                        808L -> Result.failure(TopicAccessException.PrivateTopic)
+                        807L -> Result.failure(NodeSeekApiException("not found", statusCode = 404))
+                        else -> Result.success(makeDetailPage(id, "t", "明盘 290"))
+                    }
+                } finally {
+                    inFlight.decrementAndGet()
+                }
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+        assertEquals("Body fetches must be capped at 6 per lookup", 6, forum.recordedDetailCalls.size)
+        assertEquals(
+            "Top 6 newest topicIds should be selected",
+            setOf(810L, 809L, 808L, 807L, 806L, 805L),
+            forum.recordedDetailCalls.map { it.first }.toSet(),
+        )
+        assertTrue("Concurrency must be <= 2, observed ${maxObservedConcurrency.get()}", maxObservedConcurrency.get() <= 2)
+        // 810, 806, 805 succeeded with ask prices; 809/808/807 failed without crashing
+        assertEquals(3, state.distribution?.askSampleCount)
+
+        // Now verify HTTP 429 during body fetch records cooldown and aborts remaining fetches without throwing
+        val rateLimitedForum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ -> Result.success(FeedPageResult(topics = conciseTopics.take(5))) },
+            detailHandler = { _, _ ->
+                Result.failure(NodeSeekApiException("Too Many Requests", statusCode = 429, retryAfterSeconds = 45))
+            },
+        )
+        val rateLimitedRepo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = rateLimitedForum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            bodyFetchConcurrency = 1,
+        )
+        val rlState = rateLimitedRepo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, rlState.searchStatus)
+        assertEquals("Should abort remaining body fetches after first 429", 1, rateLimitedForum.recordedDetailCalls.size)
+        // Subsequent lookup during cooldown must honor cooldown with 0 extra network calls
+        nowMs += 5_000L
+        val cooled = rateLimitedRepo.searchRemoteAndMerge("瓦工 MEGABOX")
+        assertEquals(MarketSearchStatus.COOLDOWN, cooled.searchStatus)
+        assertTrue(cooled.cooldownRemainingSeconds > 0)
+    }
+
+    @Test
+    fun `analyzeLocal uses bookmark offline snapshot bodies and cached topic bodies with zero network calls`() = runTest {
+        val bookmarkTopic = BookmarkedTopic(
+            topicId = 901L,
+            summary = TopicSummary(901L, "[出] DMIT LAX Pro Wee 带原油", "trade", "交易", authorName = "bm"),
+            offlineDetailSnapshot = makeDetailPage(
+                topicId = 901L,
+                title = "[出] DMIT LAX Pro Wee 带原油",
+                opBody = "明盘 300 续费 \$36.5/年 2026-11-28到期",
+            ),
+        )
+        val historyEntry = ReadHistoryEntry(
+            topicId = 902L,
+            title = "[出] DMIT LAX Pro Wee 吃灰",
+            categoryName = "交易",
+            authorName = "hist",
+            categorySlug = "trade",
+        )
+        val forum = FakeMarketForumRepository(
+            searchHandler = { _, _ -> throw AssertionError("analyzeLocal must NOT call searchTopics") },
+            detailHandler = { _, _ -> throw AssertionError("analyzeLocal must NOT call getTopicDetail") },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(
+                bookmarks = listOf(bookmarkTopic),
+                history = listOf(historyEntry),
+            ),
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+        repo.cacheTopicBody(902L, "一口价 260")
+
+        val state = repo.analyzeLocal("DMIT LAX Pro Wee")
+        assertEquals(0, forum.searchCallCount)
+        assertTrue(forum.recordedDetailCalls.isEmpty())
+        val dist = state.distribution!!
+        assertEquals(2, dist.matchedTopicCount)
+        assertEquals(2, dist.pricedTopicCount)
+        assertEquals(1, dist.sampleCount)
+        assertEquals(1, dist.derivedSampleCount)
+        assertEquals(2, dist.askSampleCount)
+        assertEquals(BigDecimal("280.00"), dist.askMedianCny)
+    }
+
+    @Test
+    fun `repo uses ExchangeRateRepository Frankfurter cache or overrides and falls back to static rates offline`() = runTest {
+        val fxCacheFile = tempFolder.newFile("valuation_fx_cache.json")
+        fxCacheFile.writeText("")
+        val fxRepo = ExchangeRateRepository(cacheFile = fxCacheFile)
+        // Custom override USD = 8.00 CNY (distinct from static 7.25)
+        fxRepo.setManualOverride(ValuationCurrency.USD, BigDecimal("8.00"))
+
+        val forum = FakeMarketForumRepository(
+            localTopicsProvider = {
+                listOf(
+                    TopicSummary(
+                        id = 950L,
+                        title = "[出] DMIT LAX Pro Wee 300r \$36.5/年 2026-11-28到期",
+                        categorySlug = "trade",
+                        categoryName = "交易",
+                        authorName = "fx_seller",
+                    ),
+                )
+            },
+        )
+        val fixedDate = LocalDate.of(2026, 6, 1) // 180 days before 2026-11-28
+
+        // 1. With ExchangeRateRepository (USD=8.00): residual = 36.5 * 8.00 * 180 / 365 = 144.00 -> spread = +156.00
+        val repoWithFx = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            exchangeRateRepository = fxRepo,
+            nowDateProvider = { fixedDate },
+        )
+        val withFx = repoWithFx.analyzeLocal("DMIT LAX Pro Wee")
+        assertEquals(BigDecimal("156.00"), withFx.distribution?.medianCny)
+        assertEquals(BigDecimal("144.00"), withFx.distribution?.observations?.single()?.residualCny)
+
+        // 2. Without ExchangeRateRepository (offline static default USD=7.25): residual = 36.5 * 7.25 * 180 / 365 = 130.50 -> spread = +169.50
+        val repoOffline = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            exchangeRateRepository = null,
+            nowDateProvider = { fixedDate },
+        )
+        val offline = repoOffline.analyzeLocal("DMIT LAX Pro Wee")
+        assertEquals(BigDecimal("169.50"), offline.distribution?.medianCny)
+        assertEquals(BigDecimal("130.50"), offline.distribution?.observations?.single()?.residualCny)
+    }
+
+    @Test
+    fun `excludeTopicId removes current topic from analysis and avoids fetching its OP body`() = runTest {
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            TopicSummary(980L, "[出] DMIT LAX Pro Wee 带原油", "trade", "交易", authorName = "self"),
+                            TopicSummary(981L, "[出] DMIT LAX Pro Wee 溢价 +50", "trade", "交易", authorName = "peer"),
+                        ),
+                    ),
+                )
+            },
+            detailHandler = { id, _ ->
+                if (id == 980L) throw AssertionError("Excluded current topic 980L must NOT have its body fetched")
+                Result.success(makeDetailPage(id, "t", "body"))
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { 1_780_272_000_000L },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro Wee", excludeTopicId = 980L)
+        assertTrue(
+            "Excluded current topic 980L must NOT have its body fetched",
+            forum.recordedDetailCalls.none { it.first == 980L },
+        )
+        val dist = state.distribution!!
+        assertEquals(1, dist.matchedTopicCount)
+        assertEquals(1, dist.sampleCount)
+        assertTrue(dist.observations.none { it.topicId == 980L })
+        assertTrue(dist.matchedUnparsedTopics.none { it.topicId == 980L })
+    }
+
+    @Test
+    fun `body fetch prioritizes no-pricing then ask-only then spread-no-ask ahead of loose-confirm within cap of 6`() = runTest {
+        val nowMs = 1_780_272_000_000L
+        val forum = FakeMarketForumRepository(
+            searchHandlerWithPage = { _, _, _ ->
+                Result.success(
+                    FeedPageResult(
+                        topics = listOf(
+                            // Priority 0: 2 no-pricing peers
+                            TopicSummary(881L, "[出] DMIT LAX Pro Wee 带原油 A", "trade", "交易", authorName = "n1"),
+                            TopicSummary(882L, "[出] DMIT LAX Pro Wee 带原油 B", "trade", "交易", authorName = "n2"),
+                            // Priority 1: 2 ask-only peers
+                            TopicSummary(883L, "[出] DMIT LAX Pro Wee 明盘 280", "trade", "交易", authorName = "a1"),
+                            TopicSummary(884L, "[出] DMIT LAX Pro Wee 明盘 290", "trade", "交易", authorName = "a2"),
+                            // Priority 2: 3 explicit-spread-no-ask peers -> top 2 newest (887, 886) fit remaining cap of 6
+                            TopicSummary(885L, "[出] DMIT LAX Pro Wee 溢价 +40", "trade", "交易", authorName = "s1"),
+                            TopicSummary(886L, "[出] DMIT LAX Pro Wee 溢价 +50", "trade", "交易", authorName = "s2"),
+                            TopicSummary(887L, "[出] DMIT LAX Pro Wee 溢价 +60", "trade", "交易", authorName = "s3"),
+                            // Complete spread + ask in title -> never fetched
+                            TopicSummary(889L, "[出] DMIT LAX Pro Wee 溢价 +70 明盘 300", "trade", "交易", authorName = "c1"),
+                        ),
+                    ),
+                )
+            },
+            detailHandler = { id, _ ->
+                Result.success(makeDetailPage(id, "t", "续费 \$36.5/年，2026-11-28到期"))
+            },
+        )
+        val repo = TradeMarketReferenceRepositoryImpl(
+            forumRepository = forum,
+            bookmarkAndHistoryRepository = FakeMarketBookmarkRepository(),
+            clockMillis = { nowMs },
+            nowDateProvider = { LocalDate.of(2026, 6, 1) },
+        )
+
+        val state = repo.searchRemoteAndMerge("DMIT LAX Pro Wee")
+        assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+        assertEquals(6, forum.recordedDetailCalls.size)
+        assertEquals(
+            setOf(881L, 882L, 883L, 884L, 886L, 887L),
+            forum.recordedDetailCalls.map { it.first }.toSet(),
+        )
+        val dist = state.distribution!!
+        assertEquals(2, dist.derivedAskSampleCount)
+        assertTrue(dist.observations.first { it.topicId == 887L }.isAskDerived)
+        assertEquals(BigDecimal("190.50"), dist.observations.first { it.topicId == 887L }.askPriceCny)
     }
 }

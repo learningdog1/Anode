@@ -1,0 +1,316 @@
+id	synthetic	title	body_snippet	expected_query	expected_merchant	expected_model_tokens	intent	spread_cny	ask_price_cny	renewal_amount	renewal_currency	renewal_cycle	expiry	notes
+1	0	[出] DMIT LAX.Pro.Wee 溢价 +40		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	40						fixture:feed_trade_page1;dotted_sku;explicit_spread
+2	0	[已出] 大妈 Pro.Tiny 剩余价值+60		DMIT Pro Tiny	DMIT	Pro Tiny	SELL	60						fixture:feed_trade_page1;cn_slang;dotted_sku;sold;explicit_spread
+3	0	[出] DMIT Pro 平出		DMIT Pro	DMIT	Pro	SELL	0						fixture:feed_trade_page1;explicit_spread
+4	0	[求购] DMIT Pro 溢价 +200 收		DMIT Pro	DMIT	Pro	BUY	200						fixture:feed_trade_page1;buy_request;explicit_spread
+5	0	[出] 搬瓦工 MEGABOX Pro 溢价+100		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL	100						fixture:feed_trade_page1;cn_slang;explicit_spread
+6	0	[出] BWG MegaBox 折价 -25 出		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL	-25						fixture:feed_trade_page1;explicit_spread
+7	0	[出] DMIT Pro 1C1G 100M 2026年到期 $39.9/yr		DMIT Pro	DMIT	Pro	SELL			39.9	USD	year		fixture:feed_trade_page1;renewal_only
+8	0	[出] DMIT Pro 溢价 15%		DMIT Pro	DMIT	Pro	SELL							fixture:feed_trade_page1;percent_spread_trap
+9	0	[出] RackNerd 8折出		RACKNERD	RACKNERD		SELL							fixture:feed_trade_page1;discount_rate_trap
+10	0	[出] DMIT LAX.Pro.Malibu 溢价 +120		DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	SELL	120						fixture:search_trade_dmit_pro;dotted_sku;explicit_spread
+11	0	[出] DMIT Pro.Wee 折价 -10 出		DMIT Pro WEE	DMIT	Pro WEE	SELL	-10						fixture:search_trade_dmit_pro;dotted_sku;explicit_spread
+12	0	[求购] DMIT Pro 溢价 +300 收		DMIT Pro	DMIT	Pro	BUY	300						fixture:search_trade_dmit_pro;buy_request;explicit_spread
+13	0	DMIT LAX.Pro.WEE 溢价 +80 出	出 DMIT LAX.Pro.WEE 一台，溢价 +80。CN2 GIA 延迟 138ms。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	80						fixture:topic_trade_op_123;dotted_sku;no_bracket;explicit_spread
+14	0	[出] DMIT LAX.Pro.Wee 溢价 +80 包Push		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	80						test:TradeMarketPremiumAnalyzerTest;dotted_sku;explicit_spread
+15	0	[出] 瓦工 MEGABOX Pro 剩余价值+120r		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL	120						test:TradeMarketPremiumAnalyzerTest;cn_slang;explicit_spread
+16	0	[出] BandwagonHOST DC6 折价 -35 出		BWG DC6	BWG	DC6	SELL	-35						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+17	0	[出] RackNerd 2C2G DC02 剩余价值-20出		RACKNERD DC02	RACKNERD	DC02	SELL	-20						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+18	0	[出] 绿云 软银 平出 原邮		GREENCLOUD Softbank	GREENCLOUD	Softbank	SELL	0						test:TradeMarketPremiumAnalyzerTest;cn_slang;explicit_spread
+19	0	[出] Claw HK 原价出		CLAW HK	CLAW	HK	SELL	0						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+20	0	[已出] DMIT TYO.Pro.Tiny 溢价 50		DMIT TYO Pro Tiny	DMIT	TYO Pro Tiny	SELL	50						test:TradeMarketPremiumAnalyzerTest;dotted_sku;sold;explicit_spread
+21	0	[出] DMIT LAX.Pro.WEE $36.9/yr 剩余价值+80出		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	80		36.9	USD	year		test:TradeMarketPremiumAnalyzerTest;dotted_sku;explicit_spread
+22	0	[出] DMIT PVM.LAX.Pro.WEE $36.9/yr 2026-12-01到期 带原油		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL			36.9	USD	year	2026-12-01	test:TradeMarketPremiumAnalyzerTest;dotted_sku;renewal_only
+23	0	【出】搬瓦工 BWG MEGABOX-PRO DC6 CN2 GIA-E		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL							test:TradeMarketPremiumAnalyzerTest;cn_slang;hyphen_sku
+24	0	【出】搬瓦工 DC6 CN2 GIA-E 传家宝 剩余价值+100		BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL	100						test:TradeMarketPremiumAnalyzerTest;cn_slang;hyphen_sku;explicit_spread
+25	0	明盘300出 Claw HK 4刀 1C2G 1T		CLAW HK	CLAW	HK	SELL		300	4	USD			test:TradeMarketPremiumAnalyzerTest;no_bracket;concise;ask_only
+26	0	出绿云 JP Tokyo IIJ 2222 三年付		GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL					3year		test:TradeMarketPremiumAnalyzerTest;cn_slang;glued_cjk;no_bracket
+27	0	出 RN 2024黑五 2C2.5G DC02		RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL							test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket
+28	0	DMIT HKG.EB.CORONA		DMIT HKG EB CORONA	DMIT	HKG EB CORONA	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;dotted_sku;no_bracket;concise
+29	0	V.PS Tokyo Softbank Mini Pro		V.PS Tokyo Softbank Mini Pro	V.PS	Tokyo Softbank Mini Pro	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;dotted_sku;no_bracket
+30	0	RFC JP T1 CO		RFC JP T1 CO	RFC	JP T1 CO	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;no_bracket;concise
+31	0	Netcup RS1000 G9.5		NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;dotted_sku;no_bracket;concise
+32	0	瓦工 THE PLAN v2		BWG PLAN v2	BWG	PLAN v2	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket
+33	0	YxVM HK Vol		YXVM HK Vol	YXVM	HK Vol	UNKNOWN							test:TradeMarketPremiumAnalyzerTest;no_bracket;concise
+34	0	[出] CC 2C2G DC2 10.99刀年付 带原油		CLOUDCONE DC2	CLOUDCONE	DC2	SELL			10.99	USD	year		test:TradeMarketPremiumAnalyzerTest;cn_slang;renewal_only
+35	0	出 Sharon HK Standard 剩余价值+40		SHARON HK Standard	SHARON	HK Standard	SELL	40						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+36	0	出 Halo HK BGP 溢价50		HALO HK BGP	HALO	HK BGP	SELL	50						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+37	0	出 御坂 HKG S2 原价出		MISAKA HKG S2	MISAKA	HKG S2	SELL	0						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+38	0	出 AkkoCloud 圣何塞 CN2 GIA 折价30		AKKO SJC CN2 GIA	AKKO	SJC CN2 GIA	SELL	-30						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+39	0	出 咸鱼云 美西 SJC Pro 溢价+30		SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL	30						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+40	0	出 Kirino 东京 软银 剩余价值-20出		KIRINO Tokyo Softbank	KIRINO	Tokyo Softbank	SELL	-20						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+41	0	出 爱丽丝 HK Free 平出		ALICE HK Free	ALICE	HK Free	SELL	0						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+42	0	出 Cera 洛杉矶 CMIN2 溢价+60		CERA LAX CMIN2	CERA	LAX CMIN2	SELL	60						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+43	0	出 OVH KS-LE-B 杜甫 剩余价值+100		OVH KS LE B	OVH	KS LE B	SELL	100						test:TradeMarketPremiumAnalyzerTest;hyphen_sku;no_bracket;explicit_spread
+44	0	出 HZ AX41 芬兰 剩余价值出		HETZNER AX41 芬兰	HETZNER	AX41 芬兰	SELL	0						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+45	0	出 斯巴达 西雅图 24刀 2C2G 溢价+50		SPARTAN 西雅图	SPARTAN	西雅图	SELL	50		24	USD			test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+46	0	出 BuyVM 卢森堡 1C512M 3.5刀月付		BUYVM 卢森堡	BUYVM	卢森堡	SELL			3.5	USD	month		test:TradeMarketPremiumAnalyzerTest;no_bracket;renewal_only
+47	0	出 卢森堡 512M 平出		BUYVM 卢森堡	BUYVM	卢森堡	SELL	0						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+48	0	出 火山云 香港 1C2G 溢价+20		VOLC HK	VOLC	HK	SELL	20						test:TradeMarketPremiumAnalyzerTest;cn_slang;no_bracket;explicit_spread
+49	0	出 DediPath LA 2C2G 剩余价值出		DEDIPATH LAX	DEDIPATH	LAX	SELL	0						test:TradeMarketPremiumAnalyzerTest;no_bracket;explicit_spread
+50	0	出 RN 2C2.5G 10.99刀年付 带原油		RACKNERD 2C2.5G	RACKNERD	2C2.5G	SELL			10.99	USD	year		test:TradeMarketPremiumAnalyzerTest;spec_identity;cn_slang;no_bracket
+51	0	出 Claw 4刀 1C2G 1T流量 原邮		CLAW 1C2G	CLAW	1C2G	SELL			4	USD			test:TradeMarketPremiumAnalyzerTest;spec_identity;no_bracket
+52	0	[出] 出个传家宝好鸡 极品秒出 自刀可小刀 带原油改邮 记者勿扰 剩余价值+50					SELL	50						test:TradeMarketPremiumAnalyzerTest;vague_unidentifiable;explicit_spread
+53	0	[出] 出个传家宝好鸡 剩余价值+50	出吃灰机器，型号：DMIT LAX.Pro.WEE\n续费 $36.9/yr，2026-12-01到期，带原油出。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	50		36.9	USD	year	2026-12-01	test:TradeMarketPremiumAnalyzerTest;body_only_model;explicit_spread
+54	0	[出] 出个大妈传家宝 剩余价值+80	套餐：LAX.Pro.WEE\n2026-12-01到期，原邮给。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	80					2026-12-01	test:TradeMarketPremiumAnalyzerTest;cn_slang;body_enriches_model;explicit_spread
+55	0	出绿云东京IIJ 2222 三年付 平出		GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL	0				3year		test:TradeMarketPremiumAnalyzerTest;cn_slang;glued_cjk;no_bracket;explicit_spread
+56	0	出绿云东京软银2222 三年付 平出		GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL	0				3year		test:TradeMarketPremiumAnalyzerTest;cn_slang;glued_cjk;no_bracket;explicit_spread
+57	0	[出] Netcup RS 1000 G9.5 平出		NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	SELL	0						test:TradeMarketPremiumAnalyzerTest;dotted_sku;explicit_spread
+58	0	[出] Netcup RS1000 G11 平出		NETCUP RS1000 G11	NETCUP	RS1000 G11	SELL	0						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+59	0	[出] 搬瓦工 BIGGERBOX-PRO 溢价+100		BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	SELL	100						test:TradeMarketPremiumAnalyzerTest;cn_slang;hyphen_sku;explicit_spread
+60	0	[出] 搬瓦工 MINIBOX 溢价+50		BWG MINIBOX	BWG	MINIBOX	SELL	50						test:TradeMarketPremiumAnalyzerTest;cn_slang;explicit_spread
+61	0	[出] 搬瓦工 THE PLAN v1 溢价+100		BWG PLAN v1	BWG	PLAN v1	SELL	100						test:TradeMarketPremiumAnalyzerTest;cn_slang;explicit_spread
+62	0	[出] DMIT LAX.EB.WEE 溢价+30		DMIT LAX EB WEE	DMIT	LAX EB WEE	SELL	30						test:TradeMarketPremiumAnalyzerTest;dotted_sku;explicit_spread
+63	0	[出] V.PS 东京 软银 Mini Pro +50出		V.PS Tokyo Softbank Mini Pro	V.PS	Tokyo Softbank Mini Pro	SELL	50						test:TradeMarketPremiumAnalyzerTest;dotted_sku;explicit_spread
+64	0	[出] YxVM HK Eco 溢价+40		YXVM HK Eco	YXVM	HK Eco	SELL	40						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+65	0	[出] RFC HK T1 CO 溢价+80		RFC HK T1 CO	RFC	HK T1 CO	SELL	80						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+66	0	[出] HostHatch 卢森堡 平出		HOSTHATCH 卢森堡	HOSTHATCH	卢森堡	SELL	0						test:TradeMarketPremiumAnalyzerTest;explicit_spread
+67	0	DMIT Pro 续费$39.9/yr - 200r出		DMIT Pro	DMIT	Pro	SELL		200	39.9	USD	year		test:TradeMarketPremiumAnalyzerTest;no_bracket;ask_only;dash_trap
+68	0	250出 DMIT LAX.Pro.WEE		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		250					test:TradeMarketPremiumAnalyzerTest;dotted_sku;no_bracket;concise;ask_only
+69	0	出 DMIT HKG Pro 36.9刀		DMIT HKG Pro	DMIT	HKG Pro	SELL			36.9	USD			test:TrustRiskEvaluatorTest;no_bracket;concise
+70	0	收个 Claw Cloud JP 4刀		CLAW JP	CLAW	JP	BUY			4	USD			test:TrustRiskEvaluatorTest;no_bracket;buy_request
+71	0	出一个 netcup RS1000 G11		NETCUP RS1000 G11	NETCUP	RS1000 G11	SELL							test:TrustRiskEvaluatorTest;no_bracket;concise
+72	0	诚收 搬瓦工 DC6 46刀		BWG DC6	BWG	DC6	BUY			46	USD			test:TrustRiskEvaluatorTest;cn_slang;no_bracket;buy_request
+73	0	RN 2024黑五 10.99刀 65元出		RACKNERD 黑五	RACKNERD	黑五	SELL		65	10.99	USD			test:TrustRiskEvaluatorTest;cn_slang;no_bracket;concise;ask_only
+74	0	DMIT LAX Pro 39.9刀 280R		DMIT LAX Pro	DMIT	LAX Pro	SELL		280	39.9	USD			test:TrustRiskEvaluatorTest;no_bracket;concise;ask_only
+75	0	DMIT HKG Pro 36.9 已出		DMIT HKG Pro	DMIT	HKG Pro	SELL							test:TrustRiskEvaluatorTest;no_bracket;sold
+76	0	已出					SELL							test:TrustRiskEvaluatorTest;sold;vague_unidentifiable
+77	0	出了，封贴					SELL							test:TrustRiskEvaluatorTest;sold;vague_unidentifiable
+78	0	（已收）谢谢老哥					BUY							test:TrustRiskEvaluatorTest;buy_request;vague_unidentifiable
+79	0	[出] RN 圣何塞老牌传家宝		RACKNERD SJC	RACKNERD	SJC	SELL							test:PulseRadarMonitorTest;cn_slang
+80	0	求购 RN 洛杉矶机房		RACKNERD LAX	RACKNERD	LAX	BUY							test:PulseRadarMonitorTest;cn_slang;buy_request;no_bracket
+81	0	[出] RackNerd 洛杉矶 DC02 1C / 1G / 20G NVMe / 1TB 剩余价值 ¥36.40 出 (到期 2027-05-20)		RACKNERD LAX DC02	RACKNERD	LAX DC02	SELL	0	36.40				2027-05-20	test:FleetPortfolioAndSalePostTest;explicit_spread;ask_plus_spread
+82	0	DMIT HKG Pro 36.9刀 2026-12到期		DMIT HKG Pro	DMIT	HKG Pro	UNKNOWN			36.9	USD		2026-12	test:SellerTrustRepositoryImplTest;no_bracket;renewal_only
+83	0	出个 Claw Cloud JP 4刀		CLAW JP	CLAW	JP	SELL			4	USD			test:SellerTrustRepositoryImplTest;no_bracket;concise
+84	1	出 DMIT LAX Pro Wee 300	续费 $36.9/年，2027-03-15到期，带原油出，不议价。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		300	36.9	USD	year	2027-03-15	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+85	1	[出] 斯巴达 9.9刀/年 120r	西雅图 4837 1C512M，2026-12-20到期，工单push需自理或带原油。	SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		120	9.9	USD	year	2026-12-20	synthetic;concise;cn_slang;body_enriches_model;ask_plus_residual
+86	1	出个绿云 2222 带原油	绿云 东京 软银 2222 三年付 $66.6/3yr，2028-02-10到期，明盘 420r。	GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL		420	66.6	USD	3year	2028-02-10	synthetic;concise;cn_slang;no_bracket;body_only_price;body_enriches_model;ask_plus_residual
+87	1	出 瓦工 MEGABOX 380r	BandwagonHost MEGABOX-PRO，年付 $45.68/yr，2027-01-18到期，带原邮。	BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL		380	45.68	USD	year	2027-01-18	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+88	1	明盘 260 出大妈 LAX Pro Wee	年付 $36.9/年，到期时间：2027-04-10，原邮交付。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		260	36.9	USD	year	2027-04-10	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+89	1	出大妈wee 290	DMIT LAX.Pro.WEE，续费 36.9美元/年，2027-05-01到期，支持改邮。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		290	36.9	USD	year	2027-05-01	synthetic;concise;cn_slang;glued_cjk;no_bracket;body_enriches_model;ask_plus_residual
+90	1	大妈 Malibu 550r 带原邮	PVM.LAX.Pro.Malibu，续费 $49.9/年，到期时间：2027-06-15，不刀。	DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	SELL		550	49.9	USD	year	2027-06-15	synthetic;concise;cn_slang;no_bracket;body_enriches_model;ask_plus_residual
+91	1	出大妈eb wee 220r	LAX.EB.WEE，$29.9/yr，2027-02-28到期，带原油。	DMIT LAX EB WEE	DMIT	LAX EB WEE	SELL		220	29.9	USD	year	2027-02-28	synthetic;concise;cn_slang;glued_cjk;no_bracket;body_enriches_model;ask_plus_residual
+92	1	出 DMIT LAX EB CORONA 360出	年付49.9刀，2027-04-01到期，IP正常。	DMIT LAX EB CORONA	DMIT	LAX EB CORONA	SELL		360	49.9	USD	year	2027-04-01	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+93	1	出 DMIT TYO Pro Tiny 680元	东京 Pro Tiny，季付 $36.9/季，2027-01-10到期，带原邮。	DMIT TYO Pro Tiny	DMIT	TYO Pro Tiny	SELL		680	36.9	USD	quarter	2027-01-10	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+94	1	出 搬瓦工 BIGGERBOX-PRO 320r	年付 $36.36/年，2027-03-01到期，原油可给。	BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	SELL		320	36.36	USD	year	2027-03-01	synthetic;concise;cn_slang;hyphen_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+95	1	出 瓦工 MINIBOX 240	年付 $27.08/yr，2026-12-25到期，带原邮。	BWG MINIBOX	BWG	MINIBOX	SELL		240	27.08	USD	year	2026-12-25	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+96	1	出 瓦工 POWERBOX 350r	年付 $41.94/年，2027-02-14到期，原邮出。	BWG POWERBOX	BWG	POWERBOX	SELL		350	41.94	USD	year	2027-02-14	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+97	1	出 瓦工 SAKURABOX 520r	日本大阪软银，年付 $73.6/yr，2027-04-20到期。	BWG SAKURABOX	BWG	SAKURABOX	SELL		520	73.6	USD	year	2027-04-20	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+98	1	瓦工 DC6 CN2 GIA 46刀年付 一口价 330	2027-01-30到期，带原始邮箱，先款或走中介。	BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL		330	46	USD	year	2027-01-30	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+99	1	搬瓦工 THE PLAN v2 92刀/年 700r	2027-05-15到期，DC6/DC9/软银可切机房，带原邮。	BWG PLAN v2	BWG	PLAN v2	SELL		700	92	USD	year	2027-05-15	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+100	1	出 绿云 东京 IIJ 2222 360r	三年付 $66/3yr，2027-11-11到期，免费push或改邮。	GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL		360	66	USD	3year	2027-11-11	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+101	1	出 绿云 东京 软银 2222 390元	三年付 66刀/3年，2027-10-20到期，带原邮。	GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL		390	66	USD	3year	2027-10-20	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+102	1	出 绿云 新加坡 2525 320r	三年付 $75/3年，2028-01-05到期，push出。	GREENCLOUD SG 2525	GREENCLOUD	SG 2525	SELL		320	75	USD	3year	2028-01-05	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+103	1	出 斯巴达 西雅图 16刀/年 260r	1C1G 4837，2027-01-25到期，带原邮出。	SPARTAN 西雅图	SPARTAN	西雅图	SELL		260	16	USD	year	2027-01-25	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+104	1	出 斯巴达 西雅图 24刀年付 380	2C2G 4837，2027-03-10到期，工单push。	SPARTAN 西雅图	SPARTAN	西雅图	SELL		380	24	USD	year	2027-03-10	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+105	1	出 斯巴达 达拉斯 12刀/年 95r	2026-12-18到期，带原邮。	SPARTAN 达拉斯	SPARTAN	达拉斯	SELL		95	12	USD	year	2026-12-18	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+106	1	出 Claw HK 4刀/月 88r	1C2G 1T，12.15到期，带原邮。	CLAW HK	CLAW	HK	SELL		88	4	USD	month	--12-15	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+107	1	出 爪云 JP 4刀/月 65元	1C2G 日本优化，2026-12-10到期，原油。	CLAW JP	CLAW	JP	SELL		65	4	USD	month	2026-12-10	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+108	1	出 阿里爪 SG 4刀/月 55r	新加坡 1C2G，剩余18天，改邮出。	CLAW SG	CLAW	SG	SELL		55	4	USD	month	18d	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+109	1	出 Claw HK 8.4刀/季 95r	季付 $8.4/季，2027-02-01到期，带原邮。	CLAW HK	CLAW	HK	SELL		95	8.4	USD	quarter	2027-02-01	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+110	1	出 RN 2024黑五 DC02 50r	10.99刀/年，2027-01-12到期，工单push。	RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL		50	10.99	USD	year	2027-01-12	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+111	1	RN 2025黑五 1C1G DC02 10.99刀/年 55出		RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL		55	10.99	USD	year		synthetic;concise;cn_slang;no_bracket;ask_only
+112	1	出 CC SC2 2C2G LA 15刀/年 85r	CloudCone SC2 洛杉矶，2027-02-20到期，带原油。	CLOUDCONE SC2 LAX	CLOUDCONE	SC2 LAX	SELL		85	15	USD	year	2027-02-20	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+113	1	出 Netcup RS1000 G11 120r	月付 €8.75/月，2026-12-28到期，免税号push。	NETCUP RS1000 G11	NETCUP	RS1000 G11	SELL		120	8.75	EUR	month	2026-12-28	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+114	1	出 NC RS1000 G9.5 180r	月付 5.75欧/月，2026-12-15到期，push过户。	NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	SELL		180	5.75	EUR	month	2026-12-15	synthetic;concise;cn_slang;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+115	1	出 NC VPS 1000 G11 90元	€5.75/mo，剩余20天，push。	NETCUP VPS1000 G11	NETCUP	VPS1000 G11	SELL		90	5.75	EUR	month	20d	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+116	1	出 HZ AX41 芬兰 350r	月付 €39/月，2026-12-18到期，push出。	HETZNER AX41 芬兰	HETZNER	AX41 芬兰	SELL		350	39	EUR	month	2026-12-18	synthetic;concise;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+117	1	出 OVH KS-LE-B 法国 420r	€9.99/mo，2026-12-22到期，带原油。	OVH KS LE B 法国	OVH	KS LE B 法国	SELL		420	9.99	EUR	month	2026-12-22	synthetic;concise;hyphen_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+118	1	出 V.PS 东京 软银 Mini Pro 450r	年付 €49.95/yr，2027-04-12到期，push费用买家出。	V.PS Tokyo Softbank Mini Pro	V.PS	Tokyo Softbank Mini Pro	SELL		450	49.95	EUR	year	2027-04-12	synthetic;concise;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+119	1	出个大妈 Wee	LAX.Pro.WEE，$36.9/年，2027-02-15到期，明盘 280r，带原油。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		280	36.9	USD	year	2027-02-15	synthetic;concise;cn_slang;no_bracket;body_only_price;body_enriches_model;ask_plus_residual
+120	1	出瓦工 MEGABOX	续费 45.68美元/年，2027-03-20到期，一口价 360 元，原油给。	BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL		360	45.68	USD	year	2027-03-20	synthetic;concise;cn_slang;glued_cjk;no_bracket;body_only_price;ask_plus_residual
+121	1	出一个绿云 东京 IIJ 2222	三年付 66.6刀/3年，2028-01-15到期，剩余价值+50出。	GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL	50		66.6	USD	3year	2028-01-15	synthetic;concise;cn_slang;no_bracket;spread_in_body;body_renewal_expiry
+122	1	出 斯巴达 西雅图	斯巴达 西雅图 4837，年付 $16/yr，2027-02-10到期，价格：220r。	SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		220	16	USD	year	2027-02-10	synthetic;concise;cn_slang;no_bracket;body_only_price;body_enriches_model;ask_plus_residual
+123	1	出个 Claw HK	ClawCloud 香港 4刀/月 1C2G，2026-12-20到期，明盘 70r。	CLAW HK	CLAW	HK	SELL		70	4	USD	month	2026-12-20	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+124	1	出个 Netcup RS1000 G9.5	月付 €5.75/月，2026-12-12到期，溢价 120 出，push。	NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	SELL	120		5.75	EUR	month	2026-12-12	synthetic;concise;dotted_sku;no_bracket;spread_in_body;body_renewal_expiry
+125	1	出 YxVM HK Vol	月付 $5/月，2026-12-19到期，明盘 85 元，带原邮。	YXVM HK Vol	YXVM	HK Vol	SELL		85	5	USD	month	2026-12-19	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+126	1	出 RFC JP T1 CO	季付 $29.9/季，2027-01-30到期，明盘 320r。	RFC JP T1 CO	RFC	JP T1 CO	SELL		320	29.9	USD	quarter	2027-01-30	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+127	1	出 Akile JP Lite	年付 ¥59.9/年，2027-06-01到期，一口价 45r，站内push。	AKILE JP Lite	AKILE	JP Lite	SELL		45	59.9	CNY	year	2027-06-01	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+128	1	出 咸鱼 SJC Pro	SaltyFish 圣何塞 CN2 GIA，季付 $19.9/季，2027-01-15到期，平出。	SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL	0		19.9	USD	quarter	2027-01-15	synthetic;concise;cn_slang;no_bracket;spread_in_body;body_renewal_expiry
+129	1	出 Sharon HK Standard	年付 $60/年，2027-03-01到期，明盘 380 元，push。	SHARON HK Standard	SHARON	HK Standard	SELL		380	60	USD	year	2027-03-01	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+130	1	出 BuyVM 卢森堡	1C512M 2刀/月，2026-12-20到期，折价 -10 出。	BUYVM 卢森堡	BUYVM	卢森堡	SELL	-10		2	USD	month	2026-12-20	synthetic;concise;no_bracket;spread_in_body;body_renewal_expiry
+131	1	出 爱丽丝 HK Free	永久免费小鸡，明盘 35r 带原油。	ALICE HK Free	ALICE	HK Free	SELL		35					synthetic;concise;cn_slang;no_bracket;body_only_price;ask_only
+132	1	出 WAP HK2 LXC	年付 $6/年，2027-05-01到期，明盘 30r，带原油。	WAP HK2 LXC	WAP	HK2 LXC	SELL		30	6	USD	year	2027-05-01	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+133	1	出 ZGO LAX Pro	9929+CMIN2，年付 $29.9/yr，2027-03-10到期，剩余价值+30。	ZGO LAX Pro	ZGO	LAX Pro	SELL	30		29.9	USD	year	2027-03-10	synthetic;concise;no_bracket;spread_in_body;body_renewal_expiry
+134	1	出 Halo HK BGP	月付 $9.9/mo，2026-12-25到期，明盘 95r。	HALO HK BGP	HALO	HK BGP	SELL		95	9.9	USD	month	2026-12-25	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+135	1	出 Misaka HKG S2	年付 $72/年，2027-02-01到期，剩余价值出。	MISAKA HKG S2	MISAKA	HKG S2	SELL	0		72	USD	year	2027-02-01	synthetic;concise;no_bracket;spread_in_body;body_renewal_expiry
+136	1	出 HostHatch 东京 大盘鸡	2T 存储，两年付 $55/2yr，2027-08-01到期，价格：310r。	HOSTHATCH Tokyo	HOSTHATCH	Tokyo	SELL		310	55	USD	2year	2027-08-01	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+137	1	出 Bage LAX	年付 $15.99/yr，2027-01-10到期，80r出，原邮。	BAGE LAX	BAGE	LAX	SELL		80	15.99	USD	year	2027-01-10	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+138	1	出 VMISS JP IIJ	月付 5加元/月，2026-12-18到期，25r带原邮。	VMISS JP IIJ	VMISS	JP IIJ	SELL		25	5	CAD	month	2026-12-18	synthetic;concise;no_bracket;body_only_price;ask_plus_residual;foreign_currency
+139	1	出 Hytron HK	年付 $12/yr，2027-04-01到期，明盘 65r。	HYTRON HK	HYTRON	HK	SELL		65	12	USD	year	2027-04-01	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+140	1	出 ISIF HK CO	月付 €4.8/月，2026-12-22到期，明盘 60r。	ISIF HK CO	ISIF	HK CO	SELL		60	4.8	EUR	month	2026-12-22	synthetic;concise;no_bracket;body_only_price;ask_plus_residual;foreign_currency
+141	1	出 Kurun 洛杉矶 9929	季付 $18/季，2027-01-20到期，90元出。	KURUN LAX 9929	KURUN	LAX 9929	SELL		90	18	USD	quarter	2027-01-20	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+142	1	出 ByteVirt LA NAT	年付 $3.5/年，2027-05-10到期，18r出。	BYTEVIRT LAX NAT	BYTEVIRT	LAX NAT	SELL		18	3.5	USD	year	2027-05-10	synthetic;concise;no_bracket;body_only_price;ask_plus_residual
+143	1	出吃灰传家宝	商家：BandwagonHost\n套餐：MEGABOX-PRO\n续费：$45.68/年\n到期：2027-02-01\n明盘：350r 带原油	BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL		350	45.68	USD	year	2027-02-01	synthetic;concise;no_bracket;body_only_model;body_only_price;ask_plus_residual
+144	1	出大妈美西pro wee 剩余价值+70		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	70						synthetic;cn_slang;glued_cjk;no_bracket;explicit_spread
+145	1	出大妈洛杉矶eb wee 200r		DMIT LAX EB WEE	DMIT	LAX EB WEE	SELL		200					synthetic;cn_slang;glued_cjk;no_bracket;concise;ask_only
+146	1	出大妈香港eb corona 450r	HKG.EB.CORONA，年付 $49.9/yr，2027-03-01到期。	DMIT HKG EB CORONA	DMIT	HKG EB CORONA	SELL		450	49.9	USD	year	2027-03-01	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+147	1	出大妈日本pro tiny 溢价+150		DMIT JP Pro Tiny	DMIT	JP Pro Tiny	SELL	150						synthetic;cn_slang;glued_cjk;no_bracket;explicit_spread
+148	1	出瓦工biggerbox pro 剩余价值+60		BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	SELL	60						synthetic;cn_slang;glued_cjk;no_bracket;explicit_spread
+149	1	出搬瓦工dc9 cn2 gia 49.9刀/年 380r	2027-02-20到期，带原邮。	BWG DC9 CN2 GIA	BWG	DC9 CN2 GIA	SELL		380	49.9	USD	year	2027-02-20	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+150	1	出瓦工日本软银 69.9刀/年 明盘460		BWG JP Softbank	BWG	JP Softbank	SELL		460	69.9	USD	year		synthetic;cn_slang;glued_cjk;no_bracket;ask_only
+151	1	出绿云大阪2222 三年付 330r	Osaka 2222，三年付 $66/3yr，2027-09-15到期。	GREENCLOUD Osaka 2222	GREENCLOUD	Osaka 2222	SELL		330	66	USD	3year	2027-09-15	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+152	1	出斯巴达西雅图4837 16刀/年 240r		SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		240	16	USD	year		synthetic;cn_slang;glued_cjk;no_bracket;concise;ask_only
+153	1	出咸鱼圣何塞pro 溢价40		SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL	40						synthetic;cn_slang;glued_cjk;no_bracket;explicit_spread
+154	1	出咸鱼法兰克福pro 剩余价值+30		SALTYFISH FRA Pro	SALTYFISH	FRA Pro	SELL	30						synthetic;cn_slang;glued_cjk;no_bracket;explicit_spread
+155	1	出阿里云香港轻量 200M 24元/月 150r	2027-06-01到期，走过户。	ALIYUN HK 轻量	ALIYUN	HK 轻量	SELL		150	24	CNY	month	2027-06-01	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+156	1	出 阿里云 新加坡 轻量 200M 200r		ALIYUN SG 轻量	ALIYUN	SG 轻量	SELL		200					synthetic;cn_slang;no_bracket;concise;ask_only
+157	1	出 阿里 香港 轻量 34元/月 平出		ALIYUN HK 轻量	ALIYUN	HK 轻量	SELL	0		34	CNY	month		synthetic;cn_slang;no_bracket;explicit_spread
+158	1	出 腾讯云 香港 轻量 200M 180r	年付 ¥320/年，2027-04-15到期，账号过户。	TENCENT HK 轻量	TENCENT	HK 轻量	SELL		180	320	CNY	year	2027-04-15	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+159	1	出 腾讯 新加坡 轻量 24元/月 折价-30出		TENCENT SG 轻量	TENCENT	SG 轻量	SELL	-30		24	CNY	month		synthetic;cn_slang;no_bracket;explicit_spread
+160	1	出 腾讯 日本 轻量 200M 160元		TENCENT JP 轻量	TENCENT	JP 轻量	SELL		160					synthetic;cn_slang;no_bracket;concise;ask_only
+161	1	出 甲骨文 首尔 升级号 380r		ORACLE 首尔	ORACLE	首尔	SELL		380					synthetic;cn_slang;no_bracket;account;ask_only
+162	1	出 龟壳 首尔 永久免费号 350r		ORACLE 首尔	ORACLE	首尔	SELL		350					synthetic;cn_slang;no_bracket;account;ask_only
+163	1	出 甲骨文 东京 升级号 带原邮 420元		ORACLE Tokyo	ORACLE	Tokyo	SELL		420					synthetic;cn_slang;no_bracket;account;ask_only
+164	1	出 Oracle 新加坡 升级号 400r		ORACLE SG	ORACLE	SG	SELL		400					synthetic;no_bracket;account;ask_only
+165	1	出 龟壳 圣何塞 2023老号 280r		ORACLE SJC	ORACLE	SJC	SELL		280					synthetic;cn_slang;no_bracket;account;ask_only
+166	1	出 AWS 8v 账号 75r		AWS 8v	AWS	8v	SELL		75					synthetic;no_bracket;account;ask_only
+167	1	出 AWS Lightsail 日本 5刀/月 原价出		AWS Lightsail JP	AWS	Lightsail JP	SELL	0		5	USD	month		synthetic;no_bracket;explicit_spread
+168	1	出 GCP 300刀 账号 明盘110		GCP	GCP		SELL		110					synthetic;no_bracket;account;ask_only
+169	1	出 谷歌云 300刀 赠金号 120r		GCP	GCP		SELL		120					synthetic;cn_slang;no_bracket;account;ask_only
+170	1	出 Azure 100刀 学生号 45r		AZURE	AZURE		SELL		45					synthetic;no_bracket;account;ask_only
+171	1	出 微软云 AZ100 学生号 50元		AZURE AZ100	AZURE	AZ100	SELL		50					synthetic;cn_slang;no_bracket;account;ask_only
+172	1	出 DO 200刀 账号 35r		DIGITALOCEAN	DIGITALOCEAN		SELL		35					synthetic;cn_slang;no_bracket;account;ask_only
+173	1	出 DigitalOcean 200刀 码 20r		DIGITALOCEAN	DIGITALOCEAN		SELL		20					synthetic;no_bracket;account;ask_only
+174	1	出 Vultr 250刀 账号 65r		VULTR	VULTR		SELL		65					synthetic;no_bracket;account;ask_only
+175	1	出 Linode 100刀 老号 80r		LINODE	LINODE		SELL		80					synthetic;no_bracket;account;ask_only
+176	1	出 咸鱼云 法兰克福 9929 溢价+25		SALTYFISH FRA 9929	SALTYFISH	FRA 9929	SELL	25						synthetic;cn_slang;no_bracket;explicit_spread
+177	1	出 爪云 香港 4刀/月 75r		CLAW HK	CLAW	HK	SELL		75	4	USD	month		synthetic;cn_slang;no_bracket;concise;ask_only
+178	1	【出】ＤＭＩＴ　ＬＡＸ．Ｐｒｏ．ＷＥＥ　溢价＋６０		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	60						synthetic;fullwidth;dotted_sku;explicit_spread
+179	1	出 DMIT PVM.LAX.Pro.Malibu $49.9/yr 剩余价值+110		DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	SELL	110		49.9	USD	year		synthetic;dotted_sku;no_bracket;explicit_spread
+180	1	出 DMIT PVM.LAX.Pro.PalmSpring 溢价+180		DMIT LAX Pro PalmSpring	DMIT	LAX Pro PalmSpring	SELL	180						synthetic;dotted_sku;no_bracket;explicit_spread
+181	1	出 DMIT PVM.LAX.Pro.Tiny 39.9刀/年 320r	2027-01-15到期，原油给。	DMIT LAX Pro Tiny	DMIT	LAX Pro Tiny	SELL		320	39.9	USD	year	2027-01-15	synthetic;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+182	1	出 DMIT PVM.LAX.EB.WEE $29.9/yr 230r	2027-04-05到期，支持push。	DMIT LAX EB WEE	DMIT	LAX EB WEE	SELL		230	29.9	USD	year	2027-04-05	synthetic;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+183	1	出 DMIT PVM.LAX.EB.INTRO $28/yr 平出		DMIT LAX EB INTRO	DMIT	LAX EB INTRO	SELL	0		28	USD	year		synthetic;dotted_sku;no_bracket;explicit_spread
+184	1	出 DMIT PVM.HKG.Pro.Victoria 溢价+200		DMIT HKG Pro Victoria	DMIT	HKG Pro Victoria	SELL	200						synthetic;dotted_sku;no_bracket;explicit_spread
+185	1	出 DMIT PVM.HKG.EB.WEE 溢价+90		DMIT HKG EB WEE	DMIT	HKG EB WEE	SELL	90						synthetic;dotted_sku;no_bracket;explicit_spread
+186	1	出 DMIT PVM.TYO.Pro.Mini 溢价+220		DMIT TYO Pro Mini	DMIT	TYO Pro Mini	SELL	220						synthetic;dotted_sku;no_bracket;explicit_spread
+187	1	出 Netcup VPS 200 G11s €1/mo 60r	2026-12-20到期，push出。	NETCUP VPS200 G11s	NETCUP	VPS200 G11s	SELL		60	1	EUR	month	2026-12-20	synthetic;no_bracket;ask_plus_residual;body_renewal_expiry
+188	1	出 Netcup VPS 1000 G11 €5.75/月 80r		NETCUP VPS1000 G11	NETCUP	VPS1000 G11	SELL		80	5.75	EUR	month		synthetic;no_bracket;ask_only
+189	1	出 Netcup RS 2000 G11 剩余价值+30		NETCUP RS2000 G11	NETCUP	RS2000 G11	SELL	30						synthetic;no_bracket;explicit_spread
+190	1	出 Netcup RS 1000 G9 5.75欧/月 平出		NETCUP RS1000 G9	NETCUP	RS1000 G9	SELL	0		5.75	EUR	month		synthetic;no_bracket;explicit_spread;tier_trap
+191	1	出 Hetzner EX44 德国 €44/月 剩余价值出		HETZNER EX44 DE	HETZNER	EX44 DE	SELL	0		44	EUR	month		synthetic;no_bracket;explicit_spread
+192	1	出 HZ CPX11 芬兰 €4.5/月 折价-10		HETZNER CPX11 芬兰	HETZNER	CPX11 芬兰	SELL	-10		4.5	EUR	month		synthetic;cn_slang;no_bracket;explicit_spread
+193	1	出 HZ CAX11 德国 €3.79/月 平出		HETZNER CAX11 DE	HETZNER	CAX11 DE	SELL	0		3.79	EUR	month		synthetic;cn_slang;no_bracket;explicit_spread
+194	1	出 OVH KS-LE-C 法国 €12.99/月 溢价+80		OVH KS LE C 法国	OVH	KS LE C 法国	SELL	80		12.99	EUR	month		synthetic;hyphen_sku;no_bracket;explicit_spread
+195	1	出 OVH KS-LE-E 加拿大 €19.99/月 剩余价值+150		OVH KS LE E 加拿大	OVH	KS LE E 加拿大	SELL	150		19.99	EUR	month		synthetic;hyphen_sku;no_bracket;explicit_spread
+196	1	出 OVH VPS-1 0.97刀/月 30r		OVH VPS 1	OVH	VPS 1	SELL		30	0.97	USD	month		synthetic;hyphen_sku;no_bracket;ask_only
+197	1	出 V.PS Tokyo Softbank Mini 29.95欧/年 260r	2027-02-10到期，push出。	V.PS Tokyo Softbank Mini	V.PS	Tokyo Softbank Mini	SELL		260	29.95	EUR	year	2027-02-10	synthetic;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry;tier_trap
+198	1	出 V.PS Osaka Softbank Mini Pro €49.95/yr 溢价+80		V.PS Osaka Softbank Mini Pro	V.PS	Osaka Softbank Mini Pro	SELL	80		49.95	EUR	year		synthetic;dotted_sku;no_bracket;explicit_spread
+199	1	出 V.PS SJC Mini Pro €49.95/yr 平出		V.PS SJC Mini Pro	V.PS	SJC Mini Pro	SELL	0		49.95	EUR	year		synthetic;dotted_sku;no_bracket;explicit_spread
+200	1	出 V.PS HK Mini Pro 溢价+120		V.PS HK Mini Pro	V.PS	HK Mini Pro	SELL	120						synthetic;dotted_sku;no_bracket;explicit_spread
+201	1	出 HostDare CSSD LA CN2 GIA 35.99刀/年 180r	2027-01-20到期，带原邮。	HOSTDARE CSSD LAX CN2 GIA	HOSTDARE	CSSD LAX CN2 GIA	SELL		180	35.99	USD	year	2027-01-20	synthetic;no_bracket;ask_plus_residual;body_renewal_expiry
+202	1	出 ColoCrossing 10刀/年 洛杉矶 45r	2026-12-30到期，原邮。	COLOCROSSING LAX	COLOCROSSING	LAX	SELL		45	10	USD	year	2026-12-30	synthetic;no_bracket;ask_plus_residual;body_renewal_expiry
+203	1	出 GGC HK SimpleCloud 溢价+50		GIGSGC HK SimpleCloud	GIGSGC	HK SimpleCloud	SELL	50						synthetic;cn_slang;no_bracket;explicit_spread
+204	1	出 Akile JP Lite 35r	年付 ¥59.9/年，2027-04-01到期，push。	AKILE JP Lite	AKILE	JP Lite	SELL		35	59.9	CNY	year	2027-04-01	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+205	1	出 Akile HK BGP 55r	月付 ¥19.9/月，2026-12-20到期。	AKILE HK BGP	AKILE	HK BGP	SELL		55	19.9	CNY	month	2026-12-20	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+206	1	出 Sharon HK Lite 120r	季付 $15/季，2027-01-18到期。	SHARON HK Lite	SHARON	HK Lite	SELL		120	15	USD	quarter	2027-01-18	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+207	1	出 YxVM HK Hyper 150r	月付 $10/月，2026-12-26到期。	YXVM HK Hyper	YXVM	HK Hyper	SELL		150	10	USD	month	2026-12-26	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+208	1	出 绿云 HK 2222 半年付 180r	半年付 $25/半年，2027-04-01到期，带原邮。	GREENCLOUD HK 2222	GREENCLOUD	HK 2222	SELL		180	25	USD	semi_annual	2027-04-01	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+209	1	[收] DMIT LAX.Pro.WEE 溢价+80收		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	BUY	80						synthetic;buy_request;dotted_sku;explicit_spread
+210	1	[求购] 搬瓦工 MEGABOX-PRO 预算380r		BWG MEGABOX PRO	BWG	MEGABOX PRO	BUY		380					synthetic;buy_request;cn_slang;hyphen_sku;ask_only
+211	1	收 绿云 东京 软银 2222 400r		GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	BUY		400					synthetic;buy_request;cn_slang;no_bracket;ask_only
+212	1	诚收 斯巴达 西雅图 16刀/年 溢价+100		SPARTAN 西雅图	SPARTAN	西雅图	BUY	100		16	USD	year		synthetic;buy_request;cn_slang;no_bracket;explicit_spread
+213	1	高价收 DMIT LAX.Pro.Malibu 溢价+150		DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	BUY	150						synthetic;buy_request;dotted_sku;no_bracket;explicit_spread
+214	1	收个 Claw HK 4刀/月 80r		CLAW HK	CLAW	HK	BUY		80	4	USD	month		synthetic;buy_request;no_bracket;concise;ask_only
+215	1	收一台 Netcup RS1000 G9.5 溢价+100		NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	BUY	100						synthetic;buy_request;dotted_sku;no_bracket;explicit_spread
+216	1	蹲一个 瓦工 BIGGERBOX-PRO 原价收		BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	BUY	0						synthetic;buy_request;cn_slang;hyphen_sku;no_bracket;explicit_spread
+217	1	[收] 甲骨文 首尔 升级号 350r		ORACLE 首尔	ORACLE	首尔	BUY		350					synthetic;buy_request;cn_slang;account;ask_only
+218	1	求购 OVH KS-LE-B 溢价+120收		OVH KS LE B	OVH	KS LE B	BUY	120						synthetic;buy_request;hyphen_sku;no_bracket;explicit_spread
+219	1	收 RN 2024黑五 DC02 40r		RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	BUY		40					synthetic;buy_request;cn_slang;no_bracket;concise;ask_only
+220	1	【收】V.PS 东京 软银 Mini Pro 剩余价值+60		V.PS Tokyo Softbank Mini Pro	V.PS	Tokyo Softbank Mini Pro	BUY	60						synthetic;buy_request;dotted_sku;explicit_spread
+221	1	收个 阿里云 香港 轻量 200M 150r		ALIYUN HK 轻量	ALIYUN	HK 轻量	BUY		150					synthetic;buy_request;cn_slang;no_bracket;ask_only
+222	1	收 YxVM HK Vol 溢价+50收		YXVM HK Vol	YXVM	HK Vol	BUY	50						synthetic;buy_request;no_bracket;explicit_spread
+223	1	[已收] DMIT LAX Pro Wee 谢谢各位		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	BUY							synthetic;buy_request;sold
+224	1	[已出] DMIT LAX.Pro.WEE 290r	续费 $36.9/yr，2027-03-01到期，原邮已交接。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		290	36.9	USD	year	2027-03-01	synthetic;sold;dotted_sku;ask_plus_residual;body_renewal_expiry
+225	1	【已出】搬瓦工 MEGABOX-PRO 溢价+90		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL	90						synthetic;sold;cn_slang;hyphen_sku;explicit_spread
+226	1	[已售] 绿云 东京 IIJ 2222 350r	三年付 $66/3年，2027-11-20到期。	GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL		350	66	USD	3year	2027-11-20	synthetic;sold;cn_slang;ask_plus_residual;body_renewal_expiry
+227	1	斯巴达 西雅图 16刀/年 240r 已出		SPARTAN 西雅图	SPARTAN	西雅图	SELL		240	16	USD	year		synthetic;sold;cn_slang;no_bracket;ask_only
+228	1	[已出] Claw HK 4刀/月 80r		CLAW HK	CLAW	HK	SELL		80	4	USD	month		synthetic;sold;concise;ask_only
+229	1	[SOLD] Netcup RS1000 G9.5 溢价+100		NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	SELL	100						synthetic;sold;dotted_sku;explicit_spread
+230	1	DMIT LAX.Pro.Malibu 520r 出了		DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	SELL		520					synthetic;sold;dotted_sku;no_bracket;ask_only
+231	1	已出 瓦工 MINIBOX 剩余价值+50		BWG MINIBOX	BWG	MINIBOX	SELL	50						synthetic;sold;cn_slang;no_bracket;explicit_spread
+232	1	【已出】RN 2024黑五 DC02 50元		RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL		50					synthetic;sold;cn_slang;ask_only
+233	1	[已出] YxVM HK Vol 平出		YXVM HK Vol	YXVM	HK Vol	SELL	0						synthetic;sold;explicit_spread
+234	1	已成交 阿里云 香港 轻量 200M 180r		ALIYUN HK 轻量	ALIYUN	HK 轻量	SELL		180					synthetic;sold;cn_slang;no_bracket;ask_only
+235	1	[已出] 咸鱼云 SJC Pro 折价-20出		SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL	-20						synthetic;sold;cn_slang;explicit_spread
+236	1	出 DMIT LAX Pro Wee 剩余价值+45.5		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	45.5						synthetic;no_bracket;explicit_spread;decimal_spread
+237	1	出 DMIT LAX Pro Wee +35出		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	35						synthetic;no_bracket;explicit_spread
+238	1	出 DMIT LAX Pro Wee -15出		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	-15						synthetic;no_bracket;explicit_spread
+239	1	出 搬瓦工 MEGABOX 亏40出		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL	-40						synthetic;cn_slang;no_bracket;explicit_spread
+240	1	出 Claw HK 4刀/月 血亏20出		CLAW HK	CLAW	HK	SELL	-20		4	USD	month		synthetic;no_bracket;explicit_spread
+241	1	出 RN 2C2G DC02 让利15出		RACKNERD DC02	RACKNERD	DC02	SELL	-15						synthetic;cn_slang;no_bracket;explicit_spread
+242	1	出 绿云 东京 IIJ 2222 剩余价值310 明盘360r		GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL		360					synthetic;cn_slang;no_bracket;ask_only;stated_residual
+243	1	出 DMIT LAX Pro Wee 12.1到期 $36.9/年 260r		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		260	36.9	USD	year	--12-01	synthetic;no_bracket;ask_plus_residual;partial_date
+244	1	出 斯巴达 西雅图 16刀/年 12月到期 220r		SPARTAN 西雅图	SPARTAN	西雅图	SELL		220	16	USD	year	--12	synthetic;cn_slang;no_bracket;ask_plus_residual;partial_date
+245	1	出 瓦工 MEGABOX 45.68刀/年 剩余200天 350r		BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL		350	45.68	USD	year	200d	synthetic;cn_slang;no_bracket;ask_plus_residual;relative_days
+246	1	出 DMIT LAX Pro Wee 剩260天 36.9刀/yr 明盘310		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		310	36.9	USD	year	260d	synthetic;no_bracket;ask_plus_residual;relative_days
+247	1	出 绿云 东京 软银 2222 还有500天 66.6刀/3年 400r		GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL		400	66.6	USD	3year	500d	synthetic;cn_slang;no_bracket;ask_plus_residual;relative_days
+248	1	出 DMIT LAX Pro Wee 40u 带原邮		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL							synthetic;no_bracket;foreign_ask_currency
+249	1	出 瓦工 BIGGERBOX-PRO $50 出		BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	SELL							synthetic;cn_slang;hyphen_sku;no_bracket;foreign_ask_currency
+250	1	出 RN 2024黑五 DC02 5折出		RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL							synthetic;cn_slang;no_bracket;discount_rate_trap
+251	1	出 DMIT LAX Pro Wee 溢价20%		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL							synthetic;no_bracket;percent_spread_trap
+252	1	出 DMIT LAX Pro Wee 剩余价值+50 总价300r		DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL	50	300					synthetic;no_bracket;explicit_spread;ask_plus_spread
+253	1	出 搬瓦工 DC6 CN2 GIA 80刀/年 剩余价值-30 明盘280		BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL	-30	280	80	USD	year		synthetic;cn_slang;no_bracket;explicit_spread;ask_plus_spread
+254	1	出 绿云 新加坡 2525 半年付 HK$180/半年 140r	2027-03-15到期，带原邮。	GREENCLOUD SG 2525	GREENCLOUD	SG 2525	SELL		140	180	HKD	semi_annual	2027-03-15	synthetic;cn_slang;no_bracket;ask_plus_residual;foreign_currency;body_renewal_expiry
+255	1	出 V.PS 伦敦 Starter £25/年 210r	英镑年付，2027-04-01到期，push出。	V.PS 伦敦 Starter	V.PS	伦敦 Starter	SELL		210	25	GBP	year	2027-04-01	synthetic;dotted_sku;no_bracket;ask_plus_residual;foreign_currency;body_renewal_expiry
+256	1	出 4字母 .com 域名 明盘 1800r					SELL		1800					synthetic;non_vps;domain;no_bracket;ask_only
+257	1	出 5位数字 .xyz 域名 25r					SELL		25					synthetic;non_vps;domain;no_bracket;ask_only
+258	1	出 Google Voice 老号 45r 带原邮					SELL		45					synthetic;non_vps;account;no_bracket;ask_only
+259	1	出 ChatGPT Plus 成品号 120r					SELL		120					synthetic;non_vps;account;no_bracket;ask_only
+260	1	出 GitHub 学生包 成品号 35r					SELL		35					synthetic;non_vps;account;no_bracket;ask_only
+261	1	出 Claude Pro 独享号 130元					SELL		130					synthetic;non_vps;account;no_bracket;ask_only
+262	1	出 闲置二手路由器 200r 包邮					SELL		200					synthetic;non_vps;no_bracket;ask_only
+263	1	出 100G 流量卡 30r					SELL		30					synthetic;non_vps;no_bracket;ask_only
+264	1	打包出 DMIT LAX Pro Wee + 搬瓦工 MEGABOX-PRO 共 650r	两台打包一起出，不单出，均带原邮。				SELL							synthetic;multi_bundle;no_bracket
+265	1	合出 绿云 东京 2222 + 斯巴达 西雅图 16刀 打包 580r	退坑一起清，打包580r。				SELL							synthetic;multi_bundle;cn_slang;no_bracket
+266	1	出两台 RN 2024黑五 DC02 打包 95r	两台同配置 10.99刀/年，2027-01-10到期，打包95r出。	RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL			10.99	USD	year	2027-01-10	synthetic;multi_bundle;cn_slang;no_bracket
+267	1	清库存 出三台小鸡 详情进来看	1. Claw HK 4刀 70r\n2. Akile JP Lite 35r\n3. RN DC02 40r\n均可单出。				SELL							synthetic;multi_bundle;no_bracket
+268	1	出个吃灰小鸡 带原油 100r					SELL		100					synthetic;vague_unidentifiable;no_bracket;ask_only
+269	1	出一台线路鸡 剩余价值+50 详情私聊					SELL	50						synthetic;vague_unidentifiable;no_bracket;explicit_spread
+270	1	出个闲置神鸡 明盘 150r	不玩了退坑出，型号：DMIT LAX.Pro.Tiny，续费 $39.9/年，2027-02-01到期，明盘 150r。	DMIT LAX Pro Tiny	DMIT	LAX Pro Tiny	SELL		150	39.9	USD	year	2027-02-01	synthetic;body_only_model;no_bracket;ask_plus_residual
+271	1	退坑出一台美西传家宝	产品：斯巴达 西雅图 4837\n配置：1C1G 20G\n续费：$16/年\n到期：2027-03-15\n明盘：230r 带原邮	SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		230	16	USD	year	2027-03-15	synthetic;body_only_model;body_only_price;no_bracket;ask_plus_residual
+272	1	出个自用落地鸡 30r	机型：Alice HK Free，永久免费，30r 带原邮出。	ALICE HK Free	ALICE	HK Free	SELL		30					synthetic;body_only_model;no_bracket;ask_only
+273	1	出个吃灰大盘鸡 明盘 280	商家：HostHatch\n型号：Tokyo Storage\n续费：$55/2年\n到期：2027-09-01	HOSTHATCH Tokyo	HOSTHATCH	Tokyo	SELL		280	55	USD	2year	2027-09-01	synthetic;body_only_model;no_bracket;ask_plus_residual
+274	1	出个自用 vps，详情看正文	搬瓦工 BIGGERBOX-PRO，年付 $36.36/yr，2027-01-25到期，明盘 310r，带原邮。	BWG BIGGERBOX PRO	BWG	BIGGERBOX PRO	SELL		310	36.36	USD	year	2027-01-25	synthetic;body_only_model;body_only_price;no_bracket;ask_plus_residual
+275	1	分享网站 test.cc 教程					UNKNOWN							synthetic;false_positive_trap;non_vps
+276	1	分享网站 demo.nc 教程					UNKNOWN							synthetic;false_positive_trap;non_vps
+277	1	berlin return 节点 溢价 20					UNKNOWN	20						synthetic;false_positive_trap;non_vps;explicit_spread
+278	1	出 DMIT LAX Pro Wee 原生IP 解锁Netflix ChatGPT 300r	续费 $36.9/年，2027-04-01到期，YABS正常，支持Alipay。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		300	36.9	USD	year	2027-04-01	synthetic;noisy_ascii;no_bracket;ask_plus_residual;body_renewal_expiry
+279	1	出 搬瓦工 DC6 CN2 GIA 1C1G AMD EPYC 解锁NF 350r	年付 $49.9/yr，2027-02-20到期，带Gmail原邮。	BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL		350	49.9	USD	year	2027-02-20	synthetic;noisy_ascii;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+280	1	出 Netcup RS1000 G11 AMD EPYC DDR5 免税号 push 120r	月付 €8.75/月，2026-12-26到期，支持push过户。	NETCUP RS1000 G11	NETCUP	RS1000 G11	SELL		120	8.75	EUR	month	2026-12-26	synthetic;noisy_ascii;no_bracket;ask_plus_residual;body_renewal_expiry
+281	1	出 绿云 东京 IIJ 2222 带Gmail原邮 支持Alipay 360r	三年付 $66/3yr，2027-11-18到期。	GREENCLOUD Tokyo IIJ 2222	GREENCLOUD	Tokyo IIJ 2222	SELL		360	66	USD	3year	2027-11-18	synthetic;noisy_ascii;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+282	1	出 斯巴达 西雅图 4837 E5 16刀/年 带Outlook原油 250r	2027-02-12到期，工单push费用买家自理。	SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		250	16	USD	year	2027-02-12	synthetic;noisy_ascii;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+283	1	出 RackNerd DC02 黑五 10.99刀/yr PayPal购入 可改Gmail 50r	2027-01-15到期，稳定吃灰。	RACKNERD 黑五 DC02	RACKNERD	黑五 DC02	SELL		50	10.99	USD	year	2027-01-15	synthetic;noisy_ascii;no_bracket;ask_plus_residual;body_renewal_expiry
+284	1	出 DMIT LAX.Pro.WEE Clean IP Native Unlock 280r	续费 $36.9/yr，2027-03-20到期，NodeQuality全绿。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		280	36.9	USD	year	2027-03-20	synthetic;noisy_ascii;dotted_sku;no_bracket;ask_plus_residual;body_renewal_expiry
+285	1	出 Spartan Host Seattle 4837 16刀/年 240r	2027-01-28到期，带原油出。	SPARTAN 西雅图 4837	SPARTAN	西雅图 4837	SELL		240	16	USD	year	2027-01-28	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+286	1	出 Bandwagon Host DC6 CN2 GIA 49.9刀/年 340r	2027-03-08到期，原邮可给。	BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL		340	49.9	USD	year	2027-03-08	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+287	1	出 SaltyFish Tech SJC Pro 溢价30		SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL	30						synthetic;multiword_vendor;no_bracket;explicit_spread
+288	1	出 Akile Cloud JP Lite 35r	年付 ¥59.9/年，2027-05-05到期，站内push。	AKILE JP Lite	AKILE	JP Lite	SELL		35	59.9	CNY	year	2027-05-05	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+289	1	出 RFC Host JP T1 CO 300r	季付 $29.9/季，2027-01-25到期。	RFC JP T1 CO	RFC	JP T1 CO	SELL		300	29.9	USD	quarter	2027-01-25	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+290	1	出 Sharon Network HK Standard 380r	年付 $60/年，2027-02-18到期。	SHARON HK Standard	SHARON	HK Standard	SELL		380	60	USD	year	2027-02-18	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+291	1	出 Halo Cloud HK BGP 95r	月付 $9.9/月，2026-12-22到期。	HALO HK BGP	HALO	HK BGP	SELL		95	9.9	USD	month	2026-12-22	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+292	1	出 ZGO Cloud LAX Pro 180r	年付 $29.9/年，2027-02-28到期。	ZGO LAX Pro	ZGO	LAX Pro	SELL		180	29.9	USD	year	2027-02-28	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+293	1	出 Kirino Cloud 东京 软银 200r	季付 $24/季，2027-01-16到期。	KIRINO Tokyo Softbank	KIRINO	Tokyo Softbank	SELL		200	24	USD	quarter	2027-01-16	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+294	1	出 Claw Cloud HK 4刀/月 晚高峰不炸 解锁Disney TikTok 85r	2026-12-24到期，原生IP，带原邮。	CLAW HK	CLAW	HK	SELL		85	4	USD	month	2026-12-24	synthetic;noisy_ascii;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+295	1	出 GreenCloud VPS 东京 软银 2222 380r	三年付 $66/3年，2027-12-01到期。	GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL		380	66	USD	3year	2027-12-01	synthetic;multiword_vendor;no_bracket;ask_plus_residual;body_renewal_expiry
+296	1	出大妈pro wee 290r 要的私信	LAX.Pro.WEE，$36.9/yr，2027-04-15到期，先款后鸡。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		290	36.9	USD	year	2027-04-15	synthetic;cn_slang;glued_cjk;no_bracket;body_enriches_model;ask_plus_residual
+297	1	收瓦工megabox pro 380r 有意pm		BWG MEGABOX PRO	BWG	MEGABOX PRO	BUY		380					synthetic;cn_slang;glued_cjk;buy_request;no_bracket;ask_only
+298	1	出绿云东京softbank2222 390r 不刀	三年付 $66/3年，2027-11-25到期。	GREENCLOUD Tokyo Softbank 2222	GREENCLOUD	Tokyo Softbank 2222	SELL		390	66	USD	3year	2027-11-25	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+299	1	出搬瓦工dc6cn2gia 46刀/年 320r	2027-02-05到期，带原始邮箱。	BWG DC6 CN2 GIA	BWG	DC6 CN2 GIA	SELL		320	46	USD	year	2027-02-05	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+300	1	出阿里云新加坡轻量 200M 210r 支持过户		ALIYUN SG 轻量	ALIYUN	SG 轻量	SELL		210					synthetic;cn_slang;glued_cjk;no_bracket;ask_only
+301	1	出腾讯云香港轻量 200M 175r	年付 320元/年，2027-05-01到期。	TENCENT HK 轻量	TENCENT	HK 轻量	SELL		175	320	CNY	year	2027-05-01	synthetic;cn_slang;glued_cjk;no_bracket;ask_plus_residual;body_renewal_expiry
+302	1	出 Netcup RS 2000 G11 8C16G 180r	月付 €14.99/月，2026-12-27到期，免税号push。	NETCUP RS2000 G11	NETCUP	RS2000 G11	SELL		180	14.99	EUR	month	2026-12-27	synthetic;no_bracket;ask_plus_residual;body_renewal_expiry
+303	1	出 Netcup RS 4000 G11 12C32G 溢价50		NETCUP RS4000 G11	NETCUP	RS4000 G11	SELL	50						synthetic;no_bracket;explicit_spread
+304	1	出 绿云 坡县 2525 三年付 310r	新加坡 2525，三年付 $75/3年，2027-11-30到期。	GREENCLOUD SG 2525	GREENCLOUD	SG 2525	SELL		310	75	USD	3year	2027-11-30	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+305	1	出 DMIT LAX Pro Wee 1C1G 20G 1000G 36.9刀年付 原邮 280	2027-03-10到期，测速稳定，先款或中介。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		280	36.9	USD	year	2027-03-10	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+306	1	出 搬瓦工 MEGABOX-PRO 吃灰回血	| 核算项 | 折算数值 | 口径说明 |\n| 机型 / 套餐 | BWG MEGABOX-PRO | 交易溢价核算 |\n| 周期续费 | $45.68/yr | 年付 |\n| 剩余周期 | 2026-11-28 至 2027-04-15 | 线性折算 |\n| 出让挂牌价 | ¥360 | 交易标价 |	BWG MEGABOX PRO	BWG	MEGABOX PRO	SELL		360	45.68	USD	year	2027-04-15	synthetic;concise;cn_slang;hyphen_sku;no_bracket;body_only_price;markdown_table;ask_plus_residual
+307	1	出个大妈鸡 详情见表格	| 套餐 / 机型 | DMIT LAX.Pro.Malibu | 续费 $49.9/yr |\n| 到期日期 | 2027-05-01 | 原邮交付 |\n| 出让挂牌价 | ¥540 | 不刀 |	DMIT LAX Pro Malibu	DMIT	LAX Pro Malibu	SELL		540	49.9	USD	year	2027-05-01	synthetic;concise;cn_slang;no_bracket;body_only_price;body_enriches_model;markdown_table;ask_plus_residual
+308	1	出 瓦工 THE PLAN v1 92刀/年 680r	2027-03-22到期，17机房可切换，带原邮。	BWG PLAN v1	BWG	PLAN v1	SELL		680	92	USD	year	2027-03-22	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+309	1	出 YxVM HK Eco 3刀/月 45r	2026-12-23到期，带原油。	YXVM HK Eco	YXVM	HK Eco	SELL		45	3	USD	month	2026-12-23	synthetic;concise;no_bracket;ask_plus_residual;body_renewal_expiry
+310	1	出 咸鱼云 SJC Pro 19.9刀/季 130r	2027-02-08到期，CN2 GIA，push过户。	SALTYFISH SJC Pro	SALTYFISH	SJC Pro	SELL		130	19.9	USD	quarter	2027-02-08	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+311	1	出 良心云 香港 轻量 200M 170r	年付 ¥320/年，2027-04-20到期。	TENCENT HK 轻量	TENCENT	HK 轻量	SELL		170	320	CNY	year	2027-04-20	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+312	1	出 套路云 香港 轻量 200M 160r	月付 24元/月，2026-12-25到期。	ALIYUN HK 轻量	ALIYUN	HK 轻量	SELL		160	24	CNY	month	2026-12-25	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+313	1	出 亚马逊 Lightsail 新加坡 5刀/月 35r	2026-12-20到期，带号出。	AWS Lightsail SG	AWS	Lightsail SG	SELL		35	5	USD	month	2026-12-20	synthetic;cn_slang;no_bracket;ask_plus_residual;body_renewal_expiry
+314	1	出 DMIT LAX Pro Wee 续费36.9刀/年 含8刀push费 明盘295r	2027-03-18到期，已含push费。	DMIT LAX Pro WEE	DMIT	LAX Pro WEE	SELL		295	36.9	USD	year	2027-03-18	synthetic;no_bracket;push_fee_trap;ask_plus_residual;body_renewal_expiry
+315	1	出 Netcup RS1000 G9.5 账号带10欧余额 明盘220r	月付 €5.75/月，2026-12-19到期，带原邮。	NETCUP RS1000 G9.5	NETCUP	RS1000 G9.5	SELL		220	5.75	EUR	month	2026-12-19	synthetic;dotted_sku;no_bracket;balance_trap;ask_plus_residual;body_renewal_expiry

@@ -54,6 +54,17 @@ enum class ValuationMode(val label: String) {
 }
 
 /**
+ * Transfer-deal pricing basis:
+ * - [BY_TOTAL_PRICE]: input total asking price (`askingPriceCny`), derive spread (`ask - residual`).
+ * - [BY_SPREAD]: input target spread (`targetSpreadCny`, negative for discount, 0 for par),
+ *   derive total asking price (`(residual + targetSpread).coerceAtLeast(0)`).
+ */
+enum class TransferPricingBasis(val label: String) {
+    BY_TOTAL_PRICE("按总价算溢价"),
+    BY_SPREAD("按溢价算总价"),
+}
+
+/**
  * Billing cycle presets supporting both fixed-day conventions and calendar-accurate natural periods.
  */
 enum class BillingCyclePreset(
@@ -161,6 +172,8 @@ data class VpsValuationInput(
     val middlemanFeeMode: MiddlemanFeeMode = MiddlemanFeeMode.PERCENT,
     val middlemanFeeValue: BigDecimal = BigDecimal.ZERO,
     val middlemanFeePayer: FeePayer = FeePayer.BUYER,
+    val pricingBasis: TransferPricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+    val targetSpreadCny: BigDecimal = BigDecimal.ZERO,
 )
 
 /**
@@ -189,6 +202,8 @@ data class TransferDealBreakdown(
     val spreadStatus: DealSpreadStatus,
     val buyerEffectiveDailyCostCny: BigDecimal?,
     val buyerEffectiveDailyCostHighPrecisionCny: BigDecimal?,
+    val pricingBasis: TransferPricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+    val targetSpreadCny: BigDecimal = buyerPremiumCny,
 )
 
 /**

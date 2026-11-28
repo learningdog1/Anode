@@ -658,4 +658,139 @@ class VpsValuationEngineTest {
             server.shutdown()
         }
     }
+
+    @Test
+    fun transferDeal_bySpreadComputesTotalAskAcrossPremiumParDiscountClampAndFees() {
+        val valuation = LocalDateTime.of(2026, 6, 1, 0, 0)
+        // Renewal = 365 CNY/yr, 200 days left => exact remainingValueCny = 200.00
+        fun calcBySpread(
+            targetSpread: String,
+            remainingDays: Long = 200L,
+            pushFeeCny: BigDecimal = BigDecimal.ZERO,
+            pushPayer: FeePayer = FeePayer.BUYER,
+            middlemanPercent: BigDecimal = BigDecimal.ZERO,
+            middlemanPayer: FeePayer = FeePayer.SPLIT,
+        ): VpsValuationResult {
+            val outcome = VpsValuationEngine.calculate(
+                VpsValuationInput(
+                    machineLabel = "DMIT LAX Pro Wee",
+                    mode = ValuationMode.TRANSFER_DEAL,
+                    renewalAmount = BigDecimal("365.00"),
+                    currency = ValuationCurrency.CNY,
+                    cyclePreset = BillingCyclePreset.ANNUAL,
+                    valuationDateTime = valuation,
+                    expiryDateTime = valuation.plusDays(remainingDays),
+                    pricingBasis = TransferPricingBasis.BY_SPREAD,
+                    targetSpreadCny = BigDecimal(targetSpread),
+                    pushFeeAmount = pushFeeCny,
+                    pushFeeCurrency = ValuationCurrency.CNY,
+                    pushFeePayer = pushPayer,
+                    middlemanEnabled = middlemanPercent > BigDecimal.ZERO,
+                    middlemanFeeMode = MiddlemanFeeMode.PERCENT,
+                    middlemanFeeValue = middlemanPercent,
+                    middlemanFeePayer = middlemanPayer,
+                ),
+            )
+            assertTrue("Expected Success for BY_SPREAD target=$targetSpread, got $outcome", outcome is VpsValuationOutcome.Success)
+            return (outcome as VpsValuationOutcome.Success).result
+        }
+
+        // 1. Positive premium (+80): residual 200 + 80 => askingPriceCny = 280.00
+        val premiumRes = calcBySpread("80")
+        val premiumDeal = premiumRes.transferBreakdown!!
+        assertEquals(TransferPricingBasis.BY_SPREAD, premiumDeal.pricingBasis)
+        assertEquals(BigDecimal("80.00"), premiumDeal.targetSpreadCny)
+        assertEquals(BigDecimal("200.00"), premiumRes.remainingValueCny)
+        assertEquals(BigDecimal("280.00"), premiumDeal.askingPriceCny)
+        assertEquals(BigDecimal("280.00"), premiumDeal.buyerTotalCostCny)
+        assertEquals(BigDecimal("80.00"), premiumDeal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.PREMIUM, premiumDeal.spreadStatus)
+
+        // 2. Par (0): residual 200 + 0 => askingPriceCny = 200.00
+        val parDeal = calcBySpread("0").transferBreakdown!!
+        assertEquals(BigDecimal("200.00"), parDeal.askingPriceCny)
+        assertEquals(BigDecimal("0.00"), parDeal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.PAR, parDeal.spreadStatus)
+
+        // 3. Negative discount (-30): residual 200 - 30 => askingPriceCny = 170.00
+        val discountDeal = calcBySpread("-30").transferBreakdown!!
+        assertEquals(BigDecimal("-30.00"), discountDeal.targetSpreadCny)
+        assertEquals(BigDecimal("170.00"), discountDeal.askingPriceCny)
+        assertEquals(BigDecimal("-30.00"), discountDeal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.DISCOUNT, discountDeal.spreadStatus)
+
+        // 4. Discount exceeding residual (-50 on 20 CNY residual) clamps askingPriceCny to 0.00
+        val clampedDeal = calcBySpread("-50", remainingDays = 20L).transferBreakdown!!
+        assertEquals(BigDecimal("0.00"), clampedDeal.askingPriceCny)
+        assertEquals(BigDecimal("-20.00"), clampedDeal.buyerPremiumCny)
+        assertEquals(DealSpreadStatus.DISCOUNT, clampedDeal.spreadStatus)
+
+        // 5. Fees (buyer push ¥10 + 2% middleman split on derived ¥280 ask => ¥5.60 total, ¥2.80 each)
+        val feeDeal = calcBySpread(
+            targetSpread = "80",
+            pushFeeCny = BigDecimal("10"),
+            pushPayer = FeePayer.BUYER,
+            middlemanPercent = BigDecimal("2"),
+            middlemanPayer = FeePayer.SPLIT,
+        ).transferBreakdown!!
+        assertEquals(BigDecimal("280.00"), feeDeal.askingPriceCny)
+        assertEquals(BigDecimal("5.60"), feeDeal.middlemanFeeTotalCny)
+        assertEquals(BigDecimal("292.80"), feeDeal.buyerTotalCostCny)
+        assertEquals(BigDecimal("277.20"), feeDeal.sellerNetProceedsCny)
+        assertEquals(BigDecimal("92.80"), feeDeal.buyerPremiumCny)
+        assertEquals(BigDecimal("77.20"), feeDeal.sellerPremiumCny)
+
+        // 6. Markdown shows both derived total ask and spread clearly in both styles
+        val summaryMd = VpsValuationEngine.formatMarkdown(premiumRes, ValuationMarkdownStyle.SUMMARY_CARD)
+        assertTrue(summaryMd.contains("出让总价 ¥280.00（按溢价折算）"))
+        assertTrue(summaryMd.contains("溢价 +¥80.00"))
+        val tableMd = VpsValuationEngine.formatMarkdown(premiumRes, ValuationMarkdownStyle.THREE_COLUMN_TABLE)
+        assertTrue(tableMd.contains("| 出让总价 | ¥280.00 |"))
+        assertTrue(tableMd.contains("| **差价评估** | **+¥80.00"))
+
+        // 7. BY_TOTAL_PRICE targetSpreadCny reports pure ask spread (askingPrice - remainingValue),
+        // excluding buyer fees so round-tripping BY_TOTAL_PRICE -> BY_SPREAD is invariant.
+        val byTotalWithBuyerPush = VpsValuationEngine.calculate(
+            VpsValuationInput(
+                mode = ValuationMode.TRANSFER_DEAL,
+                renewalAmount = BigDecimal("365.00"),
+                currency = ValuationCurrency.CNY,
+                cyclePreset = BillingCyclePreset.ANNUAL,
+                valuationDateTime = valuation,
+                expiryDateTime = valuation.plusDays(100), // residual = 100.00
+                pricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+                askingPriceCny = BigDecimal("150.00"),
+                pushFeeAmount = BigDecimal("20.00"),
+                pushFeeCurrency = ValuationCurrency.CNY,
+                pushFeePayer = FeePayer.BUYER,
+            ),
+        ) as VpsValuationOutcome.Success
+        val totalDeal = byTotalWithBuyerPush.result.transferBreakdown!!
+        assertEquals(BigDecimal("100.00"), byTotalWithBuyerPush.result.remainingValueCny)
+        assertEquals(BigDecimal("150.00"), totalDeal.askingPriceCny)
+        assertEquals(BigDecimal("50.00"), totalDeal.targetSpreadCny)
+        assertEquals(BigDecimal("170.00"), totalDeal.buyerTotalCostCny)
+        assertEquals(BigDecimal("70.00"), totalDeal.buyerPremiumCny)
+
+        val roundTripped = VpsValuationEngine.calculate(
+            VpsValuationInput(
+                mode = ValuationMode.TRANSFER_DEAL,
+                renewalAmount = BigDecimal("365.00"),
+                currency = ValuationCurrency.CNY,
+                cyclePreset = BillingCyclePreset.ANNUAL,
+                valuationDateTime = valuation,
+                expiryDateTime = valuation.plusDays(100),
+                pricingBasis = TransferPricingBasis.BY_SPREAD,
+                targetSpreadCny = totalDeal.targetSpreadCny,
+                pushFeeAmount = BigDecimal("20.00"),
+                pushFeeCurrency = ValuationCurrency.CNY,
+                pushFeePayer = FeePayer.BUYER,
+            ),
+        ) as VpsValuationOutcome.Success
+        val rtDeal = roundTripped.result.transferBreakdown!!
+        assertEquals(totalDeal.askingPriceCny, rtDeal.askingPriceCny)
+        assertEquals(totalDeal.buyerTotalCostCny, rtDeal.buyerTotalCostCny)
+        assertEquals(totalDeal.buyerPremiumCny, rtDeal.buyerPremiumCny)
+        assertEquals(totalDeal.targetSpreadCny, rtDeal.targetSpreadCny)
+    }
 }

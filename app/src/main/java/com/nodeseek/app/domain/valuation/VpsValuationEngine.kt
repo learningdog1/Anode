@@ -122,7 +122,9 @@ object VpsValuationEngine {
         }
 
         if (input.mode == ValuationMode.TRANSFER_DEAL) {
-            if (input.askingPriceCny < BigDecimal.ZERO) {
+            if (input.pricingBasis == TransferPricingBasis.BY_TOTAL_PRICE &&
+                input.askingPriceCny < BigDecimal.ZERO
+            ) {
                 errors += "出让价格不能为负数"
             }
             if (input.pushFeeAmount < BigDecimal.ZERO) {
@@ -364,7 +366,11 @@ object VpsValuationEngine {
 
         result.transferBreakdown?.let { deal ->
             append("\n- **交易核算**：")
-            append("出让 ¥").append(deal.askingPriceCny.toPlainString())
+            if (deal.pricingBasis == TransferPricingBasis.BY_SPREAD) {
+                append("出让总价 ¥").append(deal.askingPriceCny.toPlainString()).append("（按溢价折算）")
+            } else {
+                append("出让 ¥").append(deal.askingPriceCny.toPlainString())
+            }
             val feeDetails = buildFeeDetailParts(deal)
             if (feeDetails.isNotEmpty()) {
                 append("（含 ").append(feeDetails.joinToString("、")).append("）")
@@ -445,9 +451,15 @@ object VpsValuationEngine {
             .append(" |\n")
 
         result.transferBreakdown?.let { deal ->
-            append("| 出让挂牌价 | ¥")
-                .append(deal.askingPriceCny.toPlainString())
-                .append(" | 交易标价 |\n")
+            if (deal.pricingBasis == TransferPricingBasis.BY_SPREAD) {
+                append("| 出让总价 | ¥")
+                    .append(deal.askingPriceCny.toPlainString())
+                    .append(" | 按目标差价折算（净残值 + 目标差价） |\n")
+            } else {
+                append("| 出让挂牌价 | ¥")
+                    .append(deal.askingPriceCny.toPlainString())
+                    .append(" | 交易标价 |\n")
+            }
 
             if (deal.pushFeeTotalCny > BigDecimal.ZERO) {
                 val pushNote = buildString {
@@ -527,7 +539,13 @@ object VpsValuationEngine {
         remainingValueCny: BigDecimal,
         remainingDays: BigDecimal,
     ): TransferDealBreakdown {
-        val askingPriceCny = input.askingPriceCny.setScale(2, RoundingMode.HALF_UP).normalizeZero(2)
+        val normalizedTargetSpread = input.targetSpreadCny.setScale(2, RoundingMode.HALF_UP).normalizeZero(2)
+        val rawAskingPriceCny = when (input.pricingBasis) {
+            TransferPricingBasis.BY_TOTAL_PRICE -> input.askingPriceCny
+            TransferPricingBasis.BY_SPREAD -> remainingValueCny.add(normalizedTargetSpread)
+                .coerceAtLeast(BigDecimal.ZERO)
+        }
+        val askingPriceCny = rawAskingPriceCny.setScale(2, RoundingMode.HALF_UP).normalizeZero(2)
         val pushOrig = input.pushFeeAmount.setScale(2, RoundingMode.HALF_UP).normalizeZero(2)
         val pushEffectiveRate = if (input.pushFeeCurrency == ValuationCurrency.CNY) {
             BigDecimal.ONE
@@ -626,6 +644,14 @@ object VpsValuationEngine {
             spreadStatus = spreadStatus,
             buyerEffectiveDailyCostCny = buyerEffectiveDailyCostCny,
             buyerEffectiveDailyCostHighPrecisionCny = buyerEffectiveDailyHighPrecision,
+            pricingBasis = input.pricingBasis,
+            targetSpreadCny = when (input.pricingBasis) {
+                TransferPricingBasis.BY_TOTAL_PRICE -> askingPriceCny
+                    .subtract(remainingValueCny)
+                    .setScale(2, RoundingMode.HALF_UP)
+                    .normalizeZero(2)
+                TransferPricingBasis.BY_SPREAD -> normalizedTargetSpread
+            },
         )
     }
 

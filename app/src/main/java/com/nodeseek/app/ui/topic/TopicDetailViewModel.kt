@@ -26,10 +26,14 @@ import com.nodeseek.app.domain.trade.TradePrivacyOptions
 import com.nodeseek.app.domain.trade.TradePrivacySanitizer
 import com.nodeseek.app.domain.trade.TradeTitleFormatter
 import com.nodeseek.app.domain.trust.TrustRiskEvaluator
+import com.nodeseek.app.domain.valuation.InferredListingPricing
 import com.nodeseek.app.domain.valuation.MarketSearchStatus
+import com.nodeseek.app.domain.valuation.TradeListingPriceParser
 import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.domain.valuation.ValuationCurrency
+import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.ui.components.NoOpNsAppWidgetController
 import com.nodeseek.app.ui.components.NsAppWidgetController
 import com.nodeseek.app.ui.components.PollCardUiState
@@ -3301,6 +3305,41 @@ class TopicDetailViewModel(
         return if (tokens.isNotEmpty()) tokens.joinToString(" ") else query.trim().lowercase(Locale.ROOT)
     }
 
+    private suspend fun computeCurrentTopicPricing(
+        title: String,
+        openingMarkdown: String?,
+    ): InferredListingPricing? {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty() && openingMarkdown.isNullOrBlank()) return null
+        val fxRepo = runCatching { container.exchangeRateRepository }.getOrNull()
+        val fxState = if (fxRepo != null) {
+            runCatching { fxRepo.loadPersistedState() }.getOrElse { fxRepo.state.value }
+        } else {
+            null
+        }
+        val fxToCny: (String) -> java.math.BigDecimal? = { rawCode ->
+            val currency = ValuationCurrency.fromCode(rawCode)
+            when {
+                currency == null -> TradeListingPriceParser.defaultFxToCny(rawCode)
+                currency == ValuationCurrency.CNY -> java.math.BigDecimal.ONE
+                fxState != null -> fxState.rateFor(currency)
+                else -> currency.defaultCnyRate
+            }
+        }
+        return TradeListingPriceParser.inferSpread(
+            title = cleanTitle,
+            bodySnippet = openingMarkdown,
+            fxToCny = fxToCny,
+            now = VpsValuationEngine.todayInShanghai(),
+        )
+    }
+
+    private fun currentTopicTitleAndBody(): Pair<String, String?> {
+        val snapshot = deriveTopicSnapshot()
+        val pageTitle = snapshot.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        return pageTitle.trim() to snapshot.openingFloor?.markdownBody
+    }
+
     private fun maybeAnalyzeLocalMarketReference(
         page: TopicDetailPage,
         allowAutoRemote: Boolean = !page.isOfflineSnapshot,
@@ -3308,10 +3347,23 @@ class TopicDetailViewModel(
         val repo = tradeMarketReferenceRepository ?: return
         val resolvedOpening = page.openingFloor ?: internalState.value.cachedOpeningFloor
         if (!isTradeTopicForMarketReference(page, resolvedOpening)) return
-        if (hasUserCustomMarketQuery) return
 
         val cleanTitle = page.title.trim().ifBlank { titleHint.trim() }
         val openingBody = resolvedOpening?.markdownBody
+        if (!openingBody.isNullOrBlank()) {
+            repo.cacheTopicBody(topicId, openingBody)
+        }
+        if (hasUserCustomMarketQuery) {
+            viewModelScope.launch {
+                val pricing = computeCurrentTopicPricing(cleanTitle, openingBody)
+                internalState.update { cur ->
+                    val ref = cur.marketReference ?: return@update cur
+                    if (ref.currentTopicPricing == pricing) cur else cur.copy(marketReference = ref.copy(currentTopicPricing = pricing))
+                }
+            }
+            return
+        }
+
         val suggested = extractMarketQueryWithContext(
             title = cleanTitle,
             openingMarkdown = openingBody,
@@ -3324,10 +3376,14 @@ class TopicDetailViewModel(
         val currentRef = internalState.value.marketReference
         if (suggested.isBlank()) {
             lastAnalyzedMarketSignature = signature
-            if (currentRef == null) {
+            viewModelScope.launch {
+                val pricing = computeCurrentTopicPricing(cleanTitle, openingBody)
                 internalState.update { cur ->
-                    if (cur.marketReference == null) {
-                        cur.copy(marketReference = TradeMarketReferenceState(query = ""))
+                    val existing = cur.marketReference
+                    if (existing == null) {
+                        cur.copy(marketReference = TradeMarketReferenceState(query = "", currentTopicPricing = pricing))
+                    } else if (existing.query.isBlank() && existing.currentTopicPricing != pricing) {
+                        cur.copy(marketReference = existing.copy(currentTopicPricing = pricing))
                     } else {
                         cur
                     }
@@ -3341,11 +3397,25 @@ class TopicDetailViewModel(
         if (currentRef != null && currentKey == suggestedKey) {
             if (currentRef.searchStatus == MarketSearchStatus.LOADING) {
                 lastAnalyzedMarketSignature = signature
+                viewModelScope.launch {
+                    val pricing = computeCurrentTopicPricing(cleanTitle, openingBody)
+                    internalState.update { cur ->
+                        val ref = cur.marketReference ?: return@update cur
+                        if (ref.currentTopicPricing == pricing) cur else cur.copy(marketReference = ref.copy(currentTopicPricing = pricing))
+                    }
+                }
                 return
             }
             val prevTitle = lastAnalyzedMarketSignature?.substringBefore('|')
             if (currentRef.hasRemoteResults && cleanTitle == prevTitle) {
                 lastAnalyzedMarketSignature = signature
+                viewModelScope.launch {
+                    val pricing = computeCurrentTopicPricing(cleanTitle, openingBody)
+                    internalState.update { cur ->
+                        val ref = cur.marketReference ?: return@update cur
+                        if (ref.currentTopicPricing == pricing) cur else cur.copy(marketReference = ref.copy(currentTopicPricing = pricing))
+                    }
+                }
                 return
             }
         }
@@ -3355,6 +3425,8 @@ class TopicDetailViewModel(
             repo = repo,
             query = suggested,
             allowAutoRemote = allowAutoRemote,
+            sourceTitle = cleanTitle,
+            sourceOpeningBody = openingBody,
         )
     }
 
@@ -3364,16 +3436,17 @@ class TopicDetailViewModel(
         if (trimmedCustom != null) {
             hasUserCustomMarketQuery = true
         }
-        val snapshot = deriveTopicSnapshot()
-        val pageTitle = snapshot.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        val (pageTitle, openingBody) = currentTopicTitleAndBody()
         val query = trimmedCustom
             ?: internalState.value.marketReference?.query?.takeIf { it.isNotBlank() }
-            ?: extractMarketQueryWithContext(pageTitle, snapshot.openingFloor?.markdownBody)
+            ?: extractMarketQueryWithContext(pageTitle, openingBody)
         if (query.isBlank()) return
         refreshLocalMarketReferenceInternal(
             repo = repo,
             query = query,
             allowAutoRemote = false,
+            sourceTitle = pageTitle,
+            sourceOpeningBody = openingBody,
         )
     }
 
@@ -3381,12 +3454,18 @@ class TopicDetailViewModel(
         repo: TradeMarketReferenceRepository,
         query: String,
         allowAutoRemote: Boolean,
+        sourceTitle: String,
+        sourceOpeningBody: String?,
     ) {
         val seq = ++marketRefRequestSeq
         marketRefJob?.cancel()
         marketRefJob = viewModelScope.launch {
+            val currentPricing = computeCurrentTopicPricing(sourceTitle, sourceOpeningBody)
             val localState = try {
-                repo.analyzeLocal(query)
+                repo.analyzeLocal(
+                    query = query,
+                    excludeTopicId = topicId,
+                )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
@@ -3395,7 +3474,7 @@ class TopicDetailViewModel(
                     searchStatus = MarketSearchStatus.FAILED,
                     statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "本地参考分析失败",
                 )
-            }
+            }.copy(currentTopicPricing = currentPricing)
             if (seq != marketRefRequestSeq) return@launch
             internalState.update { it.copy(marketReference = localState) }
 
@@ -3418,11 +3497,15 @@ class TopicDetailViewModel(
                             query = query,
                             searchStatus = MarketSearchStatus.LOADING,
                             statusMessage = null,
+                            currentTopicPricing = currentPricing,
                         ),
                     )
                 }
                 val merged = try {
-                    repo.searchRemoteAndMerge(query)
+                    repo.searchRemoteAndMerge(
+                        query = query,
+                        excludeTopicId = topicId,
+                    )
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (t: Throwable) {
@@ -3431,7 +3514,7 @@ class TopicDetailViewModel(
                         searchStatus = MarketSearchStatus.FAILED,
                         statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
                     )
-                }
+                }.copy(currentTopicPricing = currentPricing)
                 if (seq != marketRefRequestSeq) return@launch
                 internalState.update { it.copy(marketReference = merged) }
             }
@@ -3445,17 +3528,17 @@ class TopicDetailViewModel(
             hasUserCustomMarketQuery = true
         }
         val currentQuery = internalState.value.marketReference?.query.orEmpty()
-        val snapshot = deriveTopicSnapshot()
-        val pageTitle = snapshot.pageData?.title?.ifBlank { titleHint } ?: titleHint
+        val (pageTitle, openingBody) = currentTopicTitleAndBody()
         val query = trimmedCustom
             ?: currentQuery.takeIf { it.isNotBlank() }
-            ?: extractMarketQueryWithContext(pageTitle, snapshot.openingFloor?.markdownBody)
+            ?: extractMarketQueryWithContext(pageTitle, openingBody)
         if (query.isBlank()) return
 
         val seq = ++marketRefRequestSeq
         autoRemoteTriggeredMarketQueries.add(normalizedMarketQueryKey(query))
         marketRefJob?.cancel()
         marketRefJob = viewModelScope.launch {
+            val currentPricing = computeCurrentTopicPricing(pageTitle, openingBody)
             internalState.update { cur ->
                 val base = cur.marketReference ?: TradeMarketReferenceState(query = query)
                 val sameQuery = base.query.equals(query, ignoreCase = true)
@@ -3465,22 +3548,30 @@ class TopicDetailViewModel(
                         distribution = if (sameQuery) base.distribution else null,
                         searchStatus = MarketSearchStatus.LOADING,
                         statusMessage = null,
+                        currentTopicPricing = currentPricing,
                     ),
                 )
             }
             val merged = try {
-                repo.searchRemoteAndMerge(query)
+                repo.searchRemoteAndMerge(
+                    query = query,
+                    excludeTopicId = topicId,
+                )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                val fallback = runCatching { repo.analyzeLocal(query) }
-                    .getOrDefault(internalState.value.marketReference ?: TradeMarketReferenceState(query = query))
+                val fallback = runCatching {
+                    repo.analyzeLocal(
+                        query = query,
+                        excludeTopicId = topicId,
+                    )
+                }.getOrDefault(internalState.value.marketReference ?: TradeMarketReferenceState(query = query))
                 fallback.copy(
                     query = query,
                     searchStatus = MarketSearchStatus.FAILED,
                     statusMessage = t.message?.takeIf { it.isNotBlank() } ?: "搜索交易版失败，已保留本地参考",
                 )
-            }
+            }.copy(currentTopicPricing = currentPricing)
             if (seq != marketRefRequestSeq) return@launch
             internalState.update { it.copy(marketReference = merged) }
         }
@@ -3600,11 +3691,11 @@ class TopicDetailViewModel(
             RegexOption.IGNORE_CASE,
         )
         private val MARKET_REF_TRADE_TITLE_SIGNAL_REGEX = Regex(
-            """(?:溢价|折价|平出|原价出|原价转|剩余价值|剩价|残值|明盘|自刀|小刀|秒出|包\s*push|改邮|原邮|原油|带原油|带邮|出鸡|收鸡|出小鸡|收小鸡|出传家宝|\[(?:出|收|转|已出|已售|求购)]|【(?:出|收|转|已出|已售|求购)】)""",
+            """(?:溢价|折价|平出|原价出|原价转|剩余价值|剩价|残值|明盘|一口价|自刀|小刀|秒出|急出|慢出|急收|慢收|诚收|诚心收|求购|包\s*push|不包\s*push|改邮|原邮|原油|带原油|带原邮|给原油|给原邮|带邮|出鸡|收鸡|出小鸡|收小鸡|出传家宝|\[(?:出|收|转|售|已出|已售|求购)]|【(?:出|收|转|售|已出|已售|求购)】|^(?:继续|再|长期|诚心?|急|慢|高价|原价|溢价|折价)?[出收](?!\s*(?:bug|error|问题|故障|事|错|状况|email|mail|sms|验证码|邮件|信件))(?:[\s:：/\-]|[A-Za-z0-9]|一台|一个|一只|个|台|只|瓦工|搬瓦工|大妈|绿云|斯巴达|爪云|甲骨文|龟壳|咸鱼|爱丽丝|御坂|火山|库伦|阿里|腾讯|美西|香港|日本|东京|新加坡|软银))""",
             RegexOption.IGNORE_CASE,
         )
         private val MARKET_REF_TRADE_BODY_SIGNAL_REGEX = Regex(
-            """(?:剩余价值|净残值|溢价|折价|平出|原价出|明盘|包\s*push|不包\s*push|改邮|带原油|原邮出|原油出|出让挂牌价|过户定价|(?:到期[\s\S]{0,60}续费|续费[\s\S]{0,60}到期)[\s\S]{0,80}(?:明盘|剩余价值|溢价|折价|平出|包\s*push|push|改邮|原邮|出鸡|转让|自刀))""",
+            """(?:剩余价值|净残值|溢价|折价|平出|原价出|明盘|一口价|包\s*push|不包\s*push|工单\s*push|改邮|带原油|带原邮|给原油|给原邮|原邮出|原油出|带邮出|出让挂牌价|过户定价|走中介|中介费|先款|急出|慢出|急收|慢收|诚收|求购|出鸡|收鸡|(?:到期[\s\S]{0,60}续费|续费[\s\S]{0,60}到期)[\s\S]{0,80}(?:明盘|一口价|剩余价值|溢价|折价|平出|包\s*push|push|改邮|原邮|原油|出鸡|转让|出让|自刀|\d+\s*[rR元块]))""",
             RegexOption.IGNORE_CASE,
         )
 

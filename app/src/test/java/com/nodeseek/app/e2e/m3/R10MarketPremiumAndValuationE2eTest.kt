@@ -43,6 +43,7 @@ import org.junit.Test
 import java.io.File
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -274,16 +275,18 @@ class R10MarketPremiumAndValuationE2eTest {
             }
             assertEquals(1, searchHits.get())
             val mergedDist = mergedState.marketReference!!.distribution!!
-            // Local: 1001(+40), 1002(+60), 1003(0), plus topic 123 (+80) recorded into ReadHistory on open!
+            // Local: 1001(+40), 1002(+60), 1003(0); current topic 123 (+80) is excluded from its own samples!
             // Remote adds: 201(+120), 202(-10); 1001(+40) overlaps -> deduped to FEED_CACHE!
-            // Values: [-10, 0, 40, 60, 80, 120] -> sampleCount == 6 (4 local + 2 remote)
-            assertEquals(6, mergedDist.sampleCount)
-            assertEquals(4, mergedDist.localSampleCount)
+            // Values: [-10, 0, 40, 60, 120] -> sampleCount == 5 (3 local + 2 remote)
+            assertEquals(5, mergedDist.sampleCount)
+            assertEquals(3, mergedDist.localSampleCount)
             assertEquals(2, mergedDist.remoteSampleCount)
             val obs1001 = mergedDist.observations.first { it.topicId == 1001L }
             assertEquals(MarketDataSource.FEED_CACHE, obs1001.source)
-            val obs123 = mergedDist.observations.first { it.topicId == 123L }
-            assertEquals(MarketDataSource.READ_HISTORY, obs123.source)
+            assertTrue(
+                "Current topic 123L must be excluded from its own market reference samples",
+                mergedDist.observations.none { it.topicId == 123L },
+            )
 
             // Within 15 min TTL: calling searchRemoteAndMerge again uses cache with 0 network calls
             harness.clock.advanceByMillis(5 * 60_000L)
@@ -697,6 +700,169 @@ class R10MarketPremiumAndValuationE2eTest {
             assertFalse(state.statusMessage.orEmpty().contains("官网请求失败 (404)"))
             assertTrue(harness.forumDispatcher.recordedRequests().any { it.requestUrl?.encodedPath == "/categories/trade" })
             assertTrue(harness.forumDispatcher.recordedRequests().any { it.requestUrl?.encodedPath == "/categories/trade/page-2" })
+        }
+    }
+
+    @Test
+    fun `E2E-T2-R10-8 concise peer posts fetch OP bodies with Frankfurter FX produce derived spread and ask fallback while excluding self`() = runBlocking {
+        E2eTestHarness().use { harness ->
+            harness.seedAuthenticatedSession(uid = 101L, username = "alice101", rank = 4, sessionCookie = "ns_concise_secret")
+
+            harness.externalDispatcher.register("GET", "/fx/latest") {
+                MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "application/json")
+                    .setBody(E2eFixtures.loadText("nodeseek/fx_latest_cny.json"))
+            }
+
+            val searchHtml = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}]}""",
+                bodyHtml = """
+                    <div id="nsk-body">
+                      <div id="nsk-body-left">
+                        <ul class="post-list">
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-900-1">出 DMIT LAX Pro Wee 300</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/900">self900</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-901-1">[出] DMIT LAX Pro Wee 带原油</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/901">seller901</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-902-1">[出] DMIT LAX Pro Wee 280r</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/902">seller902</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-903-1">[出] DMIT LAX Pro Wee 吃灰出</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/903">seller903</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-904-1">大妈 wee 295</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/904">seller904</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-905-1">[出] DMIT LAX Pro Wee 溢价 +50</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/905">seller905</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                          <li class="post-list-item">
+                            <div class="post-list-content">
+                              <div class="post-title"><a href="/post-906-1">[出] DMIT LAX Pro Wee 310r $36.5/年 2027-05-24到期</a></div>
+                              <div class="post-info"><span class="info-author"><a href="/space/906">seller906</a></span><a class="post-category" href="/categories/trade">交易</a></div>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                """.trimIndent(),
+            )
+            harness.forumDispatcher.register("GET", "/search") {
+                MockResponse().setResponseCode(200).setBody(searchHtml)
+            }
+
+            val post901Html = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}],"postData":{"postId":901,"postPage":1,"postPageCount":1,"title":"[出] DMIT LAX Pro Wee 带原油","category":"trade","categoryWord":"交易","categoryLink":"/categories/trade","views":120,"collectionCount":1,"rank":0,"locked":0,"collected":0,"award":0,"op":{"uid":901,"name":"seller901","avatar":"/avatar/901.png"},"comments":[{"commentId":90100,"floorIndex":0,"poster":{"uid":901,"name":"seller901","avatar":"/avatar/901.png","isOp":1,"roles":[]},"time":{"createdDate":"2026-11-24T14:00:00Z","createdDateFormated":"2026-11-24 22:00:00"},"markdown":"明盘 300，续费 $36.5/年，2027-05-24到期","likeCount":0,"dislikeCount":0,"upvoteCount":0,"liked":0,"disliked":0,"upvoted":0,"pined":0,"hot":0,"blocked":0}]}}""",
+                bodyHtml = """<div id="nsk-body"><div id="nsk-body-left"><div class="nsk-post"><h1>[出] DMIT LAX Pro Wee 带原油</h1></div></div></div>""",
+                title = "[出] DMIT LAX Pro Wee 带原油",
+            )
+            val post902Html = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}],"postData":{"postId":902,"postPage":1,"postPageCount":1,"title":"[出] DMIT LAX Pro Wee 280r","category":"trade","categoryWord":"交易","categoryLink":"/categories/trade","views":95,"collectionCount":0,"rank":0,"locked":0,"collected":0,"award":0,"op":{"uid":902,"name":"seller902","avatar":"/avatar/902.png"},"comments":[{"commentId":90200,"floorIndex":0,"poster":{"uid":902,"name":"seller902","avatar":"/avatar/902.png","isOp":1,"roles":[]},"time":{"createdDate":"2026-11-24T13:30:00Z","createdDateFormated":"2026-11-24 21:30:00"},"markdown":"带原油，不刀，私信联系","likeCount":0,"dislikeCount":0,"upvoteCount":0,"liked":0,"disliked":0,"upvoted":0,"pined":0,"hot":0,"blocked":0}]}}""",
+                bodyHtml = """<div id="nsk-body"><div id="nsk-body-left"><div class="nsk-post"><h1>[出] DMIT LAX Pro Wee 280r</h1></div></div></div>""",
+                title = "[出] DMIT LAX Pro Wee 280r",
+            )
+            val post903Html = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}],"postData":{"postId":903,"postPage":1,"postPageCount":1,"title":"[出] DMIT LAX Pro Wee 吃灰出","category":"trade","categoryWord":"交易","categoryLink":"/categories/trade","views":80,"collectionCount":0,"rank":0,"locked":0,"collected":0,"award":0,"op":{"uid":903,"name":"seller903","avatar":"/avatar/903.png"},"comments":[{"commentId":90300,"floorIndex":0,"poster":{"uid":903,"name":"seller903","avatar":"/avatar/903.png","isOp":1,"roles":[]},"time":{"createdDate":"2026-11-24T13:00:00Z","createdDateFormated":"2026-11-24 21:00:00"},"markdown":"闲置吃灰，有兴趣私信聊","likeCount":0,"dislikeCount":0,"upvoteCount":0,"liked":0,"disliked":0,"upvoted":0,"pined":0,"hot":0,"blocked":0}]}}""",
+                bodyHtml = """<div id="nsk-body"><div id="nsk-body-left"><div class="nsk-post"><h1>[出] DMIT LAX Pro Wee 吃灰出</h1></div></div></div>""",
+                title = "[出] DMIT LAX Pro Wee 吃灰出",
+            )
+            val post904Html = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}],"postData":{"postId":904,"postPage":1,"postPageCount":1,"title":"大妈 wee 295","category":"trade","categoryWord":"交易","categoryLink":"/categories/trade","views":110,"collectionCount":0,"rank":0,"locked":0,"collected":0,"award":0,"op":{"uid":904,"name":"seller904","avatar":"/avatar/904.png"},"comments":[{"commentId":90400,"floorIndex":0,"poster":{"uid":904,"name":"seller904","avatar":"/avatar/904.png","isOp":1,"roles":[]},"time":{"createdDate":"2026-11-24T12:30:00Z","createdDateFormated":"2026-11-24 20:30:00"},"markdown":"美西 LAX Pro Wee，续费 $36.5/年，2027-05-24到期","likeCount":0,"dislikeCount":0,"upvoteCount":0,"liked":0,"disliked":0,"upvoted":0,"pined":0,"hot":0,"blocked":0}]}}""",
+                bodyHtml = """<div id="nsk-body"><div id="nsk-body-left"><div class="nsk-post"><h1>大妈 wee 295</h1></div></div></div>""",
+                title = "大妈 wee 295",
+            )
+            val post905Html = E2eFixtures.wrapTempScriptHtml(
+                configJson = """{"user":{"member_id":101,"member_name":"alice101","coin":1650,"stardust":42,"rank":4},"enableCustomedStyle":1,"allCategory":[{"key":"trade","cn_text":"交易","customizable":1,"showInIndex":1,"adminOnly":0}],"postData":{"postId":905,"postPage":1,"postPageCount":1,"title":"[出] DMIT LAX Pro Wee 溢价 +50","category":"trade","categoryWord":"交易","categoryLink":"/categories/trade","views":105,"collectionCount":0,"rank":0,"locked":0,"collected":0,"award":0,"op":{"uid":905,"name":"seller905","avatar":"/avatar/905.png"},"comments":[{"commentId":90500,"floorIndex":0,"poster":{"uid":905,"name":"seller905","avatar":"/avatar/905.png","isOp":1,"roles":[]},"time":{"createdDate":"2026-11-24T12:00:00Z","createdDateFormated":"2026-11-24 20:00:00"},"markdown":"续费 $36.5/年，2027-05-24到期，带原油","likeCount":0,"dislikeCount":0,"upvoteCount":0,"liked":0,"disliked":0,"upvoted":0,"pined":0,"hot":0,"blocked":0}]}}""",
+                bodyHtml = """<div id="nsk-body"><div id="nsk-body-left"><div class="nsk-post"><h1>[出] DMIT LAX Pro Wee 溢价 +50</h1></div></div></div>""",
+                title = "[出] DMIT LAX Pro Wee 溢价 +50",
+            )
+            harness.forumDispatcher.register("GET", "/post-901-1") {
+                MockResponse().setResponseCode(200).setBody(post901Html)
+            }
+            harness.forumDispatcher.register("GET", "/post-902-1") {
+                MockResponse().setResponseCode(200).setBody(post902Html)
+            }
+            harness.forumDispatcher.register("GET", "/post-903-1") {
+                MockResponse().setResponseCode(200).setBody(post903Html)
+            }
+            harness.forumDispatcher.register("GET", "/post-904-1") {
+                MockResponse().setResponseCode(200).setBody(post904Html)
+            }
+            harness.forumDispatcher.register("GET", "/post-905-1") {
+                MockResponse().setResponseCode(200).setBody(post905Html)
+            }
+
+            val repo = TradeMarketReferenceRepositoryImpl(
+                forumRepository = harness.forumRepository,
+                bookmarkAndHistoryRepository = harness.bookmarkAndHistoryRepository,
+                clockMillis = harness.clock::nowMillis,
+                exchangeRateRepository = harness.exchangeRateRepository,
+                nowDateProvider = { LocalDate.of(2026, 11, 25) },
+            )
+
+            val state = repo.searchRemoteAndMerge(
+                query = "DMIT LAX Pro Wee",
+                excludeTopicId = 900L,
+            )
+            assertEquals(MarketSearchStatus.SUCCESS, state.searchStatus)
+            val dist = state.distribution!!
+            assertEquals(6, dist.matchedTopicCount) // 901, 902, 903, 904 (loose->confirmed), 905 (explicit+derived ask), 906 (complete title); 900 excluded
+            assertEquals(5, dist.pricedTopicCount)  // 901, 904, 906 (derived spread), 902 (ask-only), 905 (explicit spread + derived ask)
+            assertEquals(4, dist.sampleCount)
+            assertEquals(3, dist.derivedSampleCount)
+            assertEquals(1, dist.derivedAskSampleCount)
+            assertEquals(5, dist.askSampleCount)    // 901 (300), 902 (280), 904 (295), 905 (residual+50 derived), 906 (310)
+            assertNotNull(dist.askMedianCny)
+            assertEquals(1, dist.matchedButUnparsedCount)
+            assertEquals(listOf(903L), dist.matchedUnparsedTopics.map { it.topicId })
+            assertTrue(dist.observations.none { it.topicId == 900L })
+
+            val derived901 = dist.observations.first { it.topicId == 901L }
+            assertTrue(derived901.isDerived)
+            assertFalse(derived901.isAskDerived)
+            assertEquals(BigDecimal("300.00"), derived901.askPriceCny)
+            assertTrue(derived901.matchedExpression.startsWith("推算: 挂牌¥300 − 残值¥"))
+
+            val derived904 = dist.observations.first { it.topicId == 904L }
+            assertTrue("Ultra-short loose peer 904 should confirm via body and produce derived spread", derived904.isDerived)
+            assertEquals(BigDecimal("295.00"), derived904.askPriceCny)
+
+            val explicit905 = dist.observations.first { it.topicId == 905L }
+            assertFalse(explicit905.isDerived)
+            assertTrue("Explicit-spread peer 905 should derive total ask from OP body", explicit905.isAskDerived)
+            assertNotNull(explicit905.residualCny)
+            assertEquals(explicit905.residualCny!!.add(BigDecimal("50.00")), explicit905.askPriceCny)
+
+            val paths = harness.forumDispatcher.recordedRequests().mapNotNull { it.requestUrl?.encodedPath }.toSet()
+            assertTrue("/post-901-1" in paths)
+            assertTrue("/post-902-1" in paths)
+            assertTrue("/post-903-1" in paths)
+            assertTrue("/post-904-1" in paths)
+            assertTrue("Explicit-spread topic 905 without total ask should fetch OP body", "/post-905-1" in paths)
+            assertFalse("Complete title topic 906 with ask+renewal+expiry must skip body fetch", "/post-906-1" in paths)
+            assertFalse("Excluded current topic 900 must not be fetched", "/post-900-1" in paths)
+            harness.assertNoCookiesLeakedToExternalServer()
         }
     }
 }

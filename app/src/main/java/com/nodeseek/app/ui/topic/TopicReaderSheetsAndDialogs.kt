@@ -132,8 +132,11 @@ import com.nodeseek.app.ui.netbench.insertNetBenchMarkdownAtCursor
 import com.nodeseek.app.ui.ssh.SshQuickInsertSheet
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
+import com.nodeseek.app.domain.valuation.ValuationMode
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
+import com.nodeseek.app.ui.valuation.buildValuationSheetPrefill
 import com.nodeseek.app.ui.valuation.insertMarkdownBlockAtCursor
+import com.nodeseek.app.ui.valuation.toValuationFxResolver
 import com.nodeseek.app.ui.theme.PulseAccentPill
 import com.nodeseek.app.ui.theme.PulseArchitecturalShapes
 import com.nodeseek.app.ui.theme.PulseBrushes
@@ -214,6 +217,9 @@ internal fun ReplyComposerBottomSheet(
     onOpenFullLiteSsh: (() -> Unit)? = null,
     onPublishSshToComposer: ((suggestedTitle: String, markdownContent: String) -> Unit)? = null,
     initialValuationMachineLabel: String = "",
+    initialValuationSourceTitle: String = "",
+    initialValuationSourceMarkdown: String? = null,
+    excludeTopicId: Long? = null,
 ) {
     val appContainer = LocalAppContainer.current
     val ext = NodePulseThemeTokens.extendedColors
@@ -649,6 +655,21 @@ internal fun ReplyComposerBottomSheet(
     }
 
     if (showValuationSheet) {
+        val fxSnapshot = appContainer.exchangeRateRepository.state.value
+        val valuationPrefill = remember(
+            initialValuationSourceTitle,
+            initialValuationSourceMarkdown,
+            initialValuationMachineLabel,
+            fxSnapshot,
+        ) {
+            buildValuationSheetPrefill(
+                title = initialValuationSourceTitle,
+                openingMarkdown = initialValuationSourceMarkdown,
+                fallbackMachineLabel = initialValuationMachineLabel,
+                defaultMode = ValuationMode.NET_VALUE_ONLY,
+                fxToCny = fxSnapshot.toValuationFxResolver(),
+            )
+        }
         VpsValuationBottomSheet(
             primaryActionLabel = "插入回复内容",
             onInsertMarkdown = { markdown ->
@@ -656,8 +677,17 @@ internal fun ReplyComposerBottomSheet(
                 applyTransform { insertMarkdownBlockAtCursor(it, markdown) }
             },
             onDismiss = { showValuationSheet = false },
-            initialMachineLabel = initialValuationMachineLabel,
+            initialMachineLabel = valuationPrefill.machineLabel,
+            initialMode = valuationPrefill.mode,
+            initialCurrency = valuationPrefill.currency,
+            initialRenewalAmountText = valuationPrefill.renewalAmountText,
+            initialAskingPriceText = valuationPrefill.askingPriceText,
+            initialPricingBasis = valuationPrefill.pricingBasis,
+            initialTargetSpreadText = valuationPrefill.targetSpreadText,
+            initialCyclePreset = valuationPrefill.cyclePreset,
+            initialExpiryDateText = valuationPrefill.expiryDateText,
             marketReferenceRepository = appContainer.tradeMarketReferenceRepository,
+            excludeTopicId = excludeTopicId,
         )
     }
 

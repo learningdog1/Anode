@@ -590,6 +590,7 @@ class DefaultAppContainer(
         TradeMarketReferenceRepositoryImpl(
             forumRepository = forumRepository,
             bookmarkAndHistoryRepository = bookmarkAndHistoryRepository,
+            exchangeRateRepository = exchangeRateRepository,
         )
     }
 

@@ -15,12 +15,19 @@ enum class TradeListingIntent {
     UNKNOWN,
 }
 
+enum class PricingConfidence {
+    HIGH,
+    MEDIUM,
+    LOW,
+}
+
 data class TradeCandidateTopic(
     val topicId: Long,
     val title: String,
     val source: MarketDataSource,
     val authorName: String = "",
     val activityHint: String = "",
+    val bodySnippet: String? = null,
 )
 
 data class ParsedTradeTitleSpread(
@@ -42,6 +49,26 @@ data class TradePremiumObservation(
     val matchedExpression: String,
     val authorName: String = "",
     val activityHint: String = "",
+    val askPriceCny: BigDecimal? = null,
+    val residualCny: BigDecimal? = null,
+    val isDerived: Boolean = false,
+    val confidence: PricingConfidence = PricingConfidence.HIGH,
+    val isAskDerived: Boolean = false,
+)
+
+data class TradeAskPriceObservation(
+    val topicId: Long,
+    val title: String,
+    val askPriceCny: BigDecimal,
+    val intent: TradeListingIntent,
+    val isClosedSold: Boolean,
+    val source: MarketDataSource,
+    val matchedExpression: String,
+    val authorName: String = "",
+    val activityHint: String = "",
+    val residualCny: BigDecimal? = null,
+    val inferredSpreadCny: BigDecimal? = null,
+    val isAskDerived: Boolean = false,
 )
 
 data class TradePremiumDistribution(
@@ -60,7 +87,37 @@ data class TradePremiumDistribution(
     val observations: List<TradePremiumObservation>,
     val localSampleCount: Int,
     val remoteSampleCount: Int,
-)
+    val derivedSampleCount: Int = 0,
+    val askSampleCount: Int = 0,
+    val askMinCny: BigDecimal? = null,
+    val askP25Cny: BigDecimal? = null,
+    val askMedianCny: BigDecimal? = null,
+    val askP75Cny: BigDecimal? = null,
+    val askMaxCny: BigDecimal? = null,
+    val askObservations: List<TradeAskPriceObservation> = emptyList(),
+    val matchedButUnparsedCount: Int = 0,
+    val matchedUnparsedTopics: List<TradeCandidateTopic> = emptyList(),
+    val derivedAskSampleCount: Int = 0,
+) {
+    /**
+     * Number of distinct matched listings that produced either a spread or an ask-price sample.
+     */
+    val pricedTopicCount: Int
+        get() = buildSet {
+            observations.forEach { add(it.topicId) }
+            askObservations.forEach { add(it.topicId) }
+        }.size
+
+    /**
+     * Ask-price observations that did NOT also produce a spread observation.
+     */
+    val askOnlyObservations: List<TradeAskPriceObservation>
+        get() {
+            if (observations.isEmpty()) return askObservations
+            val spreadIds = observations.mapTo(HashSet(observations.size)) { it.topicId }
+            return askObservations.filter { it.topicId !in spreadIds }
+        }
+}
 
 enum class MarketSearchStatus {
     IDLE,
@@ -82,4 +139,5 @@ data class TradeMarketReferenceState(
     val statusMessage: String? = null,
     val lastRemoteSearchedAtMillis: Long? = null,
     val hasRemoteResults: Boolean = false,
+    val currentTopicPricing: InferredListingPricing? = null,
 )

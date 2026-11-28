@@ -143,9 +143,12 @@ import com.nodeseek.app.ui.components.WebViewSessionSheet
 import com.nodeseek.app.ui.netbench.NetBenchQuickBottomSheet
 import com.nodeseek.app.ui.netbench.insertNetBenchMarkdownAtCursor
 import com.nodeseek.app.ui.ssh.SshQuickInsertSheet
+import com.nodeseek.app.domain.valuation.ValuationMode
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
+import com.nodeseek.app.ui.valuation.buildValuationSheetPrefill
 import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
 import com.nodeseek.app.ui.valuation.insertMarkdownBlockAtCursor
+import com.nodeseek.app.ui.valuation.toValuationFxResolver
 import com.nodeseek.app.ui.theme.NodePulseMotion
 import com.nodeseek.app.ui.theme.NodePulseThemeTokens
 import com.nodeseek.app.ui.theme.PulseAccentPill
@@ -525,6 +528,16 @@ fun TopicComposerScreen(
                 openingMarkdown = bodyFieldValue.text,
             )
         }
+        val fxSnapshot = appContainer.exchangeRateRepository.state.value
+        val valuationPrefill = remember(uiState.title, bodyFieldValue.text, suggestedLabel, fxSnapshot) {
+            buildValuationSheetPrefill(
+                title = uiState.title,
+                openingMarkdown = bodyFieldValue.text,
+                fallbackMachineLabel = suggestedLabel,
+                defaultMode = ValuationMode.NET_VALUE_ONLY,
+                fxToCny = fxSnapshot.toValuationFxResolver(),
+            )
+        }
         VpsValuationBottomSheet(
             primaryActionLabel = "插入发帖正文",
             onInsertMarkdown = { generatedMarkdown ->
@@ -534,7 +547,15 @@ fun TopicComposerScreen(
                 }
             },
             onDismiss = { showValuationSheet = false },
-            initialMachineLabel = suggestedLabel,
+            initialMachineLabel = valuationPrefill.machineLabel,
+            initialMode = valuationPrefill.mode,
+            initialCurrency = valuationPrefill.currency,
+            initialRenewalAmountText = valuationPrefill.renewalAmountText,
+            initialAskingPriceText = valuationPrefill.askingPriceText,
+            initialPricingBasis = valuationPrefill.pricingBasis,
+            initialTargetSpreadText = valuationPrefill.targetSpreadText,
+            initialCyclePreset = valuationPrefill.cyclePreset,
+            initialExpiryDateText = valuationPrefill.expiryDateText,
             onCopiedFeedback = { msg ->
                 coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
             },

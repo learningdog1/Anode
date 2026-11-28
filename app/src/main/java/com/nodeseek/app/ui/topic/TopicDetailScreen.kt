@@ -197,7 +197,9 @@ import com.nodeseek.app.ui.share.TopicLongImageShareSheet
 import com.nodeseek.app.ui.trade.TradeClosureSheet
 import com.nodeseek.app.ui.valuation.MarketPremiumReferenceCard
 import com.nodeseek.app.ui.valuation.VpsValuationBottomSheet
+import com.nodeseek.app.ui.valuation.buildValuationSheetPrefill
 import com.nodeseek.app.ui.valuation.extractMarketQueryWithContext
+import com.nodeseek.app.ui.valuation.toValuationFxResolver
 import com.nodeseek.app.ui.components.NoOpNsAppWidgetController
 import com.nodeseek.app.ui.components.NsAppWidgetController
 import com.nodeseek.app.domain.model.AuthorBadge
@@ -1056,16 +1058,17 @@ fun TopicDetailScreen(
     }
 
     if (uiState.replyComposer.isSheetOpen) {
+        val replySourceTitle = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint
+        val replySourceMarkdown = uiState.openingFloor?.markdownBody
         val replyValuationLabel = remember(
             uiState.marketReference?.query,
-            uiState.pageData?.title,
-            uiState.titleHint,
-            uiState.openingFloor?.markdownBody,
+            replySourceTitle,
+            replySourceMarkdown,
         ) {
             uiState.marketReference?.query?.takeIf { it.isNotBlank() }
                 ?: extractMarketQueryWithContext(
-                    title = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint,
-                    openingMarkdown = uiState.openingFloor?.markdownBody,
+                    title = replySourceTitle,
+                    openingMarkdown = replySourceMarkdown,
                 )
         }
         ReplyComposerBottomSheet(
@@ -1090,6 +1093,9 @@ fun TopicDetailScreen(
             onOpenFullLiteSsh = onOpenFullLiteSsh,
             onPublishSshToComposer = onPublishSshToComposer,
             initialValuationMachineLabel = replyValuationLabel,
+            initialValuationSourceTitle = replySourceTitle,
+            initialValuationSourceMarkdown = replySourceMarkdown,
+            excludeTopicId = topicId,
         )
     }
 
@@ -1320,17 +1326,33 @@ fun TopicDetailScreen(
     }
 
     if (showMarketValuationSheet) {
+        val valuationSourceTitle = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint
+        val valuationSourceMarkdown = uiState.openingFloor?.markdownBody
         val valuationMachineLabel = remember(
             uiState.marketReference?.query,
-            uiState.pageData?.title,
-            uiState.titleHint,
-            uiState.openingFloor?.markdownBody,
+            valuationSourceTitle,
+            valuationSourceMarkdown,
         ) {
             uiState.marketReference?.query?.takeIf { it.isNotBlank() }
                 ?: extractMarketQueryWithContext(
-                    title = uiState.pageData?.title?.ifBlank { uiState.titleHint } ?: uiState.titleHint,
-                    openingMarkdown = uiState.openingFloor?.markdownBody,
+                    title = valuationSourceTitle,
+                    openingMarkdown = valuationSourceMarkdown,
                 )
+        }
+        val fxSnapshot = appContainer.exchangeRateRepository.state.value
+        val valuationPrefill = remember(
+            valuationSourceTitle,
+            valuationSourceMarkdown,
+            valuationMachineLabel,
+            fxSnapshot,
+        ) {
+            buildValuationSheetPrefill(
+                title = valuationSourceTitle,
+                openingMarkdown = valuationSourceMarkdown,
+                fallbackMachineLabel = valuationMachineLabel,
+                defaultMode = ValuationMode.TRANSFER_DEAL,
+                fxToCny = fxSnapshot.toValuationFxResolver(),
+            )
         }
         VpsValuationBottomSheet(
             primaryActionLabel = "复制估值报价",
@@ -1341,12 +1363,20 @@ fun TopicDetailScreen(
                 coroutineScope.launch { snackbarHostState.showSnackbar("已复制估值报价") }
             },
             onDismiss = { showMarketValuationSheet = false },
-            initialMachineLabel = valuationMachineLabel,
-            initialMode = ValuationMode.TRANSFER_DEAL,
+            initialMachineLabel = valuationPrefill.machineLabel,
+            initialMode = valuationPrefill.mode,
+            initialCurrency = valuationPrefill.currency,
+            initialRenewalAmountText = valuationPrefill.renewalAmountText,
+            initialAskingPriceText = valuationPrefill.askingPriceText,
+            initialPricingBasis = valuationPrefill.pricingBasis,
+            initialTargetSpreadText = valuationPrefill.targetSpreadText,
+            initialCyclePreset = valuationPrefill.cyclePreset,
+            initialExpiryDateText = valuationPrefill.expiryDateText,
             onCopiedFeedback = { msg ->
                 coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
             },
             marketReferenceRepository = appContainer.tradeMarketReferenceRepository,
+            excludeTopicId = topicId,
         )
     }
 }

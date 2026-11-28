@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -109,15 +110,18 @@ import com.nodeseek.app.domain.valuation.MarketSearchStatus
 import com.nodeseek.app.domain.valuation.MiddlemanFeeMode
 import com.nodeseek.app.domain.valuation.NaturalCycleSpan
 import com.nodeseek.app.domain.valuation.NoOpTradeMarketReferenceRepository
+import com.nodeseek.app.domain.valuation.TradeListingPriceParser
 import com.nodeseek.app.domain.valuation.TradeMarketPremiumAnalyzer
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceRepository
 import com.nodeseek.app.domain.valuation.TradeMarketReferenceState
+import com.nodeseek.app.domain.valuation.TransferPricingBasis
 import com.nodeseek.app.domain.valuation.ValuationCurrency
 import com.nodeseek.app.domain.valuation.ValuationMarkdownStyle
 import com.nodeseek.app.domain.valuation.ValuationMode
 import com.nodeseek.app.domain.valuation.VpsValuationEngine
 import com.nodeseek.app.domain.valuation.VpsValuationInput
 import com.nodeseek.app.domain.valuation.VpsValuationOutcome
+import com.nodeseek.app.domain.valuation.VpsValuationResult
 import com.nodeseek.app.ui.components.MarkdownRenderer
 import com.nodeseek.app.ui.components.PulseAlertDialog
 import com.nodeseek.app.ui.components.PulseDialogPrimaryButton
@@ -208,6 +212,134 @@ internal fun insertMarkdownBlockAtCursor(
     )
 }
 
+internal data class ValuationSheetPrefill(
+    val machineLabel: String = "",
+    val mode: ValuationMode = ValuationMode.NET_VALUE_ONLY,
+    val pricingBasis: TransferPricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+    val currency: ValuationCurrency = ValuationCurrency.USD,
+    val renewalAmountText: String = "10.00",
+    val cyclePreset: BillingCyclePreset = BillingCyclePreset.ANNUAL,
+    val expiryDateText: String? = null,
+    val askingPriceText: String = "50.00",
+    val targetSpreadText: String = "0",
+)
+
+internal fun FxRatesState.toValuationFxResolver(): (String) -> BigDecimal? = { rawCode ->
+    val currency = ValuationCurrency.fromCode(rawCode)
+    when {
+        currency == null -> TradeListingPriceParser.defaultFxToCny(rawCode)
+        currency == ValuationCurrency.CNY -> BigDecimal.ONE
+        else -> rateFor(currency)
+    }
+}
+
+internal fun buildValuationSheetPrefill(
+    title: String,
+    openingMarkdown: String? = null,
+    fallbackMachineLabel: String = "",
+    defaultMode: ValuationMode = ValuationMode.TRANSFER_DEAL,
+    fxToCny: (String) -> BigDecimal? = TradeListingPriceParser::defaultFxToCny,
+    now: LocalDate = VpsValuationEngine.todayInShanghai(),
+): ValuationSheetPrefill {
+    val cleanTitle = title.trim()
+    val cleanBody = openingMarkdown?.trim()?.takeIf { it.isNotEmpty() }
+    val machineLabel = fallbackMachineLabel.trim().ifBlank {
+        extractMarketQueryWithContext(title = cleanTitle, openingMarkdown = cleanBody)
+    }.take(120)
+
+    if (cleanTitle.isEmpty() && cleanBody == null) {
+        return ValuationSheetPrefill(
+            machineLabel = machineLabel,
+            mode = defaultMode,
+        )
+    }
+
+    val details = TradeListingPriceParser.parse(
+        title = cleanTitle,
+        bodySnippet = cleanBody,
+        fxToCny = fxToCny,
+        now = now,
+    )
+
+    val renewal = details.renewal
+    val currency = renewal?.currency ?: ValuationCurrency.USD
+    val renewalAmountText = renewal?.amount?.let(::formatPrefillDecimal) ?: "10.00"
+    val cyclePreset = renewal?.cycle ?: BillingCyclePreset.ANNUAL
+    val expiryDateText = details.expiry?.expiryDate?.let(ISO_DATE_FORMATTER::format)
+
+    val explicitSpread = details.explicitSpread
+    val askPrice = details.askPrice
+
+    val pricingBasis = if (explicitSpread != null && askPrice == null) {
+        TransferPricingBasis.BY_SPREAD
+    } else {
+        TransferPricingBasis.BY_TOTAL_PRICE
+    }
+
+    val askingPriceText = askPrice?.amountCny?.let(::formatPrefillDecimal) ?: "50.00"
+    val targetSpreadText = explicitSpread?.deltaCny?.let(::formatPrefillDecimal) ?: "0"
+
+    val hasTransferSignal = askPrice != null || explicitSpread != null
+    val resolvedMode = if (hasTransferSignal) ValuationMode.TRANSFER_DEAL else defaultMode
+
+    return ValuationSheetPrefill(
+        machineLabel = machineLabel,
+        mode = resolvedMode,
+        pricingBasis = pricingBasis,
+        currency = currency,
+        renewalAmountText = renewalAmountText,
+        cyclePreset = cyclePreset,
+        expiryDateText = expiryDateText,
+        askingPriceText = askingPriceText,
+        targetSpreadText = targetSpreadText,
+    )
+}
+
+private fun formatPrefillDecimal(amount: BigDecimal): String {
+    val stripped = amount.stripTrailingZeros()
+    return if (stripped.scale() <= 0) {
+        stripped.setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
+    } else {
+        stripped.toPlainString()
+    }
+}
+
+internal fun seedTargetSpreadOnBasisSwitch(result: VpsValuationResult): String? {
+    val deal = result.transferBreakdown ?: return null
+    val pureAskSpread = deal.askingPriceCny
+        .subtract(result.remainingValueCny)
+        .setScale(2, java.math.RoundingMode.HALF_UP)
+    return formatPrefillDecimal(pureAskSpread)
+}
+
+internal fun formatTransferBasisReadout(result: VpsValuationResult): String? {
+    val deal = result.transferBreakdown ?: return null
+    val buyerFees = deal.buyerPushFeeCny.add(deal.buyerMiddlemanFeeCny)
+    val feeSuffix = if (buyerFees > BigDecimal.ZERO) {
+        " · 含买家费用溢价 ${VpsValuationEngine.formatSignedCny(deal.buyerPremiumCny)}"
+    } else {
+        ""
+    }
+    return if (deal.pricingBasis == TransferPricingBasis.BY_SPREAD) {
+        val clampedNote = if (result.remainingValueCny.add(deal.targetSpreadCny) < BigDecimal.ZERO) {
+            "（已按最低 ¥0.00 封底）"
+        } else {
+            ""
+        }
+        "推算总价：¥${deal.askingPriceCny.toPlainString()}（净残值 ¥${result.remainingValueCny.toPlainString()} ${VpsValuationEngine.formatSignedCny(deal.targetSpreadCny)}）$clampedNote$feeSuffix"
+    } else {
+        val pureAskSpread = deal.askingPriceCny
+            .subtract(result.remainingValueCny)
+            .setScale(2, java.math.RoundingMode.HALF_UP)
+        val spreadLabel = when {
+            pureAskSpread > BigDecimal.ZERO -> "溢价"
+            pureAskSpread < BigDecimal.ZERO -> "折价"
+            else -> "平出"
+        }
+        "对应$spreadLabel：${VpsValuationEngine.formatSignedCny(pureAskSpread)}（总价 ¥${deal.askingPriceCny.toPlainString()} − 净残值 ¥${result.remainingValueCny.toPlainString()}）$feeSuffix"
+    }
+}
+
 /**
  * Anode VPS Remaining Value & Second-Hand Transfer Valuation Bottom Sheet.
  *
@@ -237,6 +369,11 @@ fun VpsValuationBottomSheet(
     } else {
         LocalAppContainer.current.tradeMarketReferenceRepository
     },
+    excludeTopicId: Long? = null,
+    initialPricingBasis: TransferPricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+    initialTargetSpreadText: String = "0",
+    initialCyclePreset: BillingCyclePreset = BillingCyclePreset.ANNUAL,
+    initialExpiryDateText: String? = null,
 ) {
     val context = LocalContext.current
     val isInspection = LocalInspectionMode.current
@@ -291,7 +428,7 @@ fun VpsValuationBottomSheet(
     var marketRefState by remember { mutableStateOf(TradeMarketReferenceState(query = effectiveMarketQuery)) }
     var marketCooldownSec by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(effectiveMarketQuery, marketReferenceRepository, isInspection) {
+    LaunchedEffect(effectiveMarketQuery, marketReferenceRepository, excludeTopicId, isInspection) {
         if (isInspection) return@LaunchedEffect
         activeMarketSearchJob?.cancel()
         activeMarketSearchJob = null
@@ -302,7 +439,10 @@ fun VpsValuationBottomSheet(
         }
         delay(250L)
         val localResult = try {
-            marketReferenceRepository.analyzeLocal(querySnapshot)
+            marketReferenceRepository.analyzeLocal(
+                query = querySnapshot,
+                excludeTopicId = excludeTopicId,
+            )
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -335,7 +475,10 @@ fun VpsValuationBottomSheet(
                 statusMessage = null,
             )
             val remoteResult = try {
-                marketReferenceRepository.searchRemoteAndMerge(querySnapshot)
+                marketReferenceRepository.searchRemoteAndMerge(
+                    query = querySnapshot,
+                    excludeTopicId = excludeTopicId,
+                )
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
@@ -372,7 +515,7 @@ fun VpsValuationBottomSheet(
 
     var renewalAmountText by rememberSaveable(initialRenewalAmountText) { mutableStateOf(initialRenewalAmountText) }
 
-    var cyclePresetName by rememberSaveable { mutableStateOf(BillingCyclePreset.ANNUAL.name) }
+    var cyclePresetName by rememberSaveable(initialCyclePreset) { mutableStateOf(initialCyclePreset.name) }
     val cyclePreset = remember(cyclePresetName) { BillingCyclePreset.valueOf(cyclePresetName) }
 
     var naturalSpanName by rememberSaveable { mutableStateOf(NaturalCycleSpan.YEAR.name) }
@@ -380,18 +523,27 @@ fun VpsValuationBottomSheet(
 
     var customDaysText by rememberSaveable { mutableStateOf("365") }
     var useCustomPrevRenewal by rememberSaveable { mutableStateOf(false) }
-    var prevRenewalDateText by rememberSaveable {
-        mutableStateOf(ISO_DATE_FORMATTER.format(initialNow.toLocalDate().plusDays(180).minusYears(1)))
+    val resolvedInitialExpiry = remember(initialExpiryDateText, initialExpiryStr) {
+        initialExpiryDateText?.takeIf { parseIsoDate(it) != null } ?: initialExpiryStr
+    }
+    var prevRenewalDateText by rememberSaveable(resolvedInitialExpiry) {
+        val baseExp = parseIsoDate(resolvedInitialExpiry) ?: initialNow.toLocalDate().plusDays(180)
+        mutableStateOf(ISO_DATE_FORMATTER.format(baseExp.minusYears(1)))
     }
 
     var preciseToMinute by rememberSaveable { mutableStateOf(false) }
     var valuationDateText by rememberSaveable { mutableStateOf(initialTodayStr) }
     var valuationTimeText by rememberSaveable { mutableStateOf(initialNowTimeStr) }
-    var expiryDateText by rememberSaveable { mutableStateOf(initialExpiryStr) }
+    var expiryDateText by rememberSaveable(resolvedInitialExpiry) { mutableStateOf(resolvedInitialExpiry) }
     var expiryTimeText by rememberSaveable { mutableStateOf("00:00") }
 
     // Transfer Deal state
+    var pricingBasisName by rememberSaveable(initialPricingBasis) { mutableStateOf(initialPricingBasis.name) }
+    val pricingBasis = remember(pricingBasisName) { TransferPricingBasis.valueOf(pricingBasisName) }
     var askingPriceText by rememberSaveable(initialAskingPriceText) { mutableStateOf(initialAskingPriceText) }
+    var targetSpreadText by rememberSaveable(initialTargetSpreadText) {
+        mutableStateOf(sanitizeSignedDecimalInput(initialTargetSpreadText))
+    }
     var pushFeeText by rememberSaveable(initialPushFeeText) { mutableStateOf(initialPushFeeText) }
     var pushCurrencyName by rememberSaveable { mutableStateOf(ValuationCurrency.CNY.name) }
     val pushCurrency = remember(pushCurrencyName) { ValuationCurrency.valueOf(pushCurrencyName) }
@@ -443,7 +595,9 @@ fun VpsValuationBottomSheet(
         valuationTimeText,
         expiryDateText,
         expiryTimeText,
+        pricingBasis,
         askingPriceText,
+        targetSpreadText,
         pushFeeText,
         pushCurrency,
         pushQuote.rateToCny,
@@ -469,7 +623,9 @@ fun VpsValuationBottomSheet(
             valuationTimeText = valuationTimeText,
             expiryDateText = expiryDateText,
             expiryTimeText = expiryTimeText,
+            pricingBasis = pricingBasis,
             askingPriceText = askingPriceText,
+            targetSpreadText = targetSpreadText,
             pushFeeText = pushFeeText,
             pushCurrency = pushCurrency,
             pushFeeToCnyRate = pushQuote.rateToCny,
@@ -636,7 +792,10 @@ fun VpsValuationBottomSheet(
                         )
                         activeMarketSearchJob = coroutineScope.launch {
                             val result = try {
-                                marketReferenceRepository.searchRemoteAndMerge(queryToSearch)
+                                marketReferenceRepository.searchRemoteAndMerge(
+                                    query = queryToSearch,
+                                    excludeTopicId = excludeTopicId,
+                                )
                             } catch (ce: CancellationException) {
                                 throw ce
                             } catch (t: Throwable) {
@@ -847,16 +1006,159 @@ fun VpsValuationBottomSheet(
                         icon = Icons.Rounded.Edit,
                         accentColor = MaterialTheme.colorScheme.tertiary,
                     ) {
-                        PulseTextField(
-                            value = askingPriceText,
-                            onValueChange = { askingPriceText = sanitizeDecimalInput(it) },
-                            label = "出让挂牌价 (CNY ¥)",
-                            placeholder = "50.00",
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            containerColor = ext.cardSurface,
+                        SortSegmentedSwitcher(
+                            options = remember {
+                                TransferPricingBasis.entries.map { SortSegmentItem(it, it.label) }
+                            },
+                            selectedValue = pricingBasis,
+                            onSelect = { nextBasis ->
+                                val currentResult = (outcome as? VpsValuationOutcome.Success)?.result
+                                if (nextBasis == TransferPricingBasis.BY_SPREAD && pricingBasis != TransferPricingBasis.BY_SPREAD) {
+                                    currentResult?.let(::seedTargetSpreadOnBasisSwitch)?.let { seeded ->
+                                        targetSpreadText = seeded
+                                    }
+                                } else if (nextBasis == TransferPricingBasis.BY_TOTAL_PRICE && pricingBasis != TransferPricingBasis.BY_TOTAL_PRICE) {
+                                    currentResult?.transferBreakdown?.let { deal ->
+                                        askingPriceText = formatPrefillDecimal(deal.askingPriceCny)
+                                    }
+                                }
+                                pricingBasisName = nextBasis.name
+                            },
                             modifier = Modifier.fillMaxWidth(),
                         )
+
+                        if (pricingBasis == TransferPricingBasis.BY_TOTAL_PRICE) {
+                            PulseTextField(
+                                value = askingPriceText,
+                                onValueChange = { askingPriceText = sanitizeDecimalInput(it) },
+                                label = "出让挂牌价 / 总价 (CNY ¥)",
+                                placeholder = "50.00",
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                containerColor = ext.cardSurface,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            (outcome as? VpsValuationOutcome.Success)?.result?.let(::formatTransferBasisReadout)?.let { readout ->
+                                Text(
+                                    text = readout,
+                                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        } else {
+                            val parsedSpread = remember(targetSpreadText) { parseSignedDecimalOrNull(targetSpreadText) }
+                            val isNegativeSpread = targetSpreadText.startsWith("-") ||
+                                (parsedSpread != null && parsedSpread < BigDecimal.ZERO)
+                            val isParSpread = !isNegativeSpread &&
+                                parsedSpread != null &&
+                                parsedSpread.compareTo(BigDecimal.ZERO) == 0
+                            val isPositiveSpread = !isNegativeSpread && !isParSpread
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                ValuationChoiceChip(
+                                    selected = isPositiveSpread,
+                                    label = "溢价 (+)",
+                                    onClick = {
+                                        val cleanAbs = targetSpreadText.trim().removePrefix("-").removePrefix("+")
+                                        val parsedAbs = parseDecimalOrNull(cleanAbs)
+                                        targetSpreadText = if (parsedAbs == null || parsedAbs.compareTo(BigDecimal.ZERO) == 0) {
+                                            "50"
+                                        } else {
+                                            cleanAbs
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                                ValuationChoiceChip(
+                                    selected = isParSpread,
+                                    label = "平出 (0)",
+                                    onClick = { targetSpreadText = "0" },
+                                    modifier = Modifier.weight(1f),
+                                )
+                                ValuationChoiceChip(
+                                    selected = isNegativeSpread,
+                                    label = "折价 (-)",
+                                    onClick = {
+                                        val cleanAbs = targetSpreadText.trim().removePrefix("-").removePrefix("+")
+                                        val parsedAbs = parseDecimalOrNull(cleanAbs)
+                                        targetSpreadText = if (parsedAbs == null || parsedAbs.compareTo(BigDecimal.ZERO) == 0) {
+                                            "-20"
+                                        } else {
+                                            "-$cleanAbs"
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
+                            PulseTextField(
+                                value = targetSpreadText,
+                                onValueChange = { targetSpreadText = sanitizeSignedDecimalInput(it) },
+                                label = "目标溢价 / 折价 (CNY ¥，负数=折价)",
+                                placeholder = "例如：50、0、-20",
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                trailingIcon = {
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(end = 6.dp)
+                                            .clip(PulseArchitecturalShapes.SmallChip)
+                                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                                            .pulseBouncyClickable(
+                                                pressedScale = NodePulseMotion.chipPressScale,
+                                                role = Role.Button,
+                                                onClickLabel = "切换正负号",
+                                                onClick = {
+                                                    targetSpreadText = toggleSignedDecimalText(targetSpreadText)
+                                                },
+                                            )
+                                            .padding(horizontal = 9.dp, vertical = 5.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            text = "±",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        )
+                                    }
+                                },
+                                containerColor = ext.cardSurface,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                listOf(
+                                    "-50" to "-50",
+                                    "-20" to "-20",
+                                    "0 平出" to "0",
+                                    "+50" to "50",
+                                    "+100" to "100",
+                                ).forEach { (chipLabel, spreadVal) ->
+                                    ValuationQuickFillChip(
+                                        label = chipLabel,
+                                        onClick = { targetSpreadText = spreadVal },
+                                    )
+                                }
+                            }
+
+                            (outcome as? VpsValuationOutcome.Success)?.result?.let(::formatTransferBasisReadout)?.let { readout ->
+                                Text(
+                                    text = readout,
+                                    style = MaterialTheme.typography.labelMedium.withTabularNumbers(),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
 
                         PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
 
@@ -1547,13 +1849,22 @@ private fun StickyValuationTelemetryCard(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
+                    val bySpreadAskCny = result.transferBreakdown
+                        ?.takeIf { it.pricingBasis == TransferPricingBasis.BY_SPREAD }
+                        ?.askingPriceCny
                     Text(
-                        text = "净剩余价值 (CNY)",
+                        text = if (bySpreadAskCny != null) "推算挂牌总价 (CNY)" else "净剩余价值 (CNY)",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = "¥${result.remainingValueCny.toPlainString()}",
+                        text = if (bySpreadAskCny != null) {
+                            "¥${bySpreadAskCny.toPlainString()}"
+                        } else {
+                            "¥${result.remainingValueCny.toPlainString()}"
+                        },
                         style = NodePulseThemeTokens.extraTypography.metricValue.copy(
                             fontSize = 25.sp,
                             lineHeight = 30.sp,
@@ -1561,6 +1872,8 @@ private fun StickyValuationTelemetryCard(
                         ),
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     val origPart = if (result.currency != ValuationCurrency.CNY) {
                         "原币 ${result.remainingValueOriginal.toPlainString()} ${result.currency.code} · "
@@ -1573,7 +1886,11 @@ private fun StickyValuationTelemetryCard(
                         "官方日均 ¥${result.dailyOfficialCostHighPrecisionCny.stripTrailingZeros().toPlainString()}"
                     }
                     Text(
-                        text = "$origPart$dailyPart",
+                        text = if (bySpreadAskCny != null) {
+                            "净残值 ¥${result.remainingValueCny.toPlainString()} · $dailyPart"
+                        } else {
+                            "$origPart$dailyPart"
+                        },
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -1609,6 +1926,7 @@ private fun StickyValuationTelemetryCard(
                         text = badgeText,
                         containerColor = pillBg,
                         contentColor = pillFg,
+                        modifier = Modifier.widthIn(max = 152.dp),
                     )
                 } else {
                     val daysPillText = if (result.isExpired) {
@@ -1628,6 +1946,7 @@ private fun StickyValuationTelemetryCard(
                         } else {
                             MaterialTheme.colorScheme.onPrimaryContainer
                         },
+                        modifier = Modifier.widthIn(max = 124.dp),
                     )
                 }
             }
@@ -1651,7 +1970,7 @@ private fun StickyValuationTelemetryCard(
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val remStr = VpsValuationEngine.formatDaysNumber(result.remainingDays)
@@ -1661,12 +1980,17 @@ private fun StickyValuationTelemetryCard(
                         text = if (result.isExpired) "当前周期已结束" else "剩余 $remStr / $cycStr 天$overCycleHint",
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     val pctText = "${result.remainingRatioPercent.toPlainString()}%"
                     Text(
                         text = pctText,
                         style = NodePulseThemeTokens.extraTypography.tabularBadge,
                         color = telemetryAccent,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -1676,7 +2000,23 @@ private fun StickyValuationTelemetryCard(
                 PulseGradientDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TelemetryMiniKpi(
+                        label = if (deal.pricingBasis == TransferPricingBasis.BY_SPREAD) "推算总价" else "出让总价",
+                        value = "¥${deal.askingPriceCny.toPlainString()}",
+                        modifier = Modifier.weight(1f),
+                    )
+                    val hasBuyerFees = deal.buyerPushFeeCny.add(deal.buyerMiddlemanFeeCny) > BigDecimal.ZERO
+                    TelemetryMiniKpi(
+                        label = if (hasBuyerFees) "含费溢价差" else "溢价差额",
+                        value = VpsValuationEngine.formatSignedCny(deal.buyerPremiumCny),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TelemetryMiniKpi(
                         label = "买家实付",
@@ -2288,7 +2628,7 @@ private fun FxOverrideDialog(
 
 // ── Parsing & Formatting Helpers ──────────────────────────────────────────────
 
-private fun evaluateValuationForm(
+internal fun evaluateValuationForm(
     mode: ValuationMode,
     machineLabel: String,
     currency: ValuationCurrency,
@@ -2313,6 +2653,8 @@ private fun evaluateValuationForm(
     middlemanMode: MiddlemanFeeMode,
     middlemanValueText: String,
     middlemanPayer: FeePayer,
+    pricingBasis: TransferPricingBasis = TransferPricingBasis.BY_TOTAL_PRICE,
+    targetSpreadText: String = "0",
 ): VpsValuationOutcome {
     val parseErrors = mutableListOf<String>()
 
@@ -2369,14 +2711,28 @@ private fun evaluateValuationForm(
     }
 
     var askingPrice = BigDecimal.ZERO
+    var targetSpread = BigDecimal.ZERO
     var pushFee = BigDecimal.ZERO
     var middlemanVal = BigDecimal.ZERO
     if (mode == ValuationMode.TRANSFER_DEAL) {
-        val parsedAsking = parseDecimalOrNull(askingPriceText)
-        if (parsedAsking == null || parsedAsking < BigDecimal.ZERO) {
-            parseErrors += "请输入有效的出让价格"
+        if (pricingBasis == TransferPricingBasis.BY_SPREAD) {
+            val parsedSpread = if (targetSpreadText.isBlank()) {
+                BigDecimal.ZERO
+            } else {
+                parseSignedDecimalOrNull(targetSpreadText)
+            }
+            if (parsedSpread == null) {
+                parseErrors += "请输入有效的目标溢价 / 折价（可为负数或 0）"
+            } else {
+                targetSpread = parsedSpread
+            }
         } else {
-            askingPrice = parsedAsking
+            val parsedAsking = parseDecimalOrNull(askingPriceText)
+            if (parsedAsking == null || parsedAsking < BigDecimal.ZERO) {
+                parseErrors += "请输入有效的出让价格"
+            } else {
+                askingPrice = parsedAsking
+            }
         }
 
         val parsedPush = if (pushFeeText.isBlank()) BigDecimal.ZERO else parseDecimalOrNull(pushFeeText)
@@ -2423,6 +2779,8 @@ private fun evaluateValuationForm(
             middlemanFeeMode = middlemanMode,
             middlemanFeeValue = middlemanVal,
             middlemanFeePayer = middlemanPayer,
+            pricingBasis = pricingBasis,
+            targetSpreadCny = targetSpread,
         )
     )
 }
@@ -2474,6 +2832,36 @@ private fun parseDecimalOrNull(raw: String): BigDecimal? {
     val trimmed = raw.trim()
     if (trimmed.isEmpty() || trimmed == ".") return null
     return trimmed.toBigDecimalOrNull()
+}
+
+internal fun sanitizeSignedDecimalInput(
+    raw: String,
+    maxDecimals: Int = 4,
+): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return ""
+    val isNegative = trimmed.startsWith("-") || trimmed.startsWith("－")
+    val unsigned = trimmed.dropWhile { it == '+' || it == '＋' || it == '-' || it == '－' }
+    val cleanDigits = sanitizeDecimalInput(unsigned, maxDecimals = maxDecimals)
+    return if (isNegative) "-$cleanDigits" else cleanDigits
+}
+
+internal fun parseSignedDecimalOrNull(raw: String): BigDecimal? {
+    val trimmed = raw.trim().replace('－', '-').replace('＋', '+')
+    if (trimmed.isEmpty() || trimmed == "-" || trimmed == "+" || trimmed == "." || trimmed == "-." || trimmed == "+.") {
+        return null
+    }
+    return trimmed.toBigDecimalOrNull()
+}
+
+internal fun toggleSignedDecimalText(raw: String): String {
+    val clean = sanitizeSignedDecimalInput(raw)
+    return when {
+        clean.isEmpty() -> "-"
+        clean.startsWith("-") -> clean.removePrefix("-")
+        clean == "0" || clean == "0.0" || clean == "0.00" -> "-"
+        else -> "-$clean"
+    }
 }
 
 private fun parseIsoDate(raw: String): LocalDate? {
